@@ -95,8 +95,21 @@ export interface StorefrontSummary {
   isFeatured: boolean;
 }
 
+/** [R3 · CAA s.70] The seller block every store page shows (GET /public/storefronts/:slug `seller`).
+ *  A null fact is not on file: the page says "Ask the store". Null block = the store's details are withheld. */
+export interface StorefrontSeller {
+  legalName: string | null;
+  address: string | null;
+  phone: string | null;
+  payment: { cash: true; storeMmg: boolean };
+  refundRule: string | null;
+  statutoryRights: string;
+}
+
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** Absent from an API older than R3. */
+  seller?: StorefrontSeller | null;
   operatingHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }>;
   categories: Array<{
     id: string;

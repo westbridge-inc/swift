@@ -74,6 +74,8 @@ const REVIEWER_HINTS: Record<string, string> = {
   hire_car_driver_licence: "Hire Car Driver's Licence (GRA, its own document): same name as the driver's licence, and a current date (usually 3 years).",
   hire_car_vehicle_licence: "The car's yearly hire licence: the plate matches the registration, and the date is current.",
   vehicle_registration: 'For a taxi (car or wagon car) the plate must be H-series (e.g. HC 1234) and match the plate the driver gave.',
+  // [R13 · owner 15 Oct 2026, research D6] every motor vehicle, not only a taxi
+  vehicle_insurance: "Read 'Limitations as to use': it must permit use for hire or reward (taxi: passengers for hire; delivery: commercial use). A policy for social, domestic and pleasure use only is rejected as 'Insurance does not permit use for hire or reward'.",
 };
 export const reviewerHint = (type: string): string | undefined => REVIEWER_HINTS[type];
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';

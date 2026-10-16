@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { getTenantId } from '../../plugins/tenant-context';
 import { activateUserBlock, deactivateUserBlock } from './user-block.service';
 import { assertRoomAccess } from '../chat/chat-authority';
-import { NotFoundError } from '../../utils/errors';
+import { ForbiddenError, NotFoundError } from '../../utils/errors';
+import { NotificationService } from '../notification/notification.service';
+import { CSAE_PAGE_WINDOW_SECONDS, pageCsaeReport } from './csae-page';
 
 type AuthRequest = FastifyRequest & { user: { userId: string; role: string } };
 
@@ -45,9 +47,13 @@ export async function moderationRoutes(app: FastifyInstance) {
     // Reporting preserves read access after a conversation closes or a user
     // blocks contact, but cannot expose or target somebody else's transcript.
     // Recheck before duplicate success as room participants can change.
+    // Owner ruling (14 Oct 2026): a person taken off the order may still
+    // report a message that was sent TO them while they were part of the
+    // conversation (recorded on the message when it was written). Only after
+    // the room's tenant matched: a cross-tenant reporter still gets "not found".
     if (body.targetType === 'CHAT_MESSAGE') {
       const message = await app.prisma.chatMessage.findUnique({
-        where: { id: body.targetId }, select: { chatRoomId: true },
+        where: { id: body.targetId }, select: { chatRoomId: true, recipientIds: true },
       });
       if (!message) throw new NotFoundError('Chat message');
       try {
@@ -56,7 +62,7 @@ export async function moderationRoutes(app: FastifyInstance) {
         // A room outside the reporter's tenant answers exactly like a missing
         // message: no room id, no different wording to probe existence with.
         if (error instanceof NotFoundError) throw new NotFoundError('Chat message');
-        throw error;
+        if (!(error instanceof ForbiddenError && message.recipientIds.includes(reporterId))) throw error;
       }
     }
 
@@ -79,6 +85,34 @@ export async function moderationRoutes(app: FastifyInstance) {
       },
       select: { id: true, status: true, createdAt: true },
     });
+    // [Brief item 3 · R19 · Child Safety Standards] A child-safety report pages operations at once (the SOS
+    // outbox: acknowledgement deadline, escalation, on-call texts). The report row above is the record; a page
+    // that fails to open is logged loudly and the moderation queue still floats CSAE to the top.
+    if (body.reason === 'CSAE') {
+      try {
+        // [REVIEW-F S3-1 on #1755] one page per reporter per 10 minutes: a person filing many CSAE reports cannot
+        // turn the on-call phones into a pager they control; every report still lands, at the top of the queue.
+        // [REVIEW-F S3-1 on e53c15fe] the window never silences a page that did not go out: a Redis error pages
+        // anyway, and a page that fails to open releases the window so the next report can page.
+        const windowKey = `csae:page:${reporterId}`;
+        let firstInWindow: string | null = 'OK';
+        try {
+          firstInWindow = await app.redis.set(windowKey, report.id, 'EX', CSAE_PAGE_WINDOW_SECONDS, 'NX');
+        } catch (err) {
+          app.log.warn({ err, contentReportId: report.id }, '[R19] CSAE page window unavailable; paging anyway');
+        }
+        if (firstInWindow === 'OK') {
+          try {
+            await pageCsaeReport(app.prisma, new NotificationService(app.prisma, app.io), { tenantId: request.tenantId ?? getTenantId() ?? null, contentReportId: report.id, targetType: body.targetType });
+          } catch (err) {
+            await app.redis.del(windowKey).catch(() => undefined);
+            throw err;
+          }
+        }
+      } catch (err) {
+        app.log.error({ err, contentReportId: report.id }, '[R19] CSAE report saved but the ops page did not open — moderation queue only');
+      }
+    }
     reply.code(201);
     return { success: true, data: report };
   });

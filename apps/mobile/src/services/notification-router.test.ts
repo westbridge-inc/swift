@@ -31,6 +31,11 @@ describe('destinationFor — the tap table', () => {
     expect(destinationFor({ kind: 'ride_sos_ack' })).toEqual({ screen: 'Taxi' });
   });
 
+  it('an unavailable queue notice opens the ride picker without retry parameters', () => {
+    expect(destinationFor({ kind: 'ride_queue_unavailable', audience: 'customer' }))
+      .toEqual({ screen: 'Taxi' });
+  });
+
   it('an OFFER ping lands the earner on their mover home, never the customer screen [E36 / danger #22]', () => {
     // Pre-fix, the generic orderId branch dropped an earner mid-countdown on
     // the CUSTOMER Delivery screen — a dead end with the clock running.
@@ -141,9 +146,11 @@ describe('booking + service-job pushes land on the job [S0]', () => {
       // The request itself — the rung that had no notification at all, so the
       // provider never learned there was anything to quote on.
       'booking_requested',
+      'booking_quoted',
       'booking_to_confirm',
       'booking_confirmed',
       'booking_slot_declined',
+      'booking_started',
       'booking_completed',
       'booking_cancelled',
     ]) {
@@ -278,6 +285,7 @@ const CENSUS: Case[] = [
   { k: 'trip_share_ended', d: { outcome: 'STOPPED_BY_RIDER' }, to: null, why: 'guardian — [L10 §2] the trip someone shared with them ended (stopped, completed, cancelled, or contact lost); they follow a trip, they own no order, so the notice is the whole message' },
   { k: 'ops_alert_escalated', d: { opsAlertId: 'a1', sosAlertId: 'a1', level: 1 }, to: null, why: 'admins — [S-19] an ops page nobody acknowledged by its deadline; the alert list is an ops surface' },
   { k: 'ops_alert_drill', d: { opsAlertId: 'a1' }, to: null, why: 'admins — [S-19] a scheduled or manual drill of the paging path; an ops surface' },
+  { k: 'csae_report', d: { opsAlertId: 'a1', contentReportId: 'r1', targetType: 'USER' }, to: null, why: 'admins — [R19] a child-safety report pages operations; the moderation queue is an ops surface' },
   { k: 'safety_sweep_slo', d: { workType: 'guardian.open', stalled: true, passAgeSeconds: 1200 }, to: null, why: 'admins — [S-05] a safety sweep whose pass stalled past the SLO or whose rows keep failing; an ops surface, not mobile' },
   { k: 'incident_interim_suspension', d: { ...O, caseNumber: 'INC-1' }, to: { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } }, why: 'suspended mover — the body says "contact Swift support to respond", and support is the ONLY way back. Same destination as liveness_locked, for the same reason. Was Delivery, which MoverStack never mounts' },
   { k: 'support_ticket', d: { ...O, ticketId: 't1' }, to: DELIVERY('o1'), why: 'admins — ops queue lives on the web console' },
@@ -295,6 +303,7 @@ const CENSUS: Case[] = [
   // ── Rides: the taxi screen reads the active ride itself.
   { k: 'ride_queue_matched', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — a driver took their queued ride' },
   { k: 'ride_queue_expired', d: { audience: 'customer', rideClass: 'STANDARD' }, to: { screen: 'Taxi' }, why: 'customer — queue timed out, request again' },
+  { k: 'ride_queue_unavailable', d: { audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — the queued class is no longer offered; choose an available class without retrying the retired trip' },
   { k: 'ride_released_no_drivers', d: { ...O, audience: 'customer' }, to: { screen: 'Taxi' }, why: 'customer — ride released' },
   { k: 'dispatch_offer', d: { ...O, audience: 'earner', offerAttemptId: 'a1', expiresAt: '2026-09-24T20:00:20.000Z' }, to: { screen: 'Main' }, why: 'earner — the live offer card is on their Main' },
   { k: 'custody_handoff_code', d: { ...O, caseId: 'c1' }, to: { screen: 'ActiveJob' }, why: 'RIDER holding the goods — [AF-MOB-006] a relay rider is coming; the handoff code is on their live job, which MoverStack mounts' },
@@ -305,9 +314,11 @@ const CENSUS: Case[] = [
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
+  { k: 'booking_quoted', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — a durable quote is ready to review' },
   { k: 'booking_to_confirm', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — accept or move the customer’s slot' },
   { k: 'booking_confirmed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider took the slot' },
   { k: 'booking_slot_declined', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — pick another time' },
+  { k: 'booking_started', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'customer — provider asserted commencement at the agreed time' },
   { k: 'booking_completed', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both — job done, rate it' },
   { k: 'booking_cancelled', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'the other side — job cancelled' },
   { k: 'booking_reminder', d: { refId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'both, 24h out — GAP when refId is an APPOINTMENT: no customer appointments screen exists' },
@@ -328,6 +339,7 @@ const CENSUS: Case[] = [
   { k: 'billing_card_action_required', d: { subscriptionId: 's1' }, to: null, why: 'GAP: [PT-1] the bank wants the partner to confirm this week\u2019s card payment (3-D Secure); the Confirm-your-card / Pay now surface arrives with PT-3' },
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_rate_change', d: { subscriptionId: 's1', change: 'PRICE_BOOK', appliesFrom: '2026-11-02T04:00:00.000Z' }, to: null, why: 'GAP: same (owner 15 Oct: a weekly fee change, told before it applies)' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },
   { k: 'claim', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — the guarantee claims screen (DOC-1 §31.4)' },
   { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },
@@ -409,6 +421,7 @@ const CENSUS: Case[] = [
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
   { k: 'billing_invariants', to: null, why: 'admins' },
+  { k: 'vat_threshold', to: null, why: 'admins — VAT registration threshold watch (owner legal plan R10)' },
   { k: 'billing_manual_reconciliation', to: null, why: 'admins — a card instruction the processor never saw; reviewed in the admin console before any new attempt' },
   { k: 'billing_unknown_intents_sla', to: null, why: 'admins' },
   { k: 'reconcile_mismatch', to: null, why: 'admins' },

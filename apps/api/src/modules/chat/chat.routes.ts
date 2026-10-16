@@ -261,6 +261,9 @@ export async function chatRoutes(app: FastifyInstance) {
           message: guarded.text, messageType,
           mediaUrl: mediaBlocked ? undefined : mediaId,
           offPlatformFlag: offPlatform,
+          // Who it was sent to, proved under this lock: a person later taken
+          // off the order may still report what they received (owner ruling).
+          recipientIds: recipients,
         },
       });
       return { msg, access: current, recipients, guarded, mediaBlocked };

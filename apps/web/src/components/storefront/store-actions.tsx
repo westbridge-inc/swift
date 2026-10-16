@@ -3,11 +3,12 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQueryClient } from '@tanstack/react-query';
-import { Heart, Share2 } from 'lucide-react';
+import { Flag, Heart, Share2 } from 'lucide-react';
 import { useCustomerSession } from '@/components/customer-session';
 import { accountApi } from '@/components/account/account-api';
 import { useAccountQuery } from '@/components/account/account-frame';
 import { signInPath } from '@/lib/customer-routes';
+import { STORE_REPORT_REASONS, reportContent, reportThanks, type ReportReason } from '@/lib/report-reasons';
 import styles from './storefront.module.css';
 
 /**
@@ -33,6 +34,9 @@ export function StoreActions({ vendorId, slug, name, onMessage }: {
   const signedIn = session.status === 'signed-in';
   const saved = Boolean(favourites.data?.some((favourite) => favourite.id === vendorId));
   const [saving, setSaving] = useState(false);
+  // [R19] the report sheet: closed until asked for; one report at a time
+  const [reporting, setReporting] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
   const storePath = `/store/${encodeURIComponent(slug)}`;
 
   async function toggleFavourite() {
@@ -65,6 +69,21 @@ export function StoreActions({ vendorId, slug, name, onMessage }: {
     } catch { /* the person closed the share sheet */ }
   }
 
+  async function fileReport(reason: ReportReason) {
+    if (reportBusy) return;
+    if (!(await session.ensureSignedIn())) { router.push(signInPath(storePath)); return; }
+    setReportBusy(true);
+    try {
+      await reportContent({ targetType: 'VENDOR', targetId: vendorId, reason });
+      setReporting(false);
+      onMessage(reportThanks(reason));
+    } catch (error) {
+      onMessage(error instanceof Error && error.message ? error.message : 'That report did not send. Please try again.');
+    } finally {
+      setReportBusy(false);
+    }
+  }
+
   return (
     <div className={styles.storeActions}>
       <button
@@ -80,6 +99,27 @@ export function StoreActions({ vendorId, slug, name, onMessage }: {
       <button type="button" className={styles.iconButton} onClick={() => void shareStore()} aria-label="Share">
         <Share2 size={20} aria-hidden="true" />
       </button>
+      {/* [R19 · Child Safety Standards] report this store, Child safety (CSAE) among the reasons */}
+      <button type="button" className={styles.iconButton} onClick={() => setReporting(true)} aria-label="Report this store" aria-haspopup="dialog">
+        <Flag size={20} aria-hidden="true" />
+      </button>
+      {reporting ? (
+        <div role="dialog" aria-modal="true" aria-labelledby="report-store-title" className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-4 sm:items-center">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 text-[var(--swift-ink)]">
+            <h2 id="report-store-title" className="text-lg font-bold">Report this store</h2>
+            <ul className="mt-3 space-y-2">
+              {STORE_REPORT_REASONS.map((reason) => (
+                <li key={reason.key}>
+                  <button type="button" disabled={reportBusy} onClick={() => void fileReport(reason.key)} className="w-full rounded-xl border border-black/10 px-4 py-3 text-left text-sm font-semibold">
+                    {reason.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button type="button" onClick={() => setReporting(false)} className="mt-3 w-full text-sm text-[var(--swift-muted)]">Cancel</button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

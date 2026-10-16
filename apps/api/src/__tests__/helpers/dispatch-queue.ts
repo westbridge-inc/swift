@@ -10,15 +10,19 @@ export function recordDispatchQueue(app: FastifyInstance, runImmediate = false) 
     name: string;
     data: { orderId: string; tenantId?: string; riderId?: string; attemptId?: string };
     options: { delay?: number };
+    /** [row 266] Which queue the job was added to: offer timeouts ride their own. */
+    queue: 'dispatch' | 'offer';
   }> = [];
-  app.decorate('dispatchQueue', {
+  const recorder = (queue: 'dispatch' | 'offer') => ({
     add: async (name: string, data: typeof jobs[number]['data'], options: { delay?: number } = {}) => {
-      jobs.push({ name, data, options });
+      jobs.push({ name, data, options, queue });
       if (runImmediate && name === 'dispatch-order' && !options.delay) {
         await makeDispatchService(app).dispatchOrder(data.orderId, data.tenantId);
       }
       return { id: `recorded-${jobs.length}` };
     },
-  } as never);
+  });
+  app.decorate('dispatchQueue', recorder('dispatch') as never);
+  app.decorate('offerQueue', recorder('offer') as never);
   return jobs;
 }

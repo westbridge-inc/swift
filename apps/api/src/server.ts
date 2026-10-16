@@ -76,8 +76,9 @@ async function start() {
         // are never minted lazily on a request path.
         const { seedDocRegistry } = await import('./modules/verification/doc-registry');
         const registry = await seedDocRegistry(app.prisma);
-        // [VERIFY-DOCS] The hire-car permit split takes effect with this code: its 60-day window starts
-        // at the first boot that runs it on this environment, and no later boot moves it.
+        // [VERIFY-DOCS] The hire-car permit split: its switch-over moment is recorded at the first boot
+        // that runs it on this environment, and no later boot moves it. [Owner ruling 15 Oct 2026] It
+        // grants nothing: there is no grace (verification/hire-permit-grace.ts).
         const { ensureHireSplitStarted } = await import('./modules/verification/hire-permit-grace');
         await ensureHireSplitStarted(app.prisma);
         app.log.info({ docTypes: registry.docTypes, requirementSets: registry.requirementSets, validators: registry.validators }, 'documents: registry seeded');
@@ -94,6 +95,10 @@ async function start() {
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.
         app.markBootContractsComplete();
+        // [Owner ruling 15 Oct 2026 · no grace] A taxi driver online on the old hire-car permit alone goes
+        // offline the moment this code runs, so no offer reaches them (never fatal; logged on failure).
+        const { runHireLicenceSweepAtBoot } = await import('./modules/verification/hire-licence-boot');
+        await runHireLicenceSweepAtBoot({ prisma: app.prisma, io: app.io, log: app.log });
       } catch (err) {
         app.log.warn({ err }, 'discovery: taxonomy seed failed — the category rail will be empty (or the document registry seed failed); readiness stays 503');
       }

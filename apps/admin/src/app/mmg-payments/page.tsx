@@ -17,6 +17,7 @@ import {
   type MmgFeeReversalRow, type MmgFeeReversalView,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 import { REASON_MIN } from '@/lib/reason-rules';
 
 /**
@@ -338,6 +339,15 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   const ask = useMutation({ mutationFn: () => reverseMmgFeePayment(checkoutId, Number(typed), reason.trim()), onSettled: refresh });
   const check = useMutation({ mutationFn: (id: string) => checkMmgFeeReversal(id), onSettled: refresh });
   const v = view.data?.data as MmgFeeReversalView | undefined;
+  // A failed read is said out loud: hiding the panel would hide a return that is held for a person.
+  if (view.isError) {
+    return (
+      <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
+        <h3 className="font-semibold">Return this payment to the partner</h3>
+        <QueryFailed error={view.error} what="the return status of this payment" onRetry={() => void view.refetch()} retrying={view.isFetching} />
+      </section>
+    );
+  }
   // Only the server's own answer is shown: anything else is not this panel's.
   if (!v || typeof v !== 'object' || typeof v.canReverse !== 'boolean' || !Array.isArray(v.reversals)) return null;
   const amountOk = typed.trim() !== '' && Number(typed) === amount;
@@ -422,7 +432,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
 const RESOLUTION_WORDS: Record<string, string> = {
   NOT_RETURNED: 'Closed by a person: MMG shows the payment was not returned.',
   RETURNED_BY_REFERENCE: "Closed by a person: MMG's records showed the return they named.",
-  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after the money had already paid for a week. Nothing was deducted; that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
+  RETURNED_NOT_BOOKED: 'Closed by a person: MMG returned it after its money had been used. Whatever the weekly-fee payments still held of it was taken out once; the rest of that week\'s fee is owed again (on the books as fee owed) and finance collects it.',
 };
 
 /**
@@ -460,12 +470,12 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
       {moneyUsed ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG returned it, but the money had already paid for a week (close it; that week&apos;s fee is then owed again and finance collects it)
+          MMG returned it, but the money had already paid for a week (close it: whatever the weekly-fee payments still hold of it is taken out once, and the rest of that week&apos;s fee is owed again; finance collects it)
         </label>
       ) : paymentNotFound ? (
         <label className="flex items-center gap-2 text-xs">
           <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'RETURNED_NOT_BOOKED'} onChange={() => setOutcome('RETURNED_NOT_BOOKED')} />
-          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: while the partner&apos;s weekly-fee payments still hold the amount it is deducted once; otherwise nothing is deducted and that week&apos;s fee is owed again)
+          MMG&apos;s records no longer find this payment, but its statement shows it returned (close it on MMG&apos;s reversal reference: whatever the partner&apos;s weekly-fee payments still hold of it is deducted once, and only the rest of that week&apos;s fee is owed again)
         </label>
       ) : null}
       <input

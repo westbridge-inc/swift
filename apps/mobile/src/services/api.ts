@@ -1,4 +1,8 @@
 import axios, { type AxiosRequestConfig } from 'axios';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import Constants from 'expo-constants';
 import { Platform, TurboModuleRegistry } from 'react-native';
 import {
@@ -8,7 +12,7 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
 import { explainSessionEnded } from '../lib/accountBlockedAlert';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
@@ -185,6 +189,12 @@ const refreshCoordinator = new AuthRefreshCoordinator(
   explainSessionEnded,
 );
 
+/** [PERF #9] The same one refresh the 401 path below uses, started before
+ *  the access token lapses (lib/sessionRefreshAhead.ts). */
+export function refreshSessionAhead(session: AuthSessionSnapshot): Promise<AuthRefreshOutcome | null> {
+  return refreshCoordinator.resolve(session);
+}
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
@@ -247,6 +257,10 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
 
 // Auth
 export const authApi = {
+  /** [R26 · research G2] Whether the signed-in person must accept the served legal texts again, and what changed. */
+  legalAcceptance: () => api.get('/auth/legal-acceptance'),
+  /** [R26] The fresh tick, for the version the person read. */
+  acceptLegal: (version: string) => api.post('/auth/legal-acceptance', { version, accept: true }),
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
@@ -266,6 +280,8 @@ export const authApi = {
     countryCode?: string;
     /** Server records consent + the legal version it covered [SWIFT-AUD-D9-03]. */
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" — recorded in the consent ledger. */
+    ageConfirmed?: boolean;
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),
@@ -828,6 +844,14 @@ export const courierApi = {
 };
 
 // Services (mounted at /api/v1/services)
+function serviceJobLifecycleConfig(): AxiosRequestConfig {
+  return {
+    headers: {
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+    },
+  };
+}
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>
@@ -848,17 +872,25 @@ export const servicesApi = {
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
   // Customer accepts the provider's quote by scheduling the job.
-  scheduleJob: (id: string, scheduledFor: string) => api.post(`/services/jobs/${id}/schedule`, { scheduledFor }),
-  cancelJob: (id: string) => api.post(`/services/jobs/${id}/cancel`, {}),
+  scheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedQuoteAmount: number }) =>
+    api.post(`/services/jobs/${id}/schedule`, input, serviceJobLifecycleConfig()),
+  cancelJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
   rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
   // Provider side: send the quote, then accept/decline the customer's slot (§4.3),
   // then close the job out when the work is done (SWIFT-AUD-D8-04: the complete
   // endpoint existed server-side but was never wired, so a ServiceJob stalled
   // forever at SCHEDULED — no completion, no rating, no reputation).
-  quoteJob: (id: string, amount: number) => api.post(`/services/jobs/${id}/quote`, { amount }),
-  confirmJob: (id: string) => api.post(`/services/jobs/${id}/confirm`, {}),
-  declineSlot: (id: string) => api.post(`/services/jobs/${id}/decline-slot`, {}),
-  completeJob: (id: string) => api.post(`/services/jobs/${id}/complete`, {}),
+  quoteJob: (id: string, amount: number, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }, serviceJobLifecycleConfig()),
+  confirmJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  declineSlot: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  startJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  completeJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
 // Verification (mounted at /api/v1/verification)
@@ -927,6 +959,10 @@ export const partnerApi = {
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
   }, session?: AuthSessionSnapshot) =>
     api.put('/partner/vehicle', data, capturedAuthConfig(session)),
+  /** [R18] The answer to the background-location disclosure, for the consent
+   *  ledger. Names the platform so the ledger records where it was given. */
+  recordBackgroundLocationConsent: (granted: boolean) =>
+    api.post('/partner/consent/background-location', { granted }, { headers: { 'x-client-platform': Platform.OS } }),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -1263,7 +1299,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),

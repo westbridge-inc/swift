@@ -10,6 +10,7 @@
 - doctor.sh's read-only checks of the posture.
 Nothing here needs root, a database or a running Docker daemon.
 """
+import base64
 import json
 import os
 from pathlib import Path
@@ -21,6 +22,7 @@ import unittest
 
 DEPLOY = Path(__file__).resolve().parents[1]
 SHA = 'd' * 40
+REAL_DOCKER = shutil.which('docker')
 BASE_FILES = ('pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile',
               'docker-compose.yml', 'docker-compose.routing.yml', 'docker-compose.wall.yml', 'docker-compose.rehearsal.yml',
               'gen-secrets.sh', 'doctor.sh')
@@ -325,16 +327,53 @@ if argv[:2] == ['context', 'show']:
 if argv[:2] == ['image', 'inspect']:
     sys.exit(0 if not os.environ.get('FAKE_NO_IMAGE') else 1)
 if argv[:1] == ['inspect']:
-    print('running restarts=0'); sys.exit(0)
+    print(os.environ.get('FAKE_STATE_' + argv[-1].replace('-', '_'), 'running restarts=0')); sys.exit(0)
 rehearsal = argv[:3] == ['compose', '-p', 'swift-rehearsal']
+if argv[:1] == ['compose'] and 'config' in argv:
+    # Compose itself renders the copy's settings (client-side, no daemon state).
+    os.execve(os.environ['REAL_DOCKER'], ['docker'] + argv, {**os.environ, 'HOME': os.environ['REAL_HOME']})
 if argv[:1] == ['compose'] and 'ps' in argv:
     if rehearsal and '-aq' in argv:
         print(os.environ.get('FAKE_REHEARSAL_PS', '')); sys.exit(0)
     print(argv[-1] + '-id'); sys.exit(0)
 if argv[:1] == ['compose'] and 'logs' in argv:
-    print(os.environ.get('FAKE_LOGS', 'api | tenant wall: enforced role=swift_app_login\nworker | tenant wall: enforced role=swift_app_login\n'
-                         'api | tenant wall: system login is a bypass member\nworker | tenant wall: system login is a bypass member'))
-    sys.exit(0)
+    rest, services, tail = argv[argv.index('logs') + 1:], [], None
+    while rest:
+        a = rest.pop(0)
+        if a == '--tail':
+            tail = int(rest.pop(0))
+        elif not a.startswith('-'):
+            services.append(a)
+    if 'FAKE_LOGS' in os.environ:
+        text = os.environ['FAKE_LOGS']
+    else:
+        text = '\n'.join(os.environ.get('FAKE_LOGS_' + svc.upper(), f'{svc} | tenant wall: enforced role=swift_app_login\n'
+                                        f'{svc} | tenant wall: system login is a bypass member') for svc in services)
+    lines = text.split('\n')
+    print('\n'.join(lines[-tail:] if tail else lines)); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'cat' in argv:
+    # The api container's secret mount: the copy's published URL files.
+    name = argv[-1].rsplit('/', 1)[-1]
+    login = {'DATABASE_URL': 'swift_app_login', 'SYSTEM_DATABASE_URL': 'swift_system_login'}[name]
+    user = os.environ.get('FAKE_URL_USER_' + name, login)
+    print(f'postgresql://{user}:{os.environ["FAKE_CRED_" + name]}@postgres:5432/swift'); sys.exit(0)
+if argv[:1] == ['compose'] and 'exec' in argv and 'PGPASSFILE' in argv[argv.index('-c') + 1]:
+    # A login's own new connection: the passfile line must arrive on stdin, for that login.
+    login, sql = argv[-2], argv[-1]
+    cred = os.environ['FAKE_CRED_' + ('DATABASE_URL' if login == 'swift_app_login' else 'SYSTEM_DATABASE_URL')]
+    if stdin.strip() != f'postgres:5432:swift:{login}:{cred}':
+        sys.stderr.write('psql: error: FATAL:  password authentication failed\n'); sys.exit(2)
+    if 'query_to_xml' in sql:
+        print(os.environ.get('FAKE_ROWS_' + login.upper(), '0' if login == 'swift_app_login' else '42')); sys.exit(0)
+    if sql.startswith('ALTER TABLE'):
+        if os.environ.get('FAKE_ALTER_OK'): sys.exit(0)
+        sys.stderr.write('ERROR:  must be owner of table users\n'); sys.exit(1)
+    if 'pg_get_userbyid' in sql:
+        print(os.environ.get('FAKE_OWNER', 'swift')); sys.exit(0)
+    if sql.startswith('SET ROLE'):
+        if os.environ.get('FAKE_SET_ROLE_OK'): sys.exit(0)
+        sys.stderr.write('ERROR:  permission denied to set role "swift"\n'); sys.exit(1)
+    sys.exit(3)
 if argv[:1] == ['compose'] and 'exec' in argv:
     script = argv[argv.index('-c') + 1]
     if 'pg_dumpall' in script:
@@ -373,6 +412,8 @@ with open(os.environ['CALL_LOG'], 'a') as log:
 if value:
     with open(os.environ['VALUE_LOG'], 'a') as values:
         values.write(value + '\n')
+    with open(os.environ['VALUE_LOG'] + '.json', 'a') as values:
+        values.write(json.dumps({'name': argv[1], 'value': value}) + '\n')
 '''
 
 
@@ -384,7 +425,7 @@ class RehearsalHost:
         (self.deploy / 'wall').mkdir(parents=True)
         for name in ('docker-compose.yml', 'docker-compose.wall.yml', 'docker-compose.rehearsal.yml', 'gen-secrets.sh'):
             shutil.copy(DEPLOY / name, self.deploy / name)
-        for name in ('rehearsal.sh', 'rehearsal-roles.py'):
+        for name in ('rehearsal.sh', 'rehearsal-roles.py', 'walled-rows.sql', 'stand-in.sh', 'redact-log.py'):
             shutil.copy(DEPLOY / 'wall' / name, self.deploy / 'wall' / name)
         shim(self.deploy, 'rls-logins.sh', FAKE_RLS, python=True)
         (self.deploy / '.env').write_text('PILOT_ENV=production\nNODE_ENV=production\n'
@@ -404,8 +445,10 @@ class RehearsalHost:
     def run(self, *args, extra_env=None):
         self.calls.write_text('')
         self.values.write_text('')
+        Path(str(self.values) + '.json').write_text('')
         env = {'PATH': f'{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': str(self.tmp), 'CALL_LOG': str(self.calls),
-               'VALUE_LOG': str(self.values), 'SWIFT_REHEARSAL_LOCK': str(self.tmp / 'lock')}
+               'VALUE_LOG': str(self.values), 'SWIFT_REHEARSAL_LOCK': str(self.tmp / 'lock'), 'REAL_DOCKER': REAL_DOCKER or '', 'REAL_HOME': os.environ.get('HOME', str(self.tmp)),
+               'FAKE_CRED_DATABASE_URL': 'app-fixture-credential-7Qx', 'FAKE_CRED_SYSTEM_DATABASE_URL': 'system-fixture-credential-9Kw'}
         env.update(extra_env or {})
         result = subprocess.run(['bash', str(self.deploy / 'wall' / 'rehearsal.sh'), *args], env=env, text=True,
                                 capture_output=True, timeout=180, stdin=subprocess.DEVNULL)
@@ -414,6 +457,8 @@ class RehearsalHost:
 
 class Rehearsal(unittest.TestCase):
     def setUp(self):
+        if not REAL_DOCKER:
+            self.skipTest('docker compose renders the copy\'s settings; no docker here')
         self.host = RehearsalHost(self)
 
     def test_up_builds_the_isolated_copy_and_only_reads_production(self):
@@ -496,6 +541,188 @@ class Rehearsal(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
 
+    def test_passed_only_after_every_step_and_the_wall_through_the_real_logins(self):
+        result, calls = self.host.run('up', SHA)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'PASSED at {SHA}: every step held', result.stdout)
+        self.assertIn('wall: walled rows seen unbound by swift_app_login=0, by swift_system_login=42', result.stdout)
+        self.assertIn('boot: api running restarts=0', result.stdout)
+        self.assertIn('boot: worker running restarts=0', result.stdout)
+        self.assertNotIn('FAILED', result.stdout + result.stderr)
+        # Each login on its own new connection inside the copy; its credential
+        # only ever on stdin (the fake refuses any other passfile line).
+        connects = [c['argv'] for c in calls if c['tool'] == 'docker' and 'PGPASSFILE' in ' '.join(c['argv'])]
+        self.assertEqual(sorted({a[-2] for a in connects}), ['swift_app_login', 'swift_system_login'])
+        self.assertTrue(all(a[:3] == ['compose', '-p', 'swift-rehearsal'] for a in connects))
+        self.assertTrue(any(a[-1].startswith('ALTER TABLE') for a in connects))
+        self.assertTrue(any(a[-1] == 'SET ROLE swift' for a in connects))
+        blob = self.host.calls.read_text() + result.stdout + result.stderr
+        for credential in ('app-fixture-credential-7Qx', 'system-fixture-credential-9Kw'):
+            self.assertNotIn(credential, blob)
+
+    def test_each_wired_provider_secret_gets_a_fresh_stand_in_of_the_shape_its_boot_guard_checks(self):
+        """15 Oct, staging: every stand-in was 24 random bytes in hex, and the
+        copy's API and worker crash-looped on assertSafeBootConfig (MMG checkout
+        keys must be PEM, the SMS allowlist E.164): FATAL=24, no attestation.
+        The names come from Compose's own rendering, so a quoted or `export`
+        line in deploy/.env is stood in as well."""
+        env_file = self.host.deploy / '.env'
+        env_file.write_text('PILOT_ENV=staging\nNODE_ENV=loadtest\n'
+                            'MMG_CHECKOUT_PUBLIC_KEY_FILE=/run/secrets/MMG_CHECKOUT_PUBLIC_KEY\n'
+                            'MMG_CHECKOUT_PRIVATE_KEY_FILE="/run/secrets/MMG_CHECKOUT_PRIVATE_KEY"\n'
+                            "export SMS_RECIPIENT_ALLOWLIST_FILE='/run/secrets/SMS_RECIPIENT_ALLOWLIST'\n"
+                            'POWERTRANZ_ID_FILE=/run/secrets/POWERTRANZ_ID\n'
+                            'POWERTRANZ_GATEWAY_KEY_FILE=/run/secrets/POWERTRANZ_GATEWAY_KEY\n'
+                            'CW_ALERT_WEBHOOK_URL_FILE=/run/secrets/CW_ALERT_WEBHOOK_URL\n'
+                            'SENTRY_DSN_FILE=/run/secrets/SENTRY_DSN\n'
+                            'STRIPE_SECRET_KEY_FILE=/run/secrets/STRIPE_SECRET_KEY\n'
+                            'MMG_API_KEY_FILE=/run/secrets/MMG_API_KEY\n')
+        walled = {'FAKE_LOGS_API': 'api | tenant wall: enforced role=swift_app_login',
+                  'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}
+        result, calls = self.host.run('up', SHA, extra_env=walled)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        stood_in = ['CW_ALERT_WEBHOOK_URL', 'MMG_API_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PUBLIC_KEY', 'POWERTRANZ_GATEWAY_KEY',
+                    'POWERTRANZ_ID', 'SENTRY_DSN', 'SMS_RECIPIENT_ALLOWLIST', 'STRIPE_SECRET_KEY']
+        generated = re.search(r'^GENERATED="(.*)"$', (DEPLOY / 'gen-secrets.sh').read_text(), re.M).group(1).split()
+        self.assertIn(f'secrets: {len(generated)} generated, {len(stood_in)} provider stand-ins', result.stdout)
+        stored = {}
+        for line in Path(str(self.host.values) + '.json').read_text().splitlines():
+            row = json.loads(line)
+            stored[row['name']] = row['value'][:-1] if row['value'].endswith('\n') else row['value']
+        self.assertEqual(sorted(n for n in stored if n not in generated), stood_in)
+        for name, kind in (('MMG_CHECKOUT_PUBLIC_KEY', 'PUBLIC KEY'), ('MMG_CHECKOUT_PRIVATE_KEY', 'PRIVATE KEY')):
+            self.assertRegex(stored[name], rf'^-----BEGIN {kind}-----\n[A-Za-z0-9+/=\n]+\n-----END {kind}-----$', name)
+            text = subprocess.run(['openssl', 'pkey', *(['-pubin'] if kind == 'PUBLIC KEY' else []), '-noout', '-text'],
+                                  input=stored[name], text=True, capture_output=True, timeout=30).stdout
+            self.assertRegex(text, r'\(4096 bit', name)
+        self.assertEqual(stored['SMS_RECIPIENT_ALLOWLIST'], '+5920000000')
+        self.assertRegex(stored['POWERTRANZ_ID'], r'^[0-9a-f]{16}$')
+        self.assertRegex(stored['POWERTRANZ_GATEWAY_KEY'], r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+        self.assertRegex(stored['CW_ALERT_WEBHOOK_URL'], r'^https://rehearsal\.invalid/[0-9a-f]{32}$')
+        self.assertRegex(stored['SENTRY_DSN'], r'^https://[0-9a-f]{32}@rehearsal\.invalid/1$')
+        self.assertRegex(stored['STRIPE_SECRET_KEY'], r'^sk_test_[0-9a-f]{48}$')
+        self.assertRegex(stored['MMG_API_KEY'], r'^[0-9a-f]{48}$')
+        # Fresh on every run, and never an argument or a printed line.
+        first = dict(stored)
+        result, _ = self.host.run('up', SHA, extra_env=walled)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        again = {json.loads(l)['name']: json.loads(l)['value'] for l in Path(str(self.host.values) + '.json').read_text().splitlines()}
+        for name in stood_in:
+            if name != 'SMS_RECIPIENT_ALLOWLIST':  # the one fixed, fictional number
+                self.assertNotEqual(first[name], again[name].rstrip('\n'), name)
+        blob = self.host.calls.read_text() + result.stdout + result.stderr
+        for name in stood_in:
+            if name != 'SMS_RECIPIENT_ALLOWLIST':
+                self.assertNotIn(again[name].strip().splitlines()[-1], blob, name)
+
+    def test_a_failed_boot_keeps_the_copys_logs_redacted_and_prints_the_first_fatal_lines(self):
+        """The copy's logs went with the copy (journeys-on-copy removes it), so
+        FATAL=24 could not be read. Now the last 400 lines of each process are
+        kept, redacted, and the first 20 FATAL lines are in the run's own log."""
+        # Built at run time: no secret-shaped literal sits in this source (the secret scanners read it).
+        signing = base64.b64encode(b'synthetic signing value 0123456789').decode().rstrip('=')
+        key_body = base64.b64encode(b'synthetic key material for the redaction test').decode()
+        pem = ('-----' + 'BEGIN ' + 'PRIVATE KEY' + '-----', '-----' + 'END ' + 'PRIVATE KEY' + '-----')
+        cred, bearer = 'app-fixture-' + 'credential-7Qx', 'tok-' + '0123456789-abcdef'
+        secret_lines = [f'connect postgresql://swift_app_login:{cred}@postgres:5432/swift failed',
+                        f'GET /x authorization: Bearer {bearer}', 'JWT_' + 'SECRET=' + signing,
+                        'text to +5926123456 for owner.name@example.gy', pem[0], key_body, pem[1]]
+        def log(svc, problem):
+            lines = [f'{svc}-1  | boot noise {i}' for i in range(260)]
+            for i in range(1, 26):
+                lines.append(f'{svc}-1  | Failed to start server: Error: FATAL: {problem} Refusing to start. (start {i})')
+                lines += [f'{svc}-1  | {line}' for line in secret_lines]
+            return '\n'.join(lines + [f'{svc}-1  | last line'])
+        results = self.host.tmp / 'results' / 'run-1'
+        result, calls = self.host.run('up', SHA, extra_env={
+            'REHEARSAL_RESULTS_DIR': str(results),
+            'FAKE_LOGS_API': log('api', 'MMG_CHECKOUT_PUBLIC_KEY is not a readable RSA public key (PEM).'),
+            'FAKE_LOGS_WORKER': log('worker', 'SMS_RECIPIENT_ALLOWLIST entry 1 is not an E.164 number (+ and digits).')})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('REHEARSAL FAILED at step: boot', result.stderr)
+        self.assertIn('did not both attest', result.stderr)
+        self.assertEqual(oct(results.stat().st_mode & 0o777), '0o700')
+        for svc in ('api', 'worker'):
+            saved = (results / f'{svc}.log').read_text()
+            self.assertEqual(oct((results / f'{svc}.log').stat().st_mode & 0o777), '0o600')
+            self.assertEqual(len(saved.splitlines()), 400, svc)
+            self.assertTrue(saved.rstrip().endswith(f'{svc}-1  | last line'))
+            self.assertIn('Error: FATAL:', saved)
+            saves = [c['argv'] for c in calls if c['tool'] == 'docker' and 'logs' in c['argv'] and '--tail' in c['argv'] and c['argv'][-1] == svc]
+            self.assertEqual(len(saves), 1, svc)
+            self.assertEqual(saves[0][saves[0].index('--tail') + 1], '400')
+        # The run's own log: where the logs are, then the first 20 FATAL lines (the api's first), redacted.
+        err = result.stderr.splitlines()
+        self.assertIn(f'rehearsal: logs: the copy\'s api and worker logs (last 400 lines each, redacted) are in {results}', err)
+        at = err.index('rehearsal: the first FATAL lines (redacted):')
+        printed = err[at + 1:at + 21]
+        self.assertEqual(len([l for l in err[at + 1:] if 'FATAL' in l and l.startswith('  ')]), 20)
+        self.assertTrue(all(l.startswith('  api-1  | Failed to start server: Error: FATAL: MMG_CHECKOUT_PUBLIC_KEY') for l in printed), printed)
+        self.assertLess(at, next(i for i, l in enumerate(err) if l.startswith('REHEARSAL FAILED')))
+        blob = result.stdout + result.stderr + (results / 'api.log').read_text() + (results / 'worker.log').read_text()
+        for leak in (cred, bearer, signing, '+5926123456',
+                     '6123456', 'owner.name@example.gy', key_body, 'BEGIN ' + 'PRIVATE'):
+            self.assertNotIn(leak, blob)
+        self.assertIn('[redacted: key material]', (results / 'api.log').read_text())
+
+    def test_a_passing_run_keeps_the_logs_too_and_a_refused_run_starts_nothing_to_keep(self):
+        results = self.host.tmp / 'results' / 'run-2'
+        result, _ = self.host.run('up', SHA, extra_env={'REHEARSAL_RESULTS_DIR': str(results)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('tenant wall: enforced', (results / 'api.log').read_text())
+        self.assertIn('tenant wall: enforced', (results / 'worker.log').read_text())
+        self.assertNotIn('the first FATAL lines', result.stderr)
+        refused = self.host.tmp / 'results' / 'run-3'
+        result, calls = self.host.run('up', SHA, extra_env={'REHEARSAL_RESULTS_DIR': str(refused), 'FAKE_NO_IMAGE': '1'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(refused.exists())
+        self.assertFalse([c for c in calls if c['tool'] == 'docker' and 'logs' in c['argv']])
+        # Without a directory named, the deploy user's own ~/swift-rehearsal/rehearsal-<UTC>.
+        result, _ = self.host.run('up', SHA)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        kept = list((self.host.tmp / 'swift-rehearsal').glob('rehearsal-*/api.log'))
+        self.assertEqual(len(kept), 1, kept)
+        self.assertRegex(kept[0].parent.name, r'^rehearsal-\d{8}T\d{6}Z$')
+
+    def test_any_step_that_does_not_hold_fails_the_run_and_names_it(self):
+        both = 'tenant wall: enforced role=swift_app_login\ntenant wall: system login is a bypass member'
+        cases = [
+            ({'FAKE_STATE_api_id': 'running restarts=1'}, 'boot', 'api is not running cleanly'),
+            ({'FAKE_STATE_worker_id': 'exited restarts=0'}, 'boot', 'worker is not running cleanly'),
+            # The api attested twice (it restarted), the worker never: the old combined count passed this.
+            ({'FAKE_LOGS_API': f'{both}\n{both}', 'FAKE_LOGS_WORKER': 'worker | starting'}, 'boot', 'did not both attest'),
+            ({'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}, 'boot', 'did not both attest'),
+            ({'FAKE_ROWS_SWIFT_APP_LOGIN': '3'}, 'wall', 'sees 3 walled rows'),
+            ({'FAKE_ROWS_SWIFT_SYSTEM_LOGIN': '0'}, 'wall', 'sees no walled row'),
+            ({'FAKE_ALTER_OK': '1'}, 'wall', 'could ALTER a walled table'),
+            ({'FAKE_SET_ROLE_OK': '1'}, 'wall', 'could become the database owner'),
+            ({'FAKE_OWNER': 'swift; DROP'}, 'wall', 'not a plain role name'),
+            # The api's URL file names another login (the owner): no passfile line is made for it.
+            ({'FAKE_URL_USER_DATABASE_URL': 'swift'}, 'wall', 'the request login could not count the walled rows'),
+        ]
+        for env, step, message in cases:
+            with self.subTest(message=message, env=sorted(env)):
+                result, _ = self.host.run('up', SHA, extra_env=env)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stdout + result.stderr)
+                self.assertIn(f'REHEARSAL FAILED at step: {step}', result.stderr)
+                self.assertNotIn('PASSED', result.stdout)
+
+    def test_a_non_production_host_needs_each_process_walled_but_not_the_production_only_line(self):
+        """The system login's own boot attestation runs only in production mode
+        (boot/system-login.ts), so a staging host (NODE_ENV=development) shows
+        the enforced line only; each process must still show it."""
+        env_file = self.host.deploy / '.env'
+        env_file.write_text(env_file.read_text().replace('PILOT_ENV=production\nNODE_ENV=production', 'PILOT_ENV=staging\nNODE_ENV=development'))
+        walled = {'FAKE_LOGS_API': 'api | tenant wall: enforced role=swift_app_login',
+                  'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}
+        result, _ = self.host.run('up', SHA, extra_env=walled)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('(mode development)', result.stdout)
+        result, _ = self.host.run('up', SHA, extra_env={**walled, 'FAKE_LOGS_WORKER': 'worker | starting'})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('REHEARSAL FAILED at step: boot', result.stderr)
+
     def test_down_removes_only_the_rehearsal(self):
         result, calls = self.host.run('down')
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -527,6 +754,54 @@ class Rehearsal(unittest.TestCase):
 
 
 # ── doctor.sh ──────────────────────────────────────────────────────────────
+class RedactLog(unittest.TestCase):
+    """deploy/wall/redact-log.py on its own: what a kept copy log may never
+    carry, and what it must keep so a failure can still be read. Values are
+    built at run time so no secret-shaped literal sits in this source."""
+
+    def redact(self, lines):
+        result = subprocess.run(['python3', '-I', str(DEPLOY / 'wall' / 'redact-log.py')], input='\n'.join(lines) + '\n',
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout
+
+    def test_secret_names_personal_fields_bare_numbers_and_url_passwords_never_survive(self):
+        word = 'hunter' + '2' + 'secret'
+        cases = [
+            ('SMTP_' + 'PASS=' + word, word),
+            ('{"smtp' + 'Pass":"' + word + '"}', word),
+            ('MMG_' + 'MSECRET_' + 'PASS_FILE=' + word, word),
+            ('{"pass' + 'phrase":"' + word + '"}', word),
+            ('{"private' + 'Material":"' + word + '"}', word),
+            ('{"pin":"4821"}', '4821'),
+            ('delivery PIN: 4821 for the order', '4821'),
+            ('user phone 6123456 not found', '6123456'),
+            ('{"phone":"6123456"}', '6123456'),
+            ('{"msisdn":"5926123456"}', '6123456'),
+            ('{"name":"Jane Doe","address":"12 Main St"}', 'Jane Doe'),
+            ('{"name":"Jane Doe","address":"12 Main St"}', '12 Main St'),
+            ('{"firstName":"Jane","lastName":"Doe","street":"Main St"}', 'Doe'),
+            ('{"email":"jane.doe@example.gy"}', 'jane.doe'),
+            ('connect redis://:' + 'p@ss' + '@redis:6379 failed', 'ss@redis'),
+            ('connect redis://:' + 'p@ss' + '@redis:6379 failed', 'p@'),
+            ('connect postgresql://swift:' + 'ab/cd' + '@postgres:5432/swift failed', 'ab/cd'),
+        ]
+        for line, leak in cases:
+            with self.subTest(line=line):
+                self.assertNotIn(leak, self.redact([line]))
+
+    def test_what_failed_and_where_still_reads(self):
+        keep = ['api-1  | Failed to start server: Error: FATAL: MMG_CHECKOUT_PUBLIC_KEY is not a readable RSA public key (PEM). Refusing to start.',
+                'worker-1  | {"level":30,"msg":"tenant wall: enforced role=swift_app_login tenantTables=131 rlsDisabled=0 ownedUnforced=0"}',
+                'api-1  | {"level":30,"req":{"method":"GET","url":"/api/v1/customer/orders"},"msg":"incoming request"}',
+                'api-1  | FATAL: SMS_RECIPIENT_ALLOWLIST entry 1 is not an E.164 number (+ and digits). Refusing to start rather than texting no one by mistake.',
+                'api-1  | {"passengers":3,"shipping":"standard","statusCode":503}']
+        out = self.redact(keep).splitlines()
+        self.assertEqual(out, keep)
+        # A connection URL keeps its host and port, only the credential goes.
+        self.assertEqual(self.redact(['connect redis://:' + 'p@ss' + '@redis:6379 failed']).strip(), 'connect redis://[redacted]@redis:6379 failed')
+
+
 class DoctorWallPosture(unittest.TestCase):
     def run_doctor(self, settings, env_names, roles_hold=True):
         tmp = Path(tempfile.mkdtemp(prefix='swift-wall-doctor-'))

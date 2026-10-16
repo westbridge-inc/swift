@@ -379,6 +379,31 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     headers: { 'Idempotency-Key': idempotencyKey },
     reason,
   });
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in order:
+// set it aside, pay it outside Swift, then record the payout with its transfer
+// reference. Each step is a money action a second admin approves (the server
+// answers 202 APPROVAL_REQUIRED until then). A set-aside that cannot be paid
+// is released back to the credit.
+export const setAsideSubscriptionCredit = (id: string, amount: number, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/set-aside`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+    reason,
+  });
+// [Sol r2 S1] A payout record and a release name the set-aside they are for
+// (refundSetAsideId from the list), so an approval acts only on that one.
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, method, reference, setAsideId }),
+    reason,
+  });
+export const releaseSubscriptionRefund = (id: string, amount: number, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/release`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, setAsideId }),
+    reason,
+  });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
 export const fetchSettlements = (params?: string) => apiFetch(`/api/v1/admin/finance/settlements?${params || 'limit=50'}`);
 export const processSettlement = (id: string, reference: string | undefined, reason: string) =>
@@ -647,7 +672,11 @@ export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/mode
 // edit in between refuses it. Remove bans the item for good, with a reason the
 // partner reads. Neither can lift a certain ban (a banned category, or an
 // earlier removal).
-export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export const PROHIBITED_CLASSES = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  // [R4 · owner 15 Oct] the expanded permanent list (the server's PROHIBITED_CLASSES, class for class)
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+] as const;
 export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
 export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
 export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
@@ -1131,5 +1160,21 @@ export const resolvePaymentDispute = async (
     method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
   });
   if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [L02 · row 34] Partial cash a rider still holds after a refused handover ──
+/**
+ * C4 (money class): record that cash the rider HELD is resolved — handed back
+ * later, or otherwise settled, as the stated reason says. A record only: Swift
+ * moves, refunds and deducts nothing. The first call answers 202
+ * APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it
+ * in Approvals, and the asking admin applies it from there.
+ */
+export const resolveHeldDoorCash = async (id: string, reason: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/door-cash-return/resolve`, {
+    method: 'POST', body: '{}', reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.doorCashReturn?.status !== 'RESOLVED') throw unreadableOrderAction();
   return response;
 };

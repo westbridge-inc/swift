@@ -40,6 +40,11 @@ const QUEUE_NAMES = {
   NOTIFICATION: 'notification-jobs',
   VERIFICATION: 'verification-jobs',
   DISPATCH: 'dispatch-jobs',
+  /** [row 266 · AUD-L4-005] The offer fast lane: offer timeouts ONLY, on their
+   *  own worker slots. They used to share the dispatch queue's five slots with
+   *  ~28 recurring sweeps, so a slow sweep tick could hold a rider's 20 s offer
+   *  open long past its deadline and stall the cascade to the next mover. */
+  OFFER: 'offer-jobs',
   SEARCH: 'search-jobs',
 } as const;
 
@@ -128,6 +133,18 @@ export function dlqAlertThreshold(env: Record<string, string | undefined> = proc
   return Number.isSafeInteger(value) && value >= 1 ? value : 1;
 }
 
+/** [row 266] Worker slots of the offer fast lane. Default 10: an offer timeout
+ *  is short (an atomic compare-consume of the offer, then the next offer), and
+ *  peak concurrent offers are bounded by live movers. Env-tunable so ops can
+ *  widen it without a deploy; a non-integer or out-of-range value falls back to
+ *  the default rather than becoming NaN (a worker with NaN slots takes none). */
+export function offerWorkerConcurrency(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['OFFER_WORKER_CONCURRENCY']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 10;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 1 && value <= 50 ? value : 10;
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -142,6 +159,7 @@ export type SwiftQueues = {
   notificationQueue: Queue;
   verificationQueue: Queue;
   dispatchQueue: Queue;
+  offerQueue: Queue;
   searchQueue: Queue;
 };
 
@@ -177,6 +195,7 @@ export function createQueues(
       notificationQueue: build(QUEUE_NAMES.NOTIFICATION),
       verificationQueue: build(QUEUE_NAMES.VERIFICATION),
       dispatchQueue: build(QUEUE_NAMES.DISPATCH),
+      offerQueue: build(QUEUE_NAMES.OFFER),
       searchQueue: build(QUEUE_NAMES.SEARCH),
     };
   } catch (error) {
@@ -529,7 +548,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     options: { connection: ConnectionOptions; concurrency: number },
   ): Worker => {
     // Two-phase boot: constructing a Worker normally starts its processor
-    // immediately. Keep every consumer dormant until all seven connections and
+    // immediately. Keep every consumer dormant until all eight connections and
     // every recurring schedule are committed by initializeJobRuntime.
     const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
@@ -550,6 +569,27 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
     });
     return worker;
+  };
+
+  // [row 266] Every job-side DispatchService schedules through these two: an
+  // offer timeout on the OFFER queue (its own slots), a re-dispatch on the
+  // dispatch queue. The route side (makeDispatchService) does the same.
+  const scheduleOfferTimeout = async (orderId: string, riderId: string, delayMs: number, attemptId?: string): Promise<void> => {
+    await queues.offerQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
+      delay: delayMs,
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
+  };
+  const scheduleRedispatch = async (orderId: string, delayMs: number, replayJobId?: string): Promise<boolean> => {
+    await queues.dispatchQueue.add('dispatch-order', { orderId }, {
+      // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
+      ...(replayJobId ? { jobId: replayJobId } : {}),
+      delay: delayMs,
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
+    return true;
   };
 
   try {
@@ -647,11 +687,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'tier-recalc': {
-          const changed = await billing.recalculateVendorTiers();
-          // Movers re-tier on the same cadence: a vendor's basis is catalogue
-          // size, a mover's is the vehicle they currently have registered.
-          const moversChanged = await billing.recalculateMoverTiers();
-          ctx.log.info({ changed, moversChanged }, 'Tier recalculation complete');
+          // [R27] OFF until the 14-day price-change notice ships (weekly-retier.ts).
+          const result = await billing.runWeeklyRetier();
+          ctx.log.info(result, 'Tier recalculation complete');
           break;
         }
         case 'convert-trials': {
@@ -1081,6 +1119,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [R24] A partner's rejected document gets its clock first (30 days after the rejection
+        // for an ID-type document, the registry window otherwise), so the reaper below deletes
+        // the ones already due in the same run. A failure here never stops the reaper.
+        try {
+          await verification.scheduleRejectedDocumentRetention();
+        } catch (err) {
+          ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -1096,8 +1142,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           );
           throw err;
         }
-        // Run transition notices after retention so a failed reminder cannot skip the reaper.
-        await verification.hirePermitGraceSweep();
+        // Run the hire-licence sweep after retention so a failed notice cannot skip the reaper.
+        // [Owner ruling 15 Oct 2026 · no grace] It takes permit-only taxi drivers offline and asks for both licences.
+        await verification.hireLicenceSweep();
         // Review-SLA watchdog: docs waiting >24h on a human get escalated.
         await verification.alertReviewSlaBreaches();
         // [DOC-1 DOC-INV-32] Legal holds past their review date alarm.
@@ -1359,33 +1406,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           if (handovers.pending > 0) ctx.log.warn(handovers, 'handover notices remain pending');
           else if (handovers.expired > 0) ctx.log.warn(handovers, 'handover pushes closed unconfirmed; the inbox notices remain');
         });
+        await drain('driver-pickup-notice', async () => {
+          // [L07] The passenger's "driver on the way / arrived" notice commits with
+          // the assignment-bound pickup advance; whatever its own post-commit
+          // attempt could not deliver is delivered here, in process.
+          const { drainDriverPickupNotices } = await import('../modules/rides/driver-pickup');
+          const pickups = await drainDriverPickupNotices({ prisma: ctx.prisma, notifications: new ClaimNoticeNS(ctx.prisma, ctx.io) });
+          if (pickups.pending > 0) ctx.log.warn(pickups, 'driver pickup notices remain pending');
+        });
         if (drainFailure !== undefined) throw drainFailure;
         return;
       }
       if (job.name === 'mover-revocation-outbox') {
-        const dispatch = new DispatchService(
-          ctx.prisma,
-          ctx.redis,
-          ctx.io,
-          getMapsProvider(),
-          async (orderId, moverId, delayMs, attemptId) => {
-            await queues.dispatchQueue.add('offer-timeout', { orderId, riderId: moverId, attemptId }, {
-              delay: delayMs,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
-          },
-          async (orderId, delayMs, replayJobId) => {
-            await queues.dispatchQueue.add('dispatch-order', { orderId }, {
-              // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
-              ...(replayJobId ? { jobId: replayJobId } : {}),
-              delay: delayMs,
-              removeOnComplete: 100,
-              removeOnFail: 50,
-            });
-            return true;
-          },
-        );
+        const dispatch = new DispatchService(ctx.prisma, ctx.redis, ctx.io, getMapsProvider(), scheduleOfferTimeout, scheduleRedispatch);
         const { processMoverRevocationOutboxBatch } = await import('../modules/mover-revocation-outbox');
         const result = await processMoverRevocationOutboxBatch({ ...ctx, dispatch });
         if (result.processed + result.failed > 0) {
@@ -1813,7 +1846,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const broken =
           report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
           report.unjudgedSubscriptions.length +
-          report.receiptGaps.length + report.ledgerWalletMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
+          report.receiptGaps.length + report.ledgerWalletMismatches.length + report.refundPayableMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'billing-invariants', 12 * 3600, () =>
@@ -1822,12 +1855,39 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} fee-paid-ahead mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger vs fee-paid-ahead drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} fee-paid-ahead mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger vs fee-paid-ahead drift(s), ${report.refundPayableMismatches.length} refund set-aside drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );
         }
         ctx.log.info({ walletsChecked: report.walletsChecked, broken }, 'billing invariants run');
+        return;
+      }
+
+      if (job.name === 'vat-threshold-watch') {
+        // [Owner legal plan 15 Oct · R10] Daily: how close each real tenant's
+        // weekly fees are to the VAT registration threshold. Pages platform
+        // admins once a month per state, naming the 15-day deadline.
+        const { vatTracker, vatAlert } = await import('../modules/billing/vat-tracker');
+        const tenants = await ctx.prisma.tenant.findMany({ where: { kind: 'PRODUCTION', isActive: true }, select: { id: true } });
+        for (const { id } of tenants) {
+          const tracker = await vatTracker(ctx.prisma, id);
+          const alert = vatAlert(tracker);
+          if (alert) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            const key = `vat-threshold:${id}:${tracker.status}:${tracker.months[tracker.months.length - 1]!.month}`;
+            await opsPageOnce(ctx, key, 32 * 86_400, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // The company's VAT position, not one tenant's event [NOC-A F45].
+                tenantId: null,
+                ...alert,
+                data: { kind: 'vat_threshold', status: tracker.status, tenantId: id, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months },
+                dedupeKey: key,
+              }),
+            );
+          }
+          ctx.log.info({ tenantId: id, status: tracker.status, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months }, 'vat threshold watch');
+        }
         return;
       }
 
@@ -2149,29 +2209,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
-      const dispatch = new DispatchService(
-        ctx.prisma,
-        ctx.redis,
-        ctx.io,
-        getMapsProvider(),
-        async (orderId, riderId, delayMs, attemptId) => {
-          await queues.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
-            delay: delayMs,
-            removeOnComplete: 100,
-            removeOnFail: 50,
-          });
-        },
-        async (orderId, delayMs, replayJobId) => {
-          await queues.dispatchQueue.add('dispatch-order', { orderId }, {
-            // [E36] A redelivered run re-adds the SAME id; BullMQ keeps the first.
-            ...(replayJobId ? { jobId: replayJobId } : {}),
-            delay: delayMs,
-            removeOnComplete: 100,
-            removeOnFail: 50,
-          });
-          return true;
-        },
-      );
+      const dispatch = new DispatchService(ctx.prisma, ctx.redis, ctx.io, getMapsProvider(), scheduleOfferTimeout, scheduleRedispatch);
 
       if (job.name === 'dispatch-order') {
         // [E36] The job is the replay identity: a redelivery of THIS job
@@ -2184,7 +2222,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // provenance check inside dispatchOrder): candidates are this tenant's.
         await inTenantOf(ctx.prisma, { order: job.data.orderId }, () =>
           dispatch.dispatchOrder(job.data.orderId, job.data.tenantId, job.id ? `${job.id}@${job.timestamp}` : undefined));
-      } else if (job.name === 'offer-timeout') {
+      } else if (job.name === 'offer-timeout') { // [row 266] drain only: enqueued here before the offer lane existed
         await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId));
       } else if (job.name === 'supply-watch-scan') {
           // Availability spec §5: tell waiting customers when supply returns.
@@ -2213,6 +2251,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
     },
     { connection, concurrency: 5 },
+  );
+
+  // OFFER: the offer fast lane [row 266 · AUD-L4-005]. Offer timeouts only, on
+  // their own slots: a slow sweep on the dispatch queue can no longer hold a
+  // rider's offer open past its deadline. The handler is the same one, in the
+  // order's tenant; the cascade it triggers schedules on the same two queues.
+  const offerWorker = buildWorker(
+    QUEUE_NAMES.OFFER,
+    async (job: Job) => {
+      if (job.name !== 'offer-timeout') return;
+      const { DispatchService } = await import('../modules/dispatch/dispatch.service');
+      const { getMapsProvider } = await import('../providers/maps/maps-provider');
+      const dispatch = new DispatchService(ctx.prisma, ctx.redis, ctx.io, getMapsProvider(), scheduleOfferTimeout, scheduleRedispatch);
+      await inTenantOf(ctx.prisma, { order: job.data.orderId }, () => dispatch.handleOfferTimeout(job.data.orderId, job.data.riderId, job.data.attemptId));
+    },
+    { connection, concurrency: offerWorkerConcurrency() },
   );
 
   // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
@@ -2244,7 +2298,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const allWorkers: Record<string, Worker> = {
     order: orderWorker, subscription: subscriptionWorker,
     settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker,
-    notification: notificationWorker, search: searchWorker,
+    offer: offerWorker, notification: notificationWorker, search: searchWorker,
   };
 
   const workerResources = Object.entries(allWorkers).map(([name, worker]) => ({
@@ -2338,6 +2392,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     settlementWorker,
     verificationWorker,
     dispatchWorker,
+    offerWorker,
     notificationWorker,
     searchWorker,
     waitUntilReady: () => Promise.all(Object.values(allWorkers).map((worker) => worker.waitUntilReady())),
@@ -2411,7 +2466,8 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
-  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  // committed PERSONAL documents whose type is active and whose extraction succeeded, and
+  // [R24] every partner PERSONAL image 30 days after its decision.
   await queues.verificationQueue.add('image-policy-sweep', {}, {
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
@@ -2548,6 +2604,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Billing invariants: nightly 03:30 (after the 03:00 money jobs settle).
   await queues.dispatchQueue.add('billing-invariants', {}, {
     repeat: { pattern: '30 3 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+  // [Owner legal plan 15 Oct · R10] VAT registration threshold watch, daily at
+  // 08:00 Guyana time (a working morning, so the page is read the same day).
+  await queues.dispatchQueue.add('vat-threshold-watch', {}, {
+    repeat: { pattern: '0 8 * * *', tz: GUYANA_TZ },
     removeOnComplete: 7,
     removeOnFail: 7,
   });

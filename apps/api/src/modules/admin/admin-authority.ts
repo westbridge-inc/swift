@@ -340,6 +340,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
 
   // ── Finance ─────────────────────────────────────────────────────────────
   'GET /finance/revenue': c('C0', 'finance.read'),
+  'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
@@ -371,6 +372,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /subscriptions/:id/billing-events': c('C0', 'subscription.read'),
   'PUT /subscriptions/:id/waive-fee': c('C4', 'subscription.waive', E.subscription),
   'POST /subscriptions/:id/topup': c('C4', 'subscription.topup', E.subscription),
+  'POST /subscriptions/:id/refund-credit/set-aside': c('C4', 'subscription.refund', E.subscription),
+  'POST /subscriptions/:id/refund-credit/paid': c('C4', 'subscription.refund', E.subscription),
+  'POST /subscriptions/:id/refund-credit/release': c('C4', 'subscription.refund', E.subscription),
 
   // ── Ads ─────────────────────────────────────────────────────────────────
   'GET /ads/advertisers/queue': c('C0', 'ads.read'),

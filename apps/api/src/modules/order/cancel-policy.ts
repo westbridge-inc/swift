@@ -122,7 +122,7 @@ export type CancellationVerdict =
   | {
       allowed: false;
       free: false;
-      code: typeof STORE_ACCEPTED_CANCEL_CODE | typeof CANCEL_WINDOW_CLOSED_CODE | typeof SERVICE_JOB_STARTED_CODE;
+      code: typeof STORE_ACCEPTED_CANCEL_CODE | typeof CANCEL_WINDOW_CLOSED_CODE | typeof SERVICE_JOB_STARTED_CODE | typeof SERVICE_JOB_BOOKED_CODE;
       message: string;
     };
 
@@ -402,20 +402,28 @@ function mmgAwareMessage(message: string): string {
 // ---------------------------------------------------------------------------
 // [owner #50 · coordinator ruling 14 Oct 2026 (Opus S3-3)] A SERVICE JOB (a
 // quote-based local pro: request → quote → schedule → start → complete) joins
-// the one rule. The customer cancels free until the provider starts the work;
-// once it is IN PROGRESS the provider is in the customer's home or on the job,
-// so the app no longer cancels it — the customer contacts the provider (or
-// Swift support). The same principle as custody. There is never a fee.
+// the one rule. The customer cancels free in the app while the job is a request
+// (REQUESTED or QUOTED); once it is booked (SCHEDULED) the provider has blocked
+// the time, and once it is IN PROGRESS the provider is in the customer's home or
+// on the job, so the app no longer cancels it — the customer contacts the
+// provider (or Swift support), exactly as the Terms (§7) say. There is never a fee.
 // ---------------------------------------------------------------------------
 
 export const SERVICE_JOB_STARTED_CODE = 'SERVICE_JOB_STARTED';
 export const SERVICE_JOB_STARTED_MESSAGE = 'Your provider has started this job, so it can no longer be cancelled in the app. Contact your provider, or Swift support, to change or stop it.';
 
-/** The customer's cancel of a service job: free until the provider starts it, refused once it is in progress.
+/** [coordinator ruling 14 Oct, Terms 2026-10-15 §7] Once the job is booked (a slot is agreed), the app no
+ *  longer cancels it: the customer contacts the provider, as the Terms say. */
+export const SERVICE_JOB_BOOKED_CODE = 'SERVICE_JOB_BOOKED';
+export const SERVICE_JOB_BOOKED_MESSAGE = 'This job is booked, so it can no longer be cancelled in the app. Contact your provider to change or cancel it.';
+
+/** The customer's cancel of a service job, exactly as the Terms (§7) say: free in the app while it is a request
+ *  (REQUESTED or QUOTED); once it is booked (SCHEDULED) or started (IN_PROGRESS), refused with who to contact.
  *  Closed jobs (COMPLETED / CANCELLED) are the route's own "already closed" answer, before this is asked. */
 export function serviceJobCancelVerdict(job: { status: string }): CancellationVerdict {
+  if (job.status === 'REQUESTED' || job.status === 'QUOTED') return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
   if (job.status === 'IN_PROGRESS') return { allowed: false, free: false, code: SERVICE_JOB_STARTED_CODE, message: SERVICE_JOB_STARTED_MESSAGE };
-  return { allowed: true, free: true, reason: 'NOT_ACCEPTED' };
+  return { allowed: false, free: false, code: SERVICE_JOB_BOOKED_CODE, message: SERVICE_JOB_BOOKED_MESSAGE };
 }
 
 /** [owner #46/#50/#52] The verdict in the words the apps show. */

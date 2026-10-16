@@ -1,11 +1,13 @@
 import type { Metadata } from 'next';
 import { Section } from '@/components/site';
+import { CANCEL_EARLY_STEP } from '@/lib/cancel-policy-copy';
 
 export const metadata: Metadata = { title: 'How it works' };
 
 const CUSTOMER_STEPS = [
   ['Order', 'Pick a restaurant, supermarket or shop and order in the app — delivery or pickup.'],
-  ['Change your mind early', 'Cancel from the order screen. Cancelling is typically free before the store accepts, and the app confirms the exact outcome when you cancel. Cash orders cancel free in those cases; if you already sent an MMG payment, the store refunds you directly.'],
+  // [Terms 2026-10-15 §7] free or refused, never a fee
+  ['Change your mind early', CANCEL_EARLY_STEP],
   ['The store gets to work', 'Restaurants cook; supermarkets shelf-pick your list item by item — if something is out of stock, you approve the substitute live.'],
   ['The nearest rider brings it', 'Dispatch pings the closest available rider, Uber-style. You watch every step on a live map.'],
   ['Pay at the door — or MMG', 'Cash at handover, or pay the store directly on their own MMG. Swift never holds your money.'],

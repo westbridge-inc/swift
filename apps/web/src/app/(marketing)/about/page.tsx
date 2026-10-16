@@ -133,6 +133,8 @@ export default function AboutPage() {
               </dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Operated by</dt>
               <dd>{site.legalEntityName}</dd>
+              <dt className="font-semibold text-[var(--swift-ink)]">Registration no.</dt>
+              <dd>{site.registrationNo}</dd>
               <dt className="font-semibold text-[var(--swift-ink)]">Registered and located in</dt>
               <dd>
                 {site.registeredCity}, {site.country}
