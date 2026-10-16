@@ -185,6 +185,8 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     });
     device('ok');
     render(<CourierPage />);
+    // The pickup comes from the device only when the sender taps for it (row 413).
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
     await screen.findByDisplayValue('Current location');
     await pinDropoff();
     fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
@@ -292,6 +294,8 @@ describe('[owner #67] a parcel with no prohibited items', () => {
   async function readyParcel() {
     device('ok');
     render(<CourierPage />);
+    // The pickup comes from the device only when the sender taps for it (row 413).
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
     await screen.findByDisplayValue('Current location');
     await pinDropoff();
     fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
