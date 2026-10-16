@@ -603,6 +603,27 @@ describe('[§8 · #67] a parcel is screened against the prohibited-items list', 
     expect(pack.json().error).toMatchObject({ code: 'PROHIBITED_PARCEL', message: 'Swift can\'t carry this parcel: Swift never delivers alcohol. If it\'s something else, describe it in other words.' });
   });
 
+  // [R4 · owner 15 Oct] The expanded permanent list reaches parcels too; legal-services words are a listing rule only.
+  it('the expanded list: explosives, pesticides, raw gold, firearms, wildlife, counterfeits and currency are refused', async () => {
+    const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const [packageDescription, label] of [
+      ['Box of squibs', 'fireworks and explosives'], ['Bottle of paraquat', 'pesticides and toxic chemicals'],
+      ['Raw gold', 'raw gold, diamonds and precious stones'], ['9mm ammo', 'firearms, ammunition and replicas'],
+      ['A pair of twa twa birds', 'protected wildlife'], ['Counterfeit perfume', 'counterfeit goods'],
+      ['Foreign currency for my aunt', 'currency and payment cards'],
+    ] as const) {
+      const res = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription }, sender.token);
+      expect(res.statusCode, packageDescription).toBe(409);
+      expect(res.json().error).toMatchObject({
+        code: 'PROHIBITED_PARCEL',
+        message: `Swift can't carry this parcel: Swift never delivers ${label}. If it's something else, describe it in other words.`,
+      });
+    }
+    expect(await parcelsOf(sender.userId)).toBe(0);
+    const ok = await inject('POST', '/api/v1/courier/order', { ...ORDER_BODY, packageDescription: 'Fruit basket for my lawyer' }, sender.token);
+    expect(ok.statusCode, ok.body).toBe(201);
+  });
+
   // [Legal research A10 · R1] Courier = goods only: letters, documents and mail are the Post Office's to carry in
   // Guyana. Refused in plain words before anything is written, documents travelling with goods included.
   it('a parcel described as letters, documents or mail is refused before anything is written', async () => {

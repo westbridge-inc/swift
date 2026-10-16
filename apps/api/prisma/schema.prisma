@@ -1576,6 +1576,10 @@ model Vendor {
   /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
   /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
   vatRegistrationNumber String?
+  /// [R3 · CAA s.70(3) · legal research D10 + E5 · owner 15 Oct 2026] The store's OWN refund rule, typed by the owner
+  /// (plain words, no links, at most 300 characters; checked on write by utils/vendor-refund-rule.ts). Its storefront
+  /// shows it with the statutory-rights sentence; null = none on file, and the storefront says "Ask the store".
+  refundRule String?
   /// [GUARDRAILS §8 · owner 14 Oct 2026] A store whose own words (name, description, tags) mention goods Swift never
   /// carries ("X Liquor Store", "Rum Shop") is held for a person: hidden from customers, with every item it sells,
   /// until someone holding the catalogue-approver grant approves exactly those words. This is the fingerprint they
