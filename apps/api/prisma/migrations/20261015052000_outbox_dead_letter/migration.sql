@@ -11,6 +11,9 @@
 -- Existing rows take the defaults. A rating row already at 25 attempts (given
 -- up silently before this) becomes a dead letter on the first sweep, and pages:
 -- that is the point. Rollback: rollback.sql beside this file.
+-- Each ALTER adds a nullable stamp and a constant-default column (no table rewrite);
+-- lock_timeout keeps it from queueing every outbox write behind a long transaction.
+SET lock_timeout = '10s';
 ALTER TABLE "order_outbox"
   ADD COLUMN "maxAttempts" INTEGER NOT NULL DEFAULT 20,
   ADD COLUMN "deadLetteredAt" TIMESTAMP(3);
