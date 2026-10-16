@@ -339,6 +339,7 @@ const CENSUS: Case[] = [
   { k: 'billing_card_action_required', d: { subscriptionId: 's1' }, to: null, why: 'GAP: [PT-1] the bank wants the partner to confirm this week\u2019s card payment (3-D Secure); the Confirm-your-card / Pay now surface arrives with PT-3' },
   { k: 'trial_fee_education', d: { subscriptionId: 's1', stage: 'MID' }, to: null, why: 'GAP: same' },
   { k: 'fx_change_notice', d: { subscriptionId: 's1', fxRateId: 'f1' }, to: null, why: 'GAP: same' },
+  { k: 'billing_rate_change', d: { subscriptionId: 's1', change: 'PRICE_BOOK', appliesFrom: '2026-11-02T04:00:00.000Z' }, to: null, why: 'GAP: same (owner 15 Oct: a weekly fee change, told before it applies)' },
   { k: 'usd_migration_notice', d: { subscriptionId: 's1', mode: 'A' }, to: null, why: 'GAP: same' },
   { k: 'claim', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — the guarantee claims screen (DOC-1 §31.4)' },
   { k: 'claim_update', d: { claimId: 'c1' }, to: { screen: 'Claims' }, why: 'rider — same screen' },
