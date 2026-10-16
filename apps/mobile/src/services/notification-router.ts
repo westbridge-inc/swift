@@ -32,7 +32,7 @@ export type OpenApp = () => string | null | undefined;
 const PARTNER_FEE_KINDS = new Set([
   'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning', 'billing_suspended',
   'billing_suspended_nudge', 'billing_reminder', 'billing_banked', 'billing_churned', 'billing_topup',
-  'billing_card_action_required', 'trial_fee_education', 'fx_change_notice', 'usd_migration_notice',
+  'billing_card_action_required', 'trial_fee_education', 'fx_change_notice', 'billing_rate_change', 'usd_migration_notice',
 ]);
 
 /** [PUSH-ROUTING] Document notices sent to whoever owns the document. */
