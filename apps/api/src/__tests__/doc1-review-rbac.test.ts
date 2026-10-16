@@ -149,7 +149,7 @@ describe('[DOC-1 P8-4] the review console roles, as capability presets the serve
     expect((await call(reviewer.token, 'POST', `/verification/cases/${kase.id}/claim`, {})).statusCode).toBe(200);
     expect((await call(reviewer.token, 'POST', '/verification/legal-holds', { subjectUserId: subjectId, reviewBy: new Date(Date.now() + 30 * DAY).toISOString() })).statusCode).toBe(403);
     expect((await call(reviewer.token, 'GET', '/verification/legal-holds')).statusCode).toBe(403);
-    const approved = await call(reviewer.token, 'PUT', `/verification/${doc.id}/approve`, {});
+    const approved = await call(reviewer.token, 'PUT', `/verification/${doc.id}/approve`, { registrationKind: 'COMPANY' }); // [R16]
     expect(approved.statusCode).toBe(200);
     expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } }))).status).toBe('APPROVED');
   });
