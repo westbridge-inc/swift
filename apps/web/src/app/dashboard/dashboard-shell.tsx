@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, ShieldCheck, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import type { ShellPerson } from '@/components/customer-shell';
 import { ConsoleShell } from '@/components/console-shell';
@@ -20,6 +20,7 @@ export const dashboardNav = (catalogue: CatalogueName) => [
   { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
   { href: '/dashboard/inventory', label: catalogue, icon: Boxes, exact: true },
   { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
+  { href: '/dashboard/documents', label: 'Documents', icon: ShieldCheck, exact: true, dock: false },
   { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
 ];

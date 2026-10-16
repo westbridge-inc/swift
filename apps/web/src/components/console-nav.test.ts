@@ -6,9 +6,9 @@ const dashboardNav = navFor('Products');
 import { NAV as portalNav } from '@/app/portal/portal-shell';
 
 describe('console navigation', () => {
-  it('keeps Today first and places Weekly fee between Bulk import and Settings', () => {
+  it('keeps Today first and places Documents and Weekly fee between Bulk import and Settings, in the portal’s order', () => {
     expect(dashboardNav.map(({ label }) => label)).toEqual([
-      'Today', 'Orders', 'Products', 'Bulk import', 'Weekly fee', 'Settings',
+      'Today', 'Orders', 'Products', 'Bulk import', 'Documents', 'Weekly fee', 'Settings',
     ]);
   });
 

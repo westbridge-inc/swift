@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { site } from '@/site.config';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { accountApi, type SupportCategory } from './account-api';
+import { documentLabel } from '@/lib/partner-documents';
 import { AccountFrame, buttonClass, fieldClass, useAccountQuery } from './account-frame';
 
 const categories: { value: SupportCategory; label: string }[] = [
@@ -13,11 +14,14 @@ const categories: { value: SupportCategory; label: string }[] = [
   { value: 'VENDOR', label: 'Store' }, { value: 'ACCOUNT', label: 'Account' }, { value: 'OTHER', label: 'Something else' },
 ];
 
-export function Help({ orderId = '' }: { orderId?: string }) {
+/** [DOCS-1] A partner's question about one of their documents. */
+export type HelpTopic = Extract<SupportCategory, 'VENDOR' | 'MOVER'>;
+
+export function Help({ orderId = '', topic, document }: { orderId?: string; topic?: HelpTopic; document?: string }) {
   const tickets = useAccountQuery('support', accountApi.tickets);
-  const [category, setCategory] = useState<SupportCategory>(orderId ? 'ORDER_ISSUE' : 'OTHER');
+  const [category, setCategory] = useState<SupportCategory>(orderId ? 'ORDER_ISSUE' : topic ?? 'OTHER');
   const [order, setOrder] = useState(orderId);
-  const [subject, setSubject] = useState('');
+  const [subject, setSubject] = useState(document ? `About my ${documentLabel(document)} review` : '');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const sending = useRef(false);
