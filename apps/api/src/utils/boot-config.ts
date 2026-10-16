@@ -263,6 +263,11 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   if (kycProvider !== 'manual') {
     throw new Error('FATAL: KYC_PROVIDER must be manual in production; launch verification requires human review. Refusing to start.');
   }
+  // Face matching stays OFF (owner ruling; GUARDRAILS §8): the biometric switch
+  // cannot be turned on in production, whatever engine is configured.
+  if (env['FEATURE_BIOMETRIC_FACE_MATCH'] === '1') {
+    throw new Error('FATAL: FEATURE_BIOMETRIC_FACE_MATCH=1 is refused in production; identity checks are done by a person, with no automated face matching. Refusing to start.');
+  }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
   // synthetic tokens, so production must configure a live processor or

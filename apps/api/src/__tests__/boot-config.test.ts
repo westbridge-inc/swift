@@ -207,6 +207,24 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: provider, DIDIT_API_KEY: 'synthetic-test-key', ID_ANALYZER_API_KEY: 'synthetic-test-key' })).toThrow(/KYC_PROVIDER/);
   });
 
+  // [GUARDRAILS §8 · owner: face matching OFF, identity checks by a person only] The biometric switch
+  // cannot be turned on in production: the boot guard refuses it, so no face-matching leg can run there.
+  it('refuses production face matching (FEATURE_BIOMETRIC_FACE_MATCH=1) even on the human-review provider', () => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toThrow(/FEATURE_BIOMETRIC_FACE_MATCH/);
+  });
+
+  it.each([undefined, '', '0'])('boots with face matching off (FEATURE_BIOMETRIC_FACE_MATCH=%j)', (flag) => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: flag })).not.toThrow();
+  });
+
+  it('preflight reports production face matching once and continues to the next missing setting', () => {
+    const result = runPreflight({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1', PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout.match(/✗ FATAL: FEATURE_BIOMETRIC_FACE_MATCH/g)).toHaveLength(1);
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).not.toContain('stubbing changed nothing');
+  });
+
   it('refuses sandbox or unconfigured KYC in production', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
