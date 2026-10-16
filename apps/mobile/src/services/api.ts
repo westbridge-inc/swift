@@ -907,10 +907,12 @@ export const verificationApi = {
     fileUrl: string;
     consent: true;
     privacyNoticeVersion: string;
+    /** [R17] the tick shown before the upload (recorded in the consent ledger). */
+    consentTick?: 'document_v1';
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string },
+    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
