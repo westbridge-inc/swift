@@ -11,6 +11,7 @@ import {
   requireAuthSessionSnapshot,
 } from '../../stores/authStore';
 import type { AuthSessionSnapshot } from '../../lib/authSession';
+import { pendingDocumentLabel } from './documentChecklistPresentation';
 
 function humanize(docType: string) {
   return docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -24,6 +25,9 @@ const DOC_LABELS: Record<string, string> = {
   vehicle_registration: 'Vehicle Registration',
   vehicle_insurance: 'Vehicle Insurance',
   hire_car_permit: 'Hire-Car Permit',
+  // [VERIFY-DOCS · ruling 8] the two licences that replace the permit: the person's and the car's
+  hire_car_driver_licence: "Hire Car Driver's Licence",
+  hire_car_vehicle_licence: "Car's Hire Licence (yearly, shown on the car)",
   road_service_licence: 'Road Service Licence',
   vehicle_plate_photo: 'Vehicle Plate Photo',
   police_clearance: 'Police Clearance Certificate',
@@ -38,6 +42,11 @@ const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
+  // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
+  gei_electrical_licence: 'GEI Electrical Licence',
+  pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
+  pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 /** Friendly document name for other surfaces (suspension banners etc.). */
@@ -64,8 +73,9 @@ export function DocumentUploadCard({
   submittedAt,
   reviewNote,
   isNext,
-  faceMatched = false,
+  replaced = false,
   optionalHint,
+  hint,
 }: {
   role: string;
   docType: string;
@@ -74,11 +84,13 @@ export function DocumentUploadCard({
   submittedAt?: string | null;
   reviewNote?: string | null;
   isNext?: boolean;
-  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
-  faceMatched?: boolean;
+  /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
+  replaced?: boolean;
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
    *  "keep operating" copy and no "next step" nudge. */
   optionalHint?: string;
+  /** [Owner ruling 11 Oct 2026] What this document is, in plain words (taxi checklist). */
+  hint?: string;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -89,6 +101,9 @@ export function DocumentUploadCard({
   const expiringSoon = status === 'APPROVED' && daysLeft != null && daysLeft <= RENEWAL_WINDOW_DAYS;
   // An approved doc inside its renewal window re-opens for upload.
   const approved = status === 'APPROVED' && !expiringSoon;
+  // [REPLACE-PENDING · owner request 8 Oct] A copy waiting for review can be replaced (sent the wrong one);
+  // the server keeps the old copy for audit and the reviewer sees only the newest.
+  const pendingLabel = pendingDocumentLabel(replaced, submittedAt);
 
   const send = (a: ImagePicker.ImagePickerAsset, authSession: AuthSessionSnapshot) =>
     upload.mutate({
@@ -174,6 +189,11 @@ function explainPermissionDenied(
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
     ]);
+  const confirmReplace = () =>
+    Alert.alert('Replace this document?', 'Your new upload replaces the one waiting for review. We keep the old one on record, and the reviewer sees only the new one.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Replace', onPress: pick },
+    ]);
 
   // The server's rejection reason is the fix instruction — surface it verbatim.
   const uploadErr = upload.isError
@@ -193,9 +213,7 @@ function explainPermissionDenied(
             ? 'Expired — optional, upload a new one any time'
             : 'Expired — upload the renewal to keep operating'
           : pending
-            ? submittedAt
-              ? `Submitted ${new Date(submittedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} — in review`
-              : 'In review'
+            ? pendingLabel
             : rejected
               ? reviewNote
                 ? `Rejected: ${reviewNote} — tap to re-upload`
@@ -207,7 +225,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || pending || upload.isPending} onPress={pick}>
+    <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
@@ -232,17 +250,16 @@ function explainPermissionDenied(
             {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
-              this document. It used to show under every ID, while the
-              server's face-matching was switched off. */}
+          {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made
+              by people (face-matching is off, GUARDRAILS §8). The checklist says what really happens. */}
+          {hint ? (
+            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
+              {hint}
+            </T>
+          ) : null}
           {optionalHint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {optionalHint}
-            </T>
-          ) : null}
-          {faceMatched ? (
-            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
             </T>
           ) : null}
         </View>

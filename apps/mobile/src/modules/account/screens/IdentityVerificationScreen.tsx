@@ -8,6 +8,7 @@ import { Card, PillButton, T } from '../../../kit';
 import { Badge } from '../../../kit/badge';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
+import { idCheckOf, submittedCopy, type CustomerIdCheck } from '../../../lib/customerIdCopy';
 import {
   AuthSessionBoundaryError,
   requireAuthSessionForPrincipal,
@@ -40,17 +41,20 @@ function UploadRow({
   );
 }
 
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] The ID alone: no selfie, no face match (a profile
+// photo is asked only before a taxi ride). The ID goes on file at once unless the server's
+// automatic checks hold it for a person — the result screen says which, never "verified".
 export function IdentityVerificationScreen({ navigation }: any) {
   const upload = useUploadFile();
   const submit = useSubmitIdentity();
   const [idUrl, setIdUrl] = useState<string | undefined>(undefined);
-  const [selfieUrl, setSelfieUrl] = useState<string | undefined>(undefined);
-  const [picking, setPicking] = useState<'id' | 'selfie' | null>(null);
+  const [picking, setPicking] = useState<'id' | null>(null);
   const [submitted, setSubmitted] = useState(false);
-  const [lastUploadKind, setLastUploadKind] = useState<'id' | 'selfie' | null>(null);
+  const [lastUploadKind, setLastUploadKind] = useState<'id' | null>(null);
+  const [outcome, setOutcome] = useState<CustomerIdCheck | null>(null);
   const [permErr, setPermErr] = useState<string | null>(null);
 
-  const pick = async (kind: 'id' | 'selfie') => {
+  const pick = async (kind: 'id') => {
     try {
       const saved = upload.isError && lastUploadKind === kind ? upload.variables : undefined;
       const owner = saved?.authSession ?? requireAuthSessionSnapshot();
@@ -74,8 +78,7 @@ export function IdentityVerificationScreen({ navigation }: any) {
       setLastUploadKind(kind);
       const url = await upload.mutateAsync(file);
       requireAuthSessionForPrincipal(owner);
-      if (kind === 'id') setIdUrl(url);
-      else setSelfieUrl(url);
+      setIdUrl(url);
     } catch (pickError) {
       if (pickError instanceof AuthSessionBoundaryError) return;
       // surfaced below
@@ -85,15 +88,16 @@ export function IdentityVerificationScreen({ navigation }: any) {
   };
 
   if (submitted) {
+    const copy = submittedCopy(outcome);
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space['2xl'] }}>
-          <Feather name="check-circle" size={48} color={color.success} />
+          <Feather name={outcome === 'NOT_ACCEPTED' ? 'alert-circle' : outcome === 'WAITING' ? 'clock' : 'check-circle'} size={48} color={outcome === 'NOT_ACCEPTED' ? color.text.muted : color.success} />
           <T variant="heading" center style={{ marginTop: space.md }}>
-            ID submitted for review
+            {copy.title}
           </T>
           <T variant="body" tone="muted" center style={{ marginTop: space.xs }}>
-            We verify within 24 hours. Once approved, the order limit is lifted for good.
+            {copy.body}
           </T>
           <PillButton label="Done" style={{ marginTop: space.xl, paddingHorizontal: space['2xl'] }} onPress={() => navigation?.goBack?.()} />
         </View>
@@ -107,14 +111,13 @@ export function IdentityVerificationScreen({ navigation }: any) {
         <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={10}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
-        <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Verify your identity</T>
+        <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Add your ID</T>
       </View>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32 }} showsVerticalScrollIndicator={false}>
         <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-          A one-time check, required for larger cash orders and rides. Upload a government ID and a selfie — verify once and the limit is gone.
+          Needed once for taxi rides and bigger orders. Upload a clear photo of your government ID — no selfie needed. It goes on file right away; sometimes a person checks it first.
         </T>
         <UploadRow title="Government ID" done={!!idUrl} busy={picking === 'id'} onPress={() => pick('id')} />
-        <UploadRow title="Selfie" done={!!selfieUrl} busy={picking === 'selfie'} onPress={() => pick('selfie')} />
 
         {/* [WR-027] The catch above says "surfaced below" — this is that
             surface. Only the submit error rendered; a failed photo UPLOAD was
@@ -126,16 +129,16 @@ export function IdentityVerificationScreen({ navigation }: any) {
 
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label={!idUrl ? 'Upload your ID first' : !selfieUrl ? 'Add your selfie' : 'Submit for verification'}
+          label={!idUrl ? 'Upload your ID first' : 'Send my ID'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
-          disabled={!idUrl || !selfieUrl}
+          disabled={!idUrl}
           onPress={() =>
-            submit.mutate({ idDocumentUrl: idUrl as string, selfieUrl: selfieUrl as string }, { onSuccess: () => setSubmitted(true) })
+            submit.mutate({ idDocumentUrl: idUrl as string }, { onSuccess: (result) => { setOutcome(idCheckOf(result as never)); setSubmitted(true); } })
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>
-          Your documents are encrypted and only used for verification (DPA 2023).
+          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it (DPA 2023).
         </T>
       </ScrollView>
     </SafeAreaView>

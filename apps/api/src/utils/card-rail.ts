@@ -1,3 +1,5 @@
+import { cardRailProviderNames } from '../providers/card/card-rail-factory';
+
 /** Explicit provider disablement and the operational kill switch both stop new
  * card instructions. A live provider may still reconcile while killed. */
 export function cardRailKilled(env: Record<string, string | undefined> = process.env): boolean {
@@ -10,6 +12,19 @@ export function cardRailKilled(env: Record<string, string | undefined> = process
  * all: it builds no v2 provider and sweeps no session [AX297 F5]. */
 export function cardRailV2Enabled(env: Record<string, string | undefined> = process.env): boolean {
   return env['CARD_RAIL_V2'] === '1';
+}
+
+/** [PROD-PATH] A partner can pay the weekly fee by card on this server: card
+ * rail v2 (hosted Pay now and enrolment, the only card paths a partner can
+ * open) is on, neither the kill switch nor a disabled provider stops it, and
+ * a REAL provider is configured. The simulator never counts: it serves only
+ * the test subscriptions it lists and moves no money, so it is no way for a
+ * real partner to pay (card-pay-action.ts cardSessionsAllowed). Server
+ * switches only: nothing about a partner (their card on file, their billing
+ * method, their app) enters it. */
+export function weeklyFeeCardLive(env: Record<string, string | undefined> = process.env): boolean {
+  const provider = env['CARD_RAIL_PROVIDER'] ?? '';
+  return cardRailV2Enabled(env) && !cardRailKilled(env) && provider !== 'simulator' && cardRailProviderNames().includes(provider);
 }
 
 /** [PT-1 · AX297 F5] With CARD_RAIL_V2 off, drain what v2 left in flight:
@@ -37,13 +52,14 @@ export function cardSimulatorLiveEnabled(env: Record<string, string | undefined>
   return env['CARD_RAIL_SIMULATOR_LIVE'] === '1';
 }
 
-/** [PT-2 · review S2] The simulator moves no money, yet a simulator "Approve"
- * books a paid week. So it opens pages ONLY for the TEST subscriptions listed
- * by id in CARD_RAIL_SIMULATOR_SUBSCRIPTIONS (comma-separated): a real
- * partner on a test server never sees or settles a simulator payment. Empty
- * or unset: no subscription may use it. */
-export function cardSimulatorSubscriptions(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {
-  return new Set((env['CARD_RAIL_SIMULATOR_SUBSCRIPTIONS'] ?? '').split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_-]{1,64}$/.test(s)));
+/** [PT-2 · PT-4 · reviews S2 / S2-1] A TEST card system — the simulator, or
+ * a provider's sandbox — moves no real money, yet a test "approval" books a
+ * paid week. So a test system opens pages, and books, ONLY for the TEST
+ * subscriptions listed by id in CARD_RAIL_TEST_SUBSCRIPTIONS
+ * (comma-separated): a real partner on a test server never sees or settles
+ * a test payment. Empty or unset: no subscription may use one. */
+export function cardTestSubscriptions(env: Record<string, string | undefined> = process.env): ReadonlySet<string> {
+  return new Set((env['CARD_RAIL_TEST_SUBSCRIPTIONS'] ?? '').split(',').map((s) => s.trim()).filter((s) => /^[A-Za-z0-9_-]{1,64}$/.test(s)));
 }
 
 /** [PT-2 · review S2] The host the public talks to (and, until the DNS

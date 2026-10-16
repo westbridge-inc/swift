@@ -9,6 +9,18 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // Route registration constructs these clients; Home must never call them.
 vi.mock('../providers/maps/maps-provider', () => ({ getMapsProvider: () => ({}) }));
 vi.mock('../providers/notifications/channels', () => ({ getChannels: () => ({}) }));
+// [GUARDRAILS §8] The prohibited-items reads are proven against a real database
+// (prohibited-items.test.ts); this seam models none of their tables.
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../modules/compliance/prohibited-gate')>()),
+  hiddenAmong: async () => new Set<string>(),
+  hiddenItemIds: async () => [],
+  prohibitedStoreIds: async () => [],
+  prohibitedStoreCategory: async () => null,
+  // [owner 14 Oct, store names] nor the store's own words (no fixture store's name holds it)
+  storeHiddenFromCustomers: async () => false,
+  assertOrderableNow: async () => undefined,
+}));
 
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED', 'RETURNED'];
 const LIVE = Object.values(OrderStatus).filter((s) => !TERMINAL.includes(s));
@@ -91,6 +103,12 @@ async function harness(vendors = [vendor(1), vendor(2)]) {
       note('country', args, args.where.id); return { countryCode: 'GY' };
     }) },
     countryConfig: { findUnique: vi.fn(async (args: unknown) => { note('pricing', args); return null; }) },
+    // The catalogue reads the persisted fee-pause state (billing/mmg-pause.ts
+    // readFeePause): no open pause, no repair records, no held clocks.
+    platformConfig: {
+      findUnique: vi.fn(async (args: unknown) => { note('feePause', args); return null; }),
+      findMany: vi.fn(async (args: unknown) => { note('feePause', args); return []; }),
+    },
     order: {
       findFirst: vi.fn(async (args: Prisma.OrderFindFirstArgs) => {
         note('active', args, args.where?.customerId as string); started.active.resolve();

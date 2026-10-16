@@ -11,6 +11,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
 import { publishLegalDocument, recordConsent, type ConsentSurface } from '../legal/consent.service';
+import { AGE_DECLARATION_TYPE, AGE_DECLARATION_V1, AGE_DECLARATION_VERSION } from './age-declaration';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -40,7 +41,14 @@ import {
   verifySignupOtp,
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
-import { runWithoutTenant } from '../../plugins/tenant-context';
+import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import {
+  PUBLIC_SIGNUP_TENANT_ID,
+  resolveIdentityByEmail,
+  resolveIdentityByPhone,
+  resolveSessionByRefreshCredential,
+} from './preauth-identity';
 import { accountBlockedError, isBlockedAccountStatus } from './account-blocked';
 import {
   clearPasswordFailures,
@@ -74,6 +82,8 @@ export type OtpPurpose = 'sign-in' | 'password-reset';
  * discarded when it was made: no password matches it.
  */
 const NO_ACCOUNT_PASSWORD_HASH = '$2a$12$BtoqUaI0gAvmIblEDnOQbuHKARxmMbd/Kr6Kp0uvRhw35lrqjgZA2';
+/** [L04 · R1] The id read when there is no account: no row has an empty id. */
+const NO_ACCOUNT_ID = '';
 /** Fields that must never leave the API on a user object. A deny-list (not a
  *  select) so the response keeps its shape — the app reads roles and the
  *  rider/driver/vendorOwner includes to route the account to its surface. */
@@ -259,22 +269,18 @@ export class AuthService {
       throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
     }
 
-    // Find existing user
-    const user = await this.app.prisma.user.findUnique({
-      where: { phone },
-      // tenant.kind rides the login response: the app's "Demo environment"
-      // chip (STA-1 DL-1) reads it, and nothing else about the response differs.
-      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
-    });
+    // [L04 · R1] Who the number belongs to, and in which tenant — the one
+    // pre-auth read (preauth-identity.ts). Everything after it is tenant-bound.
+    const identity = await resolveIdentityByPhone(this.app.prisma, phone);
 
     // [STA-1] A static code opens nothing but the fiction: never a registration
     // window, never a production account — even if a credential row were ever
     // written with a real subscriber's number.
-    if (review && (!user || user.tenantId !== review.tenantId)) {
+    if (review && (!identity || identity.tenantId !== review.tenantId)) {
       throw new AppError(400, 'INVALID_OTP', 'Invalid OTP code');
     }
 
-    if (!user) {
+    if (!identity) {
       // Phone ownership proven. The caller receives one unpredictable,
       // purpose-bound continuation; knowing the phone is no longer enough to
       // claim this signup. A later successful OTP ceremony supersedes it.
@@ -293,11 +299,26 @@ export class AuthService {
       }
     }
 
+    const signedIn = await runWithTenant(identity.tenantId, () => this.signInVerified(identity.id, deviceInfo));
+    return { isNewUser: false, user: signedIn.user, tokens: signedIn.tokens };
+  }
+
+  /** The account a verified code proved, signed in — in its own tenant (the caller bound it). */
+  private async signInVerified(userId: string, deviceInfo: DeviceInfo) {
+    const user = await this.app.prisma.user.findUnique({
+      where: { id: userId },
+      // tenant.kind rides the login response: the app's "Demo environment"
+      // chip (STA-1 DL-1) reads it, and nothing else about the response differs.
+      include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
+    });
+    if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+
     // [L04 · AUTH-2] The code proves the phone, not that the account may sign
     // in. Status is read under the User lock (the order ban/suspend and
     // password login use) in the same transaction that writes the session, so
     // a blocked account gets the password path's refusal and no Session row.
     const tokens = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const rows = await tx.$queryRaw<Array<{ status: UserStatus }>>`
         SELECT "status"
         FROM "users"
@@ -315,7 +336,7 @@ export class AuthService {
       return issued;
     });
 
-    return { isNewUser: false, user: sanitizeUser(user), tokens };
+    return { user: sanitizeUser(user), tokens };
   }
 
   /** Once per process: anchor the served terms/privacy texts at LEGAL_VERSION
@@ -336,6 +357,17 @@ export class AuthService {
     return this.signupDocsPublished;
   }
 
+  private ageDeclarationPublished: Promise<void> | null = null;
+  private ensureAgeDeclarationPublished(): Promise<void> {
+    this.ageDeclarationPublished ??= publishLegalDocument(this.app.prisma, {
+      documentType: AGE_DECLARATION_TYPE, version: AGE_DECLARATION_VERSION, renderedText: AGE_DECLARATION_V1,
+    }).then(() => undefined).catch((err) => {
+      this.ageDeclarationPublished = null; // next signup retries rather than caching failure
+      throw err;
+    });
+    return this.ageDeclarationPublished;
+  }
+
   async register(data: {
     phone: string;
     firstName: string;
@@ -345,6 +377,8 @@ export class AuthService {
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" (the route decides who must send it). */
+    ageConfirmed?: boolean;
     /** Request metadata for silent identity capture — never client-trusted
      *  for anything but SOFT signals (households/CGNAT never punish alone). */
     deviceId?: string | null;
@@ -365,13 +399,15 @@ export class AuthService {
       throw new AppError(403, 'REGISTRATION_PROOF_REQUIRED', 'Verify your phone again to continue registration');
     }
 
-    const existing = await this.app.prisma.user.findUnique({ where: { phone: data.phone } });
+    // [L04 · R1] A phone and an email are unique across every tenant: asked of
+    // the pre-auth identity capability, which answers only whether (and where).
+    const existing = await resolveIdentityByPhone(this.app.prisma, data.phone);
     if (existing) {
       throw new AppError(409, 'USER_EXISTS', 'User with this phone already exists');
     }
 
     if (data.email) {
-      const emailExists = await this.app.prisma.user.findUnique({ where: { email: data.email } });
+      const emailExists = await resolveIdentityByEmail(this.app.prisma, data.email);
       if (emailExists) {
         throw new AppError(409, 'EMAIL_EXISTS', 'This email is already registered');
       }
@@ -398,6 +434,16 @@ export class AuthService {
     };
     const { roles, activeRole } = roleSetup[signupRole];
 
+    // [L04 · R1] The new account, its consent rows, its session and its
+    // onboarding are written in the tenant a public sign-up joins.
+    return runWithTenant(PUBLIC_SIGNUP_TENANT_ID, () => this.createAccount(data, { signupRole, roles, activeRole, countryCode }));
+  }
+
+  private async createAccount(
+    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; ageConfirmed?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
+    plan: { signupRole: SignupRole; roles: UserRole[]; activeRole: UserRole; countryCode: string },
+  ) {
+    const { signupRole, roles, activeRole, countryCode } = plan;
     // [DCR-1 NR1-02] Consent is captured in the SAME transaction that creates
     // the account — an account without its ledger rows is the un-fixable gap
     // the consent gate exists to prevent. The served legal texts are published
@@ -405,7 +451,10 @@ export class AuthService {
     // anchor to the exact words /legal/terms and /legal/privacy render.
     const consented = data.acceptTerms === true;
     if (consented) await this.ensureSignupDocsPublished();
+    const ageDeclared = data.ageConfirmed === true;
+    if (ageDeclared) await this.ensureAgeDeclarationPublished();
     const user = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const created = await tx.user.create({
         data: {
           phone: data.phone,
@@ -437,6 +486,19 @@ export class AuthService {
             evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
           });
         }
+      }
+      // [Owner ruling 15 Oct 2026] the 18+ tick, anchored to its exact words, in the account's own transaction.
+      if (ageDeclared) {
+        await recordConsent(tx, {
+          subjectType: 'customer',
+          subjectId: created.id,
+          documentType: AGE_DECLARATION_TYPE,
+          version: AGE_DECLARATION_VERSION,
+          action: 'granted',
+          surface: data.surface,
+          ip: data.ipAddress,
+          evidence: { control: 'age_18_checkbox', path: 'auth/register', role: signupRole },
+        });
       }
       return created;
     });
@@ -510,6 +572,7 @@ export class AuthService {
   async setPassword(userId: string, sessionId: string, password: string) {
     const passwordHash = await bcrypt.hash(password, 12);
     const changed = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       // Authenticate-time proof is not enough for a security mutation: a
       // password reset, ban, or logout may revoke this session while bcrypt is
       // running. Serialize with those paths (User -> Session), then prove the
@@ -671,9 +734,23 @@ export class AuthService {
     password: string,
     deviceInfo: DeviceInfo,
   ) {
-    const user = identifier.phone
-      ? await this.app.prisma.user.findUnique({ where: { phone: identifier.phone } })
-      : await this.app.prisma.user.findUnique({ where: { email: identifier.email! } });
+    // [L04 · R1] Who, and which tenant (the one pre-auth read); then exactly ONE
+    // tenant-bound read of the account whether or not it exists — an unknown
+    // account reads an id no row has — so the work done says nothing either.
+    const identity = identifier.phone
+      ? await resolveIdentityByPhone(this.app.prisma, identifier.phone)
+      : await resolveIdentityByEmail(this.app.prisma, identifier.email!);
+    const tenantId = identity?.tenantId ?? PUBLIC_SIGNUP_TENANT_ID;
+    return runWithTenant(tenantId, () => this.passwordSignIn(identifier, identity?.id ?? NO_ACCOUNT_ID, password, deviceInfo));
+  }
+
+  private async passwordSignIn(
+    identifier: { phone?: string; email?: string },
+    userId: string,
+    password: string,
+    deviceInfo: DeviceInfo,
+  ) {
+    const user = await this.app.prisma.user.findUnique({ where: { id: userId } });
 
     // [L04 · MASTER-054] One generic failure for an unknown account, an account
     // without a password, a wrong password and a locked account: same status,
@@ -708,6 +785,7 @@ export class AuthService {
     // failed comparison from re-locking a credential generation that reset has
     // already replaced.
     const login = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const rows = await tx.$queryRaw<Array<{
         passwordHash: string | null;
         failedLoginAttempts: number;
@@ -812,14 +890,13 @@ export class AuthService {
       throw new AppError(400, 'INVALID_OTP', result.reason || 'Invalid or expired OTP');
     }
 
-    const candidate = await this.app.prisma.user.findUnique({
-      where: { phone },
-      select: { id: true, tenant: { select: { kind: true } } },
-    });
-    // [REVIEW-PARTNER] A store-review demo login is shared: its password is
-    // never reset — answered exactly as for no account (no reset code is ever
-    // texted to a demo identifier; this holds even if one were stored).
-    if (!candidate || candidate.tenant.kind === 'REVIEW') {
+    // Resolve the principal first; the tenant policy is read in that context.
+    const candidate = await resolveIdentityByPhone(this.app.prisma, phone);
+    const tenant = candidate ? await runWithTenant(candidate.tenantId, () =>
+      this.app.prisma.tenant.findUnique({ where: { id: candidate.tenantId }, select: { kind: true } })) : null;
+    // Shared store-review accounts never reset their password, even with a
+    // planted valid OTP. Preserve the same refusal as an unknown account.
+    if (!candidate || !tenant || tenant.kind === 'REVIEW') {
       // Do NOT reveal account existence on password reset — return the same
       // error a wrong OTP would, so an attacker (who somehow has a valid code)
       // can't enumerate which phone numbers have accounts.
@@ -830,15 +907,20 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 12);
+    await runWithTenant(candidate.tenantId, () => this.applyPasswordReset(candidate.id, phone, passwordHash));
+  }
+
+  private async applyPasswordReset(candidateId: string, phone: string, passwordHash: string) {
     // Keep the idempotency key stable for the lifetime of this transaction
     // invocation. A password reset is one global security generation, not a
     // collection of independently committed writes.
     const revocationId = nanoid(24);
     const reset = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const users = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id"
         FROM "users"
-        WHERE "id" = ${candidate.id} AND "phone" = ${phone}
+        WHERE "id" = ${candidateId} AND "phone" = ${phone}
         FOR UPDATE
       `;
       const user = users[0];
@@ -886,12 +968,18 @@ export class AuthService {
     // lock keys. Every security decision is repeated after both rows are
     // locked, so refresh, theft-replay, authenticated logout, and
     // refresh-credential logout have one serialization order.
-    const candidate = await this.findSessionByRefreshCredential(refreshToken);
+    // [L04 · R1] The pre-auth read answers which session, whose, and which
+    // tenant; the decision below runs bound to that tenant.
+    const candidate = await resolveSessionByRefreshCredential(this.app.prisma, refreshToken);
     if (!candidate) {
       throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
     }
+    return runWithTenant(candidate.tenantId, () => this.rotateRefreshCredential(candidate, refreshToken));
+  }
 
+  private async rotateRefreshCredential(candidate: { sessionId: string; userId: string }, refreshToken: string) {
     const outcome = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const users = await tx.$queryRaw<Array<{
         id: string;
         status: string;
@@ -923,7 +1011,7 @@ export class AuthService {
                "rotatedAt", "expiresAt", "deviceId", "deviceType",
                "authMethod"::text AS "authMethod"
         FROM "sessions"
-        WHERE "id" = ${candidate.id} AND "userId" = ${candidate.userId}
+        WHERE "id" = ${candidate.sessionId} AND "userId" = ${candidate.userId}
         FOR UPDATE
       `;
       const session = sessions[0];
@@ -1046,15 +1134,6 @@ export class AuthService {
     throw new AppError(401, 'INVALID_TOKEN', 'Invalid or expired refresh token');
   }
 
-  private findSessionByRefreshCredential(refreshToken: string) {
-    return this.app.prisma.session.findFirst({
-      where: {
-        OR: [{ refreshToken }, { previousRefreshToken: refreshToken }],
-      },
-      select: { id: true, userId: true },
-    });
-  }
-
   private async revokeLockedSession(
     tx: Prisma.TransactionClient,
     sessionId: string,
@@ -1089,6 +1168,7 @@ export class AuthService {
     pushToken?: string,
   ): Promise<MoverSessionRevocationCleanup | null> {
     return this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const users = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id"
         FROM "users"
@@ -1124,10 +1204,14 @@ export class AuthService {
    * boolean is service-internal — the public route deliberately always emits
    * the same success response so it cannot be used as a token oracle. */
   async logoutByRefreshToken(refreshToken: string, pushToken?: string): Promise<boolean> {
-    const candidate = await this.findSessionByRefreshCredential(refreshToken);
+    const candidate = await resolveSessionByRefreshCredential(this.app.prisma, refreshToken);
     if (!candidate) return false;
+    return runWithTenant(candidate.tenantId, () => this.revokeByRefreshCredential(candidate, refreshToken, pushToken));
+  }
 
+  private async revokeByRefreshCredential(candidate: { sessionId: string; userId: string }, refreshToken: string, pushToken?: string): Promise<boolean> {
     const revokedSessionId = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const users = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id"
         FROM "users"
@@ -1143,7 +1227,7 @@ export class AuthService {
       }>>`
         SELECT "id", "refreshToken", "previousRefreshToken"
         FROM "sessions"
-        WHERE "id" = ${candidate.id} AND "userId" = ${candidate.userId}
+        WHERE "id" = ${candidate.sessionId} AND "userId" = ${candidate.userId}
         FOR UPDATE
       `;
       const session = sessions[0];
@@ -1213,6 +1297,7 @@ export class AuthService {
     // same outbox event instead of inventing a duplicate.
     const revocationId = nanoid(24);
     const cleanup = await this.app.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
       const users = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id"
         FROM "users"

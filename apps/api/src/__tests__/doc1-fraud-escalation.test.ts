@@ -54,7 +54,7 @@ async function session(userId: string, role: string, n: number) {
 async function admin(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59275${NUM}${n}`, firstName: 'Fraud', lastName: `Reviewer${n}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   users.push(u.id); await session(u.id, 'SUPER_ADMIN', n); return u.id;
 }

@@ -25,6 +25,11 @@ model User {
   id               String     @id @default(cuid())
   phone            String     @unique
   email            String?    @unique
+  /// [OWNER #13 · Opus S2] When the email last changed (PUT /customer/profile).
+  /// Solo approval warns the owner at this address, so it stays off for seven
+  /// days after any change (admin-email-change.ts). Null: never changed since
+  /// this was recorded.
+  emailChangedAt   DateTime?
   firstName        String
   lastName         String
   avatar           String?
@@ -419,6 +424,7 @@ model Tenant {
   rideQueueEntries RideQueueEntry[]
   taxiTripStops    TaxiTripStop[]
   custodyRecoveryCases CustodyRecoveryCase[]
+  taxiRideWaitings TaxiRideWaiting[]
   zones            Zone[]
   adRefundIntents  AdRefundIntent[]
   adRefundItems    AdRefundItem[]
@@ -428,6 +434,10 @@ model Tenant {
   reviewFixtures    ReviewFixture[]
   items             Item[]
   categories        Category[]
+  // [DB-05 EXPAND] formerly PENDING_EXPAND
+  returnRequests     ReturnRequest[]
+  contentReports     ContentReport[]
+  collectionContacts CollectionContact[]
   transactions      Transaction[]
   earnings          Earning[]
   settlements       Settlement[]
@@ -588,8 +598,9 @@ model CountryConfig {
 
   /// DPA §3.5 — region documents are stored in (cross-border transfer rule)
   storageRegion     String?
-  /// Days to retain verification documents after a participant leaves
-  dataRetentionDays Int     @default(365)
+  /// Days to retain verification documents after a participant leaves.
+  /// [R24 · research C4] "while active + 90 days" (was 365).
+  dataRetentionDays Int     @default(90)
 
   /// Region-specific labels/sources (spec §2.2) — never hardcode in features.
   /// Guyana: "Hire Car Licence" / "Hire"; Trinidad: "H-Taxi Badge" / "H".
@@ -1562,6 +1573,21 @@ model Vendor {
   /// read, exactly as mmgPayUrl is, because a stored row is untrusted until the
   /// boundary that hands it to a customer's dialler.
   publicPhone String?
+  /// [VERIFY-DOCS · owner ruling 7, 6 Oct 2026] OPTIONAL: the store's VAT registration number, typed by the
+  /// owner only if the business is VAT-registered — for VAT tax invoices (VAT Act s.28, Sch. III). Digits
+  /// only, format-checked, never looked up; no TIN certificate image is ever asked for. Never public.
+  vatRegistrationNumber String?
+  /// [R3 · CAA s.70(3) · legal research D10 + E5 · owner 15 Oct 2026] The store's OWN refund rule, typed by the owner
+  /// (plain words, no links, at most 300 characters; checked on write by utils/vendor-refund-rule.ts). Its storefront
+  /// shows it with the statutory-rights sentence; null = none on file, and the storefront says "Ask the store".
+  refundRule String?
+  /// [GUARDRAILS §8 · owner 14 Oct 2026] A store whose own words (name, description, tags) mention goods Swift never
+  /// carries ("X Liquor Store", "Rum Shop") is held for a person: hidden from customers, with every item it sells,
+  /// until someone holding the catalogue-approver grant approves exactly those words. This is the fingerprint they
+  /// approved (compliance/prohibited-items `storeWordsHash`): any later change to the words no longer matches it, so
+  /// the check comes back. Null = never approved. The verdict itself is never stored; it is read from the words.
+  nameReviewApprovedHash String?
+  nameReviewApprovedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1576,6 +1602,8 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
 }
 
@@ -1644,6 +1672,10 @@ model Category {
   imageUrl    String?
   sortOrder   Int      @default(0)
   isActive    Boolean  @default(true)
+  /// [Item 62 · owner 11 Oct] When the store deleted this category. Like a
+  /// deleted listing it is archived, not removed: its listings are archived
+  /// with it and stay attached to the orders and bookings that hold them.
+  archivedAt  DateTime?
   items       Item[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1676,6 +1708,11 @@ model Item {
   bookings          Booking[]
   optionGroups      OptionGroup[]
   isAvailable       Boolean           @default(true)
+  /// [Item 62] When the store deleted this listing. The row stays: orders
+  /// reference it (their lines are snapshots) and bookings hold it by key, so
+  /// a delete archives instead. Archived = off every menu and editor, never
+  /// available again (CHECK items_archived_unavailable), history kept.
+  archivedAt        DateTime?
   isPopular         Boolean           @default(false)
   sku               String?
   barcode           String?
@@ -1701,6 +1738,18 @@ model Item {
   /// Set when the inventory engine hid the item (stock hit 0) — distinguishes
   /// auto-hides (undone automatically on restock) from the owner's own toggle.
   autoHiddenAt      DateTime?
+  /// [GUARDRAILS §8] A person removed this item as prohibited (alcohol, tobacco,
+  /// vapes, 18+, medicines, cooking gas, fuel). One way: hidden everywhere and
+  /// never editable back. The class names what it is; the reason is shown to
+  /// the partner. Who did it lives in the admin audit trail, not on the row.
+  prohibitedAt      DateTime?
+  prohibitedClass   String?
+  prohibitedReason  String?
+  /// [GUARDRAILS §8] A banned WORD in the partner's own text holds the item
+  /// hidden until a person checks it. The approval is bound to the exact words
+  /// approved — the hash of the judged text — so any edit brings the check back.
+  reviewApprovedHash String?
+  reviewApprovedAt   DateTime?
   dietaryTags       String[]
   allergens         String[]
   totalOrdered      Int               @default(0)
@@ -1722,6 +1771,11 @@ model Item {
   @@index([isAvailable, createdAt])
   @@index([isAvailable, basePrice])
   @@index([tenantId])
+  /// [SEARCH] Trigram GIN indexes (pg_trgm, owner decision 26, 13 Oct): customer
+  /// search matches pieces of a name or description (ILIKE '%..%' and the
+  /// one-slip patterns); without them every search reads every item.
+  @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_name_trgm_idx")
+  @@index([description(ops: raw("gin_trgm_ops"))], type: Gin, map: "items_description_trgm_idx")
   @@map("items")
 }
 
@@ -1842,8 +1896,11 @@ model Order {
   vendorId               String?
   vendor                 Vendor?                 @relation(fields: [vendorId], references: [id])
   riderId                String?
+  /// Advances whenever the assigned rider changes, including release/reassignment.
+  riderAssignmentVersion Int @default(0)
   rider                  Rider?                  @relation(fields: [riderId], references: [id])
   driverId               String?
+  driverAssignmentVersion Int                    @default(0)
   driver                 Driver?                 @relation(fields: [driverId], references: [id])
   status                 OrderStatus             @default(PENDING)
   statusHistory          OrderStatusLog[]
@@ -1911,6 +1968,10 @@ model Order {
   /// whole route.
   taxiStopCount      Int?
   taxiStops          TaxiTripStop[]
+  /// [TAXI waiting charge] The ride's waiting terms, frozen at booking, and the
+  /// charge frozen at "Fare collected" (one row, only for a ride booked while
+  /// TAXI_WAITING_CHARGE was on). The charge itself is in totalAmount.
+  taxiRideWaiting    TaxiRideWaiting?
   /// [ALG-18] THE billable distance — decided once at quote time and frozen
   /// here, with the engine that produced it. The fee path priced this number;
   /// the receipt states it; the earnings sentence will read it. Null on
@@ -2076,6 +2137,28 @@ model Order {
   /// WHO closed it — distinct from `refundOwedById`, who decided it was owed.
   refundSettledById String?
   refundSettledAt   DateTime?
+
+  /// [L02 · row 34] THE CASH TAKEN AT THE DOOR, as the mover stated it (whole
+  /// GYD). Null = not stated: an older app (the full amount was assumed, as
+  /// before) or an order that was never handed over against cash.
+  doorCashCollectedAmount Decimal?  @db.Decimal(12, 2)
+  /// [L02 · row 34] How far short of the total the goods were handed over.
+  /// Owner ruling (5 Oct 2026): the mover bears it; the platform deducts
+  /// nothing from anyone. Null unless a short handover was recorded.
+  doorCashShortfallAmount Decimal?  @db.Decimal(12, 2)
+  /// [L02 · row 34] The short handover is HELD for a person from this moment.
+  doorCashMismatchAt      DateTime?
+  /// Partial cash taken before a refused goods handover (7 Oct owner ruling).
+  /// RETURNED = rider attests handing it back; HELD = still with the rider for
+  /// operations. Separate from completed-delivery cash and rider shortfalls.
+  doorCashReturnAmount     Decimal? @db.Decimal(12, 2)
+  /// RETURNED | HELD | RESOLVED. RESOLVED = operations recorded that HELD
+  /// cash is settled (admin action, reason in the audit row); a record only.
+  doorCashReturnStatus     String?  @db.VarChar(16)
+  doorCashReturnRecordedAt DateTime?
+  /// When operations recorded HELD partial cash as resolved, and who did.
+  doorCashReturnResolvedAt   DateTime?
+  doorCashReturnResolvedById String?
 
   promoCodeId String?
   promoCode   PromoCode? @relation(fields: [promoCodeId], references: [id])
@@ -2280,6 +2363,43 @@ model CustodyRecoveryCase {
   @@index([state, deadlineAt])
   @@index([relayRiderId])
   @@map("custody_recovery_cases")
+}
+
+/// [TAXI waiting charge · owner ruling 1 Oct 2026] One taxi ride's waiting:
+/// a charge per FULL block of waiting (pickup: the driver's arrival to the trip
+/// start; each intermediate stop: its arrival to its departure or skip), summed
+/// over the trip and paid in cash on top of the route fare.
+///
+/// Written at booking, only while TAXI_WAITING_CHARGE is on, with the terms the
+/// passenger was shown (chargePerBlock per blockMinutes, from TAXI_RATES); a
+/// trigger refuses any later change to them. Frozen ONCE inside the completion
+/// transaction ("Fare collected"): the summed seconds, the minutes and the
+/// charge, which CHECKs tie to the terms, and frozenAt. A frozen row never
+/// changes again. The order's totalAmount carries the charge; the route fare
+/// stays in taxiFareTotal. A ride without this row is never charged for
+/// waiting. Read it through modules/rides/taxi-waiting.ts.
+model TaxiRideWaiting {
+  id             String    @id @default(cuid())
+  tenantId       String    @default("swift-default")
+  tenant         Tenant    @relation(fields: [tenantId], references: [id])
+  orderId        String    @unique
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  /// Whole local-currency units per full block (TAXI_RATES.waitingChargePerBlock).
+  chargePerBlock Decimal   @db.Decimal(12, 2)
+  /// Minutes in one block (TAXI_RATES.waitingBlockMinutes).
+  blockMinutes   Int
+  currencyCode   String
+  /// The TAXI_RATES version the terms were read from; null = the declared defaults.
+  termsVersion   Int?
+  /// Frozen at completion, all four together or none.
+  waitingSeconds Int?
+  waitingMinutes Int?
+  waitingCharge  Decimal?  @db.Decimal(12, 2)
+  frozenAt       DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([tenantId])
+  @@map("taxi_ride_waiting")
 }
 
 /// Taxi vehicle tier. A driver's rideClass is the TOP class their vehicle
@@ -2855,9 +2975,16 @@ model ReturnRequest {
   /// said. The delta against refundAmount is the observed refund drift.
   refundInferredAmount Decimal? @db.Decimal(12, 2)
   /// [M-33] Who funded the discount the refund is net of (PLATFORM | VENDOR).
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   refundFunder   String?
   createdAt      DateTime     @default(now())
 
+  @@index([tenantId])
   @@index([customerId])
   @@index([status])
   @@map("return_requests")
@@ -3331,11 +3458,25 @@ enum BillingEventType {
   CHARGE_SUCCESS
   CHARGE_FAILED
   PREPAID_TOPUP
+  /// [MMG REVERSAL · owner #11] A weekly-fee payment MMG returned to the
+  /// partner (a whole-payment reversal), debited from the fee wallet exactly
+  /// once, only after MMG's own lookup proved the reversal.
+  PREPAID_REVERSAL
   SUSPENDED
   REINSTATED
   REMINDER
   TIER_CHANGE
   CHURNED
+  /// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in three
+  /// recorded steps, each approved by two admins. RESERVED: the whole credit
+  /// leaves the wallet into REFUND_PAYABLE (set aside, nothing paid yet).
+  /// PREPAID_REFUND: the set-aside amount was paid back outside Swift (MMG or
+  /// bank); `paymentRef` is that transfer's reference, recorded once across
+  /// every account. RELEASED: a set-aside that could not be paid goes back to
+  /// the wallet. Open set-aside = RESERVED - PREPAID_REFUND - RELEASED.
+  PREPAID_REFUND_RESERVED
+  PREPAID_REFUND
+  PREPAID_REFUND_RELEASED
 }
 
 /// An inbound platform-fee payment [san spec PART 4] — every channel, one
@@ -3470,6 +3611,8 @@ model MmgCheckoutIntent {
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
   keys                  MmgCheckoutKey[]
+  /// [MMG REVERSAL] Attempts to return this payment to the partner (one live at a time).
+  reversals             MmgFeeReversal[]
   confirmationHold      PaymentConfirmationHold?
 
   @@index([tenantId])
@@ -3478,6 +3621,65 @@ model MmgCheckoutIntent {
   // [MMG support lookup] Support finds a checkout by a transaction a reply named (candidates @> {id}).
   @@index([candidates], type: Gin)
   @@map("mmg_checkout_intents")
+}
+
+/// [MMG REVERSAL · owner #11, 13 Oct 2026] Returning a WHOLE weekly-fee payment
+/// to the partner's MMG account (MMG reverses in full only): a duplicate, an
+/// over-the-cap or a mistaken payment. A money (C4) admin action, two people
+/// (or the owner in solo mode). The row is the durable claim written BEFORE
+/// MMG is asked; the fee wallet is debited exactly once, and only after MMG's
+/// own lookup proves the reversal. A lost or unclear answer is HELD for a
+/// person, visible and paged, never guessed. One live reversal per payment.
+model MmgFeeReversal {
+  id                String            @id @default(cuid())
+  tenantId          String
+  subscriptionId    String
+  checkoutId        String
+  checkout          MmgCheckoutIntent @relation(fields: [checkoutId], references: [id], onDelete: Restrict)
+  /// The provider identity the checkout credited (provider_payments.id).
+  providerPaymentId String
+  /// The MMG transaction asked to be reversed: the checkout's confirmed one.
+  mmgTransactionId  String
+  amount            Decimal           @db.Decimal(12, 2)
+  currencyCode      String            @db.Char(3)
+  /// SENDING (claimed, MMG being asked) | SENT (MMG accepted, proof pending)
+  /// | REVERSED (proven; wallet debited) | FAILED (MMG refused; payment stands)
+  /// | HELD (unclear: a person must look). Forward only (database trigger).
+  state             String            @default("SENDING")
+  /// The stated reason (ADM-006): why the payment is being returned.
+  reason            String
+  requestedBy       String
+  approvalId        String?
+  /// MMG's answer to the reversal request, as Swift read it.
+  providerStatus    String?
+  providerReason    String?
+  /// The reference MMG's reversal answer named, when it named one.
+  providerReference String?
+  /// MMG's lookup status for the transaction, last read.
+  lookupStatus      String?
+  heldReason        String?
+  sentAt            DateTime
+  answeredAt        DateTime?
+  lastCheckedAt     DateTime?
+  reversedAt        DateTime?
+  walletDebitedAt   DateTime?
+  /// The PREPAID_REVERSAL event that debited the wallet (once).
+  billingEventId    String?           @unique
+  failedAt          DateTime?
+  /// [DS1112] A person's resolution of a HELD return (C4, two people or solo):
+  /// NOT_RETURNED (MMG's lookup showed the payment still standing) or
+  /// RETURNED_BY_REFERENCE (MMG's lookup proved the reversal they named).
+  resolution        String?
+  resolvedBy        String?
+  /// The MMG statement line or reversal reference the person gave.
+  resolutionNote    String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([tenantId])
+  @@index([subscriptionId, state])
+  @@index([checkoutId])
+  @@map("mmg_fee_reversals")
 }
 
 /// [MMG checkout F3] Every Idempotency-Key a checkout answered. Once a key has
@@ -3659,9 +3861,16 @@ model CollectionContact {
   outcome        String // REACHED | PROMISED | REFUSED | WRONG_NUMBER
   promisedDate   DateTime?
   note           String?
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   byAdminId      String
   createdAt      DateTime  @default(now())
 
+  @@index([tenantId])
   @@index([subscriptionId, createdAt])
   @@map("collection_contacts")
 }
@@ -3944,6 +4153,27 @@ model CardSession {
   /// What the session produced: the instrument (ENROLL) or the payment (PAY_NOW).
   instrumentId       String?            @unique
   paymentId          String?            @unique
+  /// [PT-4] The provider's own transaction reference, written once when its
+  /// answer may mean money was taken (what finance looks up and what a void or
+  /// refund names).
+  providerTransactionRef String?
+  /// Claimed under the billing/session locks before the provider completion is sent.
+  completionClaimedAt DateTime?
+  /// Whitelisted approved provider completion, including its own 3DS proof. Never browser evidence.
+  completionEvidence Json?
+  /// [PT-4] The one void Swift sends for a payment it cannot book:
+  /// SENDING -> VOIDED | FAILED | UNKNOWN (forward only, trigger-guarded).
+  providerVoidState  String?
+  providerVoidAt     DateTime?
+  /// [PT-4] A refund a second person approved: SENDING -> PENDING -> REFUNDED | FAILED | UNKNOWN.
+  providerRefundState String?
+  providerRefundAt   DateTime?
+  /// [PT-4] Finance's decision to BOOK a HELD session, claimed (once) before the week is booked.
+  bookClaimedAt      DateTime?
+  /// [PT-4] The finance decision on a HELD session (two-person): BOOKED | REFUNDED | NOTHING_TAKEN.
+  resolution         String?
+  resolvedBy         String?
+  resolvedAt         DateTime?
   createdAt          DateTime           @default(now())
   updatedAt          DateTime           @updatedAt
   confirmationHold   PaymentConfirmationHold?
@@ -4549,9 +4779,15 @@ model ChatMessage {
   messageType     String   @default("text")
   mediaUrl        String?
   isRead          Boolean  @default(false)
-  /// Off-platform contact signal (spec §2): phone number / "WhatsApp me"
-  /// detected at send. The message still delivers — this feeds risk scoring.
+  /// Off-platform contact signal (spec §2) on admitted text, used for risk scoring.
+  /// With the launch content filter on, phone numbers, outside links and
+  /// abusive text are refused before storage.
   offPlatformFlag Boolean  @default(false)
+  /// The people the message was sent to: the conversation's participants,
+  /// other than the sender, at the moment it was written (under the room lock,
+  /// each cleared against blocks). A person taken off the order can still
+  /// report a message they received. Empty for messages written before this.
+  recipientIds    String[] @default([])
   createdAt       DateTime @default(now())
 
   @@index([offPlatformFlag])
@@ -4661,6 +4897,12 @@ model ContentReport {
   /// a DIFFERENT one confirms. Acting on a report stays one click — there, the
   /// failure mode is acting too slowly.
   dismissProposedBy String?
+  /// [DB-05 EXPAND] The owner's tenant, on the row itself: stamped by the wall on
+  /// create, derived from the owners by a lineage trigger when unstamped, and
+  /// NULL (quarantined, invisible to every tenant) when the owners disagree or
+  /// are gone. CONTRACT (NOT NULL) follows once quarantined rows are adjudicated.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   dismissProposedAt DateTime?
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
@@ -4668,6 +4910,7 @@ model ContentReport {
   // One report per reporter per target — re-reporting is idempotent, not spam.
   @@unique([reporterId, targetType, targetId])
   @@index([status, createdAt]) // the FIFO moderation queue
+  @@index([tenantId])
   @@index([targetType, targetId]) // "how many reports on this thing?"
   @@map("content_reports")
 }
@@ -4907,6 +5150,11 @@ model SosEscalation {
   lastError      String?
   deliveredAt    DateTime?
   receipt        Json?
+  /// [AUD-L4-016] A failed delivery pages on-call operations exactly once: the
+  /// claim is a lease (a page that died half-way is claimed again once it
+  /// lapses); the ops alert that covered the failure is written back as done.
+  failurePageClaimedAt  DateTime?
+  failurePageOpsAlertId String?
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
@@ -6663,7 +6911,7 @@ model PrivilegedApproval {
   /// one stored request, so what executes is always what was displayed. Rows
   /// raised before this column existed are null and can never be applied.
   bodySnapshot Json?
-  /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED
+  /// PENDING | APPROVED | REJECTED | APPLIED | EXPIRED | CANCELLED (withdrawn by the requester)
   status       String    @default("PENDING")
   requestedBy  String
   /// The requester's stated reason (ADM-006) — what the approver reads
@@ -6673,6 +6921,15 @@ model PrivilegedApproval {
   decidedAt    DateTime?
   appliedAt    DateTime?
   expiresAt    DateTime
+  /// [OWNER #13] Solo mode: when the requester asked to approve their own
+  /// request (the owner was the only admin who could). The wait began here.
+  soloRequestedAt DateTime?
+  /// [OWNER #13] When the solo wait ends: from then the requester may decide,
+  /// with a fresh sign-in code, while still the only admin who could.
+  soloEligibleAt  DateTime?
+  /// [OWNER #13] The requester approved their own request under solo mode.
+  /// The only way approvedBy may equal requestedBy (a database CHECK).
+  decidedSolo     Boolean   @default(false)
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 

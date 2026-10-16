@@ -7,6 +7,7 @@ import { useNotifications } from '../../../hooks/customer';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PressableScale, Screen, T } from '../../../kit';
 import { destinationFor } from '../../../services/notification-router';
 import { safeNavigate } from '../../../navigation/navigationRef';
+import { TeamInviteCards } from '../components/TeamInviteCards';
 
 // Kit Notification (56): stacked rows with icon chips; unread carries a dot.
 const ICON_FOR: Record<string, React.ComponentProps<typeof IconChip>['icon']> = {
@@ -59,6 +60,8 @@ export function NotificationsScreen() {
   return (
     <Screen>
       <Header title="Notification" />
+      {/* [Row 55] Store team invites are answered here, above the inbox. */}
+      <TeamInviteCards />
       {notifications.isLoading ? (
         <LoadingBlock />
       ) : notifications.isError ? (

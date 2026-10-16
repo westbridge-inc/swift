@@ -31,6 +31,8 @@ export const CAPTURE_ALLOWLISTS = {
     'selfie', 'liveLocation.lat', 'liveLocation.lng',
     'documents.identity', 'documents.licence', 'documents.insurance',
     'vehicle.plate', 'vehicle.model', 'mmgPayUrl',
+    // [R18] the background-location disclosure answer, kept as consent proof (DPA s.7(1))
+    'consent.backgroundLocation',
   ],
   vendor_user: [
     'phone', 'firstName', 'lastName', 'email',

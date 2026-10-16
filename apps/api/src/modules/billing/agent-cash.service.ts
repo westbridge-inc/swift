@@ -198,7 +198,8 @@ export async function payInfo(
       const { resolveRateForRun, dualDisplay } = await import('./fx');
       const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
       const [entry, rate] = await Promise.all([
-        prisma.priceBookEntry.findFirst({ where: { role, active: true }, orderBy: { effectiveFrom: 'desc' } }),
+        // [F2] The row in force now, never a scheduled one.
+        prisma.priceBookEntry.findFirst({ where: { role, active: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } }),
         resolveRateForRun(prisma, tenant.settlementCurrency),
       ]);
       if (entry && rate) {
@@ -543,7 +544,7 @@ export class AgentCashService {
         throw new Error('DESTINATION_TENANT_MISMATCH');
       }
 
-      // [OWNER RULING 8 Oct (2)] Four weeks paid ahead at most, decided under
+      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, decided under
       // the payer lock and BEFORE the provider transaction is marked credited.
       // Arriving money past the cap is held for a person (refund), never
       // credited and never dropped; an admin attaching it is refused in words.
@@ -637,7 +638,7 @@ export class AgentCashService {
       return { status: 'reconciled', paymentId, originalPaymentId: committed.refundedAs };
     }
     if ('payAheadLimit' in committed && committed.payAheadLimit) {
-      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past four weeks paid ahead; a person refunds it');
+      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past one week ahead; a person refunds it');
       return { status: 'received_unmatched', paymentId, failureCode: PAY_AHEAD_LIMIT };
     }
     if (committed.duplicateOf) {

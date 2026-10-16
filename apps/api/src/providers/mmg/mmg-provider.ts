@@ -1,6 +1,7 @@
 import { fromMajor, fromMinor, toMajorString as majorStringOf } from '../../utils/currency-amount';
 import { nanoid } from 'nanoid';
 import { isProduction } from '../../utils/runtime-mode';
+import { AppError } from '../../utils/errors';
 
 // ---------------------------------------------------------------------------
 // MMG (Mobile Money Guyana) — Merchant-Initiated Payments.
@@ -161,6 +162,17 @@ export interface MmgLookupClient {
 }
 
 /**
+ * [MMG REVERSAL · owner #11] The two calls a weekly-fee reversal makes: ask MMG
+ * to reverse a transaction (FULL only), then MMG's lookup — the only proof.
+ * reverseTransaction never throws: `declined` is MMG refusing (HTTP 422),
+ * `error` is "no usable answer" (transport, timeout, any other status) — a
+ * lost answer is never read as a refusal, and neither is ever read as done.
+ */
+export interface MmgReversalClient extends MmgLookupClient {
+  reverseTransaction(req: { transactionId: string; reason?: string }): Promise<MmgTxResult>;
+}
+
+/**
  * The published initiate contract accepts Swift's reference in a correlation
  * header, while the published lookup/history examples expose separate response
  * fields. Swift does not assume MMG maps between them: sandbox UAT must prove
@@ -212,6 +224,13 @@ export interface MmgMerchantProvider {
 const txStatusOverrides = new Map<string, MmgTxStatus>();
 const historyRows: MmgTransaction[] = [];
 const initiatedRows = new Map<string, Pick<MmgTransaction, 'amountMinor' | 'currencyCode' | 'reference'>>();
+/** [MMG REVERSAL] How the sandbox answers a reversal of one transaction:
+ *  reversed (default: done, answered), pending (accepted, not yet done),
+ *  declined (refused), error (no answer, nothing done), lost (DONE, but the
+ *  answer never arrived — the case a lookup exists to settle), duplicate
+ *  (refused as already reversed, MMG's REVERSAL_FAIL_DUPLICATE). */
+export type SandboxReversalOutcome = 'reversed' | 'pending' | 'declined' | 'error' | 'lost' | 'duplicate';
+const reversalScript = new Map<string, SandboxReversalOutcome>();
 
 /** Test control: force a transaction's lookup status (wins over markers). */
 export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): void {
@@ -221,11 +240,16 @@ export function sandboxSetTxStatus(transactionId: string, status: MmgTxStatus): 
 export function sandboxAddHistory(row: MmgTransaction): void {
   historyRows.push(row);
 }
+/** Test control: how the sandbox answers a reversal of this transaction. */
+export function sandboxScriptReversal(transactionId: string, outcome: SandboxReversalOutcome): void {
+  reversalScript.set(transactionId, outcome);
+}
 /** Test control: wipe all sandbox scripting. */
 export function sandboxResetMmg(): void {
   txStatusOverrides.clear();
   historyRows.length = 0;
   initiatedRows.clear();
+  reversalScript.clear();
 }
 
 export class SandboxMmgProvider implements MmgMerchantProvider {
@@ -252,8 +276,23 @@ export class SandboxMmgProvider implements MmgMerchantProvider {
     return { status: 'pending', transactionId };
   }
 
+  /** [MMG REVERSAL] A transaction still standing (as this sandbox's own
+   *  lookup reads it: scripted, planted, or by its id's marker) is reversed in
+   *  full, and its lookups then say `reversed`; anything else is refused.
+   *  Scripting picks the other answers (sandboxScriptReversal). */
   async reverseTransaction(req: { transactionId: string }): Promise<MmgTxResult> {
-    return { status: 'reversed', transactionId: req.transactionId };
+    const id = req.transactionId;
+    const current = (await this.transactionLookup({ transactionId: id })).status;
+    const scripted = reversalScript.get(id) ?? 'reversed';
+    if (scripted === 'duplicate') return { status: 'declined', transactionId: id, reason: 'REVERSAL_FAIL_DUPLICATE' };
+    if (scripted === 'declined' || current !== 'approved') {
+      return { status: 'declined', transactionId: id, reason: 'MMG refused the reversal (sandbox)' };
+    }
+    if (scripted === 'error') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox) <timeout>' };
+    if (scripted === 'pending') return { status: 'pending', transactionId: id };
+    txStatusOverrides.set(id, 'reversed');
+    if (scripted === 'lost') return { status: 'error', transactionId: id, reason: 'MMG reversal unreachable (sandbox)' };
+    return { status: 'reversed', transactionId: id };
   }
 
   async transactionLookup(req: { transactionId: string }): Promise<MmgTransaction> {
@@ -511,8 +550,10 @@ export class LiveMmgProvider implements MmgMerchantProvider {
         { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
       );
       if (res.status === 422) {
+        // [MMG REVERSAL] MMG's business refusal: an ANSWER ("no"), unlike a
+        // transport failure. The lookup still decides what Swift records.
         const body: any = await res.json().catch(() => ({}));
-        return { status: 'error', transactionId: req.transactionId, reason: String(body?.message ?? 'MMG reversal rejected') };
+        return { status: 'declined', transactionId: req.transactionId, reason: String(body?.message ?? 'MMG reversal rejected') };
       }
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
@@ -618,6 +659,39 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   }
 }
 
+/**
+ * [PROD-PATH] MMG fully OFF — the owner's ruling for a production launch
+ * before the live merchant keys arrive. `MMG_DRIVER=disabled`, exactly; the
+ * boot guard accepts it in production only with the hosted checkout off.
+ * Nothing in this mode reaches MMG: the billing rail never asks MMG
+ * (billing.service attemptCharge), the poller leaves every row as it is, and
+ * any other caller gets this explicit refusal — never a sandbox answer, never
+ * a silent no-op. Whether partners' fees are PAUSED is a separate rule that
+ * also asks whether a card can be used: modules/billing/fee-pause.ts.
+ */
+export function mmgDisabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env['MMG_DRIVER'] === 'disabled';
+}
+
+export class MmgDisabledError extends AppError {
+  constructor(operation: string) {
+    super(503, 'MMG_DISABLED', `MMG is switched off on this server (MMG_DRIVER=disabled); ${operation} was not sent.`);
+    this.name = 'MmgDisabledError';
+  }
+}
+
+/** Refuses every call. Holds no credential and opens no connection. */
+export class DisabledMmgProvider implements MmgMerchantProvider, MmgLookupClient {
+  readonly driver = 'disabled' as const;
+  async authenticate(): Promise<{ token: string; expiresAt?: Date }> { throw new MmgDisabledError('authentication'); }
+  async initiatePayment(_req: MmgInitiateRequest): Promise<MmgTxResult> { throw new MmgDisabledError('the payment request'); }
+  async reverseTransaction(_req: { transactionId: string; reason?: string }): Promise<MmgTxResult> { throw new MmgDisabledError('the reversal'); }
+  async transactionLookup(_req: { transactionId: string }): Promise<MmgTransaction> { throw new MmgDisabledError('the transaction lookup'); }
+  async transactionHistory(_req?: { from?: Date; to?: Date; limit?: number }): Promise<MmgTransaction[]> { throw new MmgDisabledError('the history request'); }
+  async accountBalance(): Promise<MmgBalance> { throw new MmgDisabledError('the balance request'); }
+  async transactionLookupDetail(_transactionId: string): Promise<MmgLookupDetail> { throw new MmgDisabledError('the checkout lookup'); }
+}
+
 /** The live merchant credentials, or a refusal naming what is missing. */
 function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConfig {
   const cfg: LiveMmgConfig = {
@@ -647,6 +721,37 @@ function readLiveMmgConfig(env: Record<string, string | undefined>): LiveMmgConf
  */
 export function getMmgLookupProvider(env: Record<string, string | undefined> = process.env): MmgLookupClient {
   const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // [PROD-PATH] MMG fully off: every lookup refuses explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
+  if (isProduction(env) && driver === 'sandbox') {
+    throw new Error('MMG_DRIVER=sandbox is forbidden in production');
+  }
+  switch (driver) {
+    case 'sandbox':
+      return new SandboxMmgProvider();
+    case 'live': {
+      const cfg = readLiveMmgConfig(env);
+      if (isProduction(env) && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {
+        throw new Error('A non-UAT MMG_API_URL is required in production');
+      }
+      return new LiveMmgProvider(cfg);
+    }
+    default:
+      throw new Error(`Unknown MMG_DRIVER: ${driver}`);
+  }
+}
+
+/**
+ * [MMG REVERSAL · owner #11] The client a weekly-fee reversal uses: the same
+ * driver and merchant credentials as the checkout verifier's lookup (it reads
+ * the very transaction the lookup proved), without the push rail's
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED gate — a reversal names MMG's own
+ * transaction id and depends on no reference round trip.
+ */
+export function getMmgReversalClient(env: Record<string, string | undefined> = process.env): MmgReversalClient {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  // MMG fully off: the reversal and its lookups refuse explicitly (MMG_DISABLED).
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction(env) && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }
@@ -668,6 +773,7 @@ export function getMmgLookupProvider(env: Record<string, string | undefined> = p
 /** Driver selection is config, not code. Defaults to the sandbox. */
 export function getMmgProvider(): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
+  if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction() && driver === 'sandbox') {
     throw new Error('MMG_DRIVER=sandbox is forbidden in production');
   }

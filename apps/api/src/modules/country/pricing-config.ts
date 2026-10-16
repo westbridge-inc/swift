@@ -30,7 +30,15 @@ export const PRICING_MONEY_MAX = 100_000_000;
 /** `includedKm` is the distance the base fare covers: perKm is charged only
  *  beyond it, once per trip. A payload that does not name it includes none
  *  (see NOT_INHERITED), so a config written before it existed prices as it did. */
-export interface TaxiRates { base: number; includedKm?: number; perKm: number; perMin: number; minimum: number }
+export interface TaxiRates {
+  base: number; includedKm?: number; perKm: number; perMin: number; minimum: number;
+  /** [TAXI waiting charge] What one FULL block of waiting costs (whole units), and
+   *  how long a block is. Optional: a payload that names neither (every config
+   *  written before the waiting charge) waits on the declared defaults,
+   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (500 per 10 minutes),
+   *  so no stored payload changes and no version is minted by their arrival. */
+  waitingChargePerBlock?: number; waitingBlockMinutes?: number;
+}
 export type ClassRates = { ECONOMY: number; COMFORT: number; XL: number; GROUP: number };
 
 /** The declared defaults — themselves valid full payloads.
@@ -46,10 +54,16 @@ export const DEFAULT_CLASS_RATES: ClassRates = { ECONOMY: 1.0, COMFORT: 1.35, XL
 const money = z.number().int().min(0).max(PRICING_MONEY_MAX);
 const multiplier = z.number().finite().min(0.5).max(10);
 const km = z.number().finite().min(0).max(10_000);
+/** [TAXI waiting charge] A waiting block: whole minutes, at least one, at most a day. */
+const blockMinutes = z.number().int().min(1).max(1440);
 
 const SCHEMAS: Record<PricingKind, z.ZodTypeAny> = {
   // includedKm last: the parsed payload keeps the key order the shadow merge builds.
-  TAXI_RATES: z.object({ base: money, perKm: money, perMin: money, minimum: money, includedKm: km.optional() }).strict(),
+  // [TAXI waiting charge] The two waiting terms follow, optional and never taken from the defaults.
+  TAXI_RATES: z.object({
+    base: money, perKm: money, perMin: money, minimum: money, includedKm: km.optional(),
+    waitingChargePerBlock: money.optional(), waitingBlockMinutes: blockMinutes.optional(),
+  }).strict(),
   TAXI_CLASS_RATES: z.object({ ECONOMY: z.literal(1), COMFORT: multiplier, XL: multiplier, GROUP: multiplier }).strict(),
   DELIVERY_RATES: z.object({ baseFee: money, perKmRate: money, includedKm: km, surgeMultiplier: multiplier }).strict(),
   COURIER_RATES: z.object({

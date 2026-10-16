@@ -23,6 +23,7 @@ import * as kyc from '../providers/kyc/kyc-provider';
 import { decryptBuffer, getKeyProvider } from '../providers/storage/envelope';
 import { DECLARATION_DOC_TYPE } from '../modules/verification/doc-registry';
 import { openEscrow } from '../modules/safety/deletion-hold';
+import { REAL_JPEG, REAL_PNG, REAL_WEBP } from './helpers/real-image';
 
 const storage = vi.hoisted(() => ({
   upload: vi.fn(), getObject: vi.fn(), delete: vi.fn(), getSignedUrl: vi.fn(),
@@ -38,7 +39,7 @@ const B = 'subject-b';
 const key = (owner: string, name = 'a') => `/uploads/verification/${owner}/${name.repeat(16)}.enc`;
 const avatar = (owner: string) => `/uploads/avatars/${owner}/${'s'.repeat(16)}.jpg`;
 const unavailable = { code: 'VERIFICATION_OBJECT_UNAVAILABLE' };
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const png = REAL_PNG; // [Row 108] a real photo: the upload route reads every photo with the real decoder
 const uploadRequest = (userId: string, filename = 'image.png', mimetype = 'image/png') => ({ user: { userId }, file: async () => ({
   mimetype, filename, toBuffer: async () => png,
 }) });
@@ -96,9 +97,12 @@ function harness() {
   }]));
   const documents: Array<{ id: string; userId: string; fileUrl: string } & Record<string, any>> = [];
   const orphans = new Map<string, any>();
+  // [VERIFY-DOCS V3] The admin who mints a view link; the render route re-reads
+  // their document reviewer grant on every load (same tenant as subject A).
+  const reviewer = { id: 'reviewer', tenantId: 'tenant-a', status: 'ACTIVE', activeRole: 'ADMIN', admin: { permissions: ['documents.review'] } };
   const db: any = {
     user: {
-      findUnique: vi.fn(async ({ where }: any) => people.get(where.id)),
+      findUnique: vi.fn(async ({ where }: any) => (where.id === reviewer.id ? reviewer : people.get(where.id))),
       findUniqueOrThrow: vi.fn(async ({ where }: any) => {
         const person = people.get(where.id); if (!person) throw new Error('not found'); return { ...person };
       }),
@@ -287,7 +291,7 @@ describe('verification object containment at real service boundaries', () => {
   it.each(['mint', 'render'])('poisoned document cannot reach admin %s dereference', async (operation) => {
     const h = harness(); const doc = h.poison();
     const routes = await handlers(h, operation === 'mint' ? adminRoutes : verificationRoutes);
-    const path = mintRenderPath(doc.id).path;
+    const path = mintRenderPath(doc.id, 'reviewer').path;
     const query = Object.fromEntries(new URL(path, 'http://localhost').searchParams);
     const invoke = operation === 'mint'
       ? routes.get('get /verification/:id/document-url')!({ params: { id: doc.id }, user: { userId: 'reviewer' } })
@@ -340,8 +344,8 @@ describe('verification object containment at real service boundaries', () => {
       return { url: `${provider === 'local' ? '/uploads/' : ''}${folder}/${createOpaqueStorageName(storedName)}` };
     });
     const content = mimetype === 'application/pdf' ? Buffer.from('%PDF-1.7\nsynthetic document')
-      : mimetype === 'image/jpeg' ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 8, 0, 0, 0, 0, 0, 0])
-      : mimetype === 'image/webp' ? Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary') : png;
+      : mimetype === 'image/jpeg' ? REAL_JPEG
+      : mimetype === 'image/webp' ? REAL_WEBP : png;
     const routes = await handlers(h, verificationRoutes);
     const app = Fastify(); await app.register(multipart);
     app.post('/upload', async (request) => {
@@ -376,7 +380,7 @@ describe('verification object containment at real service boundaries', () => {
     if (fault === 'missing-storage') storage.getObject.mockRejectedValue({ code: 'ENOENT' });
     if (fault === 'storage-error') storage.getObject.mockRejectedValue(new Error('private storage error'));
     const routes = await handlers(h, verificationRoutes);
-    const query = Object.fromEntries(new URL(mintRenderPath(doc.id).path, 'http://localhost').searchParams);
+    const query = Object.fromEntries(new URL(mintRenderPath(doc.id, 'reviewer').path, 'http://localhost').searchParams);
     const reply = { send: vi.fn() };
     await expect(routes.get('get /render/:docId')!({ params: { docId: doc.id }, query }, reply)).rejects.toMatchObject({ ...unavailable, message: 'This verification file is unavailable. Upload it again.' });
     expect(reply.send).not.toHaveBeenCalled();
@@ -390,11 +394,15 @@ describe('verification object containment at real service boundaries', () => {
     expect(h.db.verificationDocument.create).toHaveBeenCalledOnce();
   });
 
-  it('owned identity and owned selfie uploads reach the identity provider', async () => {
+  // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID] "no face match": a customer's ID reaches the
+  // document check alone, even with the biometric switch on. An owned selfie (store build 9 still
+  // sends one) is still proven to be the caller's own upload, and then never compared or sent.
+  it('owned identity (with an owned selfie) reaches the document check — never a face match', async () => {
     const h = harness(); vi.stubEnv('FEATURE_BIOMETRIC_FACE_MATCH', '1');
     const selfie = key(A, 's'); h.objects.set(selfie, { ...h.objects.get(key(A))!, fileKey: selfie });
     await expect(h.service.submitIdentity(A, key(A), selfie, '1')).resolves.toMatchObject({ userId: A, fileUrl: key(A) });
-    expect(h.provider.verifyIdentity).toHaveBeenCalledWith({ userId: A, idDocumentUrl: key(A), selfieUrl: selfie });
+    expect(h.provider.verifyDocument).toHaveBeenCalledWith({ userId: A, docType: 'national_id', fileUrl: key(A) });
+    expect(h.provider.verifyIdentity).not.toHaveBeenCalled();
   });
 
   it('server-persisted signup selfie keeps the checklist face-match path working', async () => {

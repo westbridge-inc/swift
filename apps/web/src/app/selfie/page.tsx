@@ -143,7 +143,7 @@ function SelfieSetup() {
   };
 
   return (
-    <main className={styles.page}>
+    <main id="main" tabIndex={-1} className={styles.page}>
       <section className={styles.card} aria-labelledby="selfie-title">
         <Link href={next} aria-label="Return to store" className={styles.brandHome}><SwiftLogo /></Link>
         <div>
@@ -201,7 +201,7 @@ function SelfieSetup() {
 
 export default function SelfiePage() {
   return (
-    <Suspense fallback={<main className={styles.page}><p>Loading account setup…</p></main>}>
+    <Suspense fallback={<main id="main" tabIndex={-1} className={styles.page}><p>Loading account setup…</p></main>}>
       <SelfieSetup />
     </Suspense>
   );

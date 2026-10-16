@@ -196,12 +196,13 @@ describe("Channel A' — inquiry, the typo-killer", () => {
 describe('Channel B — settlement import + scenario G', () => {
   it('imports a file, re-import is a zero-credit no-op, trailer mismatch is flagged', async () => {
     const { sub, san } = await makeVendorSub();
+    // [owner #62] The two rows together are one week's fee (GY$2,100): one week at a time.
     const t1 = `SF-${nanoid(8)}`;
     const t2 = `SF-${nanoid(8)}`;
     externalIds.push(t1, t2);
     const csv = [
       'transaction_id,account_number,amount,paid_at',
-      `${t1},${san},2100,2026-08-01T10:00:00Z`,
+      `${t1},${san},1100,2026-08-01T10:00:00Z`,
       `${t2},"${san.slice(0, 3)}-${san.slice(3, 6)}-${san.slice(6)}",1000,2026-08-01T11:00:00Z`,
       'TOTAL,9999',
     ].join('\n');
@@ -211,16 +212,16 @@ describe('Channel B — settlement import + scenario G', () => {
     // mismatch was only a flag on the report.)
     const bad = await importSettlementCsv(prisma, svc, csv, { source: 'test-file-1' });
     expect(bad.status).toBe('REJECTED');
-    expect(bad.trailerMismatch).toBe(true); // 3100 ≠ 9999
+    expect(bad.trailerMismatch).toBe(true); // 2100 ≠ 9999
     expect(bad.credited).toBe(0);
     expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
 
-    const good = csv.replace('TOTAL,9999', 'TOTAL,3100');
+    const good = csv.replace('TOTAL,9999', 'TOTAL,2100');
     const report = await importSettlementCsv(prisma, svc, good, { source: 'test-file-1' });
     expect(report.status).toBe('PUBLISHED');
     expect(report.fileRows).toBe(2);
     expect(report.credited).toBe(2);
-    expect(report.trailerTotalGyd).toBe(3100);
+    expect(report.trailerTotalGyd).toBe(2100);
     expect(report.trailerMismatch).toBe(false);
 
     // The same file again is the same import: it answers, it does not re-ingest.

@@ -173,11 +173,13 @@ export function useUploadFile() {
   });
 }
 
-/** Consumer L2: submit a government ID + selfie (manual KYC review). */
+/** Consumer L2: submit a government ID. [Owner ruling 8 Oct 2026] It goes on file at once unless the
+ *  server's automatic checks hold it for a person; no selfie, no face match. The result carries
+ *  `idCheck` (ON_FILE · WAITING · NOT_ACCEPTED) — read it through lib/customerIdCopy. */
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl: string }) => {
+    mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
         { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
@@ -185,6 +187,8 @@ export function useSubmitIdentity() {
       ));
       requireAuthSessionForPrincipal(owner);
       void qc.invalidateQueries({ queryKey: ['verification'] });
+      // The Profile row reads the new idCheck from /customer/profile.
+      void qc.invalidateQueries({ queryKey: ['customer', 'profile'] });
       return result;
     },
   });

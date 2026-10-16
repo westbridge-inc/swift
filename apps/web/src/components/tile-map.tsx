@@ -11,9 +11,15 @@ import type { Point } from '@/lib/live-tracking';
  * embed never drew on the tracking and trip-share pages; tiles are images.
  *
  * Privacy (W-47, M053): a tile request names only a ~1 km square at the zoom
- * used here, never a point, and is sent with no referrer at all (never the
- * link's token, nor even this site). The marker is drawn by the page itself.
+ * used here, never a point, and never the page's address (where the trip and
+ * parcel links carry their token). The marker is drawn by the page itself.
  * Callers pass a point already coarsened for display.
+ *
+ * Referer: OpenStreetMap's tile usage policy requires browsers to send one and
+ * may block referer-stripped traffic without notice, so each tile sends the
+ * site's ORIGIN only (strict-origin-when-cross-origin — the same as the pin
+ * picker and the site-wide policy). That overrides the token pages' own
+ * `no-referrer`, and still never includes the path. Links stay no-referrer.
  */
 export const TILE_SIZE = 256;
 export const TRACKING_ZOOM = 15;
@@ -46,6 +52,14 @@ export function TileMap({ point, label, zoom = TRACKING_ZOOM, linkHref, linkLabe
   linkLabel: string;
 }) {
   const [failed, setFailed] = useState(false);
+  // [Row 108] One failed tile used to blank the whole map. Each tile is fetched
+  // again once (a fresh element, so the browser asks again); only a tile that
+  // fails twice makes the map say it could not load.
+  const [retried, setRetried] = useState<ReadonlySet<string>>(() => new Set());
+  const tileFailed = (src: string) => {
+    if (retried.has(src)) setFailed(true);
+    else setRetried((seen) => new Set(seen).add(src));
+  };
   return (
     <div>
       <div role="img" aria-label={label} className="relative h-64 w-full overflow-hidden bg-[var(--swift-sunken)]">
@@ -56,14 +70,14 @@ export function TileMap({ point, label, zoom = TRACKING_ZOOM, linkHref, linkLabe
             // Raster tiles keep their exact 256 px geometry and the browser's cache.
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              key={tile.src}
+              key={retried.has(tile.src) ? `${tile.src}#retry` : tile.src}
               src={tile.src}
               alt=""
               width={TILE_SIZE}
               height={TILE_SIZE}
               draggable={false}
-              referrerPolicy="no-referrer"
-              onError={() => setFailed(true)}
+              referrerPolicy="strict-origin-when-cross-origin"
+              onError={() => tileFailed(tile.src)}
               className="absolute max-w-none select-none"
               style={{ left: `calc(50% + ${tile.left}px)`, top: `calc(50% + ${tile.top}px)` }}
             />

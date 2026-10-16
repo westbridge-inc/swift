@@ -14,6 +14,7 @@ import { log } from '../../utils/logger';
  * Idempotent (a matched order is left alone), bounded (only fixes between
  * acceptance and completion), and honest: no trace means no match, recorded
  * as exactly that rather than a straight line pretending to be a route.
+ * Only the distance is frozen: the matched path itself is never stored [R18].
  */
 export type RouteMatchOutcome = 'matched' | 'unmatched' | 'already' | 'no-trace' | 'no-order' | 'not-complete';
 
@@ -46,7 +47,10 @@ export async function matchOrderRoute(
     where: { id: orderId },
     data: {
       routeMatchedKm: Math.round(matched.km * 100) / 100,
-      routePolyline: matched.polyline,
+      // [R18 · research B5] The distance is kept for money; the path is not.
+      // A matched polyline is the mover's route for the whole job, and Swift
+      // keeps no location history (Privacy Policy). Never stored.
+      routePolyline: null,
       routeMatchSource: matched.matched ? matched.source : `${matched.source}:unmatched`,
       routeMatchedAt: new Date(),
     },
