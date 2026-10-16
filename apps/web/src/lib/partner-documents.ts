@@ -145,6 +145,10 @@ export const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
+  gei_electrical_licence: 'GEI Electrical Licence',
+  pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
+  pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 
 /**
