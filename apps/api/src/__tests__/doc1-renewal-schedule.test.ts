@@ -61,8 +61,9 @@ afterAll(async () => {
 
 describe('[DOC-1 P4-7] renewal schedules the database keeps', () => {
   it('approving a document with a printed expiry creates its schedule: four notices at T-30/14/7/1 and suspension at expiry; a document without an expiry has none', async () => {
-    // [R15] a type with a PRINTED expiry (the food handler's permit is now approved by its certificate year)
-    const doc = await pending('gra_restaurant_licence');
+    // [R15] a type with a PRINTED expiry (the food handler's permit is now approved by its certificate year;
+    // [owner 16 Oct] so is the GRA restaurant licence — the Hire Car Driver's Licence still prints its own date)
+    const doc = await pending('hire_car_driver_licence');
     const expiresAt = new Date(Date.now() + 200 * DAY);
     await runWithTenant('swift-default', () => service.approveDocument(doc.id, adminId, expiresAt));
     const s = await scheduleOf(doc.id);

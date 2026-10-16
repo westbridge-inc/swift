@@ -5,8 +5,11 @@ import { docLabel, reviewNote } from './review-center';
 // label and a reviewer note saying what to check; a person decides every one. The held trades'
 // documents (Town Clerk, ICAG, GRA practice, GCAA drone) are gone with them.
 const TRADE_DOCS = ['pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration'];
-/** [R15] checked again every January: the reviewer types the certificate's year */
-const CERTIFICATE_YEAR_DOCS = ['pest_control_operator_licence', 'eating_house_registration', 'food_handler_cert', 'gei_electrical_licence'];
+/** [R15] checked again every January: the reviewer types the certificate's year. [owner 16 Oct] a store's yearly licences too. */
+const CERTIFICATE_YEAR_DOCS = [
+  'pest_control_operator_licence', 'eating_house_registration', 'food_handler_cert', 'gei_electrical_licence',
+  'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
+];
 
 describe('[TRADES] review console wording for service-trade documents', () => {
   it.each(TRADE_DOCS)('%s has a label and a reviewer note', (docType) => {
@@ -24,9 +27,15 @@ describe('[TRADES] review console wording for service-trade documents', () => {
     expect(reviewNote('eating_house_registration', 'CUSTOMER')).toMatch(/Outside Georgetown is not accepted yet/);
   });
 
-  it('asks for the machine class only on a service provider’s driver’s licence', () => {
-    expect(reviewNote('drivers_licence', 'CUSTOMER')).toMatch(/class covers the machine/);
+  it('[owner 16 Oct] no machine-class note on any driver’s licence: the heavy-equipment operator is held', () => {
+    expect(reviewNote('drivers_licence', 'CUSTOMER')).toBeNull();
     expect(reviewNote('drivers_licence', 'MOVER')).toBeNull();
+  });
+
+  it('[owner 16 Oct] a store’s yearly licences are re-checked every January, like a business name', () => {
+    for (const docType of ['gra_restaurant_licence', 'sanitary_certificate', 'trade_licence']) {
+      expect(reviewNote(docType, 'VENDOR_OWNER'), docType).toMatch(/checked again every January/);
+    }
   });
 
   it('never asks a reviewer to accept a medical certificate', () => {

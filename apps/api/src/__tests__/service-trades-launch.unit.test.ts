@@ -22,22 +22,27 @@ import { reviewerTypedFields } from '../modules/verification/identity-signal-pol
 // trade keeps the base (national ID + police clearance); the trade's own
 // documents are a floor a stored config edit cannot remove — no trade ever goes
 // live on ID alone. Licences and food certificates are checked every January.
+// [owner 16 Oct 2026] The heavy-equipment operator is HELD again (licence rules
+// unconfirmed); tutors and photographers stay open (home visits need the police
+// clearance). A store's restaurant licence, sanitary certificate and trade
+// licence get the same January re-check as a business name.
 // ---------------------------------------------------------------------------
 
 const BASE = ['national_id', 'police_clearance'];
 
-/** The per-trade checklist of every trade opened at launch (owner 13 + 15 Oct). */
+/** The per-trade checklist of every trade opened at launch (owner 13 + 15 + 16 Oct). */
 const EXPECTED: Record<string, string[]> = {
   pest_control: [...BASE, 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
-  heavy_equipment_operator: [...BASE, 'drivers_licence'],
   chef: [...BASE, 'food_handler_cert'],
   caterer: [...BASE, 'food_handler_cert', 'eating_house_registration'],
   photographer: [...BASE],
   tutor: [...BASE],
 };
 const OPENED = Object.keys(EXPECTED) as ServiceTradeId[];
-/** [R15] research A9: UNSURE — held, with the lawyer. */
-const HELD: ServiceTradeId[] = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant'];
+/** [R15] research A9: UNSURE — held, with the lawyer. [owner 16 Oct] the heavy-equipment operator too. */
+const HELD: ServiceTradeId[] = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant', 'heavy_equipment_operator'];
+/** [owner 16 Oct 2026] A store's yearly licences, checked again every January like a business name (R16). */
+const STORE_LICENCES = ['gra_restaurant_licence', 'sanitary_certificate', 'trade_licence'];
 const NEW_DOC_TYPES = ['pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration'];
 /** [R15] the document types of the held trades are gone from the registry and the lists */
 const DROPPED_DOC_TYPES = [
@@ -54,8 +59,8 @@ function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | nu
 }
 
 describe('[TRADES · R15] the research-confirmed trades open with their own checks; the UNSURE ones stay held', () => {
-  it('exactly the six decided trades open', () => {
-    expect(OPENED).toHaveLength(6);
+  it('exactly the five decided trades open', () => {
+    expect(OPENED).toHaveLength(5);
     for (const trade of OPENED) {
       expect(isServiceCategoryOperational(trade), trade).toBe(true);
       expect(requireCanonicalServiceTrade(trade), trade).toBe(trade);
@@ -77,7 +82,7 @@ describe('[TRADES · R15] the research-confirmed trades open with their own chec
     expect(DEFAULT_DOCUMENT_CHECKLISTS).not.toHaveProperty(`SERVICE_PROVIDER_TRADE_${trade.toUpperCase()}`);
   });
 
-  it.each(['lawyer', 'attorney', 'attorney at law', 'legal consultation', 'barbering', 'hair stylist', 'beautician', 'manicure', 'make up artist', 'tax consultation'])('a held trade is held by every alias: %s', (alias) => {
+  it.each(['lawyer', 'attorney', 'attorney at law', 'legal consultation', 'barbering', 'hair stylist', 'beautician', 'manicure', 'make up artist', 'tax consultation', 'heavy equipment operator', 'heavy machinery operator'])('a held trade is held by every alias: %s', (alias) => {
     expect(() => requireCanonicalServiceTrade(alias)).toThrow('not accepting profiles or requests yet');
   });
 
@@ -178,8 +183,11 @@ describe('[R15] licences and food certificates are checked again every January',
   const RECHECK_2027 = new Date('2027-01-16T04:00:00.000Z'); // 16 Jan 2027, 00:00 Guyana time
   const RECHECK_2028 = new Date('2028-01-16T04:00:00.000Z');
 
-  it('names every food or licence document of an opened trade', () => {
-    expect([...CERTIFICATE_YEAR_DOC_TYPES].sort()).toEqual(['eating_house_registration', 'food_handler_cert', 'gei_electrical_licence', 'pest_control_operator_licence']);
+  it('names every food or licence document of an opened trade, and a store’s yearly licences', () => {
+    expect([...CERTIFICATE_YEAR_DOC_TYPES].sort()).toEqual([
+      'eating_house_registration', 'food_handler_cert', 'gei_electrical_licence', 'gra_restaurant_licence', 'pest_control_operator_licence',
+      'sanitary_certificate', 'trade_licence',
+    ]);
     for (const docType of CERTIFICATE_YEAR_DOC_TYPES) {
       expect(AUTO_APPROVE_EXPIRY_DAYS[docType], docType).toBeGreaterThan(0);
       expect(reviewerTypedFields(docType), docType).toEqual(['certificateYear']);
@@ -209,6 +217,16 @@ describe('[R15] licences and food certificates are checked again every January',
     const sooner = new Date('2026-12-01T04:00:00.000Z');
     expect(resolveApprovalExpiry(docType, sooner, null, OCT)).toEqual(sooner);
     expect(() => resolveApprovalExpiry(docType, undefined, null, OCT)).toThrow(expect.objectContaining({ code: 'EXPIRY_REQUIRED' }));
+  });
+
+  it.each(STORE_LICENCES)('[owner 16 Oct] a store’s %s is approved by its year and lapses at the coming January re-check', (docType) => {
+    expect(CERTIFICATE_YEAR_DOC_TYPES.has(docType)).toBe(true);
+    expect(reviewerTypedFields(docType)).toEqual(['certificateYear']);
+    // a printed or keyed date past the coming 16 January is brought forward to it, never kept
+    expect(resolveApprovalExpiry(docType, new Date('2027-06-30T04:00:00.000Z'), null, OCT)).toEqual(RECHECK_2027);
+    expect(resolveApprovalExpiry(docType, undefined, new Date('2027-12-31T04:00:00.000Z'), OCT)).toEqual(RECHECK_2027);
+    // and its holder is reminded from 1 December (the January re-check notice)
+    expect(isJanuaryRecheck(certificateYearRecheck(2026, OCT))).toBe(true);
   });
 
   it('other expiring documents keep their own rule (a driver’s licence is not capped at January)', () => {
@@ -267,7 +285,8 @@ describe('[TRADES] the catalogue says what each trade needs, in plain words', ()
     expect(text('chef')).toMatch(/Mayor and City Council of Georgetown/);
     expect(text('caterer')).toMatch(/eating-house registration/i);
     expect(text('caterer')).toMatch(/Georgetown only for now/);
-    expect(text('heavy_equipment_operator')).toMatch(/driver’s licence/i);
+    // [owner 16 Oct] held: its licence rules are not confirmed
+    expect(text('heavy_equipment_operator')).toMatch(/Equipment competency and applicable licence requirements/);
     expect(text('photographer')).toMatch(/Drone or aerial work is not offered on Swift yet/);
     expect(text('tutor')).toMatch(/children/i);
     for (const trade of HELD) expect(text(trade), trade).not.toMatch(/Town Clerk|ICAG|GCAA|cooking gas/);

@@ -166,22 +166,23 @@ describe('test_characterization_legacy_upload_paths', () => {
     // [VERIFY-DOCS] The example type was the police clearance; its re-check date now comes from the
     // ISSUE date the reviewer types (reviewer-typed-fields.test.ts), so a type with a PRINTED expiry
     // carries this rule's characterization instead. [R15] The food handler's permit is now approved by
-    // its certificate YEAR (service-trades-launch tests), so the GRA restaurant licence carries it.
+    // its certificate YEAR (service-trades-launch tests), and [owner 16 Oct] so is the GRA restaurant
+    // licence, so the Hire Car Driver's Licence (a printed date, up to three years) carries it.
     it('an expiring type refuses approval without a printed date (EXPIRY_REQUIRED)', async () => {
-      const d = await pendingDoc('gra_restaurant_licence');
+      const d = await pendingDoc('hire_car_driver_licence');
       const res = await approve(d.id, {});
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_REQUIRED');
       expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } })).status).toBe('PENDING');
     });
     it('a date already passed is refused (EXPIRY_IN_PAST)', async () => {
-      const d = await pendingDoc('gra_restaurant_licence');
+      const d = await pendingDoc('hire_car_driver_licence');
       const res = await approve(d.id, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() });
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_IN_PAST');
     });
     it('a future printed date is stored with the approval', async () => {
-      const d = await pendingDoc('gra_restaurant_licence');
+      const d = await pendingDoc('hire_car_driver_licence');
       const future = new Date(Date.now() + 300 * 86_400_000);
       const res = await approve(d.id, { expiresAt: future.toISOString() });
       expect(res.statusCode, res.body).toBe(200);

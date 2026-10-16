@@ -122,8 +122,12 @@ export function requireCanonicalServiceTrade(input: string): ServiceTradeId {
 // hairdresser, salon, nail technician, makeup artist) and accountants. Opened
 // with their documents: pest control (the Board's operator licence) and chefs
 // and caterers (this year's food handler's certificate).
+// [owner 16 Oct 2026] The heavy-equipment operator is held again: the licence
+// rules for its machines are not confirmed. Tutors and photographers stay open
+// (their home visits need the police clearance).
 const PENDING_CATEGORIES = new Set<ServiceTradeId>([
   'lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant',
+  'heavy_equipment_operator',
 ]);
 
 export function isServiceCategoryOperational(trade: ServiceTradeId): boolean {
@@ -185,6 +189,8 @@ function categoryDocuments(trade: ServiceTradeId): ServiceCategory['documents'] 
     nail_technician: 'Nail service scope, hygiene and premises requirements',
     makeup_artist: 'Makeup service scope and hygiene requirements',
     accountant: 'Professional credentials and authority for the services offered',
+    // [owner 16 Oct] held until the licence rules for its machines are confirmed
+    heavy_equipment_operator: 'Equipment competency and applicable licence requirements',
   };
   if (pending[trade]) documents.push({
     key: `POLICY_${trade.toUpperCase()}`, label: pending[trade]!, status: 'POLICY_REVIEW_REQUIRED',

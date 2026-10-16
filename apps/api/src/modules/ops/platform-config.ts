@@ -72,8 +72,11 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  2026-10-15.2 [R15 · owner 15 Oct, research A9/D9]: 2026-10-15.1 with the
  *  UNSURE trades held again (gas fitter, barber group, accountant; drone work):
  *  their lists are gone; pest control, heavy equipment, chef, caterer,
- *  photographer and tutor keep theirs. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-15.2';
+ *  photographer and tutor keep theirs.
+ *  2026-10-16.1 [owner 16 Oct]: 2026-10-15.2 with the heavy-equipment operator
+ *  HELD again (licence rules unconfirmed): its list is gone; pest control,
+ *  chef, caterer, photographer and tutor keep theirs. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-16.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -188,14 +191,12 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct, research A9/D9] The trades
     // opened at launch, each with the documents Guyana law ties to it. The base SERVICE_PROVIDER list
     // (national ID + police clearance) applies to every one of them; SERVICE_TRADE_LAUNCH_FLOOR below
-    // keeps both halves required whatever a stored list says. Gas fitters, the barber group and
-    // accountants are HELD (services/service-catalog) and have no list here.
+    // keeps both halves required whatever a stored list says. Gas fitters, the barber group,
+    // accountants and [owner 16 Oct] heavy-equipment operators are HELD (services/service-catalog)
+    // and have no list here.
     // Pesticides and Toxic Chemicals Control Act s.21 (operator licence) and regulation 89
     // (commercial applicator certificate, two years).
     SERVICE_PROVIDER_TRADE_PEST_CONTROL: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
-    // A driver's licence of the machine's class: the law asks for it when the machine is
-    // driven on a road; recorded as required, the reviewer checks the class.
-    SERVICE_PROVIDER_TRADE_HEAVY_EQUIPMENT_OPERATOR: ['drivers_licence'],
     // This year's food handler's certificate from the Mayor and City Council of Georgetown
     // (research D9; Georgetown only for now), re-checked every January.
     SERVICE_PROVIDER_TRADE_CHEF: ['food_handler_cert'],
@@ -214,11 +215,11 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
  * police clearance and the trade's own documents. The provider checklist is always a superset
  * of it — a stored CountryConfig edit can add documents but never take one of these away — so
  * an opened trade can never go live on identity documents alone. A trade without an entry here
- * (a held trade: the lawyer, gas fitter, barber group, accountant) gains nothing from it.
+ * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator) gains
+ * nothing from it.
  */
 export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string[]>> = {
   pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
-  heavy_equipment_operator: ['national_id', 'police_clearance', 'drivers_licence'],
   chef: ['national_id', 'police_clearance', 'food_handler_cert'],
   caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
   photographer: ['national_id', 'police_clearance'],

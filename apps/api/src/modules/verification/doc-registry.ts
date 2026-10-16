@@ -117,10 +117,15 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
  * every January. A person types the YEAR printed on the certificate (never a guessed expiry), and the
  * approval lapses at the start of 16 January of the following year, Guyana time: the holder has the
  * first fortnight of January to bring the new year's certificate (verification.service
- * certificateYearRecheck). Every food or licence document of a service trade or store is here.
+ * certificateYearRecheck), and is reminded from 1 December (renewal-schedule). Every food or licence
+ * document of a service trade or store is here.
+ * [owner 16 Oct 2026] A store's GRA restaurant licence, sanitary certificate and trade licence get the
+ * same January re-check as a business name (R16): reminded from 1 December, lapsed on 16 January if not
+ * renewed — whatever later date is printed or keyed, the approval never outlasts the coming re-check.
  */
 export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
   'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
+  'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
 ]);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**

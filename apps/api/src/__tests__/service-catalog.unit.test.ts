@@ -93,10 +93,11 @@ describe('service catalogue authority', () => {
   it('holds every category with an unresolved policy topic at profile, request, and document gates', async () => {
     const held = publicServiceCatalog().categories.filter((category) =>
       category.documents.some((document) => document.status === 'POLICY_REVIEW_REQUIRED'));
-    // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, heavy equipment, chef, caterer, tutor and photographer
-    // opened with their checks; the trades the research marks UNSURE stay held with the lawyer.
+    // [TRADES · 13 Oct; R15 · 15 Oct 2026] pest control, chef, caterer, tutor and photographer opened with
+    // their checks; the trades the research marks UNSURE stay held with the lawyer, and [owner 16 Oct] the
+    // heavy-equipment operator is held again (licence rules unconfirmed).
     expect(held.map((category) => category.id)).toEqual([
-      'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant',
+      'gas_fitter', 'heavy_equipment_operator', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'lawyer', 'accountant',
     ]);
     for (const category of held) {
       expect(category.quoteRequestsEnabled, category.id).toBe(false);

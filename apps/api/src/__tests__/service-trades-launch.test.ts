@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -8,7 +10,8 @@ import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { providerChecklist } from '../modules/services/services.service';
-import { VerificationService } from '../modules/verification/verification.service';
+import { januaryRecheckCap, VerificationService } from '../modules/verification/verification.service';
+import { dueRenewalNotices, JANUARY_RECHECK_FIRST_NOTICE_DAYS } from '../modules/verification/renewal-schedule';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { guyanaWallClockParts, startOfGuyanaDay } from '../utils/guyana-day';
@@ -24,7 +27,11 @@ import { ownedVerificationFixture } from './helpers/verification-object';
 // the full set does, an expired licence takes them off again. The UNSURE trades
 // (gas fitter, barber group, accountant) stay held with the lawyer, drone work is
 // refused, and a licence or food certificate is approved by its YEAR and lasts
-// to the January re-check.
+// to the January re-check. [owner 16 Oct 2026] The heavy-equipment operator is
+// held again; a store's restaurant licence, sanitary certificate and trade
+// licence are approved by their year too; and a GEI licence approved before the
+// January rule gets the coming 16 January re-check (data step, migration
+// 20261016200000).
 // ---------------------------------------------------------------------------
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -36,14 +43,13 @@ let seq = 0;
 const BASE = ['national_id', 'police_clearance'];
 const TRADE_DOCS: Record<string, string[]> = {
   pest_control: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
-  heavy_equipment_operator: ['drivers_licence'],
   chef: ['food_handler_cert'],
   caterer: ['food_handler_cert', 'eating_house_registration'],
   photographer: [],
   tutor: [],
 };
-/** [R15] research A9: UNSURE — held, with the lawyer. */
-const HELD = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant'];
+/** [R15] research A9: UNSURE — held, with the lawyer. [owner 16 Oct] the heavy-equipment operator too. */
+const HELD = ['lawyer', 'gas_fitter', 'barber', 'hairdresser', 'salon', 'nail_technician', 'makeup_artist', 'accountant', 'heavy_equipment_operator'];
 
 async function makeUser() {
   seq += 1;
@@ -217,6 +223,17 @@ describe('[TRADES · R15] the held categories stay held', () => {
     expect(s.checklist).toEqual([]);
     expect(s.categoryUnavailable).toBe(true);
   });
+
+  it('[owner 16 Oct] a stored heavy-equipment profile is unavailable with an empty checklist, whatever is approved', async () => {
+    const u = await makeUser();
+    await runWithoutTenant(() => app.prisma.serviceProvider.create({ data: { userId: u.userId, trade: 'heavy_equipment_operator', portfolioPhotos: [], isVerified: true } }));
+    await approve(u.userId, [...BASE, 'drivers_licence']);
+    const mine = await inject('GET', '/api/v1/services/providers/me', undefined, u.token);
+    expect(mine.json().data).toMatchObject({ trade: 'heavy_equipment_operator', isVerified: false, categoryUnavailable: true });
+    const s = await status(u.token);
+    expect(s.checklist).toEqual([]);
+    expect(s.categoryUnavailable).toBe(true);
+  });
 });
 
 describe('[TRADES] documents are submittable where the trade names them', () => {
@@ -341,6 +358,96 @@ describe('[R16] a business registration: a yearly business name is checked every
     expect(approved.status).toBe('APPROVED');
     expect(approved.expiresAt).toBeNull();
     expect(approved.renewalSchedule).toBeNull();
+  });
+});
+
+describe('[owner 16 Oct] a store’s restaurant licence, sanitary certificate and trade licence are checked again every January', () => {
+  let svc: VerificationService;
+  beforeAll(() => { svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider()); });
+  const pendingLicence = async (docType: string) => {
+    const owner = await makeUser();
+    return runWithoutTenant(() => app.prisma.verificationDocument.create({ data: {
+      userId: owner.userId, role: 'VENDOR_OWNER', docType, fileUrl: `storage://t/${docType}-${nanoid(6)}.jpg`,
+      status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'v1',
+    } }));
+  };
+  const code = async (docId: string, typed: Record<string, unknown> | undefined, expiresAt?: Date) => {
+    try { await svc.approveDocument(docId, 'admin-test', expiresAt, undefined, typed); return 'APPROVED'; } catch (err) { return (err as { code?: string }).code; }
+  };
+  const row = (id: string) => runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, include: { renewalSchedule: true } }));
+
+  it.each(['gra_restaurant_licence', 'sanitary_certificate', 'trade_licence'])('%s: the reviewer types its year; it lapses on 16 January and is reminded from 1 December', async (docType) => {
+    const doc = await pendingLicence(docType);
+    const year = guyanaWallClockParts(new Date()).year;
+    // the console asks for the year printed on it; a keyed date is not enough
+    expect(await code(doc.id, { required: true }, new Date(Date.now() + 300 * DAY))).toBe('CERTIFICATE_YEAR_REQUIRED');
+    expect(await code(doc.id, { required: true, certificateYear: year - 2 })).toBe('CERTIFICATE_YEAR_LAPSED');
+    expect((await row(doc.id)).status).toBe('PENDING');
+    expect(await code(doc.id, { required: true, certificateYear: year }, new Date(Date.now() + 300 * DAY))).toBe('APPROVED');
+    const recheck = startOfGuyanaDay(`${year + 1}-01-16`);
+    const approved = await row(doc.id);
+    expect(approved.status).toBe('APPROVED');
+    expect(approved.expiresAt).toEqual(recheck);
+    expect(approved.renewalSchedule?.expiresOn).toEqual(recheck);
+    // the 1 December reminder of the January re-check is due for it
+    const due = await runWithoutTenant(() => dueRenewalNotices(app.prisma, new Date(recheck.getTime() - (JANUARY_RECHECK_FIRST_NOTICE_DAYS - 1) * DAY)));
+    expect(due.find((notice) => notice.documentId === doc.id)).toMatchObject({ daysLeft: JANUARY_RECHECK_FIRST_NOTICE_DAYS });
+  });
+
+  it('a caller that keys a date without the year (an older console, an internal path) is still brought forward to the coming 16 January', async () => {
+    const doc = await pendingLicence('gra_restaurant_licence');
+    expect(await code(doc.id, undefined, new Date(Date.now() + 300 * DAY))).toBe('APPROVED');
+    expect((await row(doc.id)).expiresAt).toEqual(januaryRecheckCap());
+  });
+});
+
+describe('[coordinator 16 Oct] a GEI licence approved before the January rule gets the coming 16 January re-check (migration 20261016200000)', () => {
+  const MIGRATION = path.resolve(__dirname, '../../prisma/migrations/20261016200000_gei_january_recheck_backfill/migration.sql');
+  /** Runs the migration's statements as written (comments dropped), returning the rows they changed. */
+  const runBackfill = async () => {
+    const statements = readFileSync(MIGRATION, 'utf8').replace(/^\s*--.*$/gm, '').split(/;\s*(?:\n|$)/).map((part) => part.trim()).filter(Boolean);
+    let changed = 0;
+    for (const statement of statements) changed += await runWithoutTenant(() => app.prisma.$executeRawUnsafe(statement));
+    return changed;
+  };
+  const gei = async (status: 'APPROVED' | 'PENDING', expiresAt: Date | null, docType = 'gei_electrical_licence') => {
+    const u = await makeUser();
+    return runWithoutTenant(() => app.prisma.verificationDocument.create({ data: {
+      userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}-${nanoid(6)}.jpg`, status, consentAt: new Date(), privacyNoticeVersion: 'v1', expiresAt,
+      ...(status === 'APPROVED' && { reviewedBy: 'admin-before-r16', reviewedAt: new Date() }),
+    } }));
+  };
+  const read = (id: string) => runWithoutTenant(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, include: { renewalSchedule: true } }));
+  const recordOf = (id: string) => runWithoutTenant(() => app.prisma.documentRecord.findUnique({ where: { submissionId: id } }));
+
+  it('no expiry, or one past the coming 16 January, becomes that re-check; nothing else changes; a second run changes nothing', async () => {
+    const cap = januaryRecheckCap();
+    const noExpiry = await gei('APPROVED', null);
+    const tooLate = await gei('APPROVED', new Date(cap.getTime() + 400 * DAY));
+    const sooner = new Date(Date.now() + 5 * DAY); // always before the coming 16 January
+    const keepsItsDate = await gei('APPROVED', sooner);
+    const pending = await gei('PENDING', null);
+    const otherType = await gei('APPROVED', null, 'food_handler_cert');
+    expect((await read(noExpiry.id)).renewalSchedule).toBeNull();
+
+    expect(await runBackfill()).toBeGreaterThanOrEqual(2);
+    for (const id of [noExpiry.id, tooLate.id]) {
+      const doc = await read(id);
+      expect(doc.status, id).toBe('APPROVED');
+      expect(doc.expiresAt, id).toEqual(cap);
+      // the database's own triggers follow: a renewal schedule (reminded from 1 December) and the durable record
+      expect(doc.renewalSchedule?.expiresOn, id).toEqual(cap);
+      expect((await recordOf(id))?.expiresOn, id).toEqual(cap);
+    }
+    expect((await read(keepsItsDate.id)).expiresAt).toEqual(sooner);
+    expect((await read(pending.id)).expiresAt).toBeNull();
+    expect((await read(otherType.id)).expiresAt).toBeNull();
+    const due = await runWithoutTenant(() => dueRenewalNotices(app.prisma, new Date(cap.getTime() - (JANUARY_RECHECK_FIRST_NOTICE_DAYS - 1) * DAY)));
+    expect(due.find((notice) => notice.documentId === noExpiry.id)).toMatchObject({ daysLeft: JANUARY_RECHECK_FIRST_NOTICE_DAYS });
+
+    // idempotent: the same data step again changes no row anywhere
+    expect(await runBackfill()).toBe(0);
+    expect((await read(noExpiry.id)).expiresAt).toEqual(cap);
   });
 });
 

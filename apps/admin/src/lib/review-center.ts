@@ -93,11 +93,13 @@ const REVIEW_NOTES: Record<string, string> = {
   eating_house_registration: 'The Georgetown Town Clerk’s eating-house registration for this year (renewed each 1 January). Outside Georgetown is not accepted yet. Type the year it is for.',
   food_handler_cert: 'Food handler’s certificate for this year, with the issuing office (for a chef or caterer: the Mayor and City Council of Georgetown). Never a medical certificate. Type the year it is for.',
   gei_electrical_licence: 'Government Electrical Inspectorate licence in this person’s name. Type the year it is for; it is checked again every January.',
+  // [owner 16 Oct 2026] a store's yearly licences: the same January re-check as a business name
+  gra_restaurant_licence: 'GRA restaurant licence for this store. Type the year it is for; it is checked again every January.',
+  sanitary_certificate: 'Sanitary certificate for this store’s premises. Type the year it is for; it is checked again every January.',
+  trade_licence: 'Trade licence for this store. Type the year it is for; it is checked again every January.',
 };
-export function reviewNote(docType: string, role: string): string | null {
-  if (docType === 'drivers_licence' && role === 'CUSTOMER') {
-    return 'Heavy-equipment operator: check the licence class covers the machine they drive on a road (for example a tractor).';
-  }
+/** `role` is kept for callers; [owner 16 Oct] no note depends on it since the heavy-equipment operator is held. */
+export function reviewNote(docType: string, _role: string): string | null {
   return REVIEW_NOTES[docType] ?? null;
 }
 export const roleLabel = (role: string) => LABELS[role] ?? 'Applicant';
