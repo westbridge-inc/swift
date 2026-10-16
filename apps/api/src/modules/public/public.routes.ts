@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
+import { readAppVersionPolicy } from '../ops/app-version';
 import { emergencyPolicyCounter } from '../../plugins/observability';
 import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
@@ -118,6 +119,17 @@ export async function publicRoutes(app: FastifyInstance) {
   app.get('/capabilities', async (_request, reply) => {
     reply.header('Cache-Control', 'no-store');
     return { success: true, data: { adsEnabled: adsEnabled() } };
+  });
+  /**
+   * [Row 3 · force update] The oldest phone build Swift still serves, per platform
+   * (ops/app-version.ts). Phones from build 12 on read it on open and on return to
+   * the screen; builds 9–11 never ask, and no route refuses a request for its app
+   * version. Unauthenticated (an outdated phone may hold no session) and uncached,
+   * so an ops change applies at the next open.
+   */
+  app.get('/app-version', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    return { success: true, data: await readAppVersionPolicy(app.prisma) };
   });
   /** GET /storefronts — the public directory. */
   /**
