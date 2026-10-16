@@ -15,7 +15,7 @@ vi.mock('node:crypto', async (importOriginal) => {
   const real = await importOriginal<typeof import('node:crypto')>();
   return {
     ...real,
-    timingSafeEqual: (a: NodeJS.ArrayBufferView, b: NodeJS.ArrayBufferView) => {
+    timingSafeEqual: (a: Parameters<typeof real.timingSafeEqual>[0], b: Parameters<typeof real.timingSafeEqual>[1]) => {
       calls.count += 1;
       return real.timingSafeEqual(a, b);
     },
