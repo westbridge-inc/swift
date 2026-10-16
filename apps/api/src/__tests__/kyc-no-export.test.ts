@@ -10,11 +10,13 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { DiditKycProvider } from '../providers/kyc/didit-provider';
 import { IdAnalyzerKycProvider } from '../providers/kyc/id-analyzer-provider';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
+import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 let app: FastifyInstance;
 let reviewerId: string;
 const ids: string[] = [];
-const phoneBase = 592_021_000_000 + Math.floor(Math.random() * 900_000);
+// A block no other suite uses (+592017…); +592021… overlapped gold-4-serv-02's audited +59202165nnn.
+const phoneBase = 592_017_000_000 + Math.floor(Math.random() * 900_000);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'human-only-kyc-test');
 
 async function applicant(role: 'ADMIN' | 'MOVER' | 'CUSTOMER') {
@@ -48,7 +50,13 @@ afterAll(async () => {
     await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.subject.deleteMany({ where: { createdById: { in: ids } } });
+    // An approved mover ID starts the mover's weekly-fee clock: its evidence goes before the payer (as activation-authority).
+    const subIds = (await app.prisma.subscription.findMany({ where: { OR: [{ rider: { userId: { in: ids } } }, { driver: { userId: { in: ids } } }] }, select: { id: true } })).map((s) => s.id);
+    await cleanupBillingClocks(app.prisma, subIds);
+    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
+    await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
   });
   await app.close();
 });
