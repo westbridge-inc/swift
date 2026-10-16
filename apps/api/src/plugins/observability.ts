@@ -24,7 +24,29 @@ let sentryReady = false;
 // event passes through this scrubber; capture sites additionally pass route
 // TEMPLATES instead of raw URLs.
 const TOKENISH_PARAM = /\b(token|secret|key|authorization|otp|pin|code|sig|signature)=[^&\s]+/gi;
-const TOKENISH_PATH = /\/(track|public\/trip|render)\/[A-Za-z0-9_.-]+/g;
+// [M013] The website's own share link is /trip/<token> (no /public prefix).
+const TOKENISH_PATH = /\/(track|(?:public\/)?trip|render)\/[A-Za-z0-9_.-]+/g;
+// [M013] Fields that ARE credentials, whatever their value looks like: a
+// token, an OTP or PIN, a password, a sign-in link, raw headers or cookies,
+// a provider key. Matched on the key with '-' and '_' removed, any case.
+const CREDENTIAL_KEY = /^(?:.*token.*|.*secret.*|.*password.*|passwordhash|otp|otpcode|pin|ridepin|pickupcode|deliverypin|signinurl|magiclink|authorization|cookies?|setcookie|headers|apikey|mkey|msecret|cardnumber|cvc|cvv)$/;
+// [M013] Free text: an error, delivery or log message can quote a bare code
+// with no URL or key around it ("your code is 123456"), which no pattern can
+// find. The error report keeps its type, stack and context, never the text,
+// the same rule the structured logs follow (logger-config err serializer).
+const FREE_TEXT_KEY = /^(?:message|formatted|body|text|html)$/;
+// A `code` field is kept only when it is an error classification
+// (SMS_SEND_FAILED, P2002, FST_ERR_…, ECONNRESET); anything else, such as a
+// six-digit sign-in code, is withheld.
+const CLASSIFICATION_CODE = /^(?:[A-Z][A-Z0-9_]{1,63}|P\d{4})$/;
+const SCRUBBED = '[scrubbed]';
+function scrubbedByKey(key: string, value: unknown): boolean {
+  const k = key.replace(/[-_]/g, '').toLowerCase();
+  if (CREDENTIAL_KEY.test(k)) return true;
+  if (FREE_TEXT_KEY.test(k)) return typeof value === 'string';
+  if (k === 'code') return !(typeof value === 'string' && CLASSIFICATION_CODE.test(value));
+  return false;
+}
 function scrubSentryText(value: string): string {
   let out = value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
   // [REPORT-016 F-016-02] Any URL's query string can carry arbitrary user
@@ -41,7 +63,9 @@ function scrubSentryText(value: string): string {
 // now passes the scrubber.
 function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (typeof node === 'string') return scrubSentryText(node);
-  if (node === null || typeof node !== 'object' || depth <= 0) return node;
+  if (node === null || typeof node !== 'object') return node;
+  // [M013] Past the traversal budget nothing was read, so nothing is sent.
+  if (depth <= 0) return SCRUBBED;
   if (seen.has(node as object)) return node;
   seen.add(node as object);
   if (Array.isArray(node)) {
@@ -49,12 +73,28 @@ function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown
     return node;
   }
   const rec = node as Record<string, unknown>;
-  for (const key of Object.keys(rec)) rec[key] = scrubDeep(rec[key], depth - 1, seen);
+  for (const key of Object.keys(rec)) {
+    // The SDK's own working state (live scopes and the client) rides on the
+    // event until the envelope is built, which deletes it unsent. Rewriting
+    // it would corrupt the SDK for every later event, so it is left alone.
+    if (key === 'sdkProcessingMetadata') continue;
+    rec[key] = scrubbedByKey(key, rec[key]) ? SCRUBBED : scrubDeep(rec[key], depth - 1, seen);
+  }
   return rec;
 }
 export function scrubSentryEvent<T extends {
   request?: { url?: string; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
 }>(event: T): T {
+  // [M013] An exception's text is free text too (a provider error can quote
+  // the SMS it refused); its type, stack and mechanism stay.
+  const exceptions = (event as { exception?: { values?: unknown } }).exception?.values;
+  if (Array.isArray(exceptions)) {
+    for (const exception of exceptions) {
+      if (exception && typeof exception === 'object' && typeof (exception as { value?: unknown }).value === 'string') {
+        (exception as { value: string }).value = SCRUBBED;
+      }
+    }
+  }
   if (event.request) {
     // Structural drops first — these fields are pure identifier surface.
     delete event.request.query_string;
