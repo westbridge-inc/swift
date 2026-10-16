@@ -45,6 +45,7 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { publicStorefrontSeller } from '../verification/storefront-seller';
 import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
@@ -79,6 +80,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1673,6 +1675,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // R8: storefront header star + bucket (same mapper as every card).
     const ratingSurface = (await ratingSurfaces(app.prisma, 'VENDOR', [id])).get(id) ?? NEW_ACTOR_SURFACE;
+    // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
+    // records on every read — never hand-written prose; incomplete blocks say what is missing.
+    const disclosure = await compilePublicStorefrontDisclosure(app.prisma, id);
 
     return {
       success: true,
@@ -1715,9 +1720,10 @@ export async function customerRoutes(app: FastifyInstance) {
         operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
-        // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
-        // records on every read — never hand-written prose; incomplete blocks say what is missing.
-        disclosure: await compilePublicStorefrontDisclosure(app.prisma, id),
+        disclosure,
+        // [R3 · CAA s.70] The seller block the store screen shows: who sells, how payment works, the
+        // store's refund rule and the statutory-rights sentence (null = withheld with the block above).
+        seller: await publicStorefrontSeller(app.prisma, id, disclosure),
         distanceKm,
         deliveryFee,
         etaMin,
@@ -2822,6 +2828,9 @@ export async function customerRoutes(app: FastifyInstance) {
           && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
           ? order.ridePin
           : null,
+        // [R14 · legal research D12] The store delivers this order with its own rider: the order screen says so,
+        // verbatim (null on every other order). The server's reading of this order's current fulfilment mode.
+        ownRiderNotice: ownRiderNotice(order),
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share

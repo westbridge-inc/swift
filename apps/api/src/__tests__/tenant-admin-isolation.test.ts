@@ -1046,6 +1046,13 @@ describe('tenant-qualified admin access', () => {
     expect(response.body).not.toContain(TENANT_B_SUBSCRIPTION_ID);
   });
 
+  it('[R12] returns 404 instead of reading a foreign fee receipt by its number', async () => {
+    const response = await adminRequest('GET', `/api/v1/admin/billing/receipts/${TENANT_B_RECEIPT_NUMBER}`);
+    expect(response.statusCode, response.body).toBe(404);
+    expect(response.body).not.toContain(TENANT_B_SUBSCRIPTION_ID);
+    expect(response.body).not.toContain('4,321');
+  });
+
   it('keeps foreign agent-cash rows out of admin payment lists', async () => {
     const list = await adminRequest('GET', '/api/v1/admin/billing/agent-payments?limit=200');
     const unmatched = await adminRequest('GET', '/api/v1/admin/billing/agent-payments/unmatched');

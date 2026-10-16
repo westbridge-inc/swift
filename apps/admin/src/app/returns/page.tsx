@@ -6,13 +6,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchReturns, resolveReturn, settleReturnRefund } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['REQUESTED', 'APPROVED', 'REFUND_DUE', 'REJECTED', 'REFUNDED'] as const;
 
 export default function ReturnsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('REQUESTED');
-  const { data, isLoading } = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['returns', filter], queryFn: () => fetchReturns(filter) });
   const resolve = useMutation({
     mutationFn: ({ id, status, note, reason }: { id: string; status: 'APPROVED' | 'REJECTED' | 'REFUND_DUE'; note?: string; reason: string }) =>
       resolveReturn(id, status, note, reason),
@@ -54,6 +55,8 @@ export default function ReturnsPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : isError ? (
+          <QueryFailed error={error} what="the returns" onRetry={() => void refetch()} retrying={isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.toLowerCase()} returns.
