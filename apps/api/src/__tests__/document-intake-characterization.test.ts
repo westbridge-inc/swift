@@ -13,6 +13,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [DOC-1 §10.5] test_characterization_legacy_upload_paths
@@ -79,11 +80,11 @@ beforeAll(async () => {
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Admin${RUN}`,
+    phone: testPhone(), firstName: 'Doc', lastName: `Admin${RUN}`,
     // [VERIFY-DOCS V3] This admin opens and decides documents, so it holds the explicit document reviewer grant.
     roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } } } });
   const mover = await app.prisma.user.create({ data: {
-    phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Mover${RUN}`,
+    phone: testPhone(), firstName: 'Doc', lastName: `Mover${RUN}`,
     roles: ['RIDER'], activeRole: 'RIDER', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   userIds.push(admin.id, mover.id);
   for (const [u, dev] of [[admin, 'doc-admin'], [mover, 'doc-mover']] as const) {

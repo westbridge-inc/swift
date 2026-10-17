@@ -88,6 +88,7 @@ export default defineConfig({
     // id is minted. Rollback means stopping the suite, never relaxing this.
     // The target lock runs first; the billing cutover step runs only on the
     // database that lock has proven disposable (and re-checks it itself).
-    globalSetup: ['./src/__tests__/setup/target-lock.ts', './src/__tests__/setup/billing-cutover.ts'],
+    // test-phones starts the run-wide testPhone() count (helpers/fixture-ids.ts).
+    globalSetup: ['./src/__tests__/setup/target-lock.ts', './src/__tests__/setup/billing-cutover.ts', './src/__tests__/setup/test-phones.ts'],
   },
 });

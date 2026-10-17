@@ -13,6 +13,7 @@ import { captureSignup } from '../modules/integrity/capture-hooks';
 import { hasActiveHold } from '../modules/integrity/enforcement';
 import { hashSignal, isPublicNetworkAddress, normalizeIpSubnet, normalizePhone } from '../modules/integrity/normalize';
 import { registrationProofFor } from './helpers/otp';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [AUD-1 row 301 · AUD-L4-009 · AUD-PRIOR-009] The signup fraud check.
@@ -236,7 +237,7 @@ describe('only a public source address is a network', () => {
 
 describe('the route takes the source address the TRUST_PROXY way, never from a raw X-Forwarded-For', () => {
   async function register(instance: FastifyInstance, remoteAddress: string, forwardedFor: string) {
-    const phone = `+59276${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const phone = testPhone();
     const proof = await registrationProofFor(instance, phone);
     const res = await instance.inject({
       method: 'POST', url: '/api/v1/auth/register', remoteAddress,

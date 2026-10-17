@@ -16,6 +16,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { OrderService } from '../modules/order/order.service';
 import { issueSyntheticHandoverPhoto, syntheticMoverSession } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH B — the settlement digest, the top-up command, the three
@@ -63,7 +64,7 @@ async function freshVendor() {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
     ownerId: owner.id, name: `B Kitchen ${RUN} ${nanoid(3)}`, slug: `arcb-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
-    phone: `+59271${String(Math.floor(Math.random() * 90000) + 10000)}`, addressLine1: '2 Audit Row', city: 'Georgetown',
+    phone: testPhone(), addressLine1: '2 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id); return vendor;
 }
@@ -150,7 +151,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'ArcB', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });

@@ -10,6 +10,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 import { MATERIAL_CHANGES, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [Legal research G2 · R26 · Terms "Changes": "We announce material changes in the app … and ask you to accept
@@ -54,7 +55,7 @@ const userIds: string[] = [];
 
 async function mkUser(roles: UserRole[], tosVersion: string | null) {
   const u = await app.prisma.user.create({
-    data: { phone: `+59200${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Re', lastName: `Accept${nanoid(5)}`, roles, activeRole: roles[0]!, isPhoneVerified: true, tosVersion },
+    data: { phone: testPhone(), firstName: 'Re', lastName: `Accept${nanoid(5)}`, roles, activeRole: roles[0]!, isPhoneVerified: true, tosVersion },
   });
   userIds.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: roles[0]!, jti: nanoid(8) });

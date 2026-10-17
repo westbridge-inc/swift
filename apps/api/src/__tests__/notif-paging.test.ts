@@ -6,6 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { withPushRetry, type PushProvider } from '../providers/notifications/channels';
 import { NotificationService, notifyAdmins } from '../modules/notification/notification.service';
 import { opsPageOnce } from '../jobs/queue';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // SWIFT-UG-NOTIF-01/02 + SWIFT-AUD-D7-02/03 — notification hardening and ops
@@ -95,7 +96,7 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
     await app.prisma.tenant.create({ data: { id: otherTenant, name: 'Other', slug: otherTenant, isActive: true } });
     const foreignAdmin = await app.prisma.user.create({
       data: {
-        phone: `+59278${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Foreign', lastName: 'Admin',
         roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
@@ -136,7 +137,7 @@ describe('notifyAdmins tenancy [NOC-A F45]', () => {
 
       const superAdmin = await app.prisma.user.create({
         data: {
-          phone: `+59280${Math.floor(Math.random() * 900000) + 100000}`,
+          phone: testPhone(),
           firstName: 'Platform', lastName: 'Operator',
           roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
           isPhoneVerified: true, status: 'ACTIVE', tenantId: otherTenant,
@@ -181,7 +182,7 @@ describe('notifyAdmins under request tenant scope [F-028-10]', () => {
     await app.prisma.tenant.create({ data: { id: opsTenant, name: 'Ops home', slug: opsTenant, isActive: false } });
     const operator = await app.prisma.user.create({
       data: {
-        phone: `+59281${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Outage', lastName: 'Operator',
         roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: opsTenant,
