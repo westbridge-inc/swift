@@ -255,13 +255,13 @@ describe('payScreenState — the four bands', () => {
     expect(s.extra).toContain('Orders already in the kitchen still go out');
   });
 
-  it('[BILLING-REANCHOR] paused: the payment covers the week from the day it is paid, never a date already past', () => {
+  it('[BILLING-REANCHOR] paused: the paused days are not charged, and no paid-through date already past is shown', () => {
     for (const status of ['SUSPENDED', 'CHURNED']) {
       const s = payScreenState(
         { status, weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(-12), nextBillingDate: iso(-12) },
         NOW,
       );
-      expect(s.covers).toBe('Covers 1 week from the day you pay');
+      expect(s.covers).toBe('Covers 1 week · the days orders were paused are not charged');
       expect(s.covers).not.toMatch(/through|Jul|Aug/);
     }
   });

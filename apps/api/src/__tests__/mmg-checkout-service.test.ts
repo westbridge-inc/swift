@@ -570,12 +570,14 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect(await toldOf(s.userId)).toHaveLength(1);
   });
 
-  it('[BILLING-REANCHOR · board row 151] a partner the billing run suspended pays on the checkout page: billing restarts at the return, priced at the return, never the weeks switched off', async () => {
+  it('[BILLING-REANCHOR · board row 151] a partner the billing run suspended pays on the checkout page: the time switched off is not billed, the operated grace is, and the week is priced at its own start', async () => {
     const due = new Date(Date.now() - 10 * DAY);
     const s = await makeSub({ due });
     // The billing run's own suspension: three failed charges over 50 hours.
     for (const h of [0, 25, 50]) await billing.runBillingCycle(new Date(due.getTime() + h * 3_600_000));
-    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('SUSPENDED');
+    const suspended = await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } });
+    expect(suspended.status).toBe('SUSPENDED');
+    const suspendedAt = suspended.suspendedAt!;
 
     const { checkout } = await start(s);
     const row = await intentOf(checkout.ref);
@@ -595,12 +597,16 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
 
     const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } });
     expect(sub.status).toBe('ACTIVE');
-    // The week bought starts at the return, not at the unpaid due date ten days ago.
-    expect(sub.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    // COORD ruling 17 Oct (option a): the due date moves on by exactly the time
+    // suspended; the 48-hour grace they operated in is inside the week bought.
+    const reanchor = await app.prisma.billingObligationTransition.findFirstOrThrow({ where: { subscriptionId: s.subId, kind: 'RETURN_REANCHOR' } });
+    expect(reanchor.effectiveAt.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(sub.currentPeriodStart.getTime()).toBe(due.getTime() + (reanchor.effectiveAt.getTime() - suspendedAt.getTime()));
+    expect(reanchor.effectiveAt.getTime() - sub.currentPeriodStart.getTime()).toBe(suspendedAt.getTime() - due.getTime());
+    expect(suspendedAt.getTime() - due.getTime()).toBeGreaterThanOrEqual(48 * 3_600_000);
     expect(sub.nextBillingDate.getTime() - sub.currentPeriodStart.getTime()).toBe(7 * DAY);
-    expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: s.subId, kind: 'RETURN_REANCHOR' } })).toBe(1);
     expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `success:${s.subId}:${due.toISOString().slice(0, 10)}` } })).toBe(0);
-    // Priced at the return (8 USD = 1,600), not the unpaid week (10.5 USD = 2,100): the rest stays theirs.
+    // Priced at the week's own start (8 USD = 1,600), not the unpaid week (10.5 USD = 2,100): the rest stays theirs.
     const week = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `success:${s.subId}:${sub.currentPeriodStart.toISOString().slice(0, 10)}` } });
     expect([Number(week.amount), Number(week.amountUsd)]).toEqual([1600, 8]);
     expect(await walletOf(s.subId)).toBe(500);

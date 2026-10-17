@@ -3359,7 +3359,8 @@ model BillingObligationTransition {
   lapseEvent BillingEvent? @relation("ObligationLapse", fields: [lapseEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   /// [BILLING-REANCHOR · board row 151] RETURN_REANCHOR only: the immutable
   /// SUSPENDED billing record of the unpaid obligation the partner returned
-  /// from. No arrears: billing restarts at the return (owner/coordinator, 4 Oct).
+  /// from. No arrears: the time suspended is not billed, the operated grace is
+  /// (owner/coordinator 4 Oct; coordinator 17 Oct).
   suspensionEventId String? @unique
   suspensionEvent BillingEvent? @relation("ObligationSuspension", fields: [suspensionEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   auditId String @unique

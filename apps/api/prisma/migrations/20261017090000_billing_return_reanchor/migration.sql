@@ -2,9 +2,12 @@
 -- Owner/coordinator ruling (OWNER-DECISIONS "Weekly-fee arrears after a
 -- pause", 4 Oct): no arrears for weeks a partner was switched off/paused or
 -- suspended and not operating; billing restarts at the week they return.
--- A new kind of consumed obligation transition, RETURN_REANCHOR, moves the
--- one shared billing clock from the unpaid due date to the return instant
--- WITHOUT a payment. Its proof is the immutable SUSPENDED billing record of
+-- Coordinator ruling 17 Oct (review S2-1, option a): only the time SUSPENDED
+-- is not billed; the grace before it, in which the partner was operating,
+-- stays billable. A new kind of consumed obligation transition,
+-- RETURN_REANCHOR, moves the one shared billing clock from the unpaid due date
+-- on by exactly the time suspended (due + (return - suspendedAt)), WITHOUT a
+-- payment. Its proof is the immutable SUSPENDED billing record of
 -- that obligation (unique: one suspension authorizes one restart), and it is
 -- committed only together with the paid advance of the return week.
 SET lock_timeout = '10s';
@@ -31,13 +34,16 @@ DECLARE c billing_dunning_clocks%ROWTYPE; s subscriptions%ROWTYPE; p subscriptio
 BEGIN
   IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'Billing obligation transition is immutable' USING ERRCODE='check_violation'; END IF;
   -- [BILLING-REANCHOR] A partner the billing engine suspended for an unpaid
-  -- obligation (not operating) restarts at the week they return: the clock
-  -- moves from the unpaid due date to the return instant with no payment and
-  -- no arrears. The proof is the immutable SUSPENDED record of exactly this
-  -- obligation (each one used once), the subscription still SUSPENDED or
-  -- CHURNED since then, that obligation never paid, nothing being confirmed,
-  -- and the audit naming the same facts. The span not billed is recorded as
-  -- the period. It must be paid in the same transaction (billing_obligation_committed).
+  -- obligation (not operating) is not billed for the time suspended: the
+  -- clock moves from the unpaid due date on by exactly that time (effectiveAt =
+  -- the return, read against this database's clock), with no payment. The
+  -- grace before the suspension was operated, so it stays billable. The proof
+  -- is the immutable SUSPENDED record of exactly this obligation (each one
+  -- used once), the subscription still SUSPENDED or CHURNED since a moment at
+  -- or after that due date, that obligation never paid, nothing being
+  -- confirmed, and the audit naming the same facts. The span not billed is
+  -- recorded as the period. It must be paid in the same transaction
+  -- (billing_obligation_committed).
   IF NEW.kind='RETURN_REANCHOR' THEN
     SELECT * INTO c FROM billing_dunning_clocks WHERE id=NEW."clockId" FOR UPDATE;
     SELECT * INTO s FROM subscriptions WHERE id=NEW."subscriptionId";
@@ -49,11 +55,13 @@ BEGIN
         (NEW."tenantId",NEW."fromSubscriptionId",NEW."fromEpoch",NEW."fromDue")
       OR NEW."subscriptionId"<>NEW."fromSubscriptionId" OR NOT billing_clock_source_matches(c.id,s.id)
       OR s.status NOT IN ('SUSPENDED','CHURNED') OR s."suspendedAt" IS NULL OR s."suspendedAt">NEW."effectiveAt"
+      OR s."suspendedAt"<NEW."fromDue"
       OR s."nextBillingDate"<>c."dueAt" OR c."pausedAt" IS NOT NULL OR c."authorityHoldReason" IS NOT NULL
       OR (suspension."subscriptionId",suspension.type::text,suspension."idempotencyKey") IS DISTINCT FROM
         (s.id,'SUSPENDED','suspended:'||s.id||':'||to_char(c."dueAt",'YYYY-MM-DD'))
       OR suspension."createdAt">NEW."effectiveAt"
-      OR NEW."toDue"<>NEW."effectiveAt" OR NEW."toDue"<=NEW."fromDue"
+      OR NEW."toDue"<>NEW."fromDue"+(NEW."effectiveAt"-s."suspendedAt") OR NEW."toDue"<=NEW."fromDue"
+      OR NEW."effectiveAt" NOT BETWEEN (now() AT TIME ZONE 'UTC')-interval '5 minutes' AND (now() AT TIME ZONE 'UTC')+interval '5 minutes'
       OR (NEW."periodStart",NEW."periodEnd",NEW.amount,NEW."currencyCode") IS DISTINCT FROM (NEW."fromDue",NEW."toDue",0::numeric,s."currencyCode")
       OR EXISTS (SELECT 1 FROM payment_confirmation_holds WHERE "clockId"=c.id AND status IN ('ACTIVE','SETTLEMENT_APPLY_PENDING'))
       OR EXISTS (SELECT 1 FROM billing_events b WHERE b."idempotencyKey"='success:'||s.id||':'||to_char(c."dueAt",'YYYY-MM-DD'))

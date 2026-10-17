@@ -1,6 +1,6 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
-import { reanchorAtReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, weekForgivenByReturnInTx } from './dunning-clock';
+import { reanchorAtReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
@@ -557,9 +557,10 @@ export class BillingService {
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
     // [BILLING-REANCHOR] A returning partner's payment buys the week that starts
-    // now (applySuccessfulChargeInTx), so that week's price is the one charged.
+    // at the due date moved on by the time suspended (applySuccessfulChargeInTx),
+    // so that week's price, at its own start, is the one charged.
     const returning = await returnReanchorProof(this.prisma, sub, now);
-    let priced = await this.priceEligibleFor(returning ? { ...sub, nextBillingDate: now } : sub, usd);
+    let priced = await this.priceEligibleFor(returning ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
 
     if (!reclaimedAttempt) try {
       const reserved = await this.prisma.$transaction(async (tx) => {
@@ -2039,7 +2040,7 @@ export class BillingService {
       if (inSettlement && (disposition === 'advanced' || disposition === 'banked')) await inSettlement(tx);
       if (disposition !== 'advanced') return { disposition };
       // [BILLING-REANCHOR] The week booked is the one the subscription now stands
-      // in: a return pays the week from the return, not the week it was asked for.
+      // in: a return pays the week it re-anchored to, not the week it was asked for.
       const settledPeriodKey = (await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { currentPeriodStart: true } }))
         .currentPeriodStart.toISOString().slice(0, 10);
       const event = await tx.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${settledPeriodKey}` } });
@@ -2147,7 +2148,7 @@ export class BillingService {
         const forgiven = await weekForgivenByReturnInTx(tx, sub.id, payment.periodStart);
         const allowsAdvance = this.successfulChargeAuthorityAllowsAdvance(authority, sub);
         // [BILLING-REANCHOR] A capture that brings a suspended partner back is
-        // their return: kept as fee credit and spent at once on the week from now.
+        // their return: kept as fee credit and spent at once on the return week.
         const returning = !mmgHeld && !covered && !forgiven && allowsAdvance && await this.returnsInTx(tx, authority.status, sub.id, now);
         const bankCapture = mmgHeld || covered || forgiven || returning || !allowsAdvance;
         if (bankCapture && await this.holdWalletCurrencyMismatch(tx, payment, currencyCode, paymentRef)) return 'held';
@@ -2168,13 +2169,13 @@ export class BillingService {
             subscriptionId: sub.id, amount, currencyCode: sub.currencyCode,
             eventKey: `bank:${payment.id}`, channel: returning ? 'CARD_RETURN' : 'CARD_LATE_APPROVAL', rail: 'CARD',
             note: returning
-              ? `Card payment received for ${periodKey} from a suspended partner: their return; spent on the week from the return (no arrears) (payment ${payment.id})`
+              ? `Card payment received for ${periodKey} from a suspended partner: their return; spent on the return week (the time suspended is not billed) (payment ${payment.id})`
               : `Card payment received for ${periodKey}; banked without changing subscription lifecycle (payment ${payment.id})`,
           });
           if (!returning) return 'banked';
           // The credit buys the return week through the prepaid path below, at
           // that week's own price and never more than this capture.
-          ({ amount, usdTrio } = await this.returnWeekCharge(sub, amount, usdTrio, now));
+          ({ amount, usdTrio } = await this.returnWeekCharge(tx, sub, amount, usdTrio, now));
           settlePaymentId = undefined;
           spendPrepaid = amount;
           paymentRef = 'prepaid';
@@ -2186,10 +2187,11 @@ export class BillingService {
     const current = { ...sub, status: authority.status } as SubWithRelations;
     let periodStart = sub.nextBillingDate;
     // [BILLING-REANCHOR · board row 151] A SUSPENDED or CHURNED partner was not
-    // operating: their payment buys the week that starts NOW, never the unpaid
-    // week they were suspended for or any week after it (no arrears). The
-    // obligation moves to the return instant first, as its own proven
-    // transition (dunning-clock.ts); a PAST_DUE partner keeps the week due.
+    // operating while suspended: that time is not billed (no arrears), the
+    // grace they operated in before it is (COORD ruling 17 Oct). The obligation
+    // first moves on by exactly the time suspended, as its own proven
+    // transition (dunning-clock.ts), and the payment buys the week from there;
+    // a PAST_DUE partner keeps the week due.
     // An issued instruction keeps its own week (billing_confirmation_source_immutable):
     // the return reaches this point as fee credit spent on the return week (below).
     const returnAt = !settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status) ? await reanchorAtReturnInTx(tx, sub.id, now) : null;
@@ -2774,7 +2776,7 @@ export class BillingService {
   /** [BILLING-REANCHOR · board row 151] Money confirmed for an instruction
    *  issued while the partner was suspended (or before) brings them back: the
    *  instruction keeps its own week (its identity is immutable), so the money
-   *  is kept as fee credit and spent at once on the week that starts now. True
+   *  is kept as fee credit and spent at once on the return week. True
    *  only when that return is proven (the suspension of the unpaid obligation). */
   private async returnsInTx(tx: Prisma.TransactionClient, status: SubscriptionStatus, subscriptionId: string, now: Date): Promise<boolean> {
     if (!RETURN_REANCHOR_STATUSES.includes(status)) return false;
@@ -2783,17 +2785,19 @@ export class BillingService {
 
   /** [BILLING-REANCHOR · board row 151] What the return week costs when money
    *  already received (an MMG approval, a card capture, asked for the unpaid
-   *  week) brings a suspended partner back. That week starts at the return, so
-   *  it is priced at the return like every week is priced at its start (a cut
-   *  in force by then applies; a rise only as its 14-day notice allows), and
-   *  it never costs more than was received: the amount Swift asked for is
-   *  honoured. Whatever is left stays the partner's fee credit. */
+   *  week) brings a suspended partner back. That week starts at the due date
+   *  moved on by the time suspended, and it is priced at that start like every
+   *  week (a cut in force by then applies; a rise only as its 14-day notice
+   *  allows); it never costs more than was received: the amount Swift asked
+   *  for is honoured. Whatever is left stays the partner's fee credit. */
   private async returnWeekCharge(
-    sub: Subscription, received: number, receivedTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined, now: Date,
+    tx: Prisma.TransactionClient, sub: Subscription, received: number,
+    receivedTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined, now: Date,
   ): Promise<{ amount: number; usdTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined }> {
     const usd = await this.loadUsdPricing();
     if (usd && usd.currency !== sub.currencyCode) return { amount: received, usdTrio: receivedTrio };
-    const priced = await this.priceEligibleFor({ ...sub, nextBillingDate: now }, usd);
+    const obligation = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { nextBillingDate: true, suspendedAt: true } });
+    const priced = await this.priceEligibleFor({ ...sub, nextBillingDate: returnWeekStart(obligation, now) }, usd);
     const price = Number(priced.amount);
     return price < received ? { amount: price, usdTrio: priced.usdTrio } : { amount: received, usdTrio: receivedTrio };
   }
@@ -3107,7 +3111,7 @@ export class BillingService {
       // is not owed for that week: it is kept as fee credit, never dropped.
       const forgiven = await weekForgivenByReturnInTx(tx, sub.id, payment.periodStart);
       // [BILLING-REANCHOR] An approval that brings a suspended partner back is their
-      // return: kept as fee credit and spent at once on the week from now (below).
+      // return: kept as fee credit and spent at once on the return week (below).
       const returning = !covered && !forgiven && !authority.bankInsteadOfAdvance && !otherApprovalHeld
         && await this.returnsInTx(tx, authority.status, sub.id, now);
       if (covered || forgiven || returning || authority.bankInsteadOfAdvance || otherApprovalHeld) {
@@ -3177,7 +3181,7 @@ export class BillingService {
         const reason = covered
           ? `week ${periodKey} already covered`
           : forgiven ? `week ${periodKey} was not billed (billing restarted when the partner returned)`
-          : returning ? 'the partner returned from a suspension: billing restarts at the return (no arrears)'
+          : returning ? 'the partner returned from a suspension: the time suspended is not billed (no arrears)'
           : otherApprovalHeld ? 'another payment requires manual reconciliation'
           : `subscription is ${authority.status}${authority.deletedAccount ? ' after account deletion' : ''}`;
         await this.creditWalletInTx(tx, {
@@ -3186,16 +3190,16 @@ export class BillingService {
           currencyCode: settlementCurrency,
           eventKey: `bank:${payment.id}`,
           note: returning
-            ? `MMG approval received — ${reason}; spent on the week from the return (payment ${payment.id})`
+            ? `MMG approval received — ${reason}; spent on the return week (payment ${payment.id})`
             : `late MMG approval banked — ${reason} (payment ${payment.id})`,
           channel: returning ? 'MMG_PUSH_RETURN' : 'MMG_LATE_APPROVAL',
           mmgRef: evidence.transactionId,
         });
         if (returning) {
-          // The credit buys the week that starts now, through the prepaid path
+          // The credit buys the return week, through the prepaid path
           // (its own new period row), in this same transaction, at that week's
           // own price and never more than was received; the rest stays credit.
-          const week = await this.returnWeekCharge(current, amount, usdTrio, now);
+          const week = await this.returnWeekCharge(tx, current, amount, usdTrio, now);
           const applied = await this.applySuccessfulChargeInTx(tx, current, week.amount, 'prepaid', now, periodKey, undefined, week.usdTrio, week.amount);
           if (applied !== 'advanced') throw new Error(`Locked MMG authority changed while applying the return of payment ${payment.id}`);
           const returned = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { currentPeriodStart: true } });
@@ -4416,8 +4420,8 @@ export class BillingService {
           return true;
         }
         if (await hasConfirmationInTx(tx, sub.id, now, { checkoutId: checkout.id })) return false;
-        // [BILLING-REANCHOR] A return buys the week that starts now: price that week.
-        const priced = await this.priceEligibleFor(await returnReanchorProof(tx, sub, now) ? { ...sub, nextBillingDate: now } : sub, usd);
+        // [BILLING-REANCHOR] A return buys the week from the due date moved on by the time suspended: price that week.
+        const priced = await this.priceEligibleFor(await returnReanchorProof(tx, sub, now) ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
         const amount = sub.feeWaived ? 0 : Number(priced.amount);
         const balance = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } });
         if (amount > 0 && (!balance || balance.currencyCode !== sub.currencyCode || Number(balance.balance) < amount)) return false;

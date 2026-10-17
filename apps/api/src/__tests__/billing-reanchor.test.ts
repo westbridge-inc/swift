@@ -79,12 +79,18 @@ async function brokeVendorSub(due: Date) {
   return { userId: user.id, vendorId: vendor.id, subId: sub.id };
 }
 
-/** Three failed charges over 50 h: the billing engine's own suspension, from `due`. */
+/** When each partner was suspended (the billing engine's own moment, read back). */
+const suspendedAtOf = new Map<string, Date>();
+/** Three failed charges over 50 h: the billing engine's own suspension, from `due`.
+ *  The partner operated through the 48-hour grace before it. */
 async function suspendFrom(subId: string, due: Date) {
   await billing.runBillingCycle(due);
   await billing.runBillingCycle(new Date(due.getTime() + 25 * HOUR));
   await billing.runBillingCycle(new Date(due.getTime() + 50 * HOUR));
-  expect((await sub(subId)).status).toBe('SUSPENDED');
+  const s = await sub(subId);
+  expect(s.status).toBe('SUSPENDED');
+  suspendedAtOf.set(subId, s.suspendedAt!);
+  return s.suspendedAt!;
 }
 
 const sub = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id } });
@@ -100,14 +106,23 @@ const transitionsOf = (id: string) => app.prisma.billingObligationTransition.fin
 const day = (at: Date) => at.toISOString().slice(0, 10);
 const topUp = (id: string, amount: number, ref: string) => billing.recordTopUp(id, amount, 'admin-test', ref, nanoid(12));
 
-/** What a return must leave behind: one paid week from the return, the span
- *  not billed on record against the suspension it was proven by. */
+/** What a return must leave behind (COORD ruling 17 Oct, option (a): only the
+ *  time SUSPENDED is not billed; the grace they operated in stays billable):
+ *  one paid week starting at the unpaid due date moved on by exactly the time
+ *  suspended, the span not billed on record against the suspension it was
+ *  proven by. `from`..`to` bound the return instant. */
 async function expectReturnedAt(subId: string, due: Date, from: number, to: number) {
   const s = await sub(subId);
   expect(s.status).toBe('ACTIVE');
   expect(s.suspendedAt).toBeNull();
-  expect(s.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(from);
-  expect(s.currentPeriodStart.getTime()).toBeLessThanOrEqual(to);
+  const suspendedAt = suspendedAtOf.get(subId)!;
+  const returnedAt = (await transitionsOf(subId)).find((t) => t.kind === 'RETURN_REANCHOR')!.effectiveAt.getTime();
+  expect(returnedAt).toBeGreaterThanOrEqual(from);
+  expect(returnedAt).toBeLessThanOrEqual(to);
+  expect(s.currentPeriodStart.getTime()).toBe(due.getTime() + (returnedAt - suspendedAt.getTime()));
+  // The operated grace (due date to suspension) is inside what is billed: the
+  // week bought starts that long before the return.
+  expect(returnedAt - s.currentPeriodStart.getTime()).toBe(suspendedAt.getTime() - due.getTime());
   expect(s.currentPeriodEnd.getTime() - s.currentPeriodStart.getTime()).toBe(7 * DAY);
   expect(s.nextBillingDate.getTime()).toBe(s.currentPeriodEnd.getTime());
 
@@ -121,8 +136,8 @@ async function expectReturnedAt(subId: string, due: Date, from: number, to: numb
   const chain = await transitionsOf(subId);
   const reanchor = chain.find((t) => t.kind === 'RETURN_REANCHOR')!;
   expect(reanchor).toMatchObject({
-    fromDue: due, toDue: s.currentPeriodStart, effectiveAt: s.currentPeriodStart,
-    periodStart: due, periodEnd: s.currentPeriodStart, // the span not billed
+    fromDue: due, toDue: s.currentPeriodStart, effectiveAt: new Date(returnedAt),
+    periodStart: due, periodEnd: s.currentPeriodStart, // the span not billed = the time suspended
     paymentId: null, successEventId: null, lapseEventId: null, suspensionEventId: suspension.id, currencyCode: 'GYD',
   });
   expect(Number(reanchor.amount)).toBe(0);
@@ -203,7 +218,24 @@ describe('BILLING-REANCHOR — a returning partner pays from the week they retur
     expect((await sub(v.subId)).status).toBe('ACTIVE');
   });
 
-  it('returns mid-week, inside the week they were suspended in: the week starts at the return, not at the old due date', async () => {
+  it('[REVIEW-G S2-1 · COORD 17 Oct] no fee cut by gaming the grace: let a charge fail, operate through the 48-hour grace, get suspended, pay at once: the grace days are still paid', async () => {
+    const due = new Date(Date.now() - 50 * HOUR - 60_000);
+    const v = await brokeVendorSub(due);
+    const suspendedAt = await suspendFrom(v.subId, due); // a minute ago, after 50 operated hours
+    await topUp(v.subId, RATE, 'back at once');
+    const s = await sub(v.subId);
+    const reanchor = (await transitionsOf(v.subId)).find((t) => t.kind === 'RETURN_REANCHOR')!;
+    const returnedAt = reanchor.effectiveAt.getTime();
+    // Only the time suspended is not billed, never the grace they operated in.
+    expect(suspendedAt.getTime() - due.getTime()).toBeGreaterThanOrEqual(48 * HOUR);
+    expect(s.currentPeriodStart.getTime()).toBe(due.getTime() + (returnedAt - suspendedAt.getTime()));
+    expect(returnedAt - s.currentPeriodStart.getTime()).toBe(suspendedAt.getTime() - due.getTime());
+    // One week paid per 7 days plus the time switched off, never per 9 days.
+    expect(s.nextBillingDate.getTime() - due.getTime()).toBe(7 * DAY + (returnedAt - suspendedAt.getTime()));
+    expect(await balance(v.subId)).toBe(0);
+  });
+
+  it('returns mid-week, inside the week they were suspended in: the week runs on from the due date by exactly the time switched off', async () => {
     const due = new Date(Date.now() - 3.5 * DAY);
     const v = await brokeVendorSub(due);
     await suspendFrom(v.subId, due);
@@ -211,8 +243,10 @@ describe('BILLING-REANCHOR — a returning partner pays from the week they retur
     const before = Date.now();
     await topUp(v.subId, RATE, 'back mid-week');
     const { s } = await expectReturnedAt(v.subId, due, before - 1000, Date.now() + 1000);
-    // The old week would have ended in 3.5 days; the return week runs a full 7.
-    expect(s.currentPeriodEnd.getTime()).toBeGreaterThan(due.getTime() + 7 * DAY + 3 * DAY);
+    // The old week would have ended at due + 7 days; it now ends later by exactly the time switched off.
+    const suspendedFor = s.currentPeriodStart.getTime() - due.getTime();
+    expect(suspendedFor).toBeGreaterThan(30 * HOUR); // 3.5 days less the 50 operated hours
+    expect(s.currentPeriodEnd.getTime()).toBe(due.getTime() + 7 * DAY + suspendedFor);
     expect(await balance(v.subId)).toBe(0);
   });
 
@@ -226,7 +260,8 @@ describe('BILLING-REANCHOR — a returning partner pays from the week they retur
     const before = Date.now();
     await topUp(v.subId, RATE, 'rejoin');
     await expectReturnedAt(v.subId, due, before - 1000, Date.now() + 1000);
-    expect((await sub(v.subId)).nextBillingDate.getTime()).toBeGreaterThan(Date.now() + 6 * DAY);
+    // The month switched off is not billed; only the 50 operated hours of grace are.
+    expect((await sub(v.subId)).nextBillingDate.getTime()).toBeGreaterThan(Date.now() + 7 * DAY - 51 * HOUR);
 
     // The next hourly runs find nothing due; the partner is not re-suspended.
     for (const h of [1, 25, 50]) await billing.runBillingCycle(new Date(Date.now() + h * HOUR));
@@ -247,6 +282,21 @@ describe('BILLING-REANCHOR — a returning partner pays from the week they retur
     expect(s.nextBillingDate.getTime()).toBe(due.getTime() + 7 * DAY);
     expect((await transitionsOf(v.subId)).map((t) => t.kind)).toEqual(['PAID']);
     expect(await app.prisma.auditLog.count({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } })).toBe(0);
+  });
+
+  it('[REVIEW-G S4-1] an app clock away from the database clock never re-anchors: the week due is paid as it stands and finance is told', async () => {
+    const due = new Date(Date.now() - 9 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    // Money in the wallet (credited while suspended), then a billing run dated an hour ahead.
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: v.subId }, data: { balance: RATE } });
+    await billing.runBillingCycle(new Date(Date.now() + HOUR));
+    const s = await sub(v.subId);
+    expect(s.status).toBe('ACTIVE');
+    expect(s.currentPeriodStart.getTime()).toBe(due.getTime()); // the old week, as on main
+    expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: v.subId, kind: 'RETURN_REANCHOR' } })).toBe(0);
+    const review = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } });
+    expect(review.map((r) => (r.changes as Record<string, unknown>)['reason'])).toEqual(['CLOCK_DISAGREES']);
   });
 
   it('a repeated top-up key credits once and reinstates once', async () => {
@@ -377,6 +427,8 @@ async function suspendedAfterPaying(due: Date) {
 const told = (subId: string, row: PriceBookRow, at: Date) => app.prisma.billingEvent.create({ data: {
   subscriptionId: subId, type: 'REMINDER', currencyCode: 'GYD', idempotencyKey: priceBookNoticeKey(subId, row.id), deliveredAt: at,
 } });
+/** The start of the week a return at `at` buys: the due date moved on by the time suspended. */
+const returnWeekStartAt = (subId: string, due: Date, at: number) => new Date(due.getTime() + (at - suspendedAtOf.get(subId)!.getTime()));
 /** The return week's own charge: [GYD, USD]. */
 async function returnWeekCharge(subId: string) {
   const s = await sub(subId);
@@ -419,8 +471,9 @@ describe('BILLING-REANCHOR — the return week is priced at its own start: a pen
     const due = new Date(Date.now() - 10 * DAY);
     const v = await suspendedAfterPaying(due);
     await billing.setBillingRail(v.subId, 'MOBILE_MONEY', '5926001236');
-    const cut = bookRow(80, new Date(Date.now() + 60_000));
     const tick = new Date(Date.now() + 2 * 60_000); // MMG's lookup answers after the cut
+    // The cut takes effect after the week a payment now would buy starts, before the week the approval buys.
+    const cut = bookRow(80, new Date(returnWeekStartAt(v.subId, due, Date.now()).getTime() + 60_000));
     const request = await withPriceBook([bookRow(100, new Date(due.getTime() - 60 * DAY)), cut], async () => {
       expect(await billing.billSubscription(await subWithRelations(v.subId) as never)).toBe('pending');
       const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: v.subId, paymentMethod: 'MOBILE_MONEY' } });
@@ -429,7 +482,7 @@ describe('BILLING-REANCHOR — the return week is priced at its own start: a pen
       await billing.pollPendingMmgCharges(tick);
       return issued;
     });
-    expect((await sub(v.subId)).currentPeriodStart.getTime()).toBe(tick.getTime());
+    expect((await sub(v.subId)).currentPeriodStart.getTime()).toBe(returnWeekStartAt(v.subId, due, tick.getTime()).getTime());
     expect(await returnWeekCharge(v.subId)).toEqual([80 * USD_RATE, 80]);
     const credit = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `bank:${request.id}` } });
     expect(Number(credit.amount)).toBe(RATE); // every dollar received is credited once
@@ -440,7 +493,7 @@ describe('BILLING-REANCHOR — the return week is priced at its own start: a pen
     const due = new Date(Date.now() - 10 * DAY);
     const v = await suspendedAfterPaying(due);
     await billing.setBillingRail(v.subId, 'MOBILE_MONEY', '5926001237');
-    const rise = bookRow(120, new Date(Date.now() + 60_000));
+    const rise = bookRow(120, new Date(returnWeekStartAt(v.subId, due, Date.now()).getTime() + 60_000));
     await told(v.subId, rise, new Date(Date.now() - 20 * DAY));
     const tick = new Date(Date.now() + 2 * 60_000);
     await withPriceBook([bookRow(100, new Date(due.getTime() - 60 * DAY)), rise], async () => {
@@ -456,21 +509,24 @@ describe('BILLING-REANCHOR — the return week is priced at its own start: a pen
 });
 
 describe('BILLING-REANCHOR — the database admits only a proven, paid return', () => {
-  /** Insert a re-anchor by hand, with chosen facts, inside one transaction. */
-  async function forgeReanchor(subId: string, patch: { suspensionEventId?: string; nextDue?: Date } = {}) {
+  /** Insert a re-anchor by hand, with chosen facts, inside one transaction. By
+   *  default it is shaped as the engine shapes one (returned now; the due date
+   *  moved on by the time suspended), so each test changes one fact. */
+  async function forgeReanchor(subId: string, patch: { suspensionEventId?: string; nextDue?: Date; at?: Date } = {}) {
     return app.prisma.$transaction(async (tx) => {
       const clock = await tx.billingDunningClock.findUniqueOrThrow({ where: { subscriptionId: subId } });
       const s = await tx.subscription.findUniqueOrThrow({ where: { id: subId } });
       const suspension = await tx.billingEvent.findUnique({ where: { idempotencyKey: suspensionKey(subId, clock.dueAt) } });
       const suspensionEventId = patch.suspensionEventId ?? suspension!.id;
-      const nextDue = patch.nextDue ?? new Date();
+      const at = patch.at ?? new Date();
+      const nextDue = patch.nextDue ?? new Date(clock.dueAt.getTime() + (at.getTime() - (s.suspendedAt ?? at).getTime()));
       const audit = await tx.auditLog.create({ data: { action: 'BILLING_CLOCK_RETURN_REANCHOR', entity: 'BillingDunningClock', entityId: clock.id,
         changes: { clockId: clock.id, tenantId: clock.tenantId, fromSubscriptionId: subId, subscriptionId: subId,
           previousEpoch: clock.epoch, nextEpoch: clock.epoch + 1, previousDue: clock.dueAt.toISOString(), nextDue: nextDue.toISOString(),
           suspensionEventId, currencyCode: s.currencyCode } } });
       return tx.billingObligationTransition.create({ data: { tenantId: clock.tenantId, clockId: clock.id, fromSubscriptionId: subId,
         subscriptionId: subId, kind: 'RETURN_REANCHOR', fromEpoch: clock.epoch, toEpoch: clock.epoch + 1, fromDue: clock.dueAt,
-        toDue: nextDue, effectiveAt: nextDue, suspensionEventId, auditId: audit.id, amount: 0, currencyCode: s.currencyCode,
+        toDue: nextDue, effectiveAt: at, suspensionEventId, auditId: audit.id, amount: 0, currencyCode: s.currencyCode,
         periodStart: clock.dueAt, periodEnd: nextDue } });
     });
   }
@@ -497,6 +553,26 @@ describe('BILLING-REANCHOR — the database admits only a proven, paid return', 
     await expect(forgeReanchor(v.subId, { suspensionEventId: other.id })).rejects.toThrow(/exact unused suspension/);
     // ...nor one that moves the obligation anywhere but forward.
     await expect(forgeReanchor(v.subId, { nextDue: new Date(due.getTime() - HOUR) })).rejects.toThrow(/exact unused suspension/);
+  });
+
+  it('[REVIEW-G S2-1] a re-anchor that forgives more than the time suspended (the operated grace) is refused', async () => {
+    const due = new Date(Date.now() - 9 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    // Moved to the return instant itself: that would forgive the 50 operated hours too.
+    const at = new Date();
+    await expect(forgeReanchor(v.subId, { at, nextDue: at })).rejects.toThrow(/exact unused suspension/);
+    // A minute more than the time suspended is refused as well.
+    const fair = due.getTime() + (at.getTime() - suspendedAtOf.get(v.subId)!.getTime());
+    await expect(forgeReanchor(v.subId, { at, nextDue: new Date(fair + 60_000) })).rejects.toThrow(/exact unused suspension/);
+  });
+
+  it('[REVIEW-G S4-1] a re-anchor dated away from the database clock is refused', async () => {
+    const due = new Date(Date.now() - 9 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    await expect(forgeReanchor(v.subId, { at: new Date(Date.now() + HOUR) })).rejects.toThrow(/exact unused suspension/);
+    await expect(forgeReanchor(v.subId, { at: new Date(Date.now() - HOUR) })).rejects.toThrow(/exact unused suspension/);
   });
 
   it('a partner who is not suspended (PAST_DUE, still operating) can never be re-anchored', async () => {
