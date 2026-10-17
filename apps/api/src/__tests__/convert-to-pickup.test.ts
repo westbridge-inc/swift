@@ -186,8 +186,8 @@ describe('conversion and rider claims are mutually exclusive on one locked money
     process.env['DISPATCH_EXHAUSTION'] = '1';
     const order = await makeOrder();
     // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
-    // cancel only when it is very late — 30 minutes past its promise.
-    await app.prisma.order.update({ where: { id: order.id }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } });
+    // cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise.
+    await app.prisma.order.update({ where: { id: order.id }, data: { promisedAt: new Date(Date.now() - 61 * 60_000) } });
     const cancel = await app.inject({
       method: 'POST',
       url: `/api/v1/customer/orders/${order.id}/cancel`,
