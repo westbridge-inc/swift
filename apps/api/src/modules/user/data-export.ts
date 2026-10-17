@@ -62,7 +62,18 @@ async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[],
     for (const column of entry.month ?? []) if (r[column] instanceof Date) r[column] = (r[column] as Date).toISOString().slice(0, 7);
     return portable(r);
   });
+  if (entry.sortBy) kept.sort((a, b) => compareBy(a, b, entry.sortBy!));
   return { rows: kept, complete };
+}
+
+/** Plain value order on the given columns (numbers as numbers, anything else as its JSON text). */
+function compareBy(a: Row, b: Row, columns: readonly string[]): number {
+  for (const c of columns) {
+    const x = a[c]; const y = b[c];
+    const d = typeof x === 'number' && typeof y === 'number' ? x - y : JSON.stringify(x ?? '').localeCompare(JSON.stringify(y ?? ''));
+    if (d !== 0) return d;
+  }
+  return 0;
 }
 
 /** Every column rule the register uses, in rule order (the notice names exactly these). */

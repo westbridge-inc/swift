@@ -87,6 +87,8 @@ export interface ExportEntry {
   readonly month?: readonly string[];
   /** Only rows whose column is before the person's last daily rating fold (the boundary the app honours). */
   readonly foldedBefore?: string;
+  /** The file's row order (after `month`): never creation order, which would pair the k-th row with the k-th trip. */
+  readonly sortBy?: readonly string[];
 }
 
 /** The person's own account row. */
@@ -116,6 +118,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     // fold has counted it (rating-standing.ts), so no single rating can be paired with a single trip.
     category: 'ratingsReceived', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
     where: { visibleAt: { not: null }, state: 'ACTIVE' }, foldedBefore: 'createdAt', month: ['createdAt'],
+    sortBy: ['createdAt', 'score', 'comment', 'tags'],
     fields: ['rateeId', 'type', 'score', 'comment', 'tags', 'createdAt'],
   },
   {

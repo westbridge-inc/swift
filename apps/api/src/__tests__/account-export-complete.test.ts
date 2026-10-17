@@ -165,6 +165,21 @@ describe('the account export', () => {
     expect(data['ratingsReceived']![0]).not.toHaveProperty('orderId');
   });
 
+  it('lists ratings received in no order that follows the trips (never creation order)', async () => {
+    const a = await person();
+    const b = await person();
+    const owner = await person();
+    const v = await store(owner);
+    const rider = await app.prisma.rider.create({ data: { userId: b, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const when = new Date(Date.now() - 3 * 86_400_000);
+    for (const [i, score] of [5, 1, 4].entries()) {
+      const o = await app.prisma.order.create({ data: order(a, v.id, 7_100 + i, { riderId: rider.id }) });
+      await app.prisma.rating.create({ data: { orderId: o.id, raterId: b, rateeId: a, type: 'RIDER_TO_CUSTOMER', score, visibleAt: new Date(), createdAt: new Date(when.getTime() + i * 1_000) } });
+    }
+    const data = await service().exportData(a) as unknown as Record<string, Array<{ score: number }>>;
+    expect(data['ratingsReceived']!.map((r) => r.score)).toEqual([1, 4, 5]); // created 5, 1, 4
+  });
+
   it('never carries security internals or the fraud signals that fired', async () => {
     const userId = await person();
     await app.prisma.user.update({ where: { id: userId }, data: { lossProtectionSuspendedAt: new Date(), lossProtectionSuspendedReason: `velocity hit ${MARK}`, enhancedSafetyMonitoring: true } });
