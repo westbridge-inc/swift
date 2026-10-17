@@ -98,7 +98,9 @@ export const AUTH_01: Journey<Ctx> = {
     const ukv = await verifyRaw(uk, OTP);
     const ukProof = ukv.json?.data?.registrationProof;
     if (ukProof) {
-      const ukReg = await POST('/auth/register', { phone: uk, registrationProof: ukProof, firstName: 'TEST-Uk', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true });
+      // Not a TEST- name: since #1716 a TEST- name on a non-fixture phone is refused
+      // (RESERVED_NAME) before the country check, which is what this case proves.
+      const ukReg = await POST('/auth/register', { phone: uk, registrationProof: ukProof, firstName: 'Uk', lastName: 'Journey', role: 'CUSTOMER', countryCode: 'GY', acceptTerms: true });
       rec.deny('a non-Guyana number cannot register (even claiming GY)', ukReg, [400], ['COUNTRY_NOT_ACTIVE']);
     } else {
       rec.deny('a non-Guyana number is refused at verify', ukv, [400, 403], undefined, 'no continuation issued');
