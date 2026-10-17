@@ -63,10 +63,10 @@ describe('[customers take no photos] the words say a customer never needs a phot
     expect(PRIVACY).toContain('<li><b>A registration selfie (partners and advertisers):</b>');
     expect(PRIVACY).toContain('A customer never needs a photo.');
     expect(PRIVACY).not.toMatch(/see each other's first names, photos and ratings/);
-    expect(PRIVACY).toContain('A mover or business is never shown a photo of a customer.');
+    expect(PRIVACY).toContain('A mover or business is never shown your last name or a photo of you.');
     // Only a taxi driver is served the passenger's rating (driver.routes ratingSurfaces CUSTOMER); a
     // delivery rider is not, so the words never say "a mover sees a customer's rating".
-    expect(PRIVACY).toContain("Customers see a mover's first name, photo and rating; a taxi driver also sees the passenger's rating.");
+    expect(PRIVACY).toContain("a taxi driver also sees the passenger's rating.");
     expect(PRIVACY).not.toMatch(/a mover sees a customer's first name and rating/);
   });
 
@@ -86,5 +86,25 @@ describe('[customers take no photos] the words say a customer never needs a phot
 describe('[MMG direct pay] the Privacy Policy says the MMG details of a business are shown to its customer', () => {
   it('Sharing names the MMG payment details, the account name, and that the customer pays the business directly', () => {
     expect(PRIVACY).toContain('If a business takes MMG, the MMG payment details it gives Swift (its MMG number or pay link, and the name on that MMG account) are shown to you on your order, so you can pay the business directly.');
+  });
+});
+
+// [COORD ruling 17 Oct] Who sees a customer's name and phone, as the code serves them: first name always,
+// phone only to the business or mover handling the order, never the last name (customer-photo-egress census).
+describe('[first name and phone] the Sharing words say what a business or mover handling the order sees', () => {
+  it('a business and a mover see the first name and phone number, only to reach the customer about that order', () => {
+    expect(PRIVACY).toContain('A business handling your order sees the items, your first name and delivery address, and your phone number, only so it can reach you about that order.');
+    expect(PRIVACY).toContain("A mover handling your order sees the pickup and drop-off details, your first name and your phone number, only so they can reach you about that order; a taxi driver also sees the passenger's rating.");
+    expect(PRIVACY).toContain('A mover or business is never shown your last name or a photo of you.');
+  });
+
+  // Customers are served a rider's first and last name, photo and phone (utils/counterparty) and a taxi
+  // driver's first name, photo, phone and car (rides.routes): "name" is true of both.
+  it('what a customer sees of the mover is complete: name, photo, rating and phone, and for a taxi the car', () => {
+    expect(PRIVACY).toContain('Customers see the name, photo, rating and phone number of the mover handling their order, and for a taxi the car details.');
+  });
+
+  it('no first-name-only claim survives', () => {
+    expect(PRIVACY).not.toMatch(/\(items, first name, delivery address\)|pickup\/drop-off details and your first name\./);
   });
 });

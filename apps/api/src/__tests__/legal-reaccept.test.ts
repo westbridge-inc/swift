@@ -63,6 +63,7 @@ describe('who must accept, and what they are shown', () => {
     expect(v17).toMatch(/no automated face-matching/);
     expect(v17).toMatch(/Customers never need a photo/);
     expect(v17).toMatch(/if a business takes MMG, the MMG payment details it gives Swift are shown to its customer/);
+    expect(v17).toMatch(/a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name/);
   });
 
   it('partners re-accept their agreement with the Terms', () => {

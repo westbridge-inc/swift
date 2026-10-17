@@ -184,7 +184,7 @@ const PUBLISHED: Record<
   // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
   '2026-10-17': {
     terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
-    privacy: 'f633597e675900ded8694b38f8e1d9d181834c43552f97a0975fdf23f5bb7c9e',
+    privacy: '4dfb9d4e5bff08df9a8f11a9c50a05255f8f2c650f757ad9fe99a220e1465c46',
     driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
     vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
   },
