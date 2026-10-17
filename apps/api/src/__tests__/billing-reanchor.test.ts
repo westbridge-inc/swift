@@ -12,6 +12,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 import { reanchorAtReturnInTx, suspensionKey } from '../modules/billing/dunning-clock';
+import { bookAt, priceBookNoticeKey, type PriceBookRow } from '../modules/billing/price-book';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
@@ -346,6 +347,112 @@ describe('BILLING-REANCHOR — MMG money during a suspension: credited once, aft
       .toEqual(['ACTIVE', s.currentPeriodStart.getTime(), s.nextBillingDate.getTime()]);
     expect(await successes(v.subId)).toHaveLength(1);
     expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `success:${v.subId}:${day(due)}` } })).toBe(0);
+  });
+});
+
+// The return week's price (owner rulings: a paid week keeps its price; never
+// retroactive; a rise needs 14 days' notice; a cut applies from the next week).
+// The week a return buys starts at the return, so it is priced at the return
+// like every other week is priced at its start, never at the unpaid week's
+// date. Money already received for that unpaid week (an MMG approval) buys it
+// at no more than was received; the rest stays fee credit.
+const USD_RATE = 200; // GYD per USD in these books: 100 USD = RATE
+const bookRow = (amountUsd: number, effectiveFrom: Date): PriceBookRow =>
+  ({ id: `reanchor-${nanoid(8)}`, role: 'VENDOR', tier: 'RESTAURANT', amountUsd, effectiveFrom });
+/** USD pricing on for this billing service only (never the shared database's switch). */
+async function withPriceBook<T>(rows: PriceBookRow[], run: () => Promise<T>): Promise<T> {
+  const spy = vi.spyOn(billing as unknown as { loadUsdPricing: () => Promise<unknown> }, 'loadUsdPricing')
+    .mockResolvedValue({ rateId: 'fx-reanchor', rate: USD_RATE, increment: 1, currency: 'GYD', book: bookAt(rows, new Date()), rows });
+  try { return await run(); } finally { spy.mockRestore(); }
+}
+/** A suspended partner whose last paid week was 100 USD (= RATE). */
+async function suspendedAfterPaying(due: Date) {
+  const v = await brokeVendorSub(due);
+  await app.prisma.billingEvent.create({ data: {
+    subscriptionId: v.subId, type: 'CHARGE_SUCCESS', amount: RATE, currencyCode: 'GYD', amountUsd: 100, fxRateId: 'fx-reanchor', fxRateUsed: USD_RATE,
+    idempotencyKey: `reanchor-paid-before:${v.subId}`, paymentRef: 'paid-before', createdAt: new Date(due.getTime() - 7 * DAY),
+  } });
+  await suspendFrom(v.subId, due);
+  return v;
+}
+const told = (subId: string, row: PriceBookRow, at: Date) => app.prisma.billingEvent.create({ data: {
+  subscriptionId: subId, type: 'REMINDER', currencyCode: 'GYD', idempotencyKey: priceBookNoticeKey(subId, row.id), deliveredAt: at,
+} });
+/** The return week's own charge: [GYD, USD]. */
+async function returnWeekCharge(subId: string) {
+  const s = await sub(subId);
+  expect(s.status).toBe('ACTIVE');
+  const week = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `success:${subId}:${day(s.currentPeriodStart)}` } });
+  expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: subId, kind: 'RETURN_REANCHOR' } })).toBe(1);
+  return [Number(week.amount), Number(week.amountUsd)];
+}
+
+describe('BILLING-REANCHOR — the return week is priced at its own start: a pending cut and a pending rise', () => {
+  it('a cut that took effect while they were away is the return week\'s price; a rise told today but not yet in force is not charged', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await suspendedAfterPaying(due);
+    const cut = bookRow(80, new Date(due.getTime() + 2 * DAY));
+    const rise = bookRow(120, new Date(Date.now() + 10 * DAY));
+    await told(v.subId, rise, new Date());
+    await withPriceBook([bookRow(100, new Date(due.getTime() - 60 * DAY)), cut, rise], () => topUp(v.subId, RATE, 'back after a cut'));
+    // Priced at the unpaid week's date it would be 100 USD = 20,000: the cut is theirs.
+    expect(await returnWeekCharge(v.subId)).toEqual([80 * USD_RATE, 80]);
+    expect(await balance(v.subId)).toBe(RATE - 80 * USD_RATE);
+  });
+
+  it('a rise that took effect while they were away: not told 14 days before the return week, it keeps the price last paid; told in time, it is charged', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const rows = [bookRow(100, new Date(due.getTime() - 60 * DAY)), bookRow(120, new Date(due.getTime() + 3 * DAY))];
+    const untold = await suspendedAfterPaying(due);
+    const toldInTime = await suspendedAfterPaying(due);
+    await told(toldInTime.subId, rows[1]!, new Date(Date.now() - 20 * DAY));
+    await withPriceBook(rows, async () => {
+      await topUp(untold.subId, 2 * RATE, 'back, never told of the rise');
+      await topUp(toldInTime.subId, 2 * RATE, 'back, told 20 days ago');
+    });
+    expect(await returnWeekCharge(untold.subId)).toEqual([RATE, 100]);
+    expect(await balance(untold.subId)).toBe(RATE);
+    expect(await returnWeekCharge(toldInTime.subId)).toEqual([120 * USD_RATE, 120]);
+    expect(await balance(toldInTime.subId)).toBe(2 * RATE - 120 * USD_RATE);
+  });
+
+  it('an MMG request priced before a cut and approved after it buys the return week at the cut price; the rest of the money stays fee credit', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await suspendedAfterPaying(due);
+    await billing.setBillingRail(v.subId, 'MOBILE_MONEY', '5926001236');
+    const cut = bookRow(80, new Date(Date.now() + 60_000));
+    const tick = new Date(Date.now() + 2 * 60_000); // MMG's lookup answers after the cut
+    const request = await withPriceBook([bookRow(100, new Date(due.getTime() - 60 * DAY)), cut], async () => {
+      expect(await billing.billSubscription(await subWithRelations(v.subId) as never)).toBe('pending');
+      const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: v.subId, paymentMethod: 'MOBILE_MONEY' } });
+      expect(Number(issued.amount)).toBe(RATE); // asked before the cut: 100 USD
+      sandboxSetTxStatus(issued.externalRef!, 'approved');
+      await billing.pollPendingMmgCharges(tick);
+      return issued;
+    });
+    expect((await sub(v.subId)).currentPeriodStart.getTime()).toBe(tick.getTime());
+    expect(await returnWeekCharge(v.subId)).toEqual([80 * USD_RATE, 80]);
+    const credit = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `bank:${request.id}` } });
+    expect(Number(credit.amount)).toBe(RATE); // every dollar received is credited once
+    expect(await balance(v.subId)).toBe(RATE - 80 * USD_RATE);
+  });
+
+  it('an MMG request priced before a told rise and approved after it: the return week costs what was asked, never more than was received', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await suspendedAfterPaying(due);
+    await billing.setBillingRail(v.subId, 'MOBILE_MONEY', '5926001237');
+    const rise = bookRow(120, new Date(Date.now() + 60_000));
+    await told(v.subId, rise, new Date(Date.now() - 20 * DAY));
+    const tick = new Date(Date.now() + 2 * 60_000);
+    await withPriceBook([bookRow(100, new Date(due.getTime() - 60 * DAY)), rise], async () => {
+      expect(await billing.billSubscription(await subWithRelations(v.subId) as never)).toBe('pending');
+      const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: v.subId, paymentMethod: 'MOBILE_MONEY' } });
+      expect(Number(issued.amount)).toBe(RATE);
+      sandboxSetTxStatus(issued.externalRef!, 'approved');
+      await billing.pollPendingMmgCharges(tick);
+    });
+    expect(await returnWeekCharge(v.subId)).toEqual([RATE, 100]);
+    expect(await balance(v.subId)).toBe(0);
   });
 });
 

@@ -2172,7 +2172,9 @@ export class BillingService {
               : `Card payment received for ${periodKey}; banked without changing subscription lifecycle (payment ${payment.id})`,
           });
           if (!returning) return 'banked';
-          // The credit buys the return week through the prepaid path below.
+          // The credit buys the return week through the prepaid path below, at
+          // that week's own price and never more than this capture.
+          ({ amount, usdTrio } = await this.returnWeekCharge(sub, amount, usdTrio, now));
           settlePaymentId = undefined;
           spendPrepaid = amount;
           paymentRef = 'prepaid';
@@ -2779,6 +2781,23 @@ export class BillingService {
     return !!await returnReanchorProof(tx, await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } }), now);
   }
 
+  /** [BILLING-REANCHOR · board row 151] What the return week costs when money
+   *  already received (an MMG approval, a card capture, asked for the unpaid
+   *  week) brings a suspended partner back. That week starts at the return, so
+   *  it is priced at the return like every week is priced at its start (a cut
+   *  in force by then applies; a rise only as its 14-day notice allows), and
+   *  it never costs more than was received: the amount Swift asked for is
+   *  honoured. Whatever is left stays the partner's fee credit. */
+  private async returnWeekCharge(
+    sub: Subscription, received: number, receivedTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined, now: Date,
+  ): Promise<{ amount: number; usdTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined }> {
+    const usd = await this.loadUsdPricing();
+    if (usd && usd.currency !== sub.currencyCode) return { amount: received, usdTrio: receivedTrio };
+    const priced = await this.priceEligibleFor({ ...sub, nextBillingDate: now }, usd);
+    const price = Number(priced.amount);
+    return price < received ? { amount: price, usdTrio: priced.usdTrio } : { amount: received, usdTrio: receivedTrio };
+  }
+
   private async lockPaymentOutcomeAuthority(
     tx: Prisma.TransactionClient,
     sub: SubWithRelations,
@@ -3174,8 +3193,10 @@ export class BillingService {
         });
         if (returning) {
           // The credit buys the week that starts now, through the prepaid path
-          // (its own new period row), in this same transaction.
-          const applied = await this.applySuccessfulChargeInTx(tx, current, amount, 'prepaid', now, periodKey, undefined, usdTrio, amount);
+          // (its own new period row), in this same transaction, at that week's
+          // own price and never more than was received; the rest stays credit.
+          const week = await this.returnWeekCharge(current, amount, usdTrio, now);
+          const applied = await this.applySuccessfulChargeInTx(tx, current, week.amount, 'prepaid', now, periodKey, undefined, week.usdTrio, week.amount);
           if (applied !== 'advanced') throw new Error(`Locked MMG authority changed while applying the return of payment ${payment.id}`);
           const returned = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { currentPeriodStart: true } });
           return { kind: 'advanced' as const, current, amount, periodKey: returned.currentPeriodStart.toISOString().slice(0, 10) };
