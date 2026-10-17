@@ -1,7 +1,7 @@
 'use client';
 
 import BrowseLoading from './loading';
-import { Suspense } from 'react';
+import { Suspense, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
@@ -12,7 +12,6 @@ import { BROWSE_STALE_MS, fromPage, vendorListKey, type GuestRead } from '@/lib/
 export type BrowseSeed = { type: string; read: GuestRead<Vendor[]> } | null;
 import { VendorCard, VendorGridSkeleton, EmptyNote, VENDOR_GRID } from '@/components/order-ui';
 import { DataUnavailable } from '@/components/data-unavailable';
-import { CatalogueSearchBar } from '@/components/catalogue-search-bar';
 
 const TABS = [
   { key: '', label: 'All' },
@@ -23,7 +22,7 @@ const TABS = [
 ];
 const TITLE: Record<string, string> = { RESTAURANT: 'Food & takeaway', SUPERMARKET: 'Groceries', STORE: 'Shops', SERVICE: 'Services', '': 'All stores' };
 
-function BrowseInner({ seed }: { seed: BrowseSeed }) {
+function BrowseInner({ seed, searchBar }: { seed: BrowseSeed; searchBar: ReactNode }) {
   const params = useSearchParams();
   const type = params.get('type') ?? '';
   // [Q7b] Each list is kept per category, so going back to it is instant.
@@ -39,8 +38,9 @@ function BrowseInner({ seed }: { seed: BrowseSeed }) {
         <span className="sw-eyebrow">Stores on Swift</span>
         <h1 className="sw-title mt-1">{TITLE[type] ?? 'Stores'}</h1>
       </div>
-      {/* [row 110] Search stores AND dishes, narrowed to this category. */}
-      <CatalogueSearchBar type={type} />
+      {/* [row 110] Search stores AND dishes, narrowed to this category. Drawn
+          by the server page and handed in, so it adds no script to this page. */}
+      {searchBar}
       <nav aria-label="Kinds of store" className="sw-chip-row">
         {TABS.map((t) => (
           <Link key={t.key} href={t.key ? `/order/browse?type=${t.key}` : '/order/browse'} replace
@@ -58,6 +58,6 @@ function BrowseInner({ seed }: { seed: BrowseSeed }) {
   );
 }
 
-export function BrowseScreen({ seed = null }: { seed?: BrowseSeed }) {
-  return <Suspense fallback={<BrowseLoading />}><BrowseInner seed={seed} /></Suspense>;
+export function BrowseScreen({ seed = null, searchBar = null }: { seed?: BrowseSeed; searchBar?: ReactNode }) {
+  return <Suspense fallback={<BrowseLoading />}><BrowseInner seed={seed} searchBar={searchBar} /></Suspense>;
 }

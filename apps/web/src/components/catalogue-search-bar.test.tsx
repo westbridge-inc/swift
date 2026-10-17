@@ -14,6 +14,7 @@ vi.mock('next/navigation', () => ({
 }));
 vi.mock('@/lib/api', () => ({ fetchStorefronts: vi.fn(async () => []) }));
 vi.mock('@/lib/customer', () => ({ getVendors: vi.fn(async () => []) }));
+vi.mock('@/lib/browse-server', () => ({ vendorListSeed: vi.fn(async () => null) }));
 vi.mock('@/components/order-ui', () => ({
   VendorGridSkeleton: () => <div aria-label="Loading stores" />, VendorCard: () => null,
   EmptyNote: ({ children }: any) => <p>{children}</p>, VENDOR_GRID: 'grid',
@@ -65,10 +66,11 @@ describe('where the search bar shows', () => {
     expect(handOver(screen.getByRole('search')).fields).toEqual([['q', 'search', null]]);
   });
 
-  it('each category page /order/browse?type=… shows it, carrying that category', async () => {
+  it('each category page /order/browse?type=… shows it, carrying that category (drawn by the server page)', async () => {
     params.type = 'STORE';
-    const { BrowseScreen } = await import('@/app/(app)/order/browse/browse-screen');
-    render(<QueryClientProvider client={new QueryClient()}><BrowseScreen /></QueryClientProvider>);
+    const { default: BrowsePage } = await import('@/app/(app)/order/browse/page');
+    const page = await BrowsePage({ searchParams: Promise.resolve({ type: 'STORE' }) });
+    render(<QueryClientProvider client={new QueryClient()}>{page}</QueryClientProvider>);
     expect(handOver(await screen.findByRole('search', { name: 'Search stores and dishes' })).fields)
       .toEqual([['q', 'search', null], ['type', 'hidden', 'STORE']]);
   });
