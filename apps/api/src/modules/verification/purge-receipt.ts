@@ -9,8 +9,9 @@
  * receipt: callers decide what that means (the reaper leaves the row due and
  * retries; erasure records the failure and files the storage orphan).
  */
-import type { Prisma } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { resolveVerificationObject, type VerificationObjectReference, type VerificationObjectStore } from './object-authority';
 
 export type ProbeResult = 'CONFIRMED_ABSENT' | 'FAILED';
@@ -52,6 +53,33 @@ export async function shredAndProbe(prisma: VerificationObjectStore, storage: St
   const keyGone = await prisma.encryptedObject.findUnique({ where: { fileKey }, select: { wrappedDek: true } })
     .then((row) => row !== null && row.wrappedDek === null).catch(() => false);
   return { sha256, bytesDeleted, storeLocations, probe: absent && keyGone ? 'CONFIRMED_ABSENT' : 'FAILED' };
+}
+
+/**
+ * [Row 243 · DOC-INV-14 · GUARDRAILS §2] A legal hold always beats a purge. The bytes are
+ * destroyed only while the person's row lock is held and the document is still unheld:
+ * placing a hold takes the same lock (legal-hold.ts placeDocLegalHoldIn), so a hold either
+ * committed first (nothing is destroyed: null) or waits until the shred is done, and then
+ * finds the object already shredded and does not claim it (a hold never resurrects bytes).
+ * The lock is the person's row only, never the platform identity lock: storage I/O runs
+ * under it. `still` narrows what "still purgeable" means for the caller (retention due,
+ * image not yet purged).
+ */
+export async function shredUnlessHeld(
+  db: Pick<PrismaClient, '$transaction'> & VerificationObjectStore,
+  storage: StorageProvider,
+  ref: VerificationObjectReference & { documentId: string },
+  still: Prisma.VerificationDocumentWhereInput = {},
+): Promise<PurgeEvidence | null> {
+  return db.$transaction(async (fence) => {
+    await bindTenantTransaction(fence);
+    await fence.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${ref.userId} FOR UPDATE /* verification-document-purge-authority */`;
+    const live = await fence.verificationDocument.findMany({
+      where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
+    });
+    if (!live.some((d) => d.id === ref.documentId)) return null;
+    return shredAndProbe(db, storage, ref);
+  }, { timeout: 60_000 });
 }
 
 export interface ReceiptInput {

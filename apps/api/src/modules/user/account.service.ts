@@ -8,7 +8,7 @@ import {
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -371,7 +371,11 @@ export class AccountService {
       // due pointer; it cannot prevent the other personal-data cleanup.
       let evidence;
       try {
-        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+        // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
+        // since the census keeps the document; the tombstone retry then defers it as held.
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
+        if (!fenced) { pendingDocuments += 1; continue; }
+        evidence = fenced;
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
         // Refusal is an unresolved obligation, never proof of destruction.
