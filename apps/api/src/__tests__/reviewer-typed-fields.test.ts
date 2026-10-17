@@ -211,10 +211,14 @@ describe('[typed fields] the police clearance issue date', () => {
   });
 });
 
-describe('[typed fields] nothing changes for a document that needs nothing typed', () => {
-  it('a business registration approves with an empty body, as before', async () => {
+describe('[typed fields] a business registration says what it is (R16)', () => {
+  it('an empty body is refused with REGISTRATION_KIND_REQUIRED; a company approves with its kind alone', async () => {
     const doc = await pending(await subject('VENDOR_OWNER'), 'business_registration', 'VENDOR_OWNER');
-    expect((await approve(doc.id, {})).statusCode).toBe(200);
+    const empty = await approve(doc.id, {});
+    expect(empty.statusCode).toBe(400);
+    expect(empty.json().error.code).toBe('REGISTRATION_KIND_REQUIRED');
+    expect(await statusOf(doc.id)).toBe('PENDING');
+    expect((await approve(doc.id, { registrationKind: 'COMPANY' })).statusCode).toBe(200);
     expect(await statusOf(doc.id)).toBe('APPROVED');
   });
 

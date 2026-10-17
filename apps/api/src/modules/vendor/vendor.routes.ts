@@ -1233,6 +1233,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       attestationVersion: z.literal(DECLARATION_VERSION),
       privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
     }).parse(request.body ?? {});
+    // [R15 · owner 15 Oct 2026, research D9] Home cooks are held: a home kitchen needs the council's
+    // registration, and whether one can be registered is not confirmed yet. Refused before anything is written.
+    if (body.activityClass === 'home_cook') {
+      throw new AppError(409, 'HOME_COOK_HELD', 'Swift can’t take home cooks yet: a home kitchen needs a council registration that is still being confirmed. We’ll tell you when it opens.');
+    }
     const [vendor, user, registered, existing] = await Promise.all([
       app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
@@ -3843,6 +3848,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
             ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
+            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
           }
         : null,
     };

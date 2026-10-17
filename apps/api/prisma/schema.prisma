@@ -6590,6 +6590,9 @@ model IntegritySettings {
   id                        String  @id @default("platform")
   maxSignupsPerDevice24h    Int     @default(3)
   maxOtpPerPhonePerHour     Int     @default(5)
+  // [AUD-1 row 301] The Nth signup in 24 h from one public network (IPv4 /24, IPv6 /64), whatever device it names,
+  // enters REVIEW_FIRST (a person checks it at activation; nothing is refused). High on purpose: carrier NAT puts many
+  // real Guyana users behind one network. A signup that names no device is judged by this rung (capture-hooks.ts).
   ipFlagThreshold24h        Int     @default(15)
   faceLinkCosine            Decimal @default(0.92) @db.Decimal(4, 3)
   faceFlagCosine            Decimal @default(0.85) @db.Decimal(4, 3)
