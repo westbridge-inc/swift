@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 // ---------------------------------------------------------------------------
 // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a photo, and
 // a photo an account still holds from before the ruling is never served to a mover or a store:
-// the Privacy Policy says a mover or store sees a customer's first name and rating, never a photo.
+// the Privacy Policy says a mover or business is never shown a photo of a customer.
 // Partner photos (the mover's own, shown to the customer) are unchanged.
 //
 // The mover- and store-facing reads select the order's customer with an explicit field list. This

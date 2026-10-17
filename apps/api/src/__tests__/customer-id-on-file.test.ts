@@ -167,11 +167,12 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     const told = await notices(c.id);
     expect(told.map((n) => n.title)).toContain('Your ID is on file');
     for (const n of told) expect(`${n.title} ${n.body}`).not.toMatch(/verified/i);
-    // Taxi rides also need the profile photo (rides.service SELFIE_REQUIRED): the notice never says
-    // rides are unlocked by the ID alone, nor promises orders "of any size".
+    // [Owner ruling 16 Oct: customers take no photos] A taxi ride needs only the ID on file
+    // (rides.service assertL2), so the notice says rides are unlocked, never asks for a photo, and
+    // never promises orders "of any size".
     const onFile = told.find((n) => n.title === 'Your ID is on file');
-    expect(onFile?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(onFile?.body).not.toMatch(/any size|Taxi rides and/);
+    expect(onFile?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
+    expect(onFile?.body).not.toMatch(/photo|selfie|any size/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
@@ -324,11 +325,11 @@ describe('(1) an automatic check holds the ID for a person', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
-    // The person-checked notice is truthful too: bigger orders, and taxi rides need the profile photo.
+    // The person-checked notice is truthful too: bigger orders and taxi rides, and no photo (owner 16 Oct).
     const checked = (await notices(c.id)).find((n) => n.title === 'Identity verified');
     expect(checked?.body).toMatch(/A person on our team checked your ID/);
-    expect(checked?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(checked?.body).not.toMatch(/any size/);
+    expect(checked?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
+    expect(checked?.body).not.toMatch(/photo|selfie|any size/i);
   });
 });
 

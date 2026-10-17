@@ -176,6 +176,18 @@ const PUBLISHED: Record<
     driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
     vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
   },
+  // [Owner rulings: identity checks by a person only + face matching off; customers take no photos (16 Oct);
+  // R28] Privacy: no outside identity-verification company and no automated document-reading or face
+  // matching (production refuses both), how partner documents and customer IDs are handled, partners-only
+  // registration selfie, a customer is never shown by photo, "confirmation records"; Terms: the taxi
+  // profile-photo sentence gone. The two agreements' words are unchanged: putting 16 October back
+  // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
+  '2026-10-17': {
+    terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
+    privacy: '1477c797604b7a0db1f592d4f3d69b8e096dd19fc14559bc1c5532c81d5caa98',
+    driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
+    vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

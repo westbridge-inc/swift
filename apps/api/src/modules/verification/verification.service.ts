@@ -2618,9 +2618,10 @@ export class VerificationService {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(basis === 'ON_FILE'
-        // Truthful: the ID unlocks bigger orders; a taxi ride also needs the profile photo (SELFIE_REQUIRED).
-        ? { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }
-        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }),
+        // Truthful: the ID unlocks bigger orders and taxi rides. [Owner ruling 16 Oct] A customer never
+        // needs a photo — a ride needs only the ID on file (rides.service assertL2).
+        ? { title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders and taxi rides are unlocked now.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });
