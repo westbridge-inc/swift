@@ -57,7 +57,7 @@ describe('scheduled SOS watchdog recipient isolation', () => {
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as unknown as JobContext;
     await createWorkers(ctx, {} as never);
-    const processor = state.workers.get(QUEUE_NAMES.DISPATCH);
+    const processor = state.workers.get(QUEUE_NAMES.SAFETY); // [row 331] the safety lane runs the SOS tick
     expect(processor).toBeDefined();
     await processor!({ name: 'promote-sos-grace', data: {} });
     expect(query.mock.calls.some(([sql]) => (Array.isArray(sql) ? sql.join('') : (sql as { sql: string }).sql).includes('extract(epoch'))).toBe(true);
@@ -101,7 +101,7 @@ describe('scheduled SOS watchdog recipient isolation', () => {
       log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     } as unknown as JobContext;
     await createWorkers(ctx, {} as never);
-    await state.workers.get(QUEUE_NAMES.DISPATCH)!({ name: 'promote-sos-grace', data: {} });
+    await state.workers.get(QUEUE_NAMES.SAFETY)!({ name: 'promote-sos-grace', data: {} });
     const claimed = (ctx.redis.set as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(([key]) => String(key));
     return { send, audience, claimed };
   };

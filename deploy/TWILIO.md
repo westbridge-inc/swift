@@ -13,9 +13,14 @@ sender pool. Startup checks these formats locally, but cannot confirm that
 Twilio assigned the number or service to this account. Setting both senders,
 or neither, refuses to boot, as does a From value that is not E.164 or a
 Messaging Service SID that is not `MG` + 32 hex. The master Auth Token is not
-used for sending. If inbound webhook signature verification is added later,
-give its Auth Token the separate name `TWILIO_WEBHOOK_AUTH_TOKEN` and keep that
-value out of the outbound adapter.
+used for sending. Inbound STOP replies to marketing texts are verified with the
+account's Auth Token under the separate name `TWILIO_WEBHOOK_AUTH_TOKEN` (a
+secret: encrypted store, wired as
+`TWILIO_WEBHOOK_AUTH_TOKEN_FILE=/run/secrets/TWILIO_WEBHOOK_AUTH_TOKEN`); the
+outbound adapter never reads it. `TWILIO_INBOUND_SMS_URL` is the exact
+incoming-message webhook URL set on the number
+(`https://<API host>/api/v1/sms/inbound`), a plain setting. Until both are set
+the webhook answers 503 and no marketing text is sent.
 
 The identifiers (`TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_FROM` and
 `TWILIO_MESSAGING_SERVICE_SID`) are settings in the host's `deploy/.env`. The
