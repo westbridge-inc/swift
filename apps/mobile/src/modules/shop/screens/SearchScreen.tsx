@@ -333,7 +333,12 @@ export function SearchScreen() {
           // A horizontal row must HUG its chips: in this flex column an
           // un-heighted ScrollView grows to swallow the leftover screen and
           // the results get shoved to the bottom (founder screenshot, 08-30).
-          style={{ flexGrow: 0 }}
+          // And it must never SHRINK: React Native gives every ScrollView
+          // `flexShrink: 1` + `overflow: scroll`, and the results list below
+          // measures as tall as its content, so the column overflows and
+          // squeezes each chip row until it clips the chips' bottoms (owner
+          // screenshot, "Garlic", 17 Oct). `flexShrink: 0` on every row.
+          style={{ flexGrow: 0, flexShrink: 0 }}
           contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
         >
           {TYPES.map((t) => (
@@ -342,7 +347,7 @@ export function SearchScreen() {
               label={t.label}
               selected={type === t.key}
               onPress={() => setType(t.key)}
-              style={{ height: 44, paddingHorizontal: space.lg }}
+              style={{ minHeight: 44, paddingHorizontal: space.lg }}
             />
           ))}
         </ScrollView>
@@ -356,7 +361,7 @@ export function SearchScreen() {
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            style={{ marginTop: space.md, flexGrow: 0 }}
+            style={{ marginTop: space.md, flexGrow: 0, flexShrink: 0 }}
             contentContainerStyle={{ gap: space.md, paddingHorizontal: GUTTER }}
           >
             {/* [B2] In engine mode the ranking IS the sort (words · typo ·
@@ -376,7 +381,7 @@ export function SearchScreen() {
                     flexDirection: 'row',
                     alignItems: 'center',
                     gap: space.sm,
-                    height: 44,
+                    minHeight: 44,
                     paddingHorizontal: space.lg,
                     borderRadius: radius.full,
                     borderWidth: 1,
@@ -399,7 +404,7 @@ export function SearchScreen() {
               label="Open now"
               selected={openNow}
               onPress={() => setOpenNow((v) => !v)}
-              style={{ height: 44, paddingHorizontal: space.lg }}
+              style={{ minHeight: 44, paddingHorizontal: space.lg }}
             />
           </ScrollView>
 
@@ -409,11 +414,11 @@ export function SearchScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              style={{ marginTop: space.md, flexGrow: 0 }}
+              style={{ marginTop: space.md, flexGrow: 0, flexShrink: 0 }}
               contentContainerStyle={{ gap: space.sm, paddingHorizontal: GUTTER }}
             >
               {suggestions.map((s: any) => (
-                <Chip key={`${s.type}-${s.text}`} label={s.text} onPress={() => setQ(s.text)} style={{ height: 36, paddingHorizontal: space.md }} />
+                <Chip key={`${s.type}-${s.text}`} label={s.text} onPress={() => setQ(s.text)} style={{ minHeight: 36, paddingHorizontal: space.md }} />
               ))}
             </ScrollView>
           ) : null}
