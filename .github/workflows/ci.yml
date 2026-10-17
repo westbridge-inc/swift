@@ -840,3 +840,8 @@ jobs:
         run: |
           curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz | tar -xz trivy
           ./trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml pnpm-lock.yaml
+      # [AUD-1 row 303] The desktop cockpit (apps/desktop, Tauri) pins its Rust
+      # crates in Cargo.lock, which the pnpm scan above never reads. Same
+      # scanner, same HIGH+ blocking threshold, same scoped ignore file.
+      - name: Audit the desktop app's Rust crates (HIGH+ blocks)
+        run: ./trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml apps/desktop/src-tauri/Cargo.lock

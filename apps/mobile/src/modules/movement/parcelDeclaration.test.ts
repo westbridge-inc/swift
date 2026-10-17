@@ -23,8 +23,18 @@ describe('[owner #67] the words', () => {
 
   it('the list names every banned kind of goods, the server’s classes', () => {
     expect(PARCEL_BANNED_GOODS).toBe(
-      'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.',
+      'Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail.',
     );
+  });
+
+  it('[legal research A10 · REVIEW-F S3-1 on #1753] no size hint suggests documents, letters or mail', () => {
+    expect(SCREEN).not.toMatch(/hint: '[^']*(?:document|letter|mail|envelope)/i);
+  });
+
+  it('[legal research A10 · R1] the website courier page lists the same goods, word for word', () => {
+    const web = readFileSync(new URL('../../../../web/src/app/(app)/courier/page.tsx', import.meta.url), 'utf8');
+    expect(web).toContain(`>${PARCEL_BANNED_GOODS}<`);
+    expect(PARCEL_BANNED_GOODS).toMatch(/letters, documents and mail/);
   });
 
   it('the button explains what it waits for, the tick last', () => {

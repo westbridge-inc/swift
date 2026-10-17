@@ -1,7 +1,7 @@
 import { teamInviteKeys } from '../hooks/teamInviteKeys';
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
-import { getAuthSessionSnapshot } from '../stores/authStore';
+import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { selectionStillCurrent } from '../lib/storeSelection';
 
@@ -15,14 +15,64 @@ import { selectionStillCurrent } from '../lib/storeSelection';
 
 type Destination = { screen: string; params?: Record<string, unknown> };
 
+/** The app's home. Every role stack is mounted under the root route Main, so
+ *  it exists for everyone. [PUSH-ROUTING] A user-facing kind with no screen of
+ *  its own opens HERE on purpose, with its reason in the census — never a
+ *  silent null. (From inside the app it moves nothing, so the inbox shows such
+ *  a row as a plain card.) */
+export const HOME_SCREEN = 'Main';
+
+/** Which app the person has open right now ('customer' | 'mover' | 'vendor' |
+ *  'advertiser'). Read ONLY for a payload that does not say whose it is. */
+export type OpenApp = () => string | null | undefined;
+
+/** [PUSH-ROUTING] Every notice about a partner's weekly-fee subscription. Not
+ *  a `billing_` prefix: billing_invariants and its siblings are OPERATIONS
+ *  pages, and an operator's page must not open a partner's fee screen. */
+const PARTNER_FEE_KINDS = new Set([
+  'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning', 'billing_suspended',
+  'billing_suspended_nudge', 'billing_reminder', 'billing_banked', 'billing_churned', 'billing_topup',
+  'billing_card_action_required', 'trial_fee_education', 'fx_change_notice', 'billing_rate_change', 'usd_migration_notice',
+]);
+
+/** [PUSH-ROUTING] Document notices sent to whoever owns the document. */
+const DOCUMENT_KINDS = new Set(['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder']);
+
+/** [PUSH-ROUTING] Document notices only a mover receives (the API tags them earner). */
+const MOVER_DOCUMENT_KINDS = new Set(['verification_forced_offline', 'verification_vehicle_lapsed', 'compliance_review_failed']);
+
+/** The paying family a fee notice is about. The server tags it (business = a
+ *  store's fee, earner = a mover's; the trial notice spells them VENDOR and
+ *  MOVER). An untagged notice follows the open app, exactly as
+ *  WeeklyFeeRouteScreen resolves a family nobody named. */
+function feeFamilyOf(audience: string, openApp?: OpenApp): 'vendor' | 'mover' {
+  if (audience === 'business' || audience === 'VENDOR') return 'vendor';
+  if (audience === 'earner' || audience === 'MOVER') return 'mover';
+  return openApp?.() === 'vendor' ? 'vendor' : 'mover';
+}
+
+/** The documents screen of the role a document belongs to: the mover
+ *  checklist, the customer's ID screen, or the store's Account tab (its
+ *  Documents section; a store still in onboarding shows its checklist on the
+ *  same VendorRoot). The server tag says whose document it is; an untagged
+ *  notice (notifyRejection sends none) follows the open app. */
+function documentsFor(audience: string, openApp?: OpenApp): Destination {
+  const who = audience || openApp?.() || 'customer';
+  if (who === 'earner' || who === 'mover') return { screen: 'MoverDocuments' };
+  if (who === 'business' || who === 'vendor') return { screen: 'VendorRoot', params: { screen: 'Account' } };
+  if (who === 'customer') return { screen: 'IdentityVerification' };
+  return { screen: HOME_SCREEN }; // an advertiser account has no documents screen
+}
+
 /** PURE: payload → destination. The single source of tap-routing truth —
  *  extend HERE as new kinds ship. Every `kind` the API sends is enumerated in
  *  notification-router.test.ts (THE CENSUS), which is scanned against
  *  apps/api/src both ways: a new server kind fails the suite until someone
  *  decides where its tap lands, and a case here that nothing sends fails too.
  *  Screen names are checked against the real navigators — 'HomeTabs' once
- *  looked like a route and was not one, so its pushes silently went nowhere. */
-export function destinationFor(data: Record<string, unknown> | null | undefined): Destination | null {
+ *  looked like a route and was not one, so its pushes silently went nowhere.
+ *  `openApp` is consulted only for a payload with no server-tagged audience. */
+export function destinationFor(data: Record<string, unknown> | null | undefined, openApp?: OpenApp): Destination | null {
   if (!data) return null;
   if (data['kind'] === 'billing_mmg_checkout') return { screen: 'WeeklyFee', params: { ref: typeof data['ref'] === 'string' ? data['ref'] : undefined, subscriptionId: typeof data['subscriptionId'] === 'string' ? data['subscriptionId'] : undefined, vendorId: typeof data['vendorId'] === 'string' ? data['vendorId'] : undefined } };
   const kind = typeof data['kind'] === 'string' ? (data['kind'] as string) : '';
@@ -30,6 +80,29 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // Server-tagged surface ('customer' | 'earner' | 'business'), merged into
   // data by NotificationService.send. Present on only some payloads today.
   const audience = typeof data['audience'] === 'string' ? (data['audience'] as string) : '';
+
+  // [PUSH-ROUTING · board row 331] THE WEEKLY FEE. Only billing_mmg_checkout
+  // was routed: billing_final_warning ("suspension is imminent") and
+  // billing_suspended ("you cannot earn until you pay") opened the app
+  // wherever it was. Every partner fee notice now opens the Weekly fee screen,
+  // the one place the fee is seen and paid, on the family it is about. The
+  // payload names the subscription, not the store, so a store fee opens on the
+  // store the owner has selected; it carries no checkout ref to invent.
+  if (PARTNER_FEE_KINDS.has(kind)) return { screen: 'WeeklyFee', params: { feeFamily: feeFamilyOf(audience, openApp) } };
+
+  // [PUSH-ROUTING] DOCUMENTS. "Your document was rejected — fix it and
+  // resubmit" opened nothing; it opens the documents of the role it is about.
+  if (DOCUMENT_KINDS.has(kind)) return documentsFor(audience, openApp);
+  // Taken offline for a lapsed document, a vehicle's papers lapsed, or a
+  // routine review wants them re-submitted: renewing them is the way back.
+  if (MOVER_DOCUMENT_KINDS.has(kind)) return { screen: 'MoverDocuments' };
+  // "Your ID is on file" — the customer's ID screen shows it.
+  if (kind === 'verification_l2') return { screen: 'IdentityVerification' };
+  // Trusted status earned: no screen shows the trust tier; the notice is the
+  // whole message. A review of theirs was removed: the payload names no rating
+  // and no store. The person a trip was shared with: the trip ended, and they
+  // own no order. Each opens HOME on purpose (census reasons).
+  if (kind === 'trust_l3' || kind === 'rating_removed' || kind === 'trip_share_ended') return { screen: HOME_SCREEN };
 
   // [Row 55] A store team invite is answered on the inbox, where its Accept /
   // Decline card sits (the invitee joins only by accepting there).
@@ -40,6 +113,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'ride_queue_matched' || kind === 'ride_queue_expired' || kind.startsWith('ride_')) {
     return { screen: 'Taxi' };
   }
+  // [PUSH-ROUTING] "Drivers are back near you — request your ride": only the
+  // Taxi screen's "tell me when drivers are back" creates that watch. And "your
+  // trip share link was reset — share your trip again": only Taxi shares a
+  // trip. Its orderId sent it to Delivery, a screen a ride never renders on.
+  if (kind === 'supply_returned' || kind === 'trip_share_rotated') return { screen: 'Taxi' };
 
   // [safety §5.3] THE TRIP-GUARDIAN CHECK-IN — "Everything OK on your trip?"
   // It goes to the PASSENGER of a ride, and the card that answers it lives on
@@ -118,20 +196,22 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // by the audience the API tags [E28]. business = the STORE whose calendar
   // owns the slot; their Schedule agenda shows it. customer = the person whose
   // appointment moved. Schedule is mounted ONLY by VendorStack, so a customer
-  // tap aimed there opened nothing. The customer copy returns null (the app
-  // opens normally): the push carries the bookingId, not the orderId a
-  // Delivery deep link needs. (A reschedule now moves Order.appointmentSlot
-  // with the booking [Q12], so the order screen shows the new time once the
-  // customer opens it.) An untagged row cannot say whose it is, so it also
-  // opens the app normally.
+  // tap aimed there opened nothing. The push carries the bookingId, not the
+  // orderId a Delivery deep link needs, so the customer copy used to return
+  // null. [PUSH-ROUTING] It now opens OrdersHistory, their orders list: a
+  // reschedule moves Order.appointmentSlot with the booking [Q12], and that
+  // list prints each appointment's slot. An untagged row (the API tags both
+  // copies; only an old inbox row has no tag) cannot say whose it is, so it
+  // still opens the app normally.
   if (kind === 'booking_rescheduled') {
-    return audience === 'business' ? { screen: 'Schedule' } : null;
+    if (audience === 'business') return { screen: 'Schedule' };
+    return audience === 'customer' ? { screen: 'OrdersHistory' } : null;
   }
 
   // BOOKINGS + SERVICE JOBS [S0: a push landing on a dead screen]. Every other
   // booking_* kind is a service JOB event carrying jobId/refId and no orderId
-  // (to_confirm · confirmed · slot_declined · reminder · completed ·
-  // cancelled), so the family resolves above the order fallback: a job push
+  // (quoted · to_confirm · confirmed · slot_declined · started · reminder
+  // · completed · cancelled), so the family resolves above the order fallback: a job push
   // must never win a tracking screen. ServiceJobs ("My Jobs") is the ONE
   // screen that renders that job for BOTH sides — GET /services/jobs returns
   // rows where the caller is the customer OR the provider, and the provider's
@@ -178,6 +258,25 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   // [owner #51] A store whose documents are done waits only for the number
   // customers can call: the vendor root (the waiting store's own screen) asks for it.
   if (kind === 'vendor_needs_public_phone') return { screen: 'Main' };
+  // [PUSH-ROUTING] STORE SURFACES, on VendorRoot after the router selects the
+  // store (go() validates the account and the store first). Stock ran low, or a
+  // category the store asked for was added, mapped or declined: the catalogue
+  // tab, where stock and availability are set and items are tagged. Neither
+  // payload names the store, so it opens on the selected one.
+  if (kind === 'low_stock' || kind === 'category_request_resolved') return { screen: 'VendorRoot', params: { screen: 'Menu' } };
+  // [row 55] Someone accepted the owner's invite: the team panel is on Account.
+  if (kind === 'staff_joined') return { screen: 'VendorRoot', params: { screen: 'Account' } };
+  // The person ADDED to a team: the store they joined (its vendorId selects
+  // it), reached in Business mode, which the body tells them to choose.
+  if (kind === 'staff_added') return { screen: 'VendorRoot' };
+  // [PUSH-ROUTING] The store replied to the customer's review: that store's
+  // reviews page shows the reply.
+  if (kind === 'review_response') {
+    return typeof data['vendorId'] === 'string' ? { screen: 'VendorReviews', params: { vendorId: data['vendorId'] } } : { screen: HOME_SCREEN };
+  }
+  // A support ticket was updated or resolved: GetHelp lists "Your tickets"
+  // with their status, and it is mounted in every navigator.
+  if (kind === 'support_update') return { screen: 'GetHelp' };
 
   // [L04 · MASTER-003] "Your password was changed" — if it wasn't the owner,
   // support is the way back, so the notice opens the help screen (mounted in
@@ -210,6 +309,16 @@ export function destinationFor(data: Record<string, unknown> | null | undefined)
   if (kind === 'incident_interim_suspension') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account suspended pending review' } };
   }
+  // [PUSH-ROUTING] The other two case notices to the SUBJECT, for the same
+  // reason. Kept online while a report is reviewed ("contact support to
+  // respond"), or the interim action lifted while another review still
+  // restricts them (that body says contact support too): support. Lifted with
+  // nothing left ("you can go back online"): their home, the dashboard where
+  // they go online.
+  if (kind === 'incident_shadow_restricted' || (kind === 'incident_interim_lifted' && data['restrictionRemains'] === true)) {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'Account under review' } };
+  }
+  if (kind === 'incident_interim_lifted') return { screen: HOME_SCREEN };
   // [DOC-1 §31.4] A guarantee claim and everything about it lands on the claims screen — filed,
   // updated, paid, protection suspended or reinstated. MoverStack mounts it.
   if (kind === 'claim' || kind === 'claim_update' || kind === 'rlp_suspended' || kind === 'rlp_reinstated') {
@@ -252,7 +361,9 @@ let installed = false;
 let routing = 0;
 
 function isVendorDestination({ dest, data }: Tap): boolean {
-  return ['VendorOrderDetail', 'VendorCategoryReview', 'VendorTier', 'Schedule'].includes(dest.screen)
+  // VendorRoot [PUSH-ROUTING]: the store's own screen and its tabs (stock,
+  // the team, its documents) — validated and selected like every store route.
+  return ['VendorOrderDetail', 'VendorCategoryReview', 'VendorTier', 'Schedule', 'VendorRoot'].includes(dest.screen)
     || (dest.screen === 'Account' && (data['actor'] === 'VENDOR' || data['kind'] === 'store_pin_moved'));
 }
 
@@ -327,7 +438,9 @@ async function go(tap: Tap) {
     if (!params || !authority.current() || useStoreSwitcher.getState().selectedStoreId !== params['vendorId']) return;
     dest = { ...dest, params: { ...params, feeFamily: 'vendor' } };
   } else if (dest.screen === 'WeeklyFee') {
-    dest = { ...dest, params: { ...dest.params, feeFamily: 'mover' } };
+    // billing_mmg_checkout without a store is a mover's checkout. Every other
+    // fee notice already names its family [PUSH-ROUTING], and that stands.
+    dest = { ...dest, params: { feeFamily: 'mover', ...dest.params } };
   }
   if (tap.data['kind'] === 'staff_invite') {
     const { queryClient } = await import('../lib/queryClient');
@@ -342,8 +455,11 @@ async function go(tap: Tap) {
   if (!safeNavigate(dest.screen, dest.params)) pending = { ...tap, dest };
 }
 
+/** The app open at tap time — asked only by a payload with no audience tag. */
+const openApp: OpenApp = () => useAuthStore.getState().intent;
+
 function routeTap(data: Record<string, unknown>) {
-  const dest = destinationFor(data);
+  const dest = destinationFor(data, openApp);
   const attempt = ++routing;
   pending = null;
   if (!dest) return;

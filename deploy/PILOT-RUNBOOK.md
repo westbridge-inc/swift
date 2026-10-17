@@ -1271,6 +1271,21 @@ printed only when every step held. It needs passwordless `sudo -n` for
 `env … swift-secrets`, `test` and `rm`, and fails closed without it. Never
 layer `docker-compose.rehearsal.yml` by hand.
 
+Every provider secret the copy's processes are wired to read (as Compose
+renders their settings) gets a fresh throwaway stand-in in the shape the API's
+boot guards check (`deploy/wall/stand-in.sh`: PEM keys for MMG's checkout, one
+fictional number for the SMS allowlist, a GUID for the card gateway key, URLs
+on the `.invalid` domain); no real provider value is ever read. The names are
+read from migrate, api and worker: a service that later reads its own `*_FILE`
+secret gets no stand-in and refuses to boot, loudly. Once the copy's
+API and worker have been started, their logs (the last 400 lines each,
+redacted by `deploy/wall/redact-log.py`: secrets, tokens, passwords, keys,
+phone numbers and e-mail addresses removed) are kept in
+`$REHEARSAL_RESULTS_DIR`, else `~/swift-rehearsal/rehearsal-<UTC>/` (mode
+0700), however the run ends, and the first 20 `FATAL` lines are printed in the
+run's own output. On the production host these are boot logs of a copy of
+production's database: delete that directory when the copy goes.
+
 No journeys run on this copy: it holds production's personal data, and the
 journeys sign synthetic accounts in with the development code, which never
 touches a copy of production's data (coordinator ruling, 15 Oct). The
@@ -1290,7 +1305,14 @@ It refuses unless `deploy/.env` says `PILOT_ENV=staging` (and sets
 the host has room for the copy beside the live stack (2 GiB of memory
 available, and twice the database plus 2 GiB free on Docker's disk); then
 `rehearsal.sh up` builds the walled copy (which must say staging too), the
-copy's worker stops, and a private `api-journeys`
+copy's worker stops, and the journey roster's fixture fees are reset ON THE
+COPY ONLY (`deploy/wall/fixture-fees.sql`). The roster's +5920 partners live
+on staging for weeks, so their trials end and billing suspends them for an
+unpaid fee. On the copy each gets the fresh 14-day trial a new partner is born
+with, and a store that billing suspended gets back what billing took. No
+payment, receipt, ledger or clock row is written. The script first proves the
+target is the copy (another Postgres cluster than the live one, saying
+staging) and prints counts only. Then a private `api-journeys`
 (`deploy/docker-compose.journeys-copy.yml`: both logins, `TENANT_RLS_BIND=1`,
 deny, no port, the copy's internal network only, uploads to a throwaway
 store inside it) serves the journeys and runs the queues. The journeys: an
@@ -1303,8 +1325,10 @@ step-up the copy cannot do). Then the system jobs `compliance-sample` and
 `expiry-sweep`. The instance's own metrics must hold: the 95th-percentile
 request time within 1 s, no query waiting for a pool connection, tenant and
 non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
-however the run ends, and `JOURNEYS PASSED` is printed only when every step
-held. The live staging API and database are only read. The copy has its own
+however the run ends, after its api, worker and api-journeys logs (the last
+400 lines each, redacted) are kept in the run's results directory
+(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`) and the first `FATAL` lines are
+printed, and `JOURNEYS PASSED` is printed only when every step held. The live staging API and database are only read. The copy has its own
 freshly generated secrets, so staging rows encrypted under the live key do not
 read on it; the journeys make their own accounts. Any failure is a stop:
 Phase C does not go ahead, and the cause is fixed in code, never by loosening

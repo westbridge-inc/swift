@@ -203,18 +203,20 @@ describe('[Q7b] / is the ordering home', () => {
     expect(screen.getAllByRole('button', { name: /Change delivery or pickup/ })).toEqual([control]);
     expect(screen.queryByText(/12 Main St/)).toBeNull();
     expect(screen.queryByRole('link', { name: /delivery address/i })).toBeNull();
-    // The promise row is true for pickup: no delivery fee, and no "pay cash when it arrives".
-    expect(screen.getByText('0% fees, no markups')).toBeTruthy();
-    expect(screen.getByText(/pickup has no delivery fee/)).toBeTruthy();
+    // The promise row is true for pickup [legal research A12]: no "0% fees", and no "pay cash when it arrives".
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
     expect(screen.queryByText(/when it arrives/)).toBeNull();
   });
 
   it('[owner, staging] the promise row never reads as "no fees at all" next to a delivery fee', async () => {
     renderHome();
     await screen.findByRole('region', { name: 'Open now' });
-    expect(screen.getByText('0% fees, no markups')).toBeTruthy();
-    expect(screen.getByText(/Prices are the business’s own\. Swift adds nothing to your order — the delivery fee is shown at checkout\./)).toBeTruthy();
-    expect(screen.queryByText(/0% fees, always/)).toBeNull();
+    // [Legal research A12] the research's promise: no commission, no markup, the delivery fee shown first.
+    expect(screen.getByText('No commission and no markup on store prices.')).toBeTruthy();
+    expect(screen.getByText('The delivery fee is shown before you order; pickup is free.')).toBeTruthy();
+    expect(screen.queryByText(/0% fees/)).toBeNull();
     expect(screen.queryByText(/when it arrives/)).toBeNull();
   });
 

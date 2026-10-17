@@ -988,6 +988,67 @@ describe('[owner Q-1654-BOOKS] the books show every MMG return', () => {
     expect((await runBillingInvariants(app.prisma)).ledgerTrialImbalance).toBeNull();
   });
 
+  // [partial-credit follow-up · coordinator 14 Oct] What the fee credit still holds of a returned payment is taken
+  // out of it once; only the shortfall is owed again. Never part of the returned money left spendable and
+  // refundable at closing beside a fee owed for all of it.
+  const partialBooks = async (p: { subId: string; userId: string; amount: number }, reversalId: string, kept: number) => {
+    expect(await walletOf(p.subId)).toBe(0);
+    const events = await reversalEvents(p.subId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ idempotencyKey: `mmg-reversal-part:${reversalId}` });
+    expect(Number(events[0]!.amount)).toBe(kept);
+    const owed = await ledgerOf(`ledger:mmg-reversal-not-booked:${reversalId}`);
+    expect(owed.map((e) => ({ ...e, debit: Number(e.debit), credit: Number(e.credit) })).sort((a, b) => a.accountCode.localeCompare(b.accountCode))).toEqual([
+      { accountCode: 'CLEARING_MMG', subledgerId: null, debit: 0, credit: p.amount - kept },
+      { accountCode: 'FEE_RECEIVABLE', subledgerId: p.subId, debit: p.amount - kept, credit: 0 },
+    ]);
+    const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, p.userId));
+    expect(obligations.feeCreditAmount ?? 0).toBe(0);
+    // The part taken out is a wallet debit on the books (Dr fee credit / Cr MMG clearing): with the fee owed,
+    // MMG clearing gives back exactly what MMG returned. (The fixture spends the credit by writing the balance
+    // directly, so the per-account event-sum check cannot be read for this account; the trial balance can.)
+    const part = await ledgerOf(`ledger:mmg-reversal-part:${reversalId}`);
+    expect(part.map((e) => ({ ...e, debit: Number(e.debit), credit: Number(e.credit) })).sort((a, b) => a.accountCode.localeCompare(b.accountCode))).toEqual([
+      { accountCode: 'CLEARING_MMG', subledgerId: null, debit: 0, credit: kept },
+      { accountCode: 'WALLET_LIABILITY', subledgerId: p.subId, debit: kept, credit: 0 },
+    ]);
+    expect((await runBillingInvariants(app.prisma)).ledgerTrialImbalance).toBeNull();
+  };
+
+  it('[partial credit] "money already used", and the fee credit still holds PART of it: that part is taken out once, only the rest is owed', async () => {
+    const p = await paidCheckout();
+    sandboxScriptReversal(p.txn, 'pending');
+    const sent = await ask(p.checkoutId, p.amount);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: 0 } });
+    sandboxSetTxStatus(p.txn, 'reversed');
+    const held = await runWithTenant('swift-default', () => reversals.check({ tenantId: 'swift-default', reversalId: sent.id }));
+    expect(held.heldReason).toBe('WALLET_NO_LONGER_HOLDS_IT');
+    const kept = Math.floor(p.amount / 3);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: kept } });
+    const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', `STMT${RUN}P1`);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED' });
+    await partialBooks(p, held.id, kept);
+  });
+
+  it('[partial credit] MMG no longer finds the payment, and the fee credit holds PART of it: that part is taken out once, only the rest is owed', async () => {
+    const p = await paidCheckout();
+    const reversal = `RVPC${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, 'Q')}`;
+    sandboxAddHistory({ transactionId: reversal, status: 'approved', amountMinor: p.amount * 100, currencyCode: 'GYD' });
+    const client: MmgReversalClient = {
+      reverseTransaction: async (req) => { reversalCalls.push(req.transactionId); return { status: 'pending', transactionId: reversal }; },
+      transactionLookupDetail: async (id) => (id === p.txn ? { outcome: 'not_found' as const } : mmg.transactionLookupDetail(id)),
+    };
+    const service = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications, client: () => client });
+    const sent = await runWithTenant('swift-default', () => service.requestReversal({ tenantId: 'swift-default', checkoutId: p.checkoutId, amountGyd: p.amount, reason: REASON, actorId: admin.userId, approvalId: null }, async () => {}));
+    const held = await runWithTenant('swift-default', () => service.settle(sent.id, { now: new Date(Date.now() + 25 * 3_600_000) }));
+    expect(held).toMatchObject({ state: 'HELD', lookupStatus: 'PAYMENT_NOT_FOUND' });
+    const kept = Math.floor(p.amount / 3);
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: p.subId }, data: { balance: kept } });
+    const closed = await resolveAs(held.id, 'RETURNED_NOT_BOOKED', reversal, service);
+    expect(closed).toMatchObject({ state: 'FAILED', resolution: 'RETURNED_NOT_BOOKED', lookupStatus: 'PAYMENT_NOT_FOUND' });
+    await partialBooks(p, held.id, kept);
+  });
+
   it('B: the cash journal marks the original receipt "returned" and adds a negative "returned" line with MMG\'s reference', async () => {
     const p = await paidCheckout();
     const receipt = await receiptOf(p.checkoutId);
@@ -1426,5 +1487,40 @@ describe('[#1527 review S2-2] a fee-credit set-aside never starts beside an open
     await expect(ask(p.checkoutId, p.amount)).rejects.toMatchObject({ code: 'MONEY_ALREADY_USED' });
     expect(await rowsFor(p.checkoutId)).toHaveLength(0);
     expect(reversalCalls).not.toContain(p.txn);
+  });
+
+  // [#1527 review S3-1] A return a person closed "not returned" is watched for a week: MMG may still finish
+  // it. A set-aside beside it could pay the same money back twice (MMG, then Swift's transfer).
+  const closedNotReturned = async (p: Paid) => {
+    sandboxScriptReversal(p.txn, 'error');
+    const held = await ask(p.checkoutId, p.amount);
+    expect((await resolveAs(held.id, 'NOT_RETURNED', `STMT${RUN}W${nanoid(4)}`)).state).toBe('FAILED');
+    return held.id;
+  };
+
+  it('[S3-1] within the week a "not returned" close is watched: the set-aside is refused, saying when to ask again', async () => {
+    const p = await paidCheckout();
+    await closedNotReturned(p);
+    const refused = setAside(p.subId, p.amount);
+    await expect(refused).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_REVERSAL_WATCHED' });
+    await expect(refused).rejects.toThrow(/ask again after .+ \(Guyana time\)/);
+    expect(await walletOf(p.subId)).toBe(p.amount);
+    expect(await reserved(p.subId)).toBe(0);
+  });
+
+  it('[S3-1] MMG returned it after the close and it is not booked yet: refused until it is booked, even after the week', async () => {
+    const p = await paidCheckout();
+    const id = await closedNotReturned(p);
+    await app.prisma.mmgFeeReversal.update({ where: { id }, data: { lookupStatus: 'RETURNED_AFTER_CLOSE', failedAt: new Date(Date.now() - 10 * 24 * 3_600_000) } });
+    await expect(setAside(p.subId, p.amount)).rejects.toMatchObject({ statusCode: 409, code: 'REFUND_REVERSAL_WATCHED' });
+    expect(await reserved(p.subId)).toBe(0);
+  });
+
+  it('[S3-1] once the week is over with nothing returned, the credit can be set aside', async () => {
+    const p = await paidCheckout();
+    const id = await closedNotReturned(p);
+    await app.prisma.mmgFeeReversal.update({ where: { id }, data: { failedAt: new Date(Date.now() - 8 * 24 * 3_600_000) } });
+    expect(await setAside(p.subId, p.amount)).toMatchObject({ replayed: false, amount: p.amount });
+    expect(await reserved(p.subId)).toBe(1);
   });
 });

@@ -7,7 +7,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { coarsePoint } from '../dispatch/board-privacy';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
+import { carriesGoods, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentence, arrivalCorroboration, CORROBORATION_WINDOW_MS } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
@@ -27,7 +27,7 @@ import { DeliveryCashSettlementService, assertSettlementId, settlementAttestatio
 import { makeDispatchService, vehicleCanCarry } from '../dispatch/dispatch.service';
 import { FloatService, riderFloatForOrder, floatAdvice } from '../dispatch/float.service';
 import { explainEarning } from '../../utils/explain-earning';
-import { riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { passengersOnlyRefusal, riderStackingCapacity, riderLiveLegCount, settleRiderLegs } from '../dispatch/concurrency-policy';
 import { reopenPreCustodyLeg } from '../dispatch/delivery-watchdog';
 import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
@@ -1133,9 +1133,11 @@ export async function riderRoutes(app: FastifyInstance) {
     // [owner #20 · G1] The board shows only work this rider's vehicle can
     // carry — the same size rule dispatch and the grab enforce (a parcel's
     // declared size; a goods order's bulk, a bulky line needing a car or van).
+    // [Owner ruling 15 Oct 2026] …and a taxi car sees no goods work at all while car deliveries are off
+    // (vehicleCanCarry reads the switch; an unsized order is asked too).
     const carriable = candidates.filter((order) => {
       const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
-      return !requiredSize || vehicleCanCarry(rider.vehicleType, requiredSize);
+      return vehicleCanCarry(rider.vehicleType, requiredSize);
     });
     const orders = await safeBoardOrders(app.prisma, carriable, request.user.userId, 'RIDER');
 
@@ -1368,6 +1370,10 @@ export async function riderRoutes(app: FastifyInstance) {
     if (!acceptableStatuses.includes(order.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Order cannot be accepted in status ${order.status}`);
     }
+
+    // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A taxi car takes no goods work while the
+    // CAR_DELIVERIES switch is off, said in its own words before any size rule (the claim refuses it too).
+    if (!carriesGoods(rider.vehicleType)) throw passengersOnlyRefusal();
 
     // SWIFT-062: the board-grab entrance must respect vehicle capability too — a
     // parcel can't be grabbed by a mover whose vehicle can't carry it (the offer
@@ -2222,6 +2228,8 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, sub.id),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

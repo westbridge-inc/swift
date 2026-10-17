@@ -5,11 +5,12 @@ import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
+import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
-import { approvedEvidenceFor, recordEvidenceFor, hirePermitGraceUntil, type EvidenceRow } from './evidence';
-import { HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPES, hirePermitGraceEnd, hireSplitStartedAt } from './hire-permit-grace';
+import { approvedEvidenceFor, recordEvidenceFor, type EvidenceRow } from './evidence';
+import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPES, HIRE_VEHICLE_LICENCE_DOC_TYPE, hireSplitStartedAt } from './hire-permit-grace';
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
@@ -17,6 +18,7 @@ import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-rec
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
@@ -25,7 +27,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
-import { isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { isMotorVehicle, isPassengerVehicle, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { evaluateMoverDocuments, type DocumentMoverKind } from './mover-document-authority';
 import { captureSubmissionAuthority, revalidateSubmissionAuthority, moverAuthorityChanged, moverProfileRequired, type SubmissionAuthority } from './submission-authority';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
@@ -161,6 +163,10 @@ export interface ReviewerTypedInput {
   documentNumber?: string;
   /** A police clearance's issue date. */
   issuedOn?: Date;
+  /** [R15] The year printed on a licence or food certificate that is checked again every January. */
+  certificateYear?: number;
+  /** [R16] A business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation. */
+  registrationKind?: RegistrationKind;
   /** The reviewer console's contract: the fields this type needs must be typed. */
   required?: boolean;
 }
@@ -187,6 +193,39 @@ export function clearanceRecheckDate(issuedOn: Date | null, now: Date = new Date
   return recheck;
 }
 
+/**
+ * [R15 · owner 15 Oct 2026, research A9/D9] A licence or food certificate renewed by the calendar
+ * year is checked again every January: its approval lapses at the start of 16 January after its
+ * year, Guyana time (the holder has the first fortnight of January to bring the new one). Only the
+ * current year's certificate — or, until 16 January, last year's — can be approved.
+ */
+export function certificateYearRecheck(year: number | null | undefined, now: Date = new Date()): Date {
+  if (typeof year !== 'number' || !Number.isInteger(year)) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_REQUIRED', 'Type the year printed on the certificate before approving it. It is checked again every January.');
+  }
+  if (year > guyanaWallClockParts(now).year) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_IN_FUTURE', 'That year has not started yet. Check the year printed on the certificate.');
+  }
+  const recheck = startOfGuyanaDay(`${year + 1}-01-16`);
+  if (recheck.getTime() <= now.getTime()) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_LAPSED', `This certificate is for ${year}. Ask the person for this year’s certificate.`);
+  }
+  return recheck;
+}
+
+/** [R15] The automatic path's conservative default, never past the January re-check for a certificate-year type. */
+function autoApprovalExpiry(docType: string, days: number, now: Date = new Date()): Date {
+  const byDays = new Date(now.getTime() + days * 86_400_000);
+  if (!CERTIFICATE_YEAR_DOC_TYPES.has(docType)) return byDays;
+  const cap = januaryRecheckCap(now);
+  return byDays.getTime() > cap.getTime() ? cap : byDays;
+}
+
+/** [R15] The latest an approval of a certificate-year document may last: the coming January re-check. */
+export function januaryRecheckCap(now: Date = new Date()): Date {
+  return startOfGuyanaDay(`${guyanaWallClockParts(now).year + 1}-01-16`);
+}
+
 export function resolveApprovalExpiry(
   docType: string,
   supplied: Date | undefined,
@@ -208,6 +247,13 @@ export function resolveApprovalExpiry(
       'EXPIRY_IN_PAST',
       `That expiry date has already passed. An expired ${docType.replace(/_/g, ' ')} cannot be approved.`,
     );
+  }
+  // [R15] A certificate-year document never outlasts the coming January re-check: a date from its
+  // typed year is that re-check already; any other date (an internal caller, an older console, an
+  // expiry assigned at upload) is brought forward to it, never extended.
+  if (CERTIFICATE_YEAR_DOC_TYPES.has(docType)) {
+    const cap = januaryRecheckCap(now);
+    return effective.getTime() > cap.getTime() ? cap : effective;
   }
   // [self-test C · ruling 2026-09-06] The other direction: a date beyond the longest validity
   // this type is issued for is a typo or a forgery (2036 keyed for 2026), not a long licence.
@@ -304,7 +350,8 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
   WRONG_DOCUMENT: 'This is not the document we asked for.',
   FACE_MISMATCH: FRAUD_GENERIC_TEXT,
   NAME_MISMATCH: 'The name on this document does not match your account.',
-  INSURANCE_NOT_HIRE: 'This policy does not cover hire/passenger use — taxi work needs HIRE-class insurance.',
+  // [R13] Riders see why: the policy's "limitations as to use" must allow paid work.
+  INSURANCE_NOT_HIRE: 'This policy does not permit use for hire or reward. Taxi work needs cover for passengers carried for hire; deliveries need cover for commercial use. Ask your insurer for it and upload the new certificate.',
   WRONG_PLATE_CLASS: 'A taxi must carry an H registration mark — this vehicle is not registered as a hire car.',
   // [DOC-1 §24.1 · §8.5] The fraud class reads IDENTICALLY and never names the
   // signal: Swift does not tell a person its system believes their document is
@@ -318,6 +365,19 @@ const REJECTION_TEMPLATES: Record<RejectionReasonCode, string> = {
 /** Which app surface a document notification belongs to: operator docs go to
  *  the driver/business surface, never the shopping feed; L2 identity is the
  *  customer's own. */
+/** [Owner ruling 15 Oct 2026 · no grace] A hire licence by the name the driver knows it by. */
+function hireLicenceName(docType: string): string {
+  return docType === HIRE_DRIVER_LICENCE_DOC_TYPE ? 'Hire Car Driver’s Licence'
+    : docType === HIRE_VEHICLE_LICENCE_DOC_TYPE ? 'car’s hire licence (the yearly one shown on the car)'
+      : docType.replace(/_/g, ' ');
+}
+
+/** "Upload your X and your Y" — exactly the hire licences this driver still lacks, nothing else. */
+function hireLicenceUploadWords(missing: readonly string[]): string {
+  if (missing.length === HIRE_SPLIT_DOC_TYPES.length) return 'Upload your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car)';
+  return `Upload your ${missing.map(hireLicenceName).join(' and your ')}`;
+}
+
 function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
   if (role === 'MOVER') return 'earner';
   if (role === 'CUSTOMER') return 'customer';
@@ -749,7 +809,7 @@ export class VerificationService {
           reviewedAt: new Date(),
           // Auto-approvals lapse on a conservative default so the expiry
           // sweep + 30-day reminders always fire; humans key the real date.
-          ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
+          ...(autoExpiryDays && { expiresAt: autoApprovalExpiry(docType, autoExpiryDays) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
     }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, authority });
@@ -994,6 +1054,9 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [DOC-1 §8.6 · R16] Recusal before anything the reviewer typed is judged: a recused reviewer is told so, never
+    // asked for a certificate's year or a registration's kind first. (The decision boundary checks it again.)
+    await assertNotRecused(this.prisma, adminId, candidate.userId);
     // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer must TYPE for
     // this type: the ID/licence number (kept only as a blind-index identity
     // key) or the police clearance's issue date (the re-check falls due a year
@@ -1021,6 +1084,22 @@ export class VerificationService {
       if (ISSUE_DATE_DOC_TYPES.has(candidate.docType) && (typed.required || typed.issuedOn)) {
         issuedOn = typed.issuedOn ?? null;
         expiresAt = clearanceRecheckDate(issuedOn);
+      }
+      // [R15] A licence or food certificate checked every January: the reviewer types its YEAR and the
+      // approval lasts to the January re-check after it — never a keyed or guessed expiry.
+      if (CERTIFICATE_YEAR_DOC_TYPES.has(candidate.docType) && (typed.required || typed.certificateYear !== undefined)) {
+        expiresAt = certificateYearRecheck(typed.certificateYear);
+      }
+      // [R16 · research D7] A business NAME (sole trader, partnership) is registered for a year: recorded by
+      // that year and checked again every January (the store goes offline on 16 January if it is not
+      // renewed). A company's certificate of incorporation never expires: nothing is set for it (the console
+      // keys no date for a business registration).
+      if (REGISTRATION_DOC_TYPES.includes(candidate.docType) && (typed.required || typed.registrationKind !== undefined)) {
+        if (typed.registrationKind === 'BUSINESS_NAME') expiresAt = certificateYearRecheck(typed.certificateYear);
+        else if (typed.registrationKind !== 'COMPANY') {
+          throw new AppError(400, 'REGISTRATION_KIND_REQUIRED',
+            'Say what this certificate is: a business name registration (a sole trader or partnership, renewed every year) or a company’s certificate of incorporation.');
+        }
       }
     }
     // Never on any later write: the typed number leaves this method only as the blind index.
@@ -1286,10 +1365,16 @@ export class VerificationService {
     if (taxi && plateClassOf(plate ?? '') !== 'H') {
       throw new AppError(400, 'WRONG_PLATE_CLASS', 'A taxi needs an H-series registration mark on its registered vehicle. A missing or different plate cannot be approved.');
     }
-    if (doc.docType === 'vehicle_insurance' && vehicleType && isPassengerVehicle(vehicleType)
+    // [R13 · owner 15 Oct 2026, research D6] EVERY motor vehicle, not only a taxi, needs insurance whose
+    // "Limitations as to use" permit use for hire or reward (taxi: passengers carried for hire; delivery:
+    // commercial use). A person reads the wording and records the decision; a private-use policy is
+    // rejected as INSURANCE_NOT_HIRE. Only a vehicle known to have no motor (a bicycle) is exempt; an
+    // insurance certificate whose vehicle cannot be told is treated as a motor vehicle's.
+    if (doc.docType === 'vehicle_insurance' && !(vehicleType && !isMotorVehicle(vehicleType))
       && !(insurance?.coverageClass === 'HIRE' && insurance.hireClassConfirmed)) {
-      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT',
-        'A passenger vehicle needs HIRE-class insurance with the hire class confirmed by the reviewer. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
+      throw new AppError(400, 'INSURANCE_SCOPE_INSUFFICIENT', taxi || (vehicleType && isPassengerVehicle(vehicleType))
+        ? 'A passenger vehicle needs HIRE-class insurance: cover for passengers carried for hire, confirmed by the reviewer from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.'
+        : 'A motor vehicle that delivers needs insurance that permits use for hire or reward (commercial use), and the reviewer must confirm it from the policy’s limitations as to use. Confirm it, or reject the document as INSURANCE_NOT_HIRE.');
     }
   }
 
@@ -1684,8 +1769,14 @@ export class VerificationService {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
       return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
     }
-    // A service category that is not open has no checklist at all — and nothing to add either.
-    if (roleKey === 'SERVICE_PROVIDER' && required.length === 0) return [];
+    if (roleKey === 'SERVICE_PROVIDER') {
+      // A service category that is not open has no checklist at all — and nothing to add either.
+      if (required.length === 0) return [];
+      // [TRADES] The provider's base and trade `_OPTIONAL` lists
+      // — the same projection as the checklist.
+      const { providerOptionalDocuments } = await import('../services/services.service');
+      return providerOptionalDocuments(this.prisma, userId, required);
+    }
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
@@ -1746,18 +1837,8 @@ export class VerificationService {
         .filter((d) => d.status === 'APPROVED' && (!d.expiresAt || d.expiresAt > new Date()))
         .map((d) => d.docType),
     );
-    // [VERIFY-DOCS · hire-car permit split] While an approved permit stands in for the two new
-    // licences, the checklist shows them as done (build 9 keeps the driver on the home screen) and
-    // says until when; uploading the new licences stays open the whole time.
-    let hirePermitGrace: { until: Date } | undefined;
-    const splitPending = HIRE_SPLIT_DOC_TYPES.filter((docType) => checklist.includes(docType) && !approved.has(docType));
-    if (splitPending.length > 0) {
-      const until = await hirePermitGraceUntil(this.prisma, userId, new Date());
-      if (until) {
-        for (const docType of splitPending) approved.add(docType);
-        hirePermitGrace = { until };
-      }
-    }
+    // [Owner ruling 15 Oct 2026 · no grace] The old hire-car permit never marks the two hire licences
+    // done: a driver without them sees each one still to upload (`missing`).
     const missing = checklist.filter((docType) => !approved.has(docType));
     const gateMissing = gate.filter((docType) => !approved.has(docType));
 
@@ -1802,7 +1883,6 @@ export class VerificationService {
       // the one evidence rule, so the flag survives the image being deleted after review.
       // Only asked where this person's lists name the document at all.
       policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
-      ...(hirePermitGrace ? { hirePermitGrace } : {}),
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
@@ -2298,7 +2378,7 @@ export class VerificationService {
         body: optional
           ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
           : doc.docType === HIRE_PERMIT_DOC_TYPE
-            ? 'Your hire-car permit has expired. Upload your Hire Car Driver’s Licence and your car’s hire licence in Documents to keep operating.'
+            ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
             : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expired', docId: doc.id },
@@ -2350,7 +2430,7 @@ export class VerificationService {
         title: n.daysLeft <= 1 ? 'Document expires tomorrow' : 'Document expiring soon',
         body: `Your ${doc.docType.replace(/_/g, ' ')} expires on ${n.expiresOn.toISOString().slice(0, 10)} — ${n.daysLeft} day${n.daysLeft === 1 ? '' : 's'} left. ${optional
           ? (doc.docType === POLICE_CLEARANCE_DOC_TYPE ? 'Renew it to stay recorded as police-cleared. It is optional and does not affect your work.' : 'It is optional and does not affect your work.')
-          : doc.docType === HIRE_PERMIT_DOC_TYPE ? 'Upload your Hire Car Driver’s Licence and your car’s hire licence to keep operating after this permit expires.' : 'Renew it to avoid suspension.'}`,
+          : doc.docType === HIRE_PERMIT_DOC_TYPE ? `This permit no longer counts on its own. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.` : 'Renew it to avoid suspension.'}`,
         audience: audienceForRole(doc.role),
         data: { kind: 'verification_expiry_reminder', docId: n.documentId, daysLeft: n.daysLeft },
       });
@@ -2361,20 +2441,20 @@ export class VerificationService {
   }
 
   /**
-   * [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT] The hire-car permit split's 60 days, run by the
-   * daily document sweep. A taxi driver whose approved permit is standing in for the two new licences
-   * is told what to upload — when the window opens, and again with 30 and 7 days left (once each) —
-   * and when the window has closed, taken offline if the permit was all they had (GO refuses them from
-   * then on anyway). A permit that expires first is the ordinary expiry sweep's work.
+   * [Owner ruling 15 Oct 2026 ~04:25Z · no grace] The hire licences, enforced. A taxi driver who still holds
+   * the old hire-car permit but not BOTH licences that replaced it (the person's Hire Car Driver's Licence
+   * and the car's hire licence) cannot be live: the permit never counts (evidence.ts). If they are online
+   * they are taken offline now, so no offer reaches them; and they are told once, by name, exactly which
+   * licence(s) to upload. Run by the daily document sweep and at every API boot (hire-licence-boot.ts), so
+   * the rule binds the moment this code runs. Idempotent and safe to run concurrently: the force-offline
+   * write is conditional on isOnline and the notice is deduplicated per switch-over and missing set.
    */
-  async hirePermitGraceSweep(now = new Date()): Promise<number> {
+  async hireLicenceSweep(now = new Date()): Promise<number> {
     const started = await hireSplitStartedAt(this.prisma);
-    if (!started) return 0;
-    const end = hirePermitGraceEnd(started);
     const permits = await this.prisma.documentRecord.findMany({
       where: { docType: HIRE_PERMIT_DOC_TYPE, status: 'VALID', OR: [{ expiresOn: null }, { expiresOn: { gt: now } }],
         submission: { purgedAt: null, OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: now } }] } },
-      select: { accountId: true, submissionId: true, expiresOn: true, submission: { select: { retentionExpiresAt: true } } },
+      select: { accountId: true, submissionId: true },
       orderBy: { approvedAt: 'desc' },
     });
     const seen = new Set<string>();
@@ -2382,28 +2462,24 @@ export class VerificationService {
     for (const permit of permits) {
       if (seen.has(permit.accountId)) continue;
       seen.add(permit.accountId);
-      if (!(await this.prisma.driver.findUnique({ where: { userId: permit.accountId }, select: { id: true } }))) continue;
+      const driver = await this.prisma.driver.findUnique({ where: { userId: permit.accountId }, select: { vehicleType: true, user: { select: { countryCode: true } } } });
+      if (!driver) continue;
+      // Only a driver whose own checklist asks for the hire licences (a taxi, not a bus) is told to upload them.
+      const required = await this.countryConfig.getMoverChecklist(driver.user.countryCode, driver.vehicleType);
       const held = await recordEvidenceFor(this.prisma, permit.accountId, HIRE_SPLIT_DOC_TYPES, now);
-      if (HIRE_SPLIT_DOC_TYPES.every((docType) => held.some((r) => r.docType === docType))) continue;
-      if (now.getTime() >= end.getTime()) {
-        if (await this.forceMoverOfflineIfNotLive(permit.accountId,
-          'Your hire-car permit no longer counts on its own. Upload your Hire Car Driver’s Licence and your car’s hire licence in Documents to go back online.')) touched += 1;
-        continue;
-      }
-      const effectiveEnd = new Date(Math.min(end.getTime(), permit.expiresOn?.getTime() ?? Infinity, permit.submission.retentionExpiresAt?.getTime() ?? Infinity));
-      const daysLeft = Math.max(1, Math.ceil((effectiveEnd.getTime() - now.getTime()) / 86_400_000));
-      const stage = daysLeft <= 7 ? '7' : daysLeft <= 30 ? '30' : 'start';
-      const title = stage === 'start' ? 'Add your new hire-car licences' : `Add your hire-car licences within ${daysLeft} days`;
-      const already = await this.prisma.notification.findFirst({ where: { userId: permit.accountId, title, createdAt: { gte: started } }, select: { id: true } });
-      if (already) continue;
+      const missing = HIRE_SPLIT_DOC_TYPES.filter((docType) => required.includes(docType) && !held.some((r) => r.docType === docType));
+      if (missing.length === 0) continue;
+      const upload = hireLicenceUploadWords(missing);
+      await this.forceMoverOfflineIfNotLive(permit.accountId,
+        `Your hire-car permit no longer counts on its own. ${upload} in Documents to go back online.`);
       await this.notifications.send({
         userId: permit.accountId,
         type: 'SYSTEM_ANNOUNCEMENT',
-        title,
-        body: `Swift now asks taxi drivers for two licences instead of the hire-car permit: your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car). Upload both in Documents by ${effectiveEnd.toISOString().slice(0, 10)}. Until then your permit still counts, so you can keep working.`,
+        title: missing.length === 2 ? 'Upload your two hire licences' : `Upload your ${hireLicenceName(missing[0]!)}`,
+        body: `A taxi driver needs both the Hire Car Driver’s Licence and the car’s hire licence approved before going online; the old hire-car permit no longer counts on its own. ${upload} in Documents to go online.`,
         audience: 'earner',
-        data: { kind: 'verification_expiry_reminder', docId: permit.submissionId, daysLeft },
-        dedupeKey: `hire-licence-transition:${started.toISOString()}:${stage}`,
+        data: { kind: 'verification_expiry_reminder', docId: permit.submissionId, missing },
+        dedupeKey: `hire-licences-required:${started?.toISOString() ?? 'none'}:${missing.join('+')}`,
       });
       touched += 1;
     }
@@ -2488,6 +2564,47 @@ export class VerificationService {
     const flagged = { ...result, collided: true };
     if (result.status !== 'approved') return flagged;
     return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
+  }
+
+  /**
+   * [R24 · research C4] A partner's REJECTED document is not needed once the decision stands:
+   * a PERSONAL one is deleted the configured number of days after the rejection (30 unless the
+   * lawyer's number is set); a vehicle or business one after its registry window (90 days).
+   * This only sets the retention clock — never later than one it already has, never for an AML
+   * record (its own law keeps it), never under a legal hold — and the reaper below deletes it
+   * when the clock falls due. A revoked approval is not a rejection (its record is evidence
+   * history), and a customer's own ID follows the customer-ID rule, not this one (an individual
+   * service provider's documents, stored with role CUSTOMER, are partner documents: PARTNER_DOCUMENT_WHERE).
+   * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention).
+   */
+  async scheduleRejectedDocumentRetention(batch = 500): Promise<number> {
+    const personalDays = await configuredDays(this.prisma, REJECTED_DOCUMENT_DAYS_KEY, DEFAULT_REJECTED_DOCUMENT_DAYS);
+    const rejected = await this.prisma.verificationDocument.findMany({
+      where: {
+        OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+        AND: [PARTNER_DOCUMENT_WHERE], reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
+      },
+      select: { id: true, docType: true, role: true, reviewedAt: true, retentionExpiresAt: true, user: { select: { countryCode: true } } },
+      orderBy: { reviewedAt: 'asc' }, take: batch,
+    });
+    let scheduled = 0;
+    for (const doc of rejected) {
+      const config = await this.countryConfig.getByCode(doc.user.countryCode);
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: doc.user.countryCode, docType: doc.docType, role: doc.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      const days = isPersonalDocType(doc.docType) ? personalDays : ruling.days;
+      const due = new Date(doc.reviewedAt!.getTime() + days * DAY_MS);
+      if (doc.retentionExpiresAt && doc.retentionExpiresAt.getTime() <= due.getTime()) continue;
+      const set = await this.prisma.verificationDocument.updateMany({
+        where: {
+          id: doc.id, purgedAt: null, legalHoldId: null, OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+          AND: [{ OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: due } }] }],
+        },
+        data: { retentionExpiresAt: due },
+      });
+      scheduled += set.count;
+    }
+    return scheduled;
   }
 
   /** Purge documents whose retention window elapsed: delete the stored object,

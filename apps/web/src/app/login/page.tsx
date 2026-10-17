@@ -8,6 +8,7 @@ import { verifyCustomerLogin } from '@/lib/customer';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { customerRoute } from '@/lib/customer-routes';
+import { safeInternalPath } from '@/lib/safe-return-path';
 import { AuthError, AuthHeading, AuthPage, CodeBoxes, DIAL_CODE, PhoneField, fullPhone, phoneReady } from '@/components/auth-ui';
 
 const CUSTOMER_ROUTES = ['/order', '/cart', '/checkout', '/orders', '/taxi', '/account', '/explore', '/courier', '/store', '/stores', '/selfie', '/market'];
@@ -47,7 +48,8 @@ function LoginInner() {
     if (direct || requestedNext !== null) setReturnReady(true);
     else void import('@/lib/basket').then(module => {
       if (!alive) return;
-      setNext(module.guestBasketReturn());
+      // [WEB-GUARDS] Stored paths take the same shared rule as ?next=.
+      setNext(safeInternalPath(module.guestBasketReturn()) ?? '');
       setReturnReady(true);
     }, () => {
       if (alive) setError('Your browser basket could not load. Reopen the store and try signing in again.');

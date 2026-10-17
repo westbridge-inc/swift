@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useEffect } from 'react';
-import { FlatList, Pressable, RefreshControl, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { AppState, FlatList, Pressable, RefreshControl, View } from 'react-native';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
@@ -8,6 +8,7 @@ import { color, radius, space } from '@swift/ui';
 import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
+import { POLL } from '../../../lib/pollPolicy';
 import { vendorPhoto } from '../../../lib/images';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { reorderNotice } from '../../../lib/reorderNotice';
@@ -174,7 +175,13 @@ export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const orders = useOrdersInfinite();
-  const liveOrders = useLiveOrders();
+  // [row 5 · ANDROID-QA] The list must follow orders in progress while the
+  // customer looks at it: no socket event reaches this screen, so the live
+  // query re-asks (15 s; 30 s on a slow network) while the tab is on screen,
+  // the app is in front and something is in progress (hooks/customer).
+  const isFocused = useIsFocused();
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const liveOrders = useLiveOrders(isFocused && appActive && isAuthenticated ? POLL.customerLiveOrders : undefined);
   const reorder = useReorder();
   // The pull spinner is the person's own gesture (lib/pullToRefresh). The
   // focus refetch below runs on EVERY switch to this tab, and a spinner bound
@@ -187,7 +194,6 @@ export function OrdersHistoryScreen() {
   // BOTH queries refresh: an order that finishes while the tab sits in the
   // background leaves the live list and joins history, and refreshing only one
   // of them would show it in neither — or in both.
-  const isFocused = useIsFocused();
   useEffect(() => {
     if (isFocused && isAuthenticated) {
       orders.refetch();
@@ -195,6 +201,39 @@ export function OrdersHistoryScreen() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
+
+  // Back from the background with this tab on screen: the same refresh as a
+  // tab switch (Home does the same). The poll above stops while backgrounded.
+  const foreground = useRef({ isFocused, isAuthenticated, refresh: () => {} });
+  foreground.current = {
+    isFocused,
+    isAuthenticated,
+    refresh: () => { void orders.refetch(); void liveOrders.refetch(); },
+  };
+  useEffect(() => {
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (next) => {
+      setAppActive(next === 'active');
+      const { isFocused: focused, isAuthenticated: signedIn, refresh } = foreground.current;
+      if (next === 'active' && previous !== 'active' && focused && signedIn) refresh();
+      previous = next;
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // An order that leaves the live list (finished or cancelled) must join
+  // history in the same moment, or it shows in neither: re-read history when
+  // a live order drops out. Membership by id, never by status.
+  const liveIdsKey = (liveOrders.data?.items ?? []).map((o) => String(o.id)).sort().join(',');
+  const previousLiveIds = useRef<string | null>(null);
+  useEffect(() => {
+    const before = previousLiveIds.current;
+    previousLiveIds.current = liveIdsKey;
+    if (before === null || !isAuthenticated) return;
+    const now = new Set(liveIdsKey ? liveIdsKey.split(',') : []);
+    if (before.split(',').some((id) => id && !now.has(id))) void orders.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveIdsKey]);
 
   // THE PAPER HEADER — ink on the page ground, no slab, no white pill.
   const header = (

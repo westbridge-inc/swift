@@ -66,8 +66,17 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  the single hire-car permit) and no TIN certificate on any store list — on top
  *  of 2026-10-14.4 (both changes together; the two never share a value). This
  *  change carried 2026-10-07.2 and then 2026-10-14.2 on older bases; neither
- *  label describes these values. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-14.5';
+ *  label describes these values.
+ *  2026-10-15.1 [TRADES]: all of 2026-10-14.5 plus this branch's 2026-10-13.1
+ *  (the service trades opened with their own document lists; lawyers held).
+ *  2026-10-15.2 [R15 · owner 15 Oct, research A9/D9]: 2026-10-15.1 with the
+ *  UNSURE trades held again (gas fitter, barber group, accountant; drone work):
+ *  their lists are gone; pest control, heavy equipment, chef, caterer,
+ *  photographer and tutor keep theirs.
+ *  2026-10-16.1 [owner 16 Oct]: 2026-10-15.2 with the heavy-equipment operator
+ *  HELD again (licence rules unconfirmed): its list is gone; pest control,
+ *  chef, caterer, photographer and tutor keep theirs. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-16.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -155,7 +164,7 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
     // PERSON's Hire Car Driver's Licence (s.80), the CAR's yearly hire licence (s.79), the car photo
     // with the plate showing, and the certificate of fitness. The two licences replace the single
-    // hire-car permit; an approved permit counts as both for 60 days (verification/hire-permit-grace).
+    // hire-car permit; [owner 15 Oct 2026] the permit never counts as either (no grace: verification/hire-permit-grace).
     MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
@@ -179,7 +188,42 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER: ['national_id', 'police_clearance'],
     SERVICE_PROVIDER_TRADE_ELECTRICIAN: ['gei_electrical_licence'],
     SERVICE_PROVIDER_TRADE_ELECTRICAL: ['gei_electrical_licence'],
+    // [TRADES · owner 13 Oct 2026, decisions 23 + 40; R15 · owner 15 Oct, research A9/D9] The trades
+    // opened at launch, each with the documents Guyana law ties to it. The base SERVICE_PROVIDER list
+    // (national ID + police clearance) applies to every one of them; SERVICE_TRADE_LAUNCH_FLOOR below
+    // keeps both halves required whatever a stored list says. Gas fitters, the barber group,
+    // accountants and [owner 16 Oct] heavy-equipment operators are HELD (services/service-catalog)
+    // and have no list here.
+    // Pesticides and Toxic Chemicals Control Act s.21 (operator licence) and regulation 89
+    // (commercial applicator certificate, two years).
+    SERVICE_PROVIDER_TRADE_PEST_CONTROL: ['pest_control_operator_licence', 'pesticide_applicator_certificate'],
+    // This year's food handler's certificate from the Mayor and City Council of Georgetown
+    // (research D9; Georgetown only for now), re-checked every January.
+    SERVICE_PROVIDER_TRADE_CHEF: ['food_handler_cert'],
+    // The certificate + the premises: the Georgetown eating-house registration (City by-law 63),
+    // renewed every 1 January.
+    SERVICE_PROVIDER_TRADE_CATERER: ['food_handler_cert', 'eating_house_registration'],
+    // Ground photography needs no licence. Drone work is held: a profile offering it is refused.
+    SERVICE_PROVIDER_TRADE_PHOTOGRAPHER: ['police_clearance'],
+    // Works with children, often in their homes: the police clearance is required, never optional.
+    SERVICE_PROVIDER_TRADE_TUTOR: ['police_clearance'],
     CUSTOMER_L2: ['national_id', 'selfie'],
+};
+
+/**
+ * [TRADES · owner 13 Oct 2026] The legal FLOOR of each trade opened at launch: identity, the
+ * police clearance and the trade's own documents. The provider checklist is always a superset
+ * of it — a stored CountryConfig edit can add documents but never take one of these away — so
+ * an opened trade can never go live on identity documents alone. A trade without an entry here
+ * (a held trade: the lawyer, gas fitter, barber group, accountant, heavy-equipment operator) gains
+ * nothing from it.
+ */
+export const SERVICE_TRADE_LAUNCH_FLOOR: Readonly<Record<string, readonly string[]>> = {
+  pest_control: ['national_id', 'police_clearance', 'pest_control_operator_licence', 'pesticide_applicator_certificate'],
+  chef: ['national_id', 'police_clearance', 'food_handler_cert'],
+  caterer: ['national_id', 'police_clearance', 'food_handler_cert', 'eating_house_registration'],
+  photographer: ['national_id', 'police_clearance'],
+  tutor: ['national_id', 'police_clearance'],
 };
 
 /**
@@ -214,9 +258,9 @@ export const AIRPORT_TAXI_PER_KM = 295;
 /** The desired platform spine, as data. */
 export function desiredPlatformConfig(): DesiredConfig {
   const gydPerUsd = seedFxRate();
-  // Document checklists are the LAUNCH default. The GEI-licensed electrician
-  // entry is the one trade-specific requirement; every other trade falls back
-  // to the SERVICE_PROVIDER checklist.
+  // Document checklists are the LAUNCH default. Trade-specific requirements are
+  // the SERVICE_PROVIDER_TRADE_* lists (the GEI-licensed electrician, and the
+  // trades opened on 13 Oct); every other trade uses the SERVICE_PROVIDER list.
   const guyanaChecklists = DEFAULT_DOCUMENT_CHECKLISTS;
   // Guyana's taxi fare IS the code default (one place, country/pricing-config):
   // a fresh database starts on it, and its first quote records it as version 1.

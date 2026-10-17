@@ -672,7 +672,11 @@ export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/mode
 // edit in between refuses it. Remove bans the item for good, with a reason the
 // partner reads. Neither can lift a certain ban (a banned category, or an
 // earlier removal).
-export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export const PROHIBITED_CLASSES = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  // [R4 · owner 15 Oct] the expanded permanent list (the server's PROHIBITED_CLASSES, class for class)
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+] as const;
 export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
 export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
 export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
@@ -723,7 +727,7 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string; certificateYear?: number; registrationKind?: 'BUSINESS_NAME' | 'COMPANY' } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
@@ -1156,5 +1160,21 @@ export const resolvePaymentDispute = async (
     method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
   });
   if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [L02 · row 34] Partial cash a rider still holds after a refused handover ──
+/**
+ * C4 (money class): record that cash the rider HELD is resolved — handed back
+ * later, or otherwise settled, as the stated reason says. A record only: Swift
+ * moves, refunds and deducts nothing. The first call answers 202
+ * APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it
+ * in Approvals, and the asking admin applies it from there.
+ */
+export const resolveHeldDoorCash = async (id: string, reason: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/door-cash-return/resolve`, {
+    method: 'POST', body: '{}', reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.doorCashReturn?.status !== 'RESOLVED') throw unreadableOrderAction();
   return response;
 };

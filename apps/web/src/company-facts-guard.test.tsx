@@ -68,7 +68,20 @@ const FACTS: Array<[string, RegExp]> = [
 describe('[SITE-1.1 Part 3] every company fact lives in site.config.ts and nowhere else', () => {
   it('the guard knows every fact it is guarding', () => {
     for (const [name, value] of Object.entries(GUARDED)) expect(defined(value), `site.config.ts has no ${name}`).toBe(true);
-    for (const [name, pattern] of FACTS) expect(readFileSync(CONFIG, 'utf8'), `${name} is in site.config.ts`).toMatch(pattern);
+    // [Owner 15 Oct 2026 · legal research A11, R2] The legal name, registered address, phone and support e-mail have
+    // ONE source shared with the Terms and the Privacy Policy (apps/api/src/modules/legal/operator.ts); site.config.ts
+    // reads them from the legal:sync snapshot, which holds them. The second trade name is typed in site.config.ts.
+    const config = readFileSync(CONFIG, 'utf8');
+    const snapshot = readFileSync(join(SRC, 'legal', 'generated.ts'), 'utf8');
+    expect(config).toMatch(/legalEntityName: OPERATOR\.name,/);
+    expect(config).toMatch(/address: `\$\{OPERATOR\.registeredAddress\}, \$\{OPERATOR\.registeredIn\}`,/);
+    expect(config).toMatch(/phone: OPERATOR\.phone,/);
+    expect(config).toMatch(/supportEmail: OPERATOR\.supportEmail,/);
+    for (const [name, pattern] of FACTS) {
+      if (name === 'second trade name') expect(config, `${name} is in site.config.ts`).toMatch(pattern);
+      else if (name === 'address') expect(snapshot, 'the registered address is in the legal snapshot').toContain(GUARDED.address!.replace(/, Guyana$/, ''));
+      else expect(snapshot, `${name} is in the legal snapshot`).toMatch(pattern);
+    }
   });
 
   it('no shipped source file types a company fact by hand', () => {

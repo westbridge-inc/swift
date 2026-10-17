@@ -11,6 +11,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
 import { publishLegalDocument, recordConsent, type ConsentSurface } from '../legal/consent.service';
+import { AGE_DECLARATION_TYPE, AGE_DECLARATION_V1, AGE_DECLARATION_VERSION } from './age-declaration';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -356,6 +357,17 @@ export class AuthService {
     return this.signupDocsPublished;
   }
 
+  private ageDeclarationPublished: Promise<void> | null = null;
+  private ensureAgeDeclarationPublished(): Promise<void> {
+    this.ageDeclarationPublished ??= publishLegalDocument(this.app.prisma, {
+      documentType: AGE_DECLARATION_TYPE, version: AGE_DECLARATION_VERSION, renderedText: AGE_DECLARATION_V1,
+    }).then(() => undefined).catch((err) => {
+      this.ageDeclarationPublished = null; // next signup retries rather than caching failure
+      throw err;
+    });
+    return this.ageDeclarationPublished;
+  }
+
   async register(data: {
     phone: string;
     firstName: string;
@@ -365,6 +377,8 @@ export class AuthService {
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" (the route decides who must send it). */
+    ageConfirmed?: boolean;
     /** Request metadata for silent identity capture — never client-trusted
      *  for anything but SOFT signals (households/CGNAT never punish alone). */
     deviceId?: string | null;
@@ -426,7 +440,7 @@ export class AuthService {
   }
 
   private async createAccount(
-    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
+    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; ageConfirmed?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
     plan: { signupRole: SignupRole; roles: UserRole[]; activeRole: UserRole; countryCode: string },
   ) {
     const { signupRole, roles, activeRole, countryCode } = plan;
@@ -437,6 +451,8 @@ export class AuthService {
     // anchor to the exact words /legal/terms and /legal/privacy render.
     const consented = data.acceptTerms === true;
     if (consented) await this.ensureSignupDocsPublished();
+    const ageDeclared = data.ageConfirmed === true;
+    if (ageDeclared) await this.ensureAgeDeclarationPublished();
     const user = await this.app.prisma.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
       const created = await tx.user.create({
@@ -470,6 +486,19 @@ export class AuthService {
             evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
           });
         }
+      }
+      // [Owner ruling 15 Oct 2026] the 18+ tick, anchored to its exact words, in the account's own transaction.
+      if (ageDeclared) {
+        await recordConsent(tx, {
+          subjectType: 'customer',
+          subjectId: created.id,
+          documentType: AGE_DECLARATION_TYPE,
+          version: AGE_DECLARATION_VERSION,
+          action: 'granted',
+          surface: data.surface,
+          ip: data.ipAddress,
+          evidence: { control: 'age_18_checkbox', path: 'auth/register', role: signupRole },
+        });
       }
       return created;
     });

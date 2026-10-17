@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
+import { identitySalt } from '../modules/integrity/normalize';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
@@ -62,6 +63,8 @@ const good: Record<string, string | undefined> = {
   EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key is a boot guard too.
+  IDENTITY_SALT: 'synthetic-identity-boot-salt',
   // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
 };
@@ -627,6 +630,85 @@ describe('test-control lease secret [C2]', () => {
     expect(signed.lease.signature).toMatch(/^[0-9a-f]{64}$/);
     const inTest = await testControlIdentity(prismaDouble, { NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' });
     expect(inTest.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] IDENTITY_SALT keys every identity-signal hash (phone,
+// document number, plate, device). Production used to find it missing only at
+// the first identity capture, mid-signup, as a thrown 500. Now it refuses to
+// start, in the qr-config salts' style: one contract for the boot guard and the
+// hasher, and the value is never echoed.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] IDENTITY_SALT is checked at boot, not at the first identity capture', () => {
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['blank', ' \t '],
+  ] as const)('production refuses to start with IDENTITY_SALT %s', (_label, value) => {
+    expect(() => assertSafeBootConfig({ ...good, IDENTITY_SALT: value })).toThrow(/FATAL: IDENTITY_SALT .*Refusing to start/);
+  });
+
+  it('production refuses the development default printed in this public repository, without echoing it', () => {
+    let message = '';
+    try {
+      assertSafeBootConfig({ ...good, IDENTITY_SALT: 'dev-identity-salt' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/FATAL: IDENTITY_SALT .*Refusing to start/);
+    expect(message).not.toContain('dev-identity-salt');
+  });
+
+  it('a configured salt boots, and development and test keep their fixed fallback', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode })).not.toThrow();
+      expect(identitySalt({ NODE_ENV: mode })).toBe('dev-identity-salt');
+      expect(identitySalt({ NODE_ENV: mode, IDENTITY_SALT: ' ' })).toBe('dev-identity-salt');
+    }
+  });
+
+  it('the hasher keeps the same contract as the boot guard', () => {
+    expect(identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: 'synthetic-identity-boot-salt' })).toBe('synthetic-identity-boot-salt');
+    for (const value of [undefined, '', ' \t ', 'dev-identity-salt']) {
+      expect(() => identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: value }), String(value)).toThrow(/IDENTITY_SALT/);
+    }
+  });
+
+  it('the value-free preflight refuses a production file without it, and lists it by name only', () => {
+    const missing = runPreflight({ ...good, IDENTITY_SALT: undefined });
+    expect(missing.status, missing.stderr).toBe(1);
+    expect(missing.stdout).toContain('MISSING  IDENTITY_SALT');
+    expect(missing.stdout).toMatch(/REFUSED[\s\S]*IDENTITY_SALT/);
+    const present = runPreflight(good);
+    expect(present.status, present.stderr).toBe(0);
+    expect(present.stdout).toContain('PRESENT  IDENTITY_SALT');
+    expect(present.stdout).not.toContain('synthetic-identity-boot-salt');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] A kill switch left ON is printed by the preflight
+// before a deploy, in the SWITCHED OFF register, like any other capability that
+// starts fine while off. The SOS escalation worker is the case that matters.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] the preflight names every kill switch left on', () => {
+  const switchedOff = (stdout: string) => stdout.slice(stdout.indexOf('SWITCHED OFF'), stdout.indexOf('VERDICT'));
+
+  it('SOS_ESCALATION_WORKER_KILL=1 is printed under SWITCHED OFF, and the file still passes', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '1', OPS_ALERT_ESCALATION_KILL: '1' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).toContain('[SOS_ESCALATION_WORKER_KILL=1]');
+    expect(switchedOff(result.stdout)).toContain('[OPS_ALERT_ESCALATION_KILL=1]');
+  });
+
+  it('a kill switch at 0 or unset is not listed; the launch card lock (CARD_RAIL_KILL=1) always is', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '0' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).not.toContain('SOS_ESCALATION_WORKER_KILL');
+    expect(switchedOff(result.stdout)).not.toContain('OPS_ALERT_ESCALATION_KILL');
+    expect(switchedOff(result.stdout)).toContain('[CARD_RAIL_KILL=1]');
   });
 });
 
