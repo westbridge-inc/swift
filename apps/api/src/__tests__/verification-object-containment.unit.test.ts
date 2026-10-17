@@ -55,9 +55,12 @@ function referencePage(rows: any[], query: any, column: string) {
 
 function rawSecurityCensus(people: Map<string, any>, orphans: Map<string, any>, query: unknown, values: unknown[]) {
   const sql = String(query);
-  if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')) {
+  if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')
+    || sql.includes('upload-erasure-global-visibility')) {
     return [{ active: false }];
   }
+  // [Row 331] The upload/liveness erasure census: no other row in this harness references a subject's upload.
+  if (sql.includes('upload-erasure-object-references') || sql.includes('upload-erasure-liveness-references')) return [];
   if (sql.includes('avatar-global-census-page')) {
     const after = String(values[0] ?? '');
     const take = Number(values[1]);
@@ -184,6 +187,10 @@ function harness() {
   for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
     db[name] = { deleteMany: vi.fn() };
   }
+  // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
+  // and an unclaimed upload is kept while the person is under a legal hold (none here).
+  db.livenessCheck.findMany = vi.fn(async () => []);
+  db.docLegalHold = { count: vi.fn(async () => 0) };
   // The synthetic route session is not a fresh code sign-in, so deletion
   // falls through to the step-up grant the route harness holds in Redis.
   db.session.findUnique = vi.fn(async () => null);
@@ -763,7 +770,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.auditLog.create.mockResolvedValue({});
     vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
       deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1,
-      pendingAvatarObjects: 1, message: 'Personal-data erasure pending.',
+      pendingAvatarObjects: 1, pendingUploads: 1, message: 'Personal-data erasure pending.',
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
@@ -772,7 +779,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(reply.code).toHaveBeenCalledWith(202);
     expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
       action: 'ACCOUNT_SELF_DELETION_PENDING',
-      changes: expect.objectContaining({ pendingDocuments: 1, pendingAvatarObjects: 1 }),
+      changes: expect.objectContaining({ pendingDocuments: 1, pendingAvatarObjects: 1, pendingUploads: 1 }),
     }) }));
   });
 
@@ -858,6 +865,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
 
   it('account deletion stays pending when avatar absence cannot be proved', async () => {
     const h = accountHarness();
+    h.objects.delete(key(A)); // [Row 331] no uploads: this case is about the avatar alone
     storage.delete.mockResolvedValue(undefined);
     storage.getObject.mockResolvedValue(Buffer.from('avatar-still-present'));
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
@@ -1150,6 +1158,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
 
   it('F-220-01: early tombstoning preserves the original phone in the already-authorized safety escrow', async () => {
     const h = accountHarness(); h.person.avatar = '';
+    // [Row 331] This subject never uploaded a file (an unclaimed upload would now be owed too).
+    h.objects.delete(key(A));
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     h.db.sosAlert.findMany.mockResolvedValue([{ id: 'synthetic-alert' }]);
     h.db.emergencyContact.findMany = vi.fn(async () => []);
@@ -1178,6 +1188,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
     const h = accountHarness(); const doc = h.poison();
     doc.fileUrl = fault === 'legacy' ? `/uploads/verification/${A}/legacy.jpg` : key(A);
+    // [Row 331] A legacy pointer leaves no envelope of the subject's own behind (else it would be an unclaimed upload, now owed too).
+    if (fault === 'legacy') h.objects.delete(key(A));
     doc.retentionExpiresAt = null; doc.user = h.person;
     if (fault === 'metadata-missing') h.objects.delete(key(A));
     if (fault === 'metadata-outage') h.db.encryptedObject.findMany.mockRejectedValue(new Error('metadata offline'));

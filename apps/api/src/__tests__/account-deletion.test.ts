@@ -144,7 +144,7 @@ describe('D9-05 — account deletion (erasure)', () => {
     const u = await makeUser(['CUSTOMER']);
     const vendor = await app.prisma.vendor.findFirst({ select: { id: true } });
     await app.prisma.accountRecovery.create({ data: { userId: u.userId, method: 'IDENTITY_VERIFICATION', expiresAt: new Date(Date.now() + 86_400_000) } });
-    await app.prisma.livenessCheck.create({ data: { userId: u.userId, profile: 'DRIVER', selfieUrl: 'liveness/x.jpg', outcome: 'PASS' } });
+    await app.prisma.livenessCheck.create({ data: { userId: u.userId, profile: 'DRIVER', selfieUrl: `/uploads/liveness/${u.userId}/${nanoid(16)}.jpg`, outcome: 'PASS' } });
     await app.prisma.emergencyContact.create({ data: { userId: u.userId, name: 'Sis', phoneE164: '+5926000001' } });
     await app.prisma.supplyWatch.create({ data: { customerId: u.userId, pool: 'RIDE', lat: 6.8, lng: -58.1, expiresAt: new Date(Date.now() + 3_600_000) } });
     if (vendor) {

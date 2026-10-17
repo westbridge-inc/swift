@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
@@ -17,18 +18,25 @@ describe('MASTER-055 duplicate intake privacy', () => {
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64'));
     resetKeyProviderForTests();
     let duplicate = false;
+    let holderErased = false;
+    const bytes = Buffer.from('%PDF-synthetic-document');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
     const handlers = new Map<string, (request: unknown) => Promise<unknown>>();
     const app = {
-      prisma: { encryptedObject: {
-        findFirst: vi.fn(async () => duplicate ? { createdBy: 'foreign-account' } : null),
-        create: vi.fn(async () => ({ id: 'own-object' })),
-      } }, io: {}, authenticate: vi.fn(),
+      prisma: {
+        encryptedObject: {
+          findMany: vi.fn(async () => duplicate ? [{ createdBy: 'foreign-account', sha256 }] : []),
+          create: vi.fn(async () => ({ id: 'own-object' })),
+        },
+        // [Row 331 (c)] The closure census: an erased holder is no duplicate.
+        user: { findMany: vi.fn(async () => holderErased ? [{ id: 'foreign-account', phone: 'deleted:foreign-account' }] : []) },
+      }, io: {}, authenticate: vi.fn(),
       get: vi.fn(),
       post: (path: string, _options: unknown, handler: (request: unknown) => Promise<unknown>) => handlers.set(path, handler),
     };
     await verificationRoutes(app as unknown as FastifyInstance);
     const request = { user: { userId: 'uploader' }, file: async () => ({
-      filename: 'document.pdf', mimetype: 'application/pdf', toBuffer: async () => Buffer.from('%PDF-synthetic-document'),
+      filename: 'document.pdf', mimetype: 'application/pdf', toBuffer: async () => bytes,
     }) };
     const ordinary = await handlers.get('/upload')!(request);
     duplicate = true;
@@ -40,5 +48,9 @@ describe('MASTER-055 duplicate intake privacy', () => {
     expect(notice[2].tenantId).toBeNull();
     expect(JSON.stringify(notice[2])).not.toContain('foreign-account');
     expect(notice[2].data).toMatchObject({ kind: 'dup_doc', uploader: 'uploader' });
+    // [Row 331 (c)] The same bytes held only by an ERASED account raise no review signal.
+    holderErased = true;
+    expect(await handlers.get('/upload')!(request)).toEqual(ordinary);
+    expect(notices.notify).toHaveBeenCalledOnce();
   });
 });
