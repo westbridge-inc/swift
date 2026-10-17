@@ -508,6 +508,10 @@ describe('BILLING-REANCHOR — the database admits only a proven, paid return', 
     // Even holding a record shaped exactly like this obligation's suspension.
     await app.prisma.billingEvent.create({ data: { subscriptionId: v.subId, type: 'SUSPENDED', currencyCode: 'GYD', idempotencyKey: suspensionKey(v.subId, due) } });
     await expect(forgeReanchor(v.subId)).rejects.toThrow(/exact unused suspension/);
+    // ...and a suspension moment on the row: only the status is left to refuse it.
+    await app.prisma.subscription.update({ where: { id: v.subId }, data: { suspendedAt: new Date(Date.now() - HOUR) } });
+    await expect(forgeReanchor(v.subId)).rejects.toThrow(/exact unused suspension/);
+    expect((await sub(v.subId)).status).toBe('PAST_DUE');
   });
 
   it('one suspension authorizes one return: its record cannot be used again or altered', async () => {

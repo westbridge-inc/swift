@@ -570,6 +570,43 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect(await toldOf(s.userId)).toHaveLength(1);
   });
 
+  it('[BILLING-REANCHOR · board row 151] a partner the billing run suspended pays on the checkout page: billing restarts at the return, priced at the return, never the weeks switched off', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const s = await makeSub({ due });
+    // The billing run's own suspension: three failed charges over 50 hours.
+    for (const h of [0, 25, 50]) await billing.runBillingCycle(new Date(due.getTime() + h * 3_600_000));
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('SUSPENDED');
+
+    const { checkout } = await start(s);
+    const row = await intentOf(checkout.ref);
+    const txn = `MMGTX${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '7')}8`;
+    approved(txn, 2100, echoOf(row));
+    // A cut took effect while they were away (USD pricing on for this billing service only).
+    const rows = [
+      { id: `ra-base-${nanoid(6)}`, role: 'VENDOR', tier: 'RESTAURANT', amountUsd: 10.5, effectiveFrom: new Date(due.getTime() - 60 * DAY) },
+      { id: `ra-cut-${nanoid(6)}`, role: 'VENDOR', tier: 'RESTAURANT', amountUsd: 8, effectiveFrom: new Date(due.getTime() + 2 * DAY) },
+    ];
+    const usd = vi.spyOn(billing as unknown as { loadUsdPricing: () => Promise<unknown> }, 'loadUsdPricing')
+      .mockResolvedValue({ rateId: 'fx-reanchor', rate: 200, increment: 1, currency: 'GYD', book: new Map(), rows });
+    const before = Date.now();
+    try {
+      expect(await service.observeReply({ source: 'RETURN', outcome: 'success', params: { token: replyFor(row.merchantTransactionId, txn) } })).toBe('CONFIRMED');
+    } finally { usd.mockRestore(); }
+
+    const sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } });
+    expect(sub.status).toBe('ACTIVE');
+    // The week bought starts at the return, not at the unpaid due date ten days ago.
+    expect(sub.currentPeriodStart.getTime()).toBeGreaterThanOrEqual(before - 1000);
+    expect(sub.nextBillingDate.getTime() - sub.currentPeriodStart.getTime()).toBe(7 * DAY);
+    expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: s.subId, kind: 'RETURN_REANCHOR' } })).toBe(1);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `success:${s.subId}:${due.toISOString().slice(0, 10)}` } })).toBe(0);
+    // Priced at the return (8 USD = 1,600), not the unpaid week (10.5 USD = 2,100): the rest stays theirs.
+    const week = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `success:${s.subId}:${sub.currentPeriodStart.toISOString().slice(0, 10)}` } });
+    expect([Number(week.amount), Number(week.amountUsd)]).toEqual([1600, 8]);
+    expect(await walletOf(s.subId)).toBe(500);
+    expect(await topups(s.subId)).toHaveLength(1);
+  });
+
   it('the redirect alone never credits: a transaction MMG does not know leaves it confirming, the wallet untouched', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);
