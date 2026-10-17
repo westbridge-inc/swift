@@ -106,6 +106,7 @@ async function numberOrder(who: Actor = customer) {
   await fillCart(who);
   const res = await checkout(who, { paymentMethod: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER' });
   expect(res.statusCode, res.body).toBe(200);
+  expect(res.body).not.toContain('6001234'); // the checkout answer never carries the store's number
   return res.json().data as { order: { id: string; total: number }; paymentAction: unknown };
 }
 const accept = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/accept`, owner.token, undefined, store());
@@ -320,8 +321,13 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
     const committed = await orderRow(placed.order.id);
     expect([committed.paymentMethod, committed.paymentStatus, committed.mmgNumberSnapshot, committed.mmgPayUrlSnapshot]).toEqual(['MOBILE_MONEY', 'PENDING', NUMBER, null]);
 
-    // Before acceptance: no number.
-    expect((await orderView(placed.order.id)).json().data.mmgPayment).toBeNull();
+    // Before acceptance: no number, anywhere the customer can read.
+    const unaccepted = await orderView(placed.order.id);
+    expect(unaccepted.json().data.mmgPayment).toBeNull();
+    expect(unaccepted.body).not.toContain('6001234');
+    const list = await call('GET', '/api/v1/customer/orders', customer.token);
+    expect(list.statusCode, list.body).toBe(200);
+    expect(list.body).not.toContain('6001234');
 
     // The store accepts an unpaid MMG order [Q1].
     const accepted = await accept(placed.order.id);
@@ -454,6 +460,14 @@ describe('[PAYMENT-SIMPLIFY · Q1 boundary] accepting an unpaid MMG order moves 
       expect(again.statusCode).toBe(200);
       expect(arm).toHaveBeenCalledTimes(1);
       expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId: placed.order.id, note: { startsWith: 'MMG payment attested' } } }))).toBe(1);
+
+      // Paid: a rider may now take it — and the rider never receives the store's MMG number.
+      const taken = await call('POST', `/api/v1/rider/orders/${placed.order.id}/accept`, rider.token, {});
+      expect(taken.statusCode, taken.body).toBe(200);
+      expect(taken.body).not.toContain('6001234');
+      const job = await call('GET', '/api/v1/rider/orders/active', rider.token);
+      expect(job.statusCode, job.body).toBe(200);
+      expect(job.body).not.toContain('6001234');
     } finally {
       arm.mockRestore();
     }
