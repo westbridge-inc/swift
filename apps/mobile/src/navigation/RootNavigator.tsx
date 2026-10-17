@@ -17,7 +17,7 @@ import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
 import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
 import { navigationRef, safeNavigate } from './navigationRef';
-import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
+import { installNotificationTapRouter, flushPendingNavigation, settleTapAfterSignIn } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
 import { previewBypassForIntent, rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
@@ -128,6 +128,21 @@ export function RootNavigator() {
       clearTimeout(readyRetry);
     };
   }, [entryGate, isAuthenticated, resumeAuthContinuation, sessionGeneration, wantsAuth]);
+
+  // [row 205 · DS256 F2] A notification tapped while signed out opened sign-in
+  // and waits there. It lands once the same account is through every root
+  // gate; a different account or a cancelled sign-in drops it. Same post-commit
+  // attempt + one ready retry as the auth continuation above.
+  React.useEffect(() => {
+    const settle = () => { settleTapAfterSignIn({ isAuthenticated, wantsAuth, entryGate }); };
+    if (!isAuthenticated || entryGate !== 'main') { settle(); return; }
+    const firstAttempt = setTimeout(settle, 0);
+    const readyRetry = setTimeout(settle, 250);
+    return () => {
+      clearTimeout(firstAttempt);
+      clearTimeout(readyRetry);
+    };
+  }, [entryGate, isAuthenticated, sessionGeneration, wantsAuth]);
 
   return (
     <NavigationContainer
