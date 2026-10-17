@@ -192,7 +192,10 @@ export function MoverAccountScreen({ navigation }: any) {
           </Card>
         ) : null}
 
-        {isDriver ? (
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+            drop-off, cash or MMG: the card shows only while the server says the link
+            is on (DRIVER_MMG_PAY_LINK). Off, or a server that does not say, means no card. */}
+        {isDriver && (profile as { mmgPayLinkEnabled?: unknown } | null | undefined)?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="rides"
             value={profile?.mmgPayUrl}

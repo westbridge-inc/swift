@@ -126,6 +126,7 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/rides/fare-zones.ts'),
       read('apps/api/src/modules/ads/checkout.service.ts'),
       read('apps/api/src/modules/ads/refund.service.ts'),
+      read('apps/api/src/utils/mmg-pay-url.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {

@@ -708,7 +708,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (
@@ -1119,9 +1119,10 @@ function AssignedRideCard({
 
       <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginTop: space.lg, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
         <View style={{ flex: 1 }}>
-          <T variant="micro" tone="faint">Fare · cash</T>
+          <T variant="micro" tone="faint">Fare</T>
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Paid straight to the driver: cash or MMG, no in-app pay link. */}
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-            Pay the driver directly.
+            Pay the driver cash or MMG at drop-off.
           </T>
         </View>
         <Money amount={fare} size="l" />
@@ -1618,7 +1619,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               </T>
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
-                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash to the driver
+                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · pay the driver cash or MMG at drop-off
                 {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
               </T>
             </>
