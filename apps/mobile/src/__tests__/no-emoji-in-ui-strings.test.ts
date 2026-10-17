@@ -31,10 +31,8 @@ const CHAR_ALLOW: Record<string, string> = {
 const FILE_ALLOW: Record<string, string> = {
   'apps/web/src/legal/legal-html.ts':
     'the HTML entity decoder table (&copy; &reg; &trade;) for the legal documents: it maps entities found in the legal text, it is not copy',
-  'apps/api/src/modules/discovery/taxonomy.seed.ts':
-    'category pictograms are catalogue DATA the customer category rail draws (spec #17 6.1); moving the rail to the icon set is an OWNER decision raised 17 Oct (UI-POLISH) — delete this entry when it moves',
   'apps/mobile/src/lib/flags.ts':
-    'the country flag in the phone-number calling-code chip (sign-in, emergency contacts) names the country, it is not decoration; OWNER decision raised 17 Oct (UI-POLISH) — delete this entry if he wants it gone',
+    'owner 17 Oct: standard calling-code flag (the +592 chip on sign-in and emergency contacts names the country)',
 };
 
 const isEmoji = (ch: string): boolean =>
