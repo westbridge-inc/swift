@@ -123,6 +123,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'product',
   },
   {
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Deliberately OFF: a store's MMG NUMBER replaced its pay
+    // link. Listed so the switch is never a silent mystery.
+    key: 'store_mmg_pay_link',
+    setting: 'STORE_MMG_PAY_LINK',
+    source: 'env',
+    enabledWhen: '1',
+    title: "The store's MMG pay link (replaced by the store's MMG number)",
+    whileOff:
+      "A customer who chooses MMG pays the store's MMG NUMBER directly, shown on the order once the store accepts; no surface offers or opens a store pay link, a store cannot set a new one, and phones on builds 9-11 (which know only the link) see cash only at checkout. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
+    impact: 'money',
+  },
+  {
     key: 'mover_push_required',
     setting: 'MOVER_PUSH_REQUIRED',
     source: 'env',

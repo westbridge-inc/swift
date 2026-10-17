@@ -11,6 +11,8 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
+import { riderRoutes } from '../modules/rider/rider.routes';
+import { DispatchService, makeDispatchService, stuckDispatchEligibleWhere } from '../modules/dispatch/dispatch.service';
 import { applyDueMmgLinkChanges } from '../modules/integrity/money-surface';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -52,6 +54,10 @@ let customer: Actor;
 let stranger: Actor;
 let owner: Actor;
 let manager: Actor;
+let staff: Actor;
+let otherOwner: Actor;
+let otherVendorId: string;
+let rider: Actor & { riderId: string };
 let vendorId: string;
 let itemId: string;
 
@@ -126,10 +132,14 @@ async function purgeFixtures() {
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
     await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
+    const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+    await app.prisma.deliveryCashSettlement.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
     await app.prisma.vendorStaff.deleteMany({ where: { OR: [{ vendorId: { in: vendorIds } }, { userId: { in: ids } }] } });
     await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
     await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
@@ -159,6 +169,7 @@ beforeAll(async () => {
   registerTenantHeaderScope(app);
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.ready();
   await purgeFixtures();
 
@@ -185,6 +196,26 @@ beforeAll(async () => {
   const category = await sys(() => app.prisma.category.create({ data: { vendorId, name: 'Menu', sortOrder: 0 } }));
   itemId = (await sys(() => app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Pepperpot', basePrice: 2500, isAvailable: true } }))).id;
   await sys(() => app.prisma.vendorStaff.create({ data: { vendorId, userId: manager.userId, role: 'MANAGER', invitedBy: owner.userId } }));
+  staff = await makeUser('Sam', ['CUSTOMER'], 'CUSTOMER');
+  await sys(() => app.prisma.vendorStaff.create({ data: { vendorId, userId: staff.userId, role: 'STAFF', invitedBy: owner.userId } }));
+  otherOwner = await makeUser('Oz', ['VENDOR_OWNER'], 'VENDOR_OWNER');
+  const otherOwnerRow = await sys(() => app.prisma.vendorOwner.create({ data: { userId: otherOwner.userId } }));
+  otherVendorId = (await sys(() => app.prisma.vendor.create({
+    data: {
+      ownerId: otherOwnerRow.id, name: 'Other Shop', slug: `psn-o-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT',
+      phone: `${PHONE_PREFIX}901`, addressLine1: 'Other Street', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: STORE.lat, longitude: STORE.lng, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, deliveryRadius: 50,
+    },
+  }))).id;
+  const riderActor = await makeUser('Rae', ['RIDER', 'CUSTOMER'], 'RIDER');
+  const riderRow = await sys(() => app.prisma.rider.create({
+    data: {
+      userId: riderActor.userId, riderType: 'BOTH', vehicleType: 'MOTORCYCLE', documentsVerified: true,
+      isOnline: true, isAvailable: true, currentLat: STORE.lat, currentLng: STORE.lng, lastLocationUpdate: new Date(),
+      locationSessionId: riderActor.sessionId, floatLimit: 100_000,
+    },
+  }));
+  rider = { ...riderActor, riderId: riderRow.id };
 });
 
 afterAll(async () => {
@@ -347,5 +378,79 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('MMG_NOT_AVAILABLE');
     await sys(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { mmgNumber: NUMBER } }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [COORD security ask · SPS-F-0016 / LB-015] ONLY the ACCEPTED transition is
+// un-gated. Every other step that moves goods, a rider or money still refuses
+// an MMG order until the store's "Paid by MMG", and acceptance itself creates
+// no money record, no rider float, no dispatch and no earning.
+// ---------------------------------------------------------------------------
+describe('[PAYMENT-SIMPLIFY · Q1 boundary] accepting an unpaid MMG order moves nothing else', () => {
+  it('after acceptance: no prepare, no ready, no board listing, no rider claim, no dispatch offer, no money rows; "Paid by MMG" then arms dispatch once', async () => {
+    const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
+    try {
+      const placed = await numberOrder();
+      const riderBefore = await sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }));
+      expect((await accept(placed.order.id)).statusCode).toBe(200);
+      const row = await orderRow(placed.order.id);
+      expect([row.status, row.paymentStatus, row.riderId, row.fulfillmentMode]).toEqual(['ACCEPTED', 'PENDING', null, 'PLATFORM_RIDER']);
+
+      // Acceptance armed no dispatch (the ON_ACCEPT trigger waits for the money).
+      expect(arm).not.toHaveBeenCalled();
+      // The dispatch engine itself refuses to offer it.
+      expect(await makeDispatchService(app).dispatchOrder(placed.order.id)).toEqual({});
+      expect(await sys(() => app.prisma.dispatchSearch.count({ where: { subjectId: placed.order.id } }))).toBe(0);
+      // The stuck-dispatch reconciler does not treat it as stuck (it waits for the money, not a rider).
+      const stuck = () => sys(() => app.prisma.order.count({ where: { AND: [stuckDispatchEligibleWhere(new Date(Date.now() + 60_000)), { id: placed.order.id }] } }));
+      expect(await stuck()).toBe(0);
+      // No money record, no float, no earning.
+      expect(await sys(() => app.prisma.deliveryCashSettlement.count({ where: { orderId: placed.order.id } }))).toBe(0);
+      expect(await sys(() => app.prisma.earning.count({ where: { orderId: placed.order.id } }))).toBe(0);
+      const riderAfter = await sys(() => app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } }));
+      expect(riderAfter.committedFloat).toEqual(riderBefore.committedFloat);
+
+      // The store cannot move it on: preparing is the payment gate; ready is unreachable from here.
+      const prep = await call('PUT', `/api/v1/vendor/orders/${placed.order.id}/preparing`, owner.token, undefined, store());
+      expect(prep.statusCode, prep.body).toBe(409);
+      expect(prep.json().error.code).toBe('MMG_PAYMENT_PENDING');
+      const ready = await call('PUT', `/api/v1/vendor/orders/${placed.order.id}/ready`, owner.token, undefined, store());
+      expect(ready.statusCode).toBeGreaterThanOrEqual(400);
+      expect((await orderRow(placed.order.id)).status).toBe('ACCEPTED');
+      // No rider sees it or can take it.
+      const board = await call('GET', '/api/v1/rider/orders/available', rider.token);
+      expect(board.statusCode, board.body).toBe(200);
+      expect(JSON.stringify(board.json().data)).not.toContain(placed.order.id);
+      const grab = await call('POST', `/api/v1/rider/orders/${placed.order.id}/accept`, rider.token, {});
+      expect(grab.statusCode, grab.body).toBe(409);
+      expect(grab.json().error.code).toBe('MMG_PAYMENT_PENDING');
+      expect((await orderRow(placed.order.id)).riderId).toBeNull();
+
+      // Only THIS store's owner or manager may say "Paid by MMG": staff, another store and the customer may not.
+      const ref = `MP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, '7')}`;
+      const byStaff = await call('POST', `/api/v1/vendor/orders/${placed.order.id}/confirm-payment`, staff.token, { reference: ref }, store());
+      expect(byStaff.statusCode).toBe(403);
+      const byOtherStore = await call('POST', `/api/v1/vendor/orders/${placed.order.id}/confirm-payment`, otherOwner.token, { reference: ref }, { 'x-vendor-id': otherVendorId });
+      expect(byOtherStore.statusCode).toBe(404);
+      const byCustomer = await call('POST', `/api/v1/vendor/orders/${placed.order.id}/confirm-payment`, customer.token, { reference: ref }, store());
+      expect([403, 404]).toContain(byCustomer.statusCode);
+      expect((await orderRow(placed.order.id)).paymentStatus).toBe('PENDING');
+
+      const paid = await call('POST', `/api/v1/vendor/orders/${placed.order.id}/confirm-payment`, manager.token, { reference: ref }, store());
+      expect(paid.statusCode, paid.body).toBe(200);
+      expect((await orderRow(placed.order.id)).paymentStatus).toBe('CLAIMED');
+      expect(await stuck()).toBe(1); // paid and still riderless: the reconciler may now re-drive it
+      // "Paid by MMG" is the moment dispatch is armed — once, at the order's own version.
+      expect(arm).toHaveBeenCalledTimes(1);
+      expect(arm).toHaveBeenCalledWith(placed.order.id, row.fulfillmentModeVersion);
+      // A second tap is idempotent: nothing new is written, nothing is armed again.
+      const again = await call('POST', `/api/v1/vendor/orders/${placed.order.id}/confirm-payment`, manager.token, { reference: ref }, store());
+      expect(again.statusCode).toBe(200);
+      expect(arm).toHaveBeenCalledTimes(1);
+      expect(await sys(() => app.prisma.orderStatusLog.count({ where: { orderId: placed.order.id, note: { startsWith: 'MMG payment attested' } } }))).toBe(1);
+    } finally {
+      arm.mockRestore();
+    }
   });
 });

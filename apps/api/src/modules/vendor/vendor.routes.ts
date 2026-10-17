@@ -22,7 +22,7 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
-import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgDispatchBlocked, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
@@ -742,7 +742,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   async function startPlatformDeliveryAfterCommit(
     order: { id: string; isExpress: boolean },
     fulfillmentModeVersion: number,
-    reason: 'accept' | 'ready' | 'mode_switch',
+    reason: 'accept' | 'ready' | 'mode_switch' | 'mmg_paid',
   ): Promise<boolean> {
     try {
       const current = await dispatch.prepareForPlatformDelivery(order.id, fulfillmentModeVersion);
@@ -1868,7 +1868,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // defers dispatch to the Mark-ready transition below instead.
     if (updated.fulfillmentMode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, updated.fulfillmentModeVersion);
-    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT') {
+    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT' && !mmgDispatchBlocked(updated)) {
+      // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] An MMG order the store accepts BEFORE the money
+      // arrives arms no dispatch here: no rider is sought for an unpaid order. The store's
+      // "Paid by MMG" (confirm-payment) arms it instead.
       await startPlatformDeliveryAfterCommit(order, updated.fulfillmentModeVersion, 'accept');
     }
 
@@ -2369,6 +2372,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (capture.notice && capture.outboxId) {
       await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
         .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] The store accepted this MMG order before the money
+    // arrived, so acceptance armed no dispatch. "Paid by MMG" is that moment: arm the platform
+    // delivery now, exactly as acceptance would have (ON_ACCEPT) — never while a claim is disputed,
+    // and never twice (no rider yet; the dispatch arm is versioned and idempotent).
+    if (
+      updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT'
+      && updated.riderId == null && ['ACCEPTED', 'PREPARING'].includes(updated.status)
+      && !mmgDispatchBlocked(updated)
+    ) {
+      await startPlatformDeliveryAfterCommit(updated, updated.fulfillmentModeVersion, 'mmg_paid');
     }
     return { success: true, data: updated };
   });

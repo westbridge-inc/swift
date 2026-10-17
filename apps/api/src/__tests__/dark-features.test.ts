@@ -108,6 +108,7 @@ describe('[dark features] the registry matches the code that reads the switch', 
     // A registry entry for a variable nothing consults is worse than no entry:
     // it tells an operator they have turned something on when they have not.
     const sources = [
+      read('apps/api/src/utils/store-mmg.ts'),
       read('apps/web/src/app/well-known/apple-app-site-association/route.ts'),
       read('apps/web/src/app/well-known/assetlinks.json/route.ts'),
       read('apps/api/src/modules/safety/sos-escalation.ts'),
