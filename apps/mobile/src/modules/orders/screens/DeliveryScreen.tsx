@@ -31,7 +31,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
-import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';
+import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -1060,6 +1060,13 @@ export function DeliveryScreen() {
                 {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
                   <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                     {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The question waits a bounded
+                    time; say until when and what happens without an answer. */}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
                   </T>
                 ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
