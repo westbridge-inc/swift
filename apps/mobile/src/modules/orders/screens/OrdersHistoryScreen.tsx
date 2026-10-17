@@ -152,9 +152,9 @@ function itemsSummary(o: any): string | null {
   return rest > 0 ? `${head.join(', ')} +${rest} more` : head.join(', ');
 }
 
-/** The amount the row is allowed to show, or null. `money()` turns a missing
- *  value into "$0", which is a lie on a ledger — so a row with no server
- *  amount prints an em-dash instead. */
+/** The amount the row is allowed to show, or null. A missing value shown as
+ *  "$0" is a lie on a ledger — so a row with no server amount prints an
+ *  em-dash instead (as money() itself now does). */
 function rowAmount(o: any, isRide: boolean): number | null {
   const raw = isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total);
   const n = Number(raw);
