@@ -527,17 +527,26 @@ async function clockAgrees(db: Tx | PrismaClient, now: Date): Promise<boolean> {
 /** The SUSPENDED record the billing engine writes for an obligation (suspendAccessRows). */
 export const suspensionKey = (subscriptionId: string, due: Date) => `suspended:${subscriptionId}:${isoDay(due)}`;
 
+/** Why a return at `now` can or cannot restart this subscription's billing.
+ *  The database clock is read only once the cheap facts allow a return. */
+async function returnReanchorCheck(db: Tx | PrismaClient, sub: Subscription, now: Date) {
+  if (!RETURN_REANCHOR_STATUSES.includes(sub.status) || !sub.suspendedAt || sub.suspendedAt >= now
+    || sub.suspendedAt < sub.nextBillingDate || sub.nextBillingDate >= now) return { reason: 'SUSPENSION_UNPROVEN_OR_USED' as const };
+  if (!await clockAgrees(db, now)) return { reason: 'CLOCK_DISAGREES' as const };
+  const suspension = await db.billingEvent.findUnique({ where: { idempotencyKey: suspensionKey(sub.id, sub.nextBillingDate) } });
+  if (!suspension || suspension.subscriptionId !== sub.id || suspension.type !== 'SUSPENDED' || suspension.createdAt > now
+    || await db.billingObligationTransition.findUnique({ where: { suspensionEventId: suspension.id }, select: { id: true } })
+    || await db.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${isoDay(sub.nextBillingDate)}` }, select: { id: true } })) {
+    return { reason: 'SUSPENSION_UNPROVEN_OR_USED' as const };
+  }
+  return { suspension };
+}
+
 /** Read-only: the suspension that authorizes restarting this subscription's
  *  billing at `now`, or null. Also used to price the week a return buys. */
 export async function returnReanchorProof(db: Tx | PrismaClient, sub: Subscription, now: Date) {
-  if (!RETURN_REANCHOR_STATUSES.includes(sub.status) || !sub.suspendedAt || sub.suspendedAt >= now
-    || sub.suspendedAt < sub.nextBillingDate || sub.nextBillingDate >= now) return null;
-  if (!await clockAgrees(db, now)) return null;
-  const suspension = await db.billingEvent.findUnique({ where: { idempotencyKey: suspensionKey(sub.id, sub.nextBillingDate) } });
-  if (!suspension || suspension.subscriptionId !== sub.id || suspension.type !== 'SUSPENDED' || suspension.createdAt > now) return null;
-  if (await db.billingObligationTransition.findUnique({ where: { suspensionEventId: suspension.id }, select: { id: true } })) return null;
-  if (await db.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${isoDay(sub.nextBillingDate)}` }, select: { id: true } })) return null;
-  return suspension;
+  const check = await returnReanchorCheck(db, sub, now);
+  return 'suspension' in check ? check.suspension : null;
 }
 
 /** Inside the settlement transaction, with the payer and subscription locked
@@ -549,15 +558,15 @@ export async function reanchorAtReturnInTx(tx: Tx, subscriptionId: string, now: 
   const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
   if (!RETURN_REANCHOR_STATUSES.includes(sub.status)) return null;
   const previous = await clockRow(tx, subscriptionId, now);
-  const clockOk = await clockAgrees(tx, now);
-  const suspension = clockOk ? await returnReanchorProof(tx, sub, now) : null;
+  const check = await returnReanchorCheck(tx, sub, now);
+  const suspension = 'suspension' in check ? check.suspension : null;
   const held = previous.authorityHoldReason || previous.pausedAt
     || await tx.paymentConfirmationHold.count({ where: { clockId: previous.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
   if (!suspension || held || previous.subscriptionId !== sub.id || previous.dueAt.getTime() !== sub.nextBillingDate.getTime()) {
     await tx.auditLog.create({ data: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entity: 'BillingDunningClock', entityId: previous.id,
       changes: { clockId: previous.id, tenantId: previous.tenantId, subscriptionId: sub.id, status: sub.status,
         epoch: previous.epoch, dueAt: previous.dueAt.toISOString(),
-        reason: !clockOk ? 'CLOCK_DISAGREES' : !suspension ? 'SUSPENSION_UNPROVEN_OR_USED' : held ? 'OBLIGATION_HELD' : 'OBLIGATION_SOURCE_MISMATCH' } } });
+        reason: 'reason' in check ? check.reason : held ? 'OBLIGATION_HELD' : 'OBLIGATION_SOURCE_MISMATCH' } } });
     return null;
   }
   const resume = returnWeekStart(sub, now);
