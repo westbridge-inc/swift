@@ -547,3 +547,73 @@ describe('partner, driver and rider review is UNCHANGED', () => {
     expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { userId: checked.id } })).floatLimit)).toBe(Number(cfg.floatL2));
   });
 });
+
+// ---------------------------------------------------------------------------
+// [S2-29 · KYC-DECISION-ATOMIC] A reviewer's decision commits with everything it owes — the L2
+// promotion, its notice, the audit trail — or none of it does. A fault between those steps never
+// leaves a decided document with no trail and no L2 (whose retry then hits "not pending"), and a
+// notice that fails after the commit never turns a committed, audited decision into an error.
+// ---------------------------------------------------------------------------
+describe('[S2-29] a reviewer decision commits with its effects and its trail, or not at all', () => {
+  const heldId = async (c: { id: string; token: string }) => {
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
+    return res.json().data as { id: string };
+  };
+  const docRow = (id: string) => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { status: true } });
+  const trail = async (docId: string, action: string) => (await audit(docId)).filter((a) => a.action === action).length;
+  const approve = (docId: string, documentNumber: string) => admin('PUT', `/api/v1/admin/verification/${docId}/approve`, { documentNumber });
+
+  it('a fault between the decision and the L2 promotion leaves nothing half-done, and the retry decides it once', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const number = typedNumber();
+    const fault = vi.spyOn(FloatService.prototype, 'recomputeForUser').mockRejectedValueOnce(new Error('synthetic fault between the decision and the L2 promotion'));
+    let faulted: Awaited<ReturnType<typeof approve>>;
+    let hit = 0;
+    try { faulted = await approve(doc.id, number); hit = fault.mock.calls.length; } finally { fault.mockRestore(); }
+    expect(hit).toBeGreaterThan(0);
+    expect(faulted.statusCode).toBe(500);
+    // Nothing of the decision committed: still pending, still L1, no trail row, no approval notice.
+    expect(await docRow(doc.id)).toEqual({ status: 'PENDING' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(0);
+    expect((await notices(c.id)).map((n) => n.title)).not.toContain('Document approved');
+    // The reviewer's retry decides it — once, completely.
+    const retried = await approve(doc.id, number);
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document approved')).toHaveLength(1);
+  });
+
+  it('a notice that fails after the approval commits never fails it: decided, L2, one trail row', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    let attempted = 0;
+    try { res = await approve(doc.id, typedNumber()); attempted = outage.mock.calls.length; } finally { outage.mockRestore(); }
+    expect(attempted).toBeGreaterThan(0);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+  });
+
+  it('a rejection commits with its notice and its trail row: a notice outage never strands it', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    try {
+      res = await admin('PUT', `/api/v1/admin/verification/${doc.id}/reject`, { reason: 'Synthetic: the picture is not an ID' });
+    } finally { outage.mockRestore(); }
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'REJECTED' });
+    expect(await trail(doc.id, 'REJECT_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document rejected')).toHaveLength(1);
+  });
+});
