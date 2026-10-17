@@ -389,7 +389,11 @@ export function assertCashDiscountSponsored(args: {
  * compiles, which is a stronger guarantee than any test could give.
  */
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
+  order: {
+    paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null;
+    /** [PAYMENT-SIMPLIFY · Q1] Read only for ACCEPTED; a caller that does not project it keeps the full gate. */
+    mmgAttestedRef?: string | null;
+  },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
@@ -408,7 +412,10 @@ export function assertMmgFulfilmentAllowed(
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
   // [PAYMENT-SIMPLIFY · Q1] The store may accept an unpaid MMG order; nothing after acceptance may move.
-  if (target === 'ACCEPTED') return;
+  // Only an order whose payment can still happen: a store claim an operator rejected ("did not pay",
+  // `mmgAttestedRef` kept on a reopened PENDING row) can never be paid on this order, so it is never
+  // accepted unpaid. Not projected (undefined) fails closed: the payment gate below applies.
+  if (target === 'ACCEPTED' && order.mmgAttestedRef === null) return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,

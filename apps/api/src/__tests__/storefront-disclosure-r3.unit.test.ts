@@ -41,7 +41,7 @@ async function fixture(status = 'ACTIVE') {
     categories: [], operatingHours: [], images: [], publicPhone: null, vendorType: 'RESTAURANT',
     latitude: 0, longitude: 0, minOrderAmount: 0,
     // [R3] the seller block's own facts: no MMG link, no refund rule on file
-    mmgPayUrl: null, refundRule: null,
+    mmgPayUrl: null, mmgNumber: null, refundRule: null,
   };
   const records: Row[] = [
     { id: 'private-identity-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-fixture',
