@@ -174,7 +174,7 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
@@ -184,9 +184,10 @@ export function MoverAccountScreen({ navigation }: any) {
               </T>
             ) : null}
             {uploadVehiclePhoto.isError ? (
-              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-                Upload failed — try a different photo.
-              </T>
+              <View style={{ marginTop: space.sm }}>
+                <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+              </View>
             ) : null}
           </Card>
         ) : null}

@@ -6,6 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
+import { RefundRuleCard } from './refund-rule-card';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -258,6 +259,7 @@ export default function SettingsPage() {
         </div>
       )}
 
+      <RefundRuleCard storeId={storeId} />
       <SubscriptionCard />
       <SettlementsCard />
       <HoursEditor />

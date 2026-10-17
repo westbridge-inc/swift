@@ -7,6 +7,7 @@ import { fetchClaims, approveClaim, rejectClaim, payClaim, fetchCashMetrics, fet
 import { StatusPill, gyd } from '@/components/detail';
 import { MutationError } from '@/components/MutationError';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTED'] as const;
 
@@ -18,7 +19,7 @@ const FILTERS = ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED', 'PAID', 'REJECTE
 export default function ClaimsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('PENDING_REVIEW');
-  const { data, isLoading } = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
+  const claimsQ = useQuery({ queryKey: ['claims', filter], queryFn: () => fetchClaims(filter) });
   const metricsQ = useQuery({ queryKey: ['cash-metrics'], queryFn: fetchCashMetrics });
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['claims'] });
@@ -46,7 +47,7 @@ export default function ClaimsPage() {
   });
   const reserve: any = reserveQ.data?.data ?? null;
 
-  const rows: any[] = data?.data ?? [];
+  const rows: any[] = claimsQ.data?.data ?? [];
   const m: any = metricsQ.data?.data ?? {};
   const busy = approve.isPending || reject.isPending || pay.isPending;
 
@@ -67,6 +68,9 @@ export default function ClaimsPage() {
       )}
 
       {/* Founder cockpit numbers (cash-rules founderMetrics) */}
+      {metricsQ.isError ? (
+        <QueryFailed error={metricsQ.error} what="the claim numbers" onRetry={() => void metricsQ.refetch()} retrying={metricsQ.isFetching} className="mb-6" />
+      ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Failed-payment rate (30d)</p>
@@ -78,7 +82,7 @@ export default function ClaimsPage() {
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Guarantee payouts (7d)</p>
           <p className="text-3xl font-bold mt-1">{metricsQ.isLoading ? '—' : gyd(m.guaranteePayoutsThisWeek?.total ?? 0)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">{m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
+          <p className="text-[var(--muted)] text-xs mt-1">{metricsQ.isLoading ? '—' : m.guaranteePayoutsThisWeek?.count ?? 0} approved claims</p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Riders with claims (30d)</p>
@@ -86,6 +90,7 @@ export default function ClaimsPage() {
           <p className="text-[var(--muted)] text-xs mt-1">repeat filers surface first</p>
         </div>
       </div>
+      )}
 
       {/* [DOC-1 §31.4] The reserve line: a claim is paid from it or not at all. */}
       <div className={`rounded-xl border p-5 mb-6 ${reserve?.low ? 'border-amber-500/60 bg-amber-500/5' : 'border-[var(--border)] bg-[var(--panel)]'}`} data-testid="rlp-reserve">
@@ -118,6 +123,9 @@ export default function ClaimsPage() {
             Adjust reserve
           </button>
         </div>
+        {reserveQ.isError ? (
+          <QueryFailed error={reserveQ.error} what="the reserve line" onRetry={() => void reserveQ.refetch()} retrying={reserveQ.isFetching} className="mt-3" />
+        ) : null}
         {adjust.error ? <div className="mt-3"><MutationError error={adjust.error} label="Reserve entry did not record" /></div> : null}
         {reserve?.entries?.length ? (
           <ul className="mt-3 text-xs text-[var(--muted)] space-y-1">
@@ -143,8 +151,10 @@ export default function ClaimsPage() {
       </div>
 
       <div className="space-y-3">
-        {isLoading ? (
+        {claimsQ.isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : claimsQ.isError ? (
+          <QueryFailed error={claimsQ.error} what="the claims" onRetry={() => void claimsQ.refetch()} retrying={claimsQ.isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             No {filter.replaceAll('_', ' ').toLowerCase()} claims.

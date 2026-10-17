@@ -9,6 +9,7 @@ import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
+import { identitySalt } from '../modules/integrity/normalize';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
@@ -474,6 +475,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
   assertQrConfig(env);
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key (phone, document
+  // number, plate, device hashes): refused at boot, not at the first identity
+  // capture. The same contract as the hasher; the value is never echoed.
+  identitySalt(env);
   assertPlacesConfig(env);
 }
 

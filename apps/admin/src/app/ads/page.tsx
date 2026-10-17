@@ -14,6 +14,7 @@ import {
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // Swift Ads has two gates, and until now neither had a human standing at it.
@@ -112,13 +113,13 @@ export default function AdsReviewPage() {
           onClick={() => { setTab('advertisers'); setActiveId(null); setMutationError(null); }}
           className={`px-3 py-1.5 rounded-lg text-xs ${tab === 'advertisers' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'}`}
         >
-          Advertisers ({advertiserRows.length})
+          Advertisers ({advertisers.isSuccess ? advertiserRows.length : '—'})
         </button>
         <button
           onClick={() => { setTab('creatives'); setActiveId(null); setMutationError(null); }}
           className={`px-3 py-1.5 rounded-lg text-xs ${tab === 'creatives' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--panel)] text-[var(--muted)] border border-[var(--border)]'}`}
         >
-          Creatives ({creativeRows.length})
+          Creatives ({creatives.isSuccess ? creativeRows.length : '—'})
         </button>
       </div>
 
@@ -140,6 +141,8 @@ export default function AdsReviewPage() {
 
           {advertisers.isLoading ? (
             <p className="text-[var(--muted)] text-sm">Loading…</p>
+          ) : advertisers.isError ? (
+            <QueryFailed error={advertisers.error} what="the advertisers" onRetry={() => void advertisers.refetch()} retrying={advertisers.isFetching} />
           ) : advertiserRows.length === 0 ? (
             <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
               Nothing in {status.replace('_', ' ').toLowerCase()}.
@@ -244,6 +247,8 @@ export default function AdsReviewPage() {
           </p>
           {creatives.isLoading ? (
             <p className="text-[var(--muted)] text-sm">Loading…</p>
+          ) : creatives.isError ? (
+            <QueryFailed error={creatives.error} what="the creatives" onRetry={() => void creatives.refetch()} retrying={creatives.isFetching} />
           ) : creativeRows.length === 0 ? (
             <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-10 text-center text-[var(--muted)] text-sm">
               No creatives waiting for review.

@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ActionResult } from '@/components/mc/ActionResult';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
-import { fetchDocumentReviewers, setCatalogueApprover, type DocumentReviewerRow } from '@/lib/api';
+import { errorStatus, fetchDocumentReviewers, setCatalogueApprover, type DocumentReviewerRow } from '@/lib/api';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 import type { Outcome } from '@/lib/outcome';
 
 /**
@@ -24,6 +25,11 @@ export function CatalogueApproverAccess() {
   const dialog = useActionDialog();
   const [result, setResult] = useState<Outcome | null>(null);
   const team = useQuery({ queryKey: ['document-reviewers'], queryFn: fetchDocumentReviewers, retry: false });
+  // A 403 is the designed answer for anyone but a super-admin: the panel is absent.
+  // Any other failure is said out loud, never read as "nobody holds the grant".
+  if (team.isError && errorStatus(team.error) !== 403) {
+    return <QueryFailed error={team.error} what="who may approve catalogue items" onRetry={() => void team.refetch()} retrying={team.isFetching} />;
+  }
   if (!team.data?.data) return null;
   const rows = team.data.data;
   const me = rows.find((row) => row.you);

@@ -191,16 +191,31 @@ describe('Services — provider verification + qualification badge', () => {
     expect(notMine.statusCode).toBe(404);
   });
 
+  // [R4 · research A8] Advertising legal services is barred to "any person whatsoever": a profile whose own words
+  // offer them is refused whatever trade it names, and nothing is saved; an ordinary profile still saves.
+  it('refuses a profile that offers legal services, whatever trade it names', async () => {
+    const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    for (const bio of ['Carpentry and legal advice', 'Also: Legal-Consultation for land deeds', 'Conveyancing on request', 'Attorney-at-law and handyman']) {
+      const res = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio }, owner.token);
+      expect(res.statusCode, bio).toBe(409);
+      expect(res.json().error, bio).toMatchObject({ code: 'SERVICE_NOT_ALLOWED', message: 'Swift doesn\'t list legal services. Remove them from your profile to continue.' });
+    }
+    expect(await app.prisma.serviceProvider.count({ where: { userId: owner.userId } })).toBe(0);
+    const plain = await inject('POST', '/api/v1/services/providers', { trade: 'carpenter', bio: 'Built-ins, shelves and cabinets.' }, owner.token);
+    expect(plain.statusCode, plain.body).toBe(200);
+  });
+
   it('marks a stored held-category profile unavailable after refreshing its live verification', async () => {
     const owner = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await runWithoutTenant(() => app.prisma.serviceProvider.create({
-      data: { userId: owner.userId, trade: 'tutor', portfolioPhotos: [], isVerified: true },
+      // [TRADES · 13 Oct 2026] the lawyer is the category still held
+      data: { userId: owner.userId, trade: 'lawyer', portfolioPhotos: [], isVerified: true },
     }));
 
     const mine = await inject('GET', '/api/v1/services/providers/me', undefined, owner.token);
     expect(mine.statusCode).toBe(200);
     expect(mine.json().data).toMatchObject({
-      trade: 'tutor', isVerified: false, categoryUnavailable: true,
+      trade: 'lawyer', isVerified: false, categoryUnavailable: true,
     });
   });
 
@@ -469,7 +484,7 @@ describe('Services — risk-tiered browse', () => {
       .toBe(400);
 
     // A held trade and its alias cannot enter the browse/cursor population.
-    for (const trade of ['tutor', 'tutoring']) {
+    for (const trade of ['lawyer', 'attorney']) {
       const held = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
       expect(held.statusCode).toBe(409);
       expect(held.json().error.code).toBe('SERVICE_CATEGORY_UNAVAILABLE');

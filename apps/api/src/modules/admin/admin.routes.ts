@@ -95,6 +95,7 @@ import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../mone
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
+import { REGISTRATION_KINDS } from '../verification/doc-registry';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -363,6 +364,10 @@ const approveDocSchema = z.object({
   // only as a blind-index identity key — and a police clearance's issue date.
   documentNumber: z.string().trim().min(1).max(40).optional(),
   issuedOn: z.coerce.date().optional(),
+  // [R15] the year printed on a licence or food certificate checked again every January
+  certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
+  // [R16] a business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation
+  registrationKind: z.enum(REGISTRATION_KINDS).optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -4781,21 +4786,36 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
   });
 
-  /** Set a plan price (append semantics: deactivate + create keeps history;
-   *  the book is USD-only by law). */
+  /** Schedule a plan price (append semantics: every row is kept; the book is
+   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A HIGHER price
+   *  (or a first price for a plan) takes effect no sooner than 14 days from
+   *  now (an earlier effectiveFrom is refused); a LOWER one may take effect
+   *  from now, the next billing week (coordinator ruling 15 Oct). The price in
+   *  force stays in force until then, a week is priced by the book in force
+   *  when it starts, and every partner it changes is told now
+   *  (billing/price-book.ts, fx-notices.ts). */
   app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
       tier: z.string().trim().max(40).optional(),
       amountUsd: z.number().positive().max(10_000),
+      effectiveFrom: z.string().datetime(),
     }).parse(request.body ?? {});
+    const { activePriceBook, earliestPriceChange, PRICE_BOOK_NOTICE_DAYS, priceBookKey, bookRowsAt } = await import('../billing/price-book');
+    const now = new Date();
+    const effectiveFrom = new Date(body.effectiveFrom);
+    if (effectiveFrom.getTime() < now.getTime() - 60_000) throw new AppError(400, 'PRICE_CHANGE_IN_PAST', 'A price never takes effect in the past. Nothing changed.');
+    // Compared with the price that would otherwise be in force on that date.
+    const before = bookRowsAt(await activePriceBook(app.prisma), effectiveFrom).get(priceBookKey(body.role, body.tier ?? null));
+    const lower = !!before && body.amountUsd < before.amountUsd;
+    const earliest = earliestPriceChange(now);
+    if (!lower && effectiveFrom.getTime() < earliest.getTime()) {
+      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A higher weekly price (or a first price for a plan) changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
+    }
     const updated = await app.prisma.$transaction(async (tx) => {
-      await tx.priceBookEntry.updateMany({
-        where: { role: body.role, tier: body.tier ?? null, active: true },
-        data: { active: false },
-      });
+      // The price in force stays in force until effectiveFrom: nothing is deactivated here.
       const created = await tx.priceBookEntry.create({
-        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
+        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd, effectiveFrom },
       });
       // [ADM-002] The route already owned this transaction — the audit row
       // simply joins it, and names the entry it made (a create declares no
@@ -4803,7 +4823,10 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
     });
-    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
+    // Tell every partner it changes, now (the daily notice job retries any undelivered).
+    const { announcePriceBookEntry } = await import('../billing/fx-notices');
+    const told = await announcePriceBookEntry(app.prisma, app.io, updated.id, new Date());
+    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd), noticesQueued: told.notified } };
   });
 
   /** Part 13 reporting — one truth, two columns: USD (management view) and
@@ -4899,7 +4922,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
     const inc = tenant ? Number(tenant.roundingIncrement) : 1;
     const previous = await app.prisma.fxRate.findFirst({ where: { quote: q.quote }, orderBy: { effectiveFrom: 'desc' } });
-    const entries = await app.prisma.priceBookEntry.findMany({ where: { active: true }, orderBy: { role: 'asc' } });
+    // The plans in force today (a scheduled price shows once it is in force).
+    const { activePriceBook, bookRowsAt } = await import('../billing/price-book');
+    const entries = [...bookRowsAt(await activePriceBook(app.prisma), new Date()).values()].sort((a, b) => a.role.localeCompare(b.role));
     return {
       success: true,
       data: {
@@ -5624,6 +5649,22 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: row };
   });
 
+  // [Owner legal plan 15 Oct · R12] One weekly-fee receipt as the partner sees
+  // it (billing/fee-receipt.ts), by its number: support reads it out, the
+  // accountant checks it. Read only.
+  app.get('/billing/receipts/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
+    // Tenant-local like every billing read: only a receipt of this tenant's
+    // own subscriptions; another tenant's number reads as not found.
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { receiptNumber } = z.object({ receiptNumber: z.string().regex(/^[A-Z0-9-]{1,64}$/) }).parse(request.params);
+    const { feeReceiptDocument } = await import('../billing/fee-receipt');
+    const doc = await feeReceiptDocument(app.prisma, receiptNumber, { tenantId, subscriptionWhere: subscriptionTenantScope(tenantId) });
+    if (!doc) throw new NotFoundError('Receipt');
+    return { success: true, data: doc };
+  });
+
   /** Daily cash journal CSV [20.4] — the accountant's export. */
   app.get('/billing/cash-journal', { preHandler: [adminGuard] }, async (request, reply) => {
     const q = z.object({
@@ -5963,6 +6004,8 @@ export async function adminRoutes(app: FastifyInstance) {
       required: true,
       ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+      ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
+      ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
     });
     await audit(
       request.user.userId,

@@ -5,6 +5,7 @@ import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDime
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
+import { openDirections } from '../../../lib/openDirections';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -15,7 +16,7 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
+import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
@@ -421,13 +422,25 @@ export function DeliveryScreen() {
   const liveTrackingAllowedRef = useRef(liveTrackingAllowed);
   liveTrackingAllowedRef.current = liveTrackingAllowed;
 
+  // [row 5 · ANDROID-QA] The cancel taps read the order straight from the
+  // server (readOrderFresh), not through `order.refetch()`: the screen's own
+  // background refreshes cancel a shared read in flight, and the tap then
+  // waited on their read, which on a slow line could time out and drop it.
+  const readCancelSnapshot = async (targetOrderId: string): Promise<{ data: any; isError: boolean }> => {
+    try {
+      return { data: await readOrderFresh<any>(qc, targetOrderId), isError: false };
+    } catch {
+      return { data: undefined, isError: true };
+    }
+  };
+
   const openCancelConfirmation = async () => {
     const targetOrderId = orderId;
     setCancelPreviewFresh(false);
     setCancelPreviewOrderId(null);
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -454,7 +467,7 @@ export function DeliveryScreen() {
     }
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -664,7 +677,12 @@ export function DeliveryScreen() {
   }, [isFocused, o?.status, o?.fulfillment]);
 
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
-  if (order.isError || !o) {
+  // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
+  // On a slow line a background refresh (the 15 s poll, a reconnect) can time
+  // out; that used to swap the whole order, and the Cancel button under the
+  // customer's finger, for an error screen until the next read landed. The
+  // order already on screen stays (the cart's E07 rule).
+  if (!o) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
         <ErrorState onRetry={() => order.refetch()} />
@@ -1264,10 +1282,9 @@ export function DeliveryScreen() {
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
-                    onPress={() => {
-                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
-                    }}
+                    // [row 363] The phone's own maps: Apple Maps on iOS, Google
+                    // Maps on Android (it was maps.apple.com on every phone).
+                    onPress={() => { void openDirections({ lat: o.pickupLat, lng: o.pickupLng, address: o.pickupAddress }); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
                     accessibilityHint="Opens turn-by-turn directions"
@@ -1302,6 +1319,19 @@ export function DeliveryScreen() {
                 </T>
               </View>
             )
+          ) : null}
+
+          {/* [R14 · legal research D12] The server's words, shown while the store delivers THIS order
+              with its own rider (null on every other order) — never decided here. */}
+          {typeof o.ownRiderNotice === 'string' && o.ownRiderNotice ? (
+            <View
+              accessible
+              accessibilityLabel={o.ownRiderNotice}
+              style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.xl, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info }}
+            >
+              <Feather name="info" size={16} color={color.info} />
+              <T variant="caption" tone="info" style={{ flex: 1 }}>{o.ownRiderNotice}</T>
+            </View>
           ) : null}
 
           {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at

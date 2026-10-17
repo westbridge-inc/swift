@@ -77,6 +77,7 @@ import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { refundRuleForWrite } from './refund-rule';
 import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
@@ -121,6 +122,9 @@ const updateVendorProfileSchema = z.object({
   // [VERIFY-DOCS · ruling 7] OPTIONAL VAT registration number, owner only; null/'' takes it off.
   // Shape is enforced by vatNumberForWrite (utils/vendor-vat-number).
   vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
+  // [R3 · CAA s.70(3)] The store's own refund rule, owner only; null/'' takes it down.
+  // Shape is enforced by refundRuleForWrite (vendor/refund-rule).
+  refundRule: z.string().max(2000).nullable().optional(),
 })
   // [Q8] A store pin is one point. Half of one would move the store along a
   // single axis to a spot nobody chose, so the two travel together or not at all.
@@ -1229,6 +1233,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       attestationVersion: z.literal(DECLARATION_VERSION),
       privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
     }).parse(request.body ?? {});
+    // [R15 · owner 15 Oct 2026, research D9] Home cooks are held: a home kitchen needs the council's
+    // registration, and whether one can be registered is not confirmed yet. Refused before anything is written.
+    if (body.activityClass === 'home_cook') {
+      throw new AppError(409, 'HOME_COOK_HELD', 'Swift can’t take home cooks yet: a home kitchen needs a council registration that is still being confirmed. We’ll tell you when it opens.');
+    }
     const [vendor, user, registered, existing] = await Promise.all([
       app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
@@ -1357,6 +1366,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? undefined
       : vatNumberForWrite(body.vatRegistrationNumber);
     if (vatRegistrationNumber !== undefined) requireRole(access, 'OWNER');
+    // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
+    if (body.refundRule !== undefined) requireRole(access, 'OWNER');
+    const refundRule = refundRuleForWrite(body.refundRule);
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1387,6 +1399,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
+          ...(refundRule !== undefined && { refundRule }),
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
@@ -3835,6 +3848,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
             ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
+            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
           }
         : null,
     };
