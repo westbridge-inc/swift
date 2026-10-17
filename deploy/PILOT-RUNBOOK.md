@@ -1323,11 +1323,14 @@ the runner's SKIP whose executed steps all passed and whose only cases left
 to the target are the ones the script names (an MMG pay link needs an SMS
 step-up the copy cannot do). Then the system jobs `compliance-sample` and
 `expiry-sweep`. The instance's own metrics must hold: the 95th-percentile
-request time within 1 s, no query waiting for a pool connection, tenant and
-non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
-however the run ends, after its api, worker and api-journeys logs (the last
-400 lines each, redacted) are kept in the run's results directory
-(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`) and the first `FATAL` lines are
+request time within 1 s, the pool never at its connection limit (the
+instance's own limit, read inside its container before the journeys; a query in
+flight at a sample is reported, not judged), tenant and non-tenant bindings ran,
+and `nontenant_system_in_tx` = 0. The copy is removed however the run ends,
+after its api, worker and api-journeys logs (the last 400 lines each, redacted)
+are kept in the run's results directory
+(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`), with the instance's metrics
+samples (`metrics/`, redacted) once sampling began, and the first `FATAL` lines are
 printed, and `JOURNEYS PASSED` is printed only when every step held. The live staging API and database are only read. The copy has its own
 freshly generated secrets, so staging rows encrypted under the live key do not
 read on it; the journeys make their own accounts. Any failure is a stop:
