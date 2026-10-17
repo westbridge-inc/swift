@@ -73,6 +73,8 @@ import {
   storeVisibleReview,
 } from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
+import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
@@ -115,6 +117,8 @@ const updateVendorProfileSchema = z.object({
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number (+592 mobile); '' / null = stop taking MMG.
+  mmgNumber: z.string().trim().max(40).nullable().optional(),
   // The number customers may call before ordering. Opt-in; null/'' takes it
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
@@ -683,6 +687,27 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 // Route plugin
 // ---------------------------------------------------------------------------
 
+
+/** [ALG-34 · owner 17 Oct 2026 PAYMENT-SIMPLIFY] The store's own view of where MMG money goes.
+ *  The MMG NUMBER (live + staged, each re-checked on read) is what customers pay now. The pay
+ *  LINK is shown only while STORE_MMG_PAY_LINK is on (`mmgPayLinkEnabled`); off, a stored link
+ *  stays dormant and an older app shows an empty card, never a link Swift does not use. */
+function storeMoneySurfaceView(row: {
+  mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null;
+  mmgNumber: string | null; mmgNumberPending: string | null; mmgNumberApplyAt: Date | null;
+}) {
+  const linkOn = storeMmgPayLinkEnabled();
+  return {
+    mmgPayLinkEnabled: linkOn,
+    mmgPayUrl: linkOn ? safeMmgPayUrl(row.mmgPayUrl) : null,
+    mmgPayUrlPending: linkOn ? safeMmgPayUrl(row.mmgPayUrlPending) : null,
+    mmgPayUrlApplyAt: linkOn ? row.mmgPayUrlApplyAt : null,
+    mmgNumber: safeMmgNumber(row.mmgNumber),
+    mmgNumberPending: safeMmgNumber(row.mmgNumberPending),
+    mmgNumberApplyAt: row.mmgNumberPending ? row.mmgNumberApplyAt : null,
+  };
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
@@ -1107,8 +1132,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // invalid stored value back into an app where it could be opened.
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
-      mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
-      mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
+      ...storeMoneySurfaceView(vendor),
       publicPhone: safePublicPhone(vendor.publicPhone),
       // [owner #51] What still stands between a never-live store and going
       // live, besides its documents (additive; older apps ignore it).
@@ -1340,7 +1364,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
-    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    if ((body.mmgPayUrl !== undefined || body.mmgNumber !== undefined) && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the MMG number: while
+    // STORE_MMG_PAY_LINK is off a NEW link is refused before step-up or any money-surface write.
+    if (body.mmgPayUrl !== undefined) assertStoreMmgPayLinkWritable(body.mmgPayUrl);
     // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
     const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
     if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
@@ -1351,7 +1378,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Owner only, step-up first; a new link is STAGED behind a cool-off with
     // the old one still live and the owner told (integrity/money-surface.ts).
     // Clearing it is immediate — it redirects nothing.
-    if (mmgPayUrl !== undefined) {
+    // [PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG number is the same kind of money
+    // destination: owner only, step-up first, the same velocity budget, a new number STAGED
+    // behind the same cool-off with the old one still live and the owner told; clearing is immediate.
+    const mmgNumber = body.mmgNumber === undefined
+      ? undefined
+      : mmgNumberForWrite(body.mmgNumber);
+    if (mmgPayUrl !== undefined || mmgNumber !== undefined) {
       requireRole(access, 'OWNER');
       await requireStepUp(app, request);
       await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
@@ -1418,6 +1451,13 @@ export async function vendorRoutes(app: FastifyInstance) {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
+    if (mmgNumber === null) {
+      await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, field: 'NUMBER' });
+    } else if (mmgNumber !== undefined) {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+        actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newNumber: mmgNumber, field: 'NUMBER',
+      });
+    }
     // [owner #51] A never-live store whose documents are done waits only for
     // its published number: once it has one, the activation projection runs
     // now (not at the next daily belt) and the store goes live. A failure
@@ -1429,7 +1469,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
+      where: { id: vendorId },
+      select: {
+        mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true,
+        mmgNumber: true, mmgNumberPending: true, mmgNumberApplyAt: true,
+        status: true, isVerified: true, acceptingOrders: true,
+      },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1441,8 +1486,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...vendor,
         ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
-        mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
-        mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        ...storeMoneySurfaceView(link),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
         storeCheck: partnerStoreView(storeCheckOf(vendor)),
         nameReviewApprovedHash: undefined,
@@ -1458,6 +1502,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
       actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId,
+    });
+    return { success: true, data };
+  });
+
+  /** DELETE /profile/mmg-number/pending — [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me"
+   *  for the store's MMG number: drop the staged change and sign out every other device.
+   *  Owner only; no step-up — cancelling is always the safe direction. */
+  app.delete('/profile/mmg-number/pending', auth, async (request) => {
+    await assertVelocity(app, request, 'money.mmg-link.cancel'); // [R048-007]
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+      actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId, field: 'NUMBER',
     });
     return { success: true, data };
   });

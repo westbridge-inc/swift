@@ -64,7 +64,10 @@ import { SupportService } from '../support/support.service';
 import { AccountService, closesByRequest } from './account.service';
 import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
-import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { displayMmgNumber, safeMmgNumber } from '../../utils/mmg-number';
+import { formatMoney } from '../../utils/currency-amount';
+import { validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
 import {
   currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
@@ -178,6 +181,8 @@ const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
 
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY to the store's MMG number (build 12+, web).
+  mmgPayTo: z.enum(['STORE_NUMBER']).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
@@ -412,23 +417,35 @@ async function buildCartResponse(
   const paymentVendorIds = [...new Set(cart.items.map((item) => item.item.vendorId))].sort();
   const paymentVendors = await app.prisma.vendor.findMany({
     where: { id: { in: paymentVendorIds } },
-    select: { id: true, mmgPayUrl: true },
+    select: { id: true, mmgPayUrl: true, mmgNumber: true },
     orderBy: { id: 'asc' },
   });
   const singlePaymentVendor = paymentVendorIds.length === 1 && paymentVendors.length === 1
     ? paymentVendors[0]!
     : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] `mmg` is the OLD pay-LINK rail (the only one
+  // builds 9-11 know): offered only while STORE_MMG_PAY_LINK is on, so those builds show
+  // cash only. `mmgStoreNumber` is the rail build 12 and the web read: the customer pays
+  // the store's MMG NUMBER directly, shown on the order once the store accepts.
   const mmgValidation = singlePaymentVendor
-    ? validateMmgPayUrl(singlePaymentVendor.mmgPayUrl)
+    ? validateOfferedStoreMmgPayUrl(singlePaymentVendor.mmgPayUrl)
     : null;
   const mmgAvailable = mmgValidation?.valid === true;
   const mmgUnavailableReason = paymentVendorIds.length !== 1
     ? 'MULTI_VENDOR_UNSUPPORTED' as const
-    : !singlePaymentVendor?.mmgPayUrl
-      ? 'VENDOR_NOT_CONFIGURED' as const
-      : mmgAvailable
-        ? null
-        : 'VENDOR_LINK_INVALID' as const;
+    : mmgValidation && !mmgValidation.valid && mmgValidation.reason === 'PAY_LINKS_OFF'
+      ? 'PAY_LINKS_OFF' as const
+      : !singlePaymentVendor?.mmgPayUrl
+        ? 'VENDOR_NOT_CONFIGURED' as const
+        : mmgAvailable
+          ? null
+          : 'VENDOR_LINK_INVALID' as const;
+  const storeNumber = singlePaymentVendor ? safeMmgNumber(singlePaymentVendor.mmgNumber) : null;
+  const mmgNumberUnavailableReason = paymentVendorIds.length !== 1
+    ? 'MULTI_VENDOR_UNSUPPORTED' as const
+    : storeNumber
+      ? null
+      : 'VENDOR_NOT_CONFIGURED' as const;
   // Opaque, non-secret scope: a method selection is valid only for this exact
   // vendor set + destination state. A previous cart's MMG choice cannot revive
   // when another MMG-capable vendor appears.
@@ -436,8 +453,9 @@ async function buildCartResponse(
     .update(JSON.stringify({
       cartId: cart.id,
       vendors: paymentVendors.map((vendor) => {
-        const checked = validateMmgPayUrl(vendor.mmgPayUrl);
-        return [vendor.id, checked.valid ? checked.url : checked.reason];
+        const checked = validateOfferedStoreMmgPayUrl(vendor.mmgPayUrl);
+        // The number is part of the scope too: a choice made for one number never survives a change.
+        return [vendor.id, checked.valid ? checked.url : checked.reason, safeMmgNumber(vendor.mmgNumber) ?? 'NO_NUMBER'];
       }),
       expectedVendorIds: paymentVendorIds,
     }))
@@ -666,6 +684,15 @@ async function buildCartResponse(
         provider: 'MMG' as const,
         fundsFlow: 'DIRECT_TO_VENDOR' as const,
         unavailableReason: mmgUnavailableReason,
+      },
+      // The number itself is never in the cart: it is shown only on the accepted order.
+      mmgStoreNumber: {
+        available: storeNumber !== null,
+        provider: 'MMG' as const,
+        fundsFlow: 'DIRECT_TO_VENDOR' as const,
+        payTo: 'STORE_NUMBER' as const,
+        shownWhen: 'STORE_ACCEPTS' as const,
+        unavailableReason: mmgNumberUnavailableReason,
       },
     },
   };
@@ -2369,6 +2396,7 @@ export async function customerRoutes(app: FastifyInstance) {
       result = await orderService.checkout({
         userId,
         paymentMethod,
+        ...(body.mmgPayTo && paymentMethod === 'MOBILE_MONEY' ? { mmgPayTo: body.mmgPayTo } : {}),
         deliveryInstructions: body.deliveryInstructions,
         tipAmount: body.tipAmount,
         scheduledFor: scheduledForCanonical,
@@ -2688,6 +2716,38 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Pay-to-number. The store's MMG number and the exact
+    // order total (goods + delivery fee) are shown ONLY to this order's customer (the query is
+    // scoped to customerId) and ONLY once the store has ACCEPTED, while the payment still waits
+    // for the store's "Paid by MMG". Never before acceptance, never after the store confirms,
+    // never on a closed order or a rejected attempt, and never the store's live profile number:
+    // only the number committed under the vendor row lock at checkout.
+    const shownMmgNumber = order.paymentMethod === 'MOBILE_MONEY'
+      && order.paymentStatus === 'PENDING'
+      && order.acceptedAt != null
+      && !(TERMINAL_ORDER_STATUSES as readonly string[]).includes(order.status)
+      && !isRejectedMmgAttempt(order)
+      ? safeMmgNumber(order.mmgNumberSnapshot)
+      : null;
+    const mmgPayment = shownMmgNumber
+      ? (() => {
+          const recipientName = order.mmgRecipientNameSnapshot ?? order.vendor?.name ?? 'the store';
+          const amount = Number(order.totalAmount);
+          const numberDisplay = displayMmgNumber(shownMmgNumber);
+          return {
+            payTo: 'STORE_NUMBER' as const,
+            provider: 'MMG' as const,
+            fundsFlow: 'DIRECT_TO_VENDOR' as const,
+            recipientName,
+            number: shownMmgNumber,
+            numberDisplay,
+            amount,
+            currencyCode: order.currencyCode,
+            instruction: `Pay ${formatMoney(amount, order.currencyCode, { whole: true })} by MMG to ${recipientName}'s MMG number ${numberDisplay}.`,
+          };
+        })()
+      : null;
+
     // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
     const riderSurface = order.rider?.userId
       ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
@@ -2805,6 +2865,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        mmgPayment,
         // [S1-6] What each party said about a direct-MMG payment, whether the
         // order is held on a disagreement, and whether a claim may be made now.
         mmgClaim: mmgClaimView(order),

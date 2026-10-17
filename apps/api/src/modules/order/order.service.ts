@@ -71,7 +71,8 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
-import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgNumber } from '../../utils/mmg-number';
+import { MMG_PAY_TO_STORE_NUMBER, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE, validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
@@ -87,6 +88,10 @@ interface CheckoutInput {
    *  database even if Redis forgot. */
   idempotency?: { key: string; requestHash: string };
   paymentMethod: string;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY only: 'STORE_NUMBER' = the customer pays the
+   *  store's MMG number directly, shown on the order once the store accepts (build 12+, web). Absent =
+   *  an app that knows only the old pay link (builds 9-11), refused while STORE_MMG_PAY_LINK is off. */
+  mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
   deliveryInstructions?: string;
   tipAmount?: number;
   scheduledFor?: string; // ISO date string
@@ -209,8 +214,14 @@ export function assertPricesAsSeen(
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
-  const checked = validateMmgPayUrl(rawUrl);
+  const checked = validateOfferedStoreMmgPayUrl(rawUrl);
   if (checked.valid) return checked.url;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the store's MMG number.
+  // An app that still asks for the link (builds 9-11) is refused with an MMG_* code — which those
+  // builds already turn into "back to cash" — and a sentence that says what to do.
+  if (checked.reason === 'PAY_LINKS_OFF') {
+    throw new AppError(400, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE);
+  }
   if (checked.reason === 'MISSING') {
     throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
   }
@@ -218,6 +229,14 @@ function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName:
     throw new AppError(503, 'MMG_PAY_LINKS_NOT_CONFIGURED', 'MMG pay links are not configured for this environment yet — choose cash instead.');
   }
   throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
+}
+
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG NUMBER a pay-to-number checkout commits to,
+ *  re-checked from the stored row (never trusted as written). */
+function requireCheckoutMmgNumber(rawNumber: string | null | undefined, vendorName: string): string {
+  const number = safeMmgNumber(rawNumber);
+  if (number) return number;
+  throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
 }
 
 /** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
@@ -306,11 +325,18 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
 // paid customer→store OUTSIDE Swift, and only the store can attest the money
 // landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
-// order may not move through fulfilment: not accepted, prepared, readied,
+// order may not move through fulfilment: not prepared, readied,
 // claimed/assigned, taken into custody, delivered, self-delivered, or
 // pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
 // open, and the store's confirm-payment action never passes through here — it
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+//
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] ACCEPTED no longer waits
+// for the payment: the store ACCEPTS first ("we have it"), which shows the customer
+// the store's MMG number and the exact amount; the customer pays; the store taps
+// "Paid by MMG". Acceptance moves no goods and no rider — PREPARING onward and
+// every rider claim/assignment stay gated until the store confirms the money. A
+// DISPUTED payment (two claims that disagree) still holds acceptance too.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
@@ -381,6 +407,8 @@ export function assertMmgFulfilmentAllowed(
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
+  // [PAYMENT-SIMPLIFY · Q1] The store may accept an unpaid MMG order; nothing after acceptance may move.
+  if (target === 'ACCEPTED') return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
@@ -978,7 +1006,8 @@ export class OrderService {
       // a vendor row lock in the commit transaction, so a concurrent profile
       // edit cannot swap/remove the payment target after this decision.
       if (input.paymentMethod === 'MOBILE_MONEY') {
-        requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) requireCheckoutMmgNumber(vendor.mmgNumber, vendor.name);
+        else requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
       // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
@@ -1504,15 +1533,22 @@ export class OrderService {
       }
 
       let committedMmgPayUrl: string | null = null;
+      let committedMmgNumber: string | null = null;
       let committedMmgRecipientName: string | null = null;
       if (input.paymentMethod === 'MOBILE_MONEY') {
         const paymentPlan = plans[0]!; // multi-vendor MMG was rejected above
         await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${paymentPlan.vendor.id} FOR UPDATE`;
         const currentVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: paymentPlan.vendor.id },
-          select: { name: true, mmgPayUrl: true },
+          select: { name: true, mmgPayUrl: true, mmgNumber: true },
         });
-        committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        // [PAYMENT-SIMPLIFY] The destination is re-read and committed under the vendor row lock:
+        // a concurrent profile edit (or the cool-off applying a new number) cannot swap it.
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
+          committedMmgNumber = requireCheckoutMmgNumber(currentVendor.mmgNumber, currentVendor.name);
+        } else {
+          committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        }
         committedMmgRecipientName = currentVendor.name;
       }
 
@@ -1650,6 +1686,7 @@ export class OrderService {
             // both fields while the vendor row is locked so a later profile
             // edit cannot redirect an already-placed order or relabel its payee.
             mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
+            mmgNumberSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgNumber : null,
             mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
             // Minutes-to-promise for the legacy field; the promise itself is the truth.
