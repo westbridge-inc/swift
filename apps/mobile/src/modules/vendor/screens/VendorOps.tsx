@@ -241,8 +241,13 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 placeholder="From MMG’s payment message"
                 style={{ marginTop: space.sm }}
               />
+              {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] One plainly worded button: tap it when the
+                  money is in the store's own MMG account. Swift never checks the money itself. */}
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Tap when {money(order.totalAmount ?? order.total)} is in your MMG account.
+              </T>
               <PillButton
-                label={`${money(order.totalAmount ?? order.total)} received in my MMG`}
+                label="Paid by MMG"
                 size="md"
                 icon="check"
                 style={{ marginTop: space.sm }}
