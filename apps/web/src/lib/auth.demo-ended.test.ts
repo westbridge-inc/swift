@@ -16,9 +16,9 @@ async function loadAuth() {
   return import('@/lib/auth');
 }
 const closed = { success: false, error: { code: 'REVIEW_SESSION_CLOSED', message: 'This demo has ended, so its sample stores and orders are no longer available.' } };
-let assign = vi.fn<(href: string) => void>();
+let assign = vi.fn<(_href: string) => void>();
 const at = (pathname: string) => {
-  assign = vi.fn<(href: string) => void>();
+  assign = vi.fn<(_href: string) => void>();
   Object.defineProperty(window, 'location', { value: { pathname, search: '', set href(v: string) { assign(v); } }, configurable: true });
 };
 const calls = (fetchMock: ReturnType<typeof mockApi>, path: string) =>
