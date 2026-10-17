@@ -13,7 +13,7 @@ import {
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
 import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
-import { explainSessionEnded } from '../lib/accountBlockedAlert';
+import { noticeSessionEnded } from '../lib/sessionEndedNotice';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
@@ -161,6 +161,9 @@ api.interceptors.request.use((config) => {
   return config;
 }, undefined, { synchronous: true });
 
+/** [Row 3] "Sign in" on the you-were-signed-out notice: straight to sign-in. */
+const signInAgain = () => useAuthStore.getState().promptLogin();
+
 // Response interceptor for token refresh. The coordinator single-flights an
 // exact session, but lets a newly logged-in account start its own flight. Every
 // rotate/logout is compare-and-swap bound to the user + generation + refresh
@@ -186,7 +189,7 @@ const refreshCoordinator = new AuthRefreshCoordinator(
   },
   (error) => axios.isAxiosError(error)
     && (error.response?.status === 401 || error.response?.status === 403),
-  explainSessionEnded,
+  (error) => noticeSessionEnded(error, signInAgain),
 );
 
 /** [PERF #9] The same one refresh the 401 path below uses, started before
@@ -215,7 +218,7 @@ api.interceptors.response.use(
       if (authRefreshRetries.has(originalRequest)) {
         // A refreshed credential was authoritatively rejected. End only the
         // exact replay session; a newer login/rotation must remain untouched.
-        useAuthStore.getState().logoutIfCurrent(captured);
+        if (useAuthStore.getState().logoutIfCurrent(captured)) noticeSessionEnded(error, signInAgain);
         return Promise.reject(error);
       }
       const outcome = await refreshCoordinator.resolve(captured);

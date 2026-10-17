@@ -4,7 +4,7 @@ import { runBillingMutation } from '../lib/billingMutation';
 import type { MutationGuard } from './useStepUp';
 import { useEffect, useMemo, useRef } from 'react';
 import * as Location from 'expo-location';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
 import { currentDevicePosition } from '../services/devicePosition';
 import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
@@ -309,6 +309,10 @@ export type RunSummary = {
   next: { orderId: string; vendorName: string | null; status: string };
 };
 
+/** A stacked rider's live legs. One read for every observer of the query, so
+ *  a read-only observer (the live job feed) never brings a different fetch. */
+export const activeLegsQueryFn = () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs());
+
 /**
  * [B6] Every live leg — the primary first — plus the run summary. The singular
  * case is `useActiveJob` untouched: one leg, no run, the same query. Taxi is
@@ -321,7 +325,7 @@ export function useActiveJobs(kind: MoverKind | null) {
   const stacked = kind === 'RIDER' && !pv;
   const legsQ = useQuery({
     queryKey: ['mover', 'active', kind, 'legs'],
-    queryFn: () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs()),
+    queryFn: activeLegsQueryFn,
     enabled: stacked,
     refetchInterval: POLL.moverLegs,
   });
@@ -424,10 +428,24 @@ export function useGoOffline(kind: MoverKind) {
   const m = useMutation({ mutationFn: () => unwrap(svc(kind).goOffline()), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
   return pv ? PV.previewMutation() : m;
 }
+/**
+ * [PERF partner #2] What a job step's button waits for: the active job, the
+ * thing the job screen shows next. TanStack Query awaits the promise a
+ * mutation's onSuccess returns, and the steps used to return the refetch of
+ * EVERY mounted mover read (Home stays mounted under the job screen: both
+ * profile probes, which retry twice, today's and the week's earnings, demand,
+ * the job board). The button spun until the slowest of them came back, though
+ * the step had already succeeded. The other reads still refresh, at once, in
+ * the background; only the wait is narrower.
+ */
+export function refreshAfterJobStep(qc: QueryClient): Promise<void> {
+  void qc.invalidateQueries({ queryKey: ['mover'], predicate: (query) => query.queryKey[1] !== 'active' });
+  return qc.invalidateQueries({ queryKey: ['mover', 'active'] });
+}
 export function useAcceptJob(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ id }: { id: string }) => unwrap(svc(kind).accept(id)), onSuccess: () => refreshAfterJobStep(qc) });
   return pv ? PV.previewMutation() : m;
 }
 /** Accept a dispatch OFFER (the offer card), not a board grab. Hits
@@ -436,7 +454,7 @@ export function useAcceptJob(kind: MoverKind) {
 export function useAcceptOffer(kind: MoverKind) {
   const pv = usePreview();
   const qc = useQueryClient();
-  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }) });
+  const m = useMutation({ mutationFn: ({ orderId, offerAttemptId }: { orderId: string; offerAttemptId?: string }) => unwrap(svc(kind).acceptOffer(orderId, offerAttemptId)), onSuccess: () => refreshAfterJobStep(qc) });
   return pv ? PV.previewMutation() : m;
 }
 /** Explicit pass on a dispatch offer — tells the cascade to move to the next
@@ -536,7 +554,7 @@ export function useDriverAction() {
         void qc.invalidateQueries({ queryKey: ['mover'] });
         return;
       }
-      return qc.invalidateQueries({ queryKey: ['mover'] });
+      return refreshAfterJobStep(qc);
     },
   });
   return pv ? PV.previewMutation() : m;
@@ -587,7 +605,7 @@ export function useRiderAction() {
         }
       }
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSuccess: () => refreshAfterJobStep(qc),
   });
   return pv ? PV.previewMutation() : m;
 }
@@ -885,7 +903,7 @@ export function useTaxiStopAction() {
     },
     // The screen says what went wrong in its own words; no second toast.
     meta: { silent: true },
-    onSettled: () => qc.invalidateQueries({ queryKey: ['mover'] }),
+    onSettled: () => refreshAfterJobStep(qc),
   });
   return pv ? PV.previewMutation() : m;
 }
