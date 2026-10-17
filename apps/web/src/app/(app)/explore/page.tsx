@@ -19,7 +19,8 @@ const VALUES = [
   // [Legal research A12] the research's price promise; "0% fees" was not true next to a delivery fee.
   { Icon: BadgePercent, title: PRICE_PROMISE_TITLE, body: PRICE_PROMISE_BODY },
   { Icon: Wallet, title: 'Pay cash or MMG', body: 'You pay the business or driver directly — Swift never holds your money.' },
-  { Icon: ShieldCheck, title: 'Verified locals', body: 'Every business and driver is document-verified before they go live.' },
+  // [R7 · GUARDRAILS §7(4)] Say what a person on our team actually did, and when.
+  { Icon: ShieldCheck, title: 'Checked before they go live', body: 'A person on our team checks every business’s and driver’s documents before they go live.' },
 ];
 
 export default function ExplorePage() {

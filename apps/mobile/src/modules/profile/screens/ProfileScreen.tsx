@@ -262,15 +262,16 @@ export function ProfileScreen() {
               ) : null}
             </View>
           </View>
-          {/* [ref 05] "✓ Verified 2 of 3 — next: place your first order" —
+          {/* [ref 05] "✓ 2 of 3 done — next: place your first order" —
               the check is drawn, the count is real, the next step is an
-              imperative the person can act on. */}
+              imperative the person can act on. [R7] Never "Verified": a selfie
+              and a first order are not anything a person on our team checked. */}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: space.md }}>
             <Feather name="check-circle" size={12} color={color.success} />
             <T variant="caption" tone="muted">
               {nextFact
-                ? `Verified ${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.next}`
-                : 'Verified — account complete'}
+                ? `${facts.filter((f) => f.on).length} of ${facts.length} done — next: ${nextFact.next}`
+                : 'Account complete'}
             </T>
           </View>
 
