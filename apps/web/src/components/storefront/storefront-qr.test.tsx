@@ -13,6 +13,7 @@ import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
+import * as browseServer from '@/lib/browse-server';
 import { stubIntersectionObserver } from '@/test/test-utils';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
@@ -51,6 +52,8 @@ beforeEach(() => {
   vi.spyOn(auth, 'verifyPartnerLogin').mockResolvedValue({ home: '/dashboard' } as Awaited<ReturnType<typeof auth.verifyPartnerLogin>>);
   vi.spyOn(customer, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } } as Awaited<ReturnType<typeof customer.verifyCustomerLogin>>);
   vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);
+  // [PERF #2] No live menu from the server here: the page checks it in the browser, as before.
+  vi.spyOn(browseServer, 'storeMenuForPage').mockResolvedValue(null);
   vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: false });
   vi.spyOn(customer, 'getPublicStorefront').mockResolvedValue(store);
   vi.spyOn(customer, 'getPublicVendor').mockResolvedValue({ ...store, description: undefined, categories: store.categories.map(category => ({

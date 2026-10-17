@@ -43,7 +43,7 @@ beforeEach(async () => {
   favourites = [{ id: 'v1', name: 'Shanta Kitchen' }];
   storeReply = null;
   cartReply = null;
-  fetchMock = mockApi(({ url, method }: ApiRequest) => {
+  fetchMock = mockApi(({ url, method, init }: ApiRequest) => {
     if (url.pathname === '/api/v1/auth/me') return ok({ user: { id: 'c1' } });
     if (url.pathname === '/api/v1/auth/refresh') return { status: 401, body: { success: false } };
     if (url.pathname === '/api/v1/market/depth') return ok({ visible: false, items: 0, vendors: 0 });
@@ -52,7 +52,14 @@ beforeEach(async () => {
     if (url.pathname === '/api/v1/customer/favorites/v1' && method === 'POST') { favourites = [...favourites, { id: 'v1', name: 'Shanta Kitchen' }]; return ok({}); }
     if (url.pathname === '/api/v1/customer/favorites/v1' && method === 'DELETE') { favourites = favourites.filter((f) => f.id !== 'v1'); return ok({}); }
     if (url.pathname === '/api/v1/public/storefronts/shanta-kitchen') return ok(storefrontFixture(STORE));
-    if (url.pathname === '/api/v1/customer/vendors/v1') return storeReply ?? ok(STORE);
+    if (url.pathname === '/api/v1/customer/vendors/v1') {
+      // [PERF #2] The server reads the live menu for the page too (its shared
+      // copy, sent with `next`). `storeReply` holds the BROWSER's check; while
+      // that is held, the server's read fails as well, so the page arrives
+      // without a live menu and checks it in the browser — the case below.
+      if ((init as { next?: unknown } | undefined)?.next) return storeReply ? { status: 503, body: { success: false } } : ok(STORE);
+      return storeReply ?? ok(STORE);
+    }
     if (url.pathname === '/api/v1/customer/cart' && method === 'GET') return cartReply ?? ok({ items: [] });
     if (url.pathname === '/api/v1/customer/addresses') return ok([]);
     return { status: 404, body: { success: false } };

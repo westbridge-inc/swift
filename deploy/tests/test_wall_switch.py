@@ -495,7 +495,8 @@ class Rehearsal(unittest.TestCase):
         stored = [c for c in calls if c['tool'] == 'swift-secrets' and c['argv'][:1] == ['set']]
         names = sorted(c['argv'][1] for c in stored)
         generated = re.search(r'^GENERATED="(.*)"$', (DEPLOY / 'gen-secrets.sh').read_text(), re.M).group(1).split()
-        self.assertEqual(names, sorted(generated + ['SMTP_PASS', 'TWILIO_API_KEY_SECRET']))
+        # [AUD-G7-023] The api is hardwired to the emergency-policy signing key, so the copy stands one in too.
+        self.assertEqual(names, sorted(generated + ['EMERGENCY_POLICY_SIGNING_KEY', 'SMTP_PASS', 'TWILIO_API_KEY_SECRET']))
         for c in calls:
             if c['tool'] == 'swift-secrets':
                 self.assertEqual((c['env_store'], c['env_run']), ('/etc/credstore.encrypted/swift-rehearsal', '/run/swift-rehearsal-secrets'))
@@ -581,8 +582,8 @@ class Rehearsal(unittest.TestCase):
                   'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}
         result, calls = self.host.run('up', SHA, extra_env=walled)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        stood_in = ['CW_ALERT_WEBHOOK_URL', 'MMG_API_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PUBLIC_KEY', 'POWERTRANZ_GATEWAY_KEY',
-                    'POWERTRANZ_ID', 'SENTRY_DSN', 'SMS_RECIPIENT_ALLOWLIST', 'STRIPE_SECRET_KEY']
+        stood_in = ['CW_ALERT_WEBHOOK_URL', 'EMERGENCY_POLICY_SIGNING_KEY', 'MMG_API_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PUBLIC_KEY',
+                    'POWERTRANZ_GATEWAY_KEY', 'POWERTRANZ_ID', 'SENTRY_DSN', 'SMS_RECIPIENT_ALLOWLIST', 'STRIPE_SECRET_KEY']
         generated = re.search(r'^GENERATED="(.*)"$', (DEPLOY / 'gen-secrets.sh').read_text(), re.M).group(1).split()
         self.assertIn(f'secrets: {len(generated)} generated, {len(stood_in)} provider stand-ins', result.stdout)
         stored = {}
@@ -602,6 +603,8 @@ class Rehearsal(unittest.TestCase):
         self.assertRegex(stored['SENTRY_DSN'], r'^https://[0-9a-f]{32}@rehearsal\.invalid/1$')
         self.assertRegex(stored['STRIPE_SECRET_KEY'], r'^sk_test_[0-9a-f]{48}$')
         self.assertRegex(stored['MMG_API_KEY'], r'^[0-9a-f]{48}$')
+        # [AUD-G7-023] 48 characters: over the API's 32-character floor, so the copy's api boots and signs.
+        self.assertRegex(stored['EMERGENCY_POLICY_SIGNING_KEY'], r'^[0-9a-f]{48}$')
         # Fresh on every run, and never an argument or a printed line.
         first = dict(stored)
         result, _ = self.host.run('up', SHA, extra_env=walled)
