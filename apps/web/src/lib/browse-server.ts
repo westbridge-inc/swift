@@ -51,7 +51,9 @@ async function guestLookup<T>(path: string, revalidate: number, tags: string[], 
   const body = await response.json().catch(() => null);
   if (!body || body.success === false || !valid(body.data)) throw new Error('The Swift API answer could not be read.');
   const stamped = Date.parse(response.headers.get('date') ?? '');
-  return { data: body.data as T, at: Number.isFinite(stamped) ? Math.min(stamped, Date.now()) : Date.now() };
+  return Number.isFinite(stamped)
+    ? { data: body.data as T, at: Math.min(stamped, Date.now()) }
+    : { data: body.data as T, at: Date.now(), undated: true };
 }
 
 /** One guest GET. Any failure is "no answer" — the page then loads it in the browser as before. */
@@ -88,25 +90,39 @@ export async function vendorSeed(id: string): Promise<GuestRead<VendorDetail> | 
 }
 
 /**
+ * [PERF #2] How long a store page's server render waits for its live menu.
+ * The page drew without it before; past this the page is sent at once and
+ * reads the menu in the browser, as before, so a slow or hung menu read can
+ * never hold the QR landing page blank. (The read itself carries on and fills
+ * the shared copy for the next visitor.)
+ */
+export const STORE_MENU_WAIT_MS = 1_000;
+
+/**
  * [PERF #2] A store page's live menu, drawn into the page so Add works the
  * moment it shows. The page used to draw from the store copy, then read the
  * store AND its menu again in the browser ("Checking this live menu's
  * required choices…") before Add worked: two more trips from the phone. This
  * is the same guest menu read as above (shared 30-second server copy, so the
  * API sees no more reads than before), handed to the page only while it is
- * at most LIVE_MENU_MAX_AGE_MS old by this server's clock. An older copy, no
- * copy, or any failure is null: the page then reads it in the browser before
- * Add works, exactly as before.
+ * at most LIVE_MENU_MAX_AGE_MS old by the API's own Date header and this
+ * server's clock. An older copy, an undated one, no copy, an answer later
+ * than STORE_MENU_WAIT_MS, or any failure is null: the page then reads it in
+ * the browser before Add works, exactly as before.
  */
 export async function storeMenuForPage(id: string): Promise<ServerStoreMenu | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), STORE_MENU_WAIT_MS); });
   try {
-    const read = await vendorSeed(id);
-    if (!read) return null;
+    const read = await Promise.race([vendorSeed(id), late]);
+    if (!read || read.undated) return null;
     const ageMs = Math.max(0, Date.now() - read.at);
     if (ageMs > LIVE_MENU_MAX_AGE_MS) return null;
     return { vendor: read.data, at: read.at, ageMs, renderId: crypto.randomUUID() };
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

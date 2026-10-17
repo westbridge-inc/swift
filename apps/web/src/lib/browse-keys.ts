@@ -40,6 +40,9 @@ export interface GuestRead<T> {
   data: T;
   /** When the API produced this answer (its Date header), so the browser knows how old it is. */
   at: number;
+  /** [PERF #2] The answer carried no readable Date header, so `at` is only when
+   *  this server received it. Never treated as fresh where an order depends on it. */
+  undated?: true;
 }
 
 /** A query's first answer from the page itself: used only while the query has

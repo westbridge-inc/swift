@@ -804,8 +804,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
         {catalog.description ? <p className={styles.description}>{catalog.description}</p> : null}
 
-        {catalogState === 'ready' && catalogCheckedAt ? (
-          <p className={styles.menuFreshness}>Live menu checked at {catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</p>
+        {/* [PERF #2] A page that arrives with the live menu draws this line in
+            the server's HTML too (the time follows once the phone's clock
+            shows it), so it never pushes the whole menu down after the page
+            appears (a layout shift of 0.2 on a 100-item store). */}
+        {catalogState === 'ready' ? (
+          <p className={styles.menuFreshness}>
+            {catalogCheckedAt
+              ? `Live menu checked at ${catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+              : 'Live menu checked'}
+          </p>
         ) : null}
 
         {catalogState !== 'ready' ? (

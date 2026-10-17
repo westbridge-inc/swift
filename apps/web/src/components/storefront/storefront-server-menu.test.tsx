@@ -8,7 +8,8 @@ import * as customer from '@/lib/customer';
 import * as auth from '@/lib/auth';
 import type { StorefrontDetail } from '@/lib/api';
 import { LIVE_MENU_MAX_AGE_MS, type ServerStoreMenu } from '@/lib/browse-keys';
-import { storeMenuForPage } from '@/lib/browse-server';
+import { STORE_MENU_WAIT_MS, storeMenuForPage } from '@/lib/browse-server';
+import styles from './storefront.module.css';
 import { readGuestBasket } from '@/lib/basket-storage';
 import { CustomerSessionProvider, type CustomerSession, type SessionStatus } from '@/components/customer-session';
 
@@ -262,5 +263,49 @@ describe('the server draws a recent live menu into the store page (PERF #2)', ()
   it('hands over nothing when the API cannot be reached', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
     expect(await storeMenuForPage('menu-store')).toBeNull();
+  });
+
+  it('hands over nothing for an answer without a Date header: its age cannot be known', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ success: true, data: vendor }))));
+    expect(await storeMenuForPage('menu-store')).toBeNull();
+  });
+
+  it('a slow menu read never holds the page: past the wait it arrives at once, checking the menu in the browser as before', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const held = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/api/v1/public/storefronts/sample-kitchen') return new Response(JSON.stringify({ success: true, data: storefront }));
+      return new Promise<Response>(() => {}); // the menu read never answers
+    });
+    vi.stubGlobal('fetch', held);
+    let drawn = false;
+    const page = StorefrontPage({ params: Promise.resolve({ slug: 'sample-kitchen' }), searchParams: Promise.resolve({}) });
+    void page.then(() => { drawn = true; });
+    await vi.advanceTimersByTimeAsync(STORE_MENU_WAIT_MS - 1);
+    expect(drawn).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(drawn).toBe(true);
+    const html = renderToString(await page);
+    expect(html).toContain('Checking this live menu');
+    expect(held.mock.calls.some(([url]) => String(url).endsWith('/api/v1/customer/vendors/menu-store'))).toBe(true);
+  });
+
+  it('the page that arrives with the menu already holds its "Live menu checked" line, so nothing pushes the menu down after it appears', async () => {
+    stubApi(2_000);
+    const page = await StorefrontPage({ params: Promise.resolve({ slug: 'sample-kitchen' }), searchParams: Promise.resolve({}) });
+    const html = renderToString(page);
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    document.body.appendChild(container);
+    const line = container.querySelector(`.${styles.menuFreshness}`);
+    expect(line?.textContent).toMatch(/^Live menu checked/);
+    // After hydration the same line only gains its time: nothing is added
+    // above the menu once the page is on screen.
+    const blocksInServerHtml = line!.parentElement!.children.length;
+    await act(async () => { hydrateRoot(container, page); });
+    await waitFor(() => expect(container.querySelector(`.${styles.menuFreshness}`)?.textContent).toMatch(/^Live menu checked at /));
+    expect(container.querySelector(`.${styles.menuFreshness}`)).toBe(line);
+    expect(line!.parentElement!.children.length).toBe(blocksInServerHtml);
+    container.remove();
   });
 });
