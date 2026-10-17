@@ -42,6 +42,11 @@ const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
+  // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
+  gei_electrical_licence: 'GEI Electrical Licence',
+  pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
+  pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 /** Friendly document name for other surfaces (suspension banners etc.). */
@@ -179,6 +184,7 @@ function explainPermissionDenied(
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      ...(upload.isError && upload.variables ? [{ text: 'Retry saved photo', onPress: () => upload.mutate(upload.variables!) }] : []),
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -241,7 +247,7 @@ function explainPermissionDenied(
             tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
-            {caption}
+            {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
           {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made

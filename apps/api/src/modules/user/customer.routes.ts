@@ -16,7 +16,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
-import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
+import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
@@ -66,11 +66,10 @@ import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
-import {
-  currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
-} from '../legal/consent.service';
-import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { currentConsentDetailed } from '../legal/consent.service';
+import { LEGAL_VERSION } from '../legal/legal.routes';
 import { consentSurfaceOf } from '../legal/consent-surface';
+import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
@@ -80,6 +79,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -2827,6 +2827,9 @@ export async function customerRoutes(app: FastifyInstance) {
           && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
           ? order.ridePin
           : null,
+        // [R14 · legal research D12] The store delivers this order with its own rider: the order screen says so,
+        // verbatim (null on every other order). The server's reading of this order's current fulfilment mode.
+        ownRiderNotice: ownRiderNotice(order),
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
@@ -3464,29 +3467,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  [F-021-02]. */
   app.post('/consent/marketing', async (request: AuthRequest) => {
     const { granted } = z.object({ granted: z.boolean() }).parse(request.body);
-    const userId = request.user.userId;
-    await publishLegalDocumentOnce(app.prisma, {
-      documentType: 'marketing_consent', version: LEGAL_VERSION, renderedText: MARKETING_CONSENT,
-    });
-    const outcome = await app.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(Prisma.sql`
-        SELECT pg_advisory_xact_lock(hashtextextended(${`consent:marketing:${userId}`}, 0))`);
-      const prior = await currentConsentDetailed(tx, 'customer', userId, 'marketing_consent');
-      const effectiveAtCurrent = !!prior
-        && (prior.action === 'granted' || prior.action === 're_granted')
-        && prior.version === LEGAL_VERSION;
-      const effectiveAtAny = !!prior && (prior.action === 'granted' || prior.action === 're_granted');
-      if (granted === effectiveAtCurrent && (granted || !effectiveAtAny)) {
-        return { marketing: effectiveAtCurrent, changed: false };
-      }
-      const action: ConsentAction = granted ? (prior ? 're_granted' : 'granted') : 'withdrawn';
-      await recordConsent(tx, {
-        subjectType: 'customer', subjectId: userId,
-        documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurfaceOf(request), ip: request.ip,
-        evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
-      });
-      return { marketing: granted, changed: true };
+    const outcome = await setMarketingConsent(app.prisma, {
+      userId: request.user.userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+      evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
     });
     return { success: true, data: outcome };
   });

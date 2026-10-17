@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../../lib/uploadImage';
 import { useEffect, useRef, useState } from 'react';
 import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -107,7 +108,8 @@ export function SelfieCaptureScreen() {
         throw new AuthSessionBoundaryError();
       }
       const form = new FormData();
-      form.append('file', { uri: photoUri, name: 'selfie.jpg', type: 'image/jpeg' } as never);
+      form.append('file', await prepareUploadImage({ uri: photoUri, name: 'selfie.jpg', type: 'image/jpeg' }) as never);
+      requireAuthSessionForPrincipal(owner);
       const { data } = await authApi.uploadSelfie(form, owner);
       requireAuthSessionForPrincipal(owner);
       const updated = data.data.user;
@@ -181,6 +183,7 @@ export function SelfieCaptureScreen() {
         <View style={{ marginTop: space.xl }}>
           {photoUri ? (
             <>
+              <T variant="label" tone="muted">{uploading ? 'Still uploading — keep this screen open. Your photo is kept if you need to retry.' : ''}</T>
               <PillButton label="Use this photo" loading={uploading} onPress={upload} />
               <PillButton
                 label="Retake"

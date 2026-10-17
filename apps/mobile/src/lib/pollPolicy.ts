@@ -16,7 +16,11 @@ import { vendorOrderFeedLive } from './vendorOrderFeed';
  * notification on their user room, and mover screens join no order room).
  * The job board is refreshed on offer events but not on other board changes.
  * So all four keep their cadence while connected and back off only on a slow
- * network. Same for the vendor profile. */
+ * network. Same for the vendor profile.
+ *
+ * Not pushed either: the customer's activity list. Order events go to the
+ * order's own room, which only the order screen joins, so the live list
+ * re-asks while it is on screen with something in progress (row 5). */
 export const POLL = {
   chatMessages: () => adaptivePollInterval(4000, 15000),
   vendorOrders: () => (vendorOrderFeedLive() ? adaptivePollInterval : slowNetworkPollInterval)(12000, 30000),
@@ -26,4 +30,5 @@ export const POLL = {
   moverAvailable: () => slowNetworkPollInterval(10000, 30000),
   moverActive: () => slowNetworkPollInterval(12000, 30000),
   moverLegs: () => slowNetworkPollInterval(12000, 30000),
+  customerLiveOrders: () => slowNetworkPollInterval(15000, 30000),
 };

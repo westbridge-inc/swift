@@ -72,7 +72,7 @@ async function pendingCase(userId: string) {
   return { doc, kase };
 }
 const post = (adminId: string, path: string) => adminApp.inject({ method: 'POST', url: `/api/v1/admin/verification/cases/${path}`, payload: {}, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json' } });
-const approve = (adminId: string, docId: string) => adminApp.inject({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: {}, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
+const approve = (adminId: string, docId: string) => adminApp.inject({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: { registrationKind: 'COMPANY' } /* [R16] */, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
 const caseRow = (id: string) => system(() => app.prisma.reviewCase.findUniqueOrThrow({ where: { id } }));
 
 beforeAll(async () => {

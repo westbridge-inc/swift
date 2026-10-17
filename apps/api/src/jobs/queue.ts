@@ -1376,6 +1376,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [R24] A partner's rejected document gets its clock first (30 days after the rejection
+        // for an ID-type document, the registry window otherwise), so the reaper below deletes
+        // the ones already due in the same run. A failure here never stops the reaper.
+        try {
+          await verification.scheduleRejectedDocumentRetention();
+        } catch (err) {
+          ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -1750,6 +1758,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // an alarm that silently stops alarming is the defect it exists to
           // prevent.
           ctx.log.warn({ err }, 'DLQ depth check failed — dead-letter paging is blind this cycle');
+        }
+
+        // [row 267 · AUD-L4-021] The durable outboxes' dead letters page too.
+        // order_outbox, mover_revocation_outbox and rating_outbox used to retry a
+        // failing row for ever (or, for ratings, stop at 25 attempts and tell
+        // nobody). A spent row is now never claimed again; this sweep stamps it
+        // and pages, on the same alarm as the dead jobs, and the admin
+        // Background jobs page lists it for a requeue.
+        try {
+          const { sweepOutboxDeadLetters } = await import('./outbox-dead-letter');
+          const outboxes = await sweepOutboxDeadLetters(ctx.prisma);
+          if (outboxes.total > 0) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'outbox-dead-letter', 1800, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // Platform-wide, like the dead-job page above.
+                tenantId: null,
+                title: `${outboxes.total} outbox command${outboxes.total === 1 ? '' : 's'} gave up`,
+                body: `${outboxes.queues.map((q) => `${q.count} ${q.queue}`).join(', ')}. Each was retried until its budget ran out. Open Platform → Background jobs to requeue them.`,
+                data: { kind: 'ops_dlq_non_empty', total: outboxes.total, queues: outboxes.queues },
+              }),
+            );
+          }
+        } catch (err) {
+          ctx.log.warn({ err }, 'Outbox dead-letter sweep failed — outbox dead letters are blind this cycle');
         }
 
         // [C2 / WS-0.2] Routing degradation page. See osrmFallbackAlertPct above
@@ -2594,7 +2627,8 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
-  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  // committed PERSONAL documents whose type is active and whose extraction succeeded, and
+  // [R24] every partner PERSONAL image 30 days after its decision.
   await queues.verificationQueue.add('image-policy-sweep', {}, {
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
