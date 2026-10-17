@@ -45,6 +45,12 @@ const QUEUE_NAMES = {
    *  ~28 recurring sweeps, so a slow sweep tick could hold a rider's 20 s offer
    *  open long past its deadline and stall the cascade to the next mover. */
   OFFER: 'offer-jobs',
+  /** [row 331 · AUD-L4-005] The safety lane: the SOS grace backstop
+   *  (promote-sos-grace, every 10 s: promotion + the escalation ladder) and the
+   *  Trip Guardian tick (guardian-sweep) ONLY, on their own worker slots. They
+   *  used to share the dispatch queue's five slots with ~30 recurring sweeps,
+   *  so five slow sweeps at once delayed an SOS escalation. */
+  SAFETY: 'safety-jobs',
   SEARCH: 'search-jobs',
 } as const;
 
@@ -145,6 +151,23 @@ export function offerWorkerConcurrency(env: Record<string, string | undefined> =
   return Number.isSafeInteger(value) && value >= 1 && value <= 50 ? value : 10;
 }
 
+/** [row 331] The recurring jobs the safety lane runs, and nothing else. */
+export const SAFETY_TIMER_JOBS = ['promote-sos-grace', 'guardian-sweep'] as const;
+
+/** [row 331] Worker slots of the safety lane. Default 4: the two timers never
+ *  wait on each other, and a tick held by a slow SMS provider (its delivery
+ *  batch can take minutes in an outage) still leaves the next tick a slot —
+ *  both ticks are idempotent and safe to overlap. At least 2; env-tunable so
+ *  ops can widen it without a deploy; a value that is not a sane integer falls
+ *  back to the default rather than becoming NaN (a worker with NaN slots takes
+ *  none). */
+export function safetyWorkerConcurrency(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SAFETY_WORKER_CONCURRENCY']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 4;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 2 && value <= 20 ? value : 4;
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -160,6 +183,7 @@ export type SwiftQueues = {
   verificationQueue: Queue;
   dispatchQueue: Queue;
   offerQueue: Queue;
+  safetyQueue: Queue;
   searchQueue: Queue;
 };
 
@@ -196,6 +220,7 @@ export function createQueues(
       verificationQueue: build(QUEUE_NAMES.VERIFICATION),
       dispatchQueue: build(QUEUE_NAMES.DISPATCH),
       offerQueue: build(QUEUE_NAMES.OFFER),
+      safetyQueue: build(QUEUE_NAMES.SAFETY),
       searchQueue: build(QUEUE_NAMES.SEARCH),
     };
   } catch (error) {
@@ -548,7 +573,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     options: { connection: ConnectionOptions; concurrency: number },
   ): Worker => {
     // Two-phase boot: constructing a Worker normally starts its processor
-    // immediately. Keep every consumer dormant until all eight connections and
+    // immediately. Keep every consumer dormant until all nine connections and
     // every recurring schedule are committed by initializeJobRuntime.
     const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
@@ -590,6 +615,175 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       removeOnFail: 50,
     });
     return true;
+  };
+
+  // [row 331 · AUD-L4-005] The two safety timers, moved here unchanged from the
+  // dispatch worker. Each runs on the SAFETY worker below, on its own slots,
+  // never behind the dispatch sweeps; the dispatch worker only drains a tick
+  // queued there before the split.
+  const sosGraceTick = async (): Promise<void> => {
+    // SOS grace-expiry backstop [F-0003 / safety spec §4.1]. The client
+    // confirms the instant the grace bar completes (the happy path); this
+    // fires when the app was KILLED mid-grace — a closed app must never stop
+    // a life-safety escalation. The grace deadline is DB state and promotion
+    // is compare-and-set, so this is idempotent, safe to overlap, and
+    // catches up on any worker downtime. Loud: a backstop-promoted alert
+    // means a client died mid-SOS, which ops should see.
+    const { SosService } = await import('../modules/safety/sos.service');
+    const promoted = await new SosService(ctx.prisma, ctx.io).promoteExpiredGrace();
+    if (promoted.length > 0) {
+      ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
+    }
+    // [S-01] The escalation worker: backfill live alerts with no rows,
+    // page the platform for any ACTIVE alert whose ops page is still
+    // undelivered past the threshold (the watchdog), and drain what every
+    // ACTIVE alert owns (leased, once each, retried).
+    // [AUD-L4-016] The alarms run BEFORE the delivery batch: in an SMS
+    // outage the batch is up to 200 rows at the send timeout (minutes),
+    // and neither the failed-delivery page, the watchdog nor the ops-alert
+    // ladder may wait behind it.
+    const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
+    const escalationWorkerLive = !sosEscalationWorkerKilled();
+    if (escalationWorkerLive) {
+      const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+      if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
+    }
+    // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
+    // failed row of a live, real SOS (a contact's text, the ops page, the
+    // war room, the evidence) pages on-call operations once; the row keeps
+    // retrying. An alarm, not a delivery: it runs under the worker kill too.
+    {
+      const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
+      const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
+      await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
+        .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
+    }
+    const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
+    if (watchdog && watchdog.activeWithoutPage.length > 0) {
+      const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+      // Legacy demo alerts can remain pending during retry backoff. They never
+      // page real operations, and are dropped BEFORE the cap of 20 pages a
+      // tick, so old demo alerts can never fill it and hide a real SOS (the
+      // scan drops them too; this is the second wall).
+      const realStuck: typeof watchdog.activeWithoutPage = [];
+      for (const stuck of watchdog.activeWithoutPage) {
+        if (realStuck.length >= 20) break;
+        if (stuck.tenantId && await isReviewTenantId(ctx.prisma, stuck.tenantId)) continue;
+        realStuck.push(stuck);
+      }
+      for (const stuck of realStuck) {
+        await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
+          notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+            tenantId: stuck.tenantId,
+            title: '🚨 SOS ACTIVE with no ops page delivered',
+            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
+            data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
+          }),
+        ).catch(() => {});
+      }
+    }
+    // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
+    // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
+    // platform page), drills run on schedule, and zero-ACK is the gauge.
+    {
+      const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
+      const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
+      const { getChannels } = await import('../providers/notifications/channels');
+      const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
+      await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
+      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+      for (const id of esc.platformPage) {
+        await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+        ).catch(() => {});
+      }
+      await scanOpsAlerts(ctx.prisma).catch(() => null);
+      await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
+    }
+    // The SOS delivery batch, after every alarm above (the failed-delivery
+    // page, the watchdog, and the ops-alert ladder that re-pages an
+    // unacknowledged page): in an SMS outage it can take minutes.
+    if (escalationWorkerLive) {
+      const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
+      if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
+    }
+    // [S-16 · operations] Every legacy plaintext trip-share token is a live
+    // exposure: rotate (revoke + null + tell the sharer) until none is left.
+    {
+      const { rotateLegacyTripShareTokens } = await import('../modules/safety/trip-share.service');
+      const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
+      const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
+      if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+      // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
+      const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
+      await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
+    }
+    // [S-02] The retrigger log: import any legacy JSON history as rows,
+    // then report lost sequences and oversized hot rows.
+    const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
+    await importLegacyRetriggers(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-02] legacy retrigger import failed'));
+    await scanSosRetriggers(ctx.prisma).catch(() => null);
+    // §9.1 live trail: the same life-safety tick appends the mover's
+    // newest fix to every open alert's unsealed bundle — the war room
+    // replays this later. Cheap no-op when no alert is open.
+    const { EvidenceService } = await import('../modules/safety/evidence.service');
+    await new EvidenceService(ctx.prisma, ctx.io).appendLiveFixes().catch(() => {});
+  };
+
+  const guardianTick = async (): Promise<void> => {
+    // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
+    // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
+    // persisted driver fix dispatch reads, closes sessions whose ride
+    // ended. All state is DB rows and every mutation is create-unique or
+    // CAS — idempotent, overlap-safe, catches up after worker downtime.
+    const { GuardianService } = await import('../modules/safety/guardian.service');
+    const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
+    if (res.opened + res.closed + res.flagged + res.escalated > 0) {
+      ctx.log.info(res, 'Trip Guardian sweep');
+    }
+    // [S-05 · operations] Page maximum due age and the poison population,
+    // not processed counts: a sweep whose pass has stalled past the SLO,
+    // or a row that keeps failing, is a human's problem now.
+    // [S-06] The check-in delivery worker: drain what every ask owns,
+    // backfill asks with no rows, and page per deadline that must not run.
+    const { drainCheckinDeliveries, backfillCheckinDeliveries, scanCheckinDeliveries, checkinDeliveryKilled } = await import('../modules/safety/guardian-delivery');
+    const { NotificationService: GuardianNS, notifyAdmins: pageAdmins } = await import('../modules/notification/notification.service');
+    if (!checkinDeliveryKilled()) {
+      const back = await backfillCheckinDeliveries(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+      if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-06] check-in asks had no delivery rows — staged now');
+      const drained = await drainCheckinDeliveries(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), { limit: 200 }).catch(() => null);
+      if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-06] check-in deliveries failed this tick');
+    }
+    const deliveries = await scanCheckinDeliveries(ctx.prisma).catch(() => null);
+    for (const held of (deliveries?.deadlineWithoutDelivery ?? []).slice(0, 20)) {
+      await opsPageOnce(ctx, `guardian-undelivered:${held.sessionId}`, 600, () =>
+        pageAdmins(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), {
+          tenantId: held.tenantId,
+          title: 'Guardian: hard check-in not delivered',
+          body: `Session ${held.sessionId} has waited ${held.ageSeconds}s with its hard check-in ${held.state.toLowerCase()}. The deadline is held; please look at the trip.`,
+          data: { kind: 'guardian_checkin_undelivered', sessionId: held.sessionId, delivery: held.state, watchdog: true },
+        }),
+      ).catch(() => {});
+    }
+    const { scanSweeps } = await import('../lib/sweep-cursor');
+    const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
+    const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
+    if (trouble.length > 0) {
+      const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+      for (const w of trouble) {
+        await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
+          notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+            tenantId: null,
+            title: `Safety sweep behind: ${w.workType}`,
+            body: w.stalled
+              ? `The ${w.workType} sweep has not completed a pass for ${w.passAgeSeconds}s (current pass ${w.currentPassSeconds}s). Rows past the cursor are waiting.`
+              : `The ${w.workType} sweep has ${w.repeatPoison.length} row(s) failing on every pass — the first: ${w.repeatPoison[0]?.id} (${w.repeatPoison[0]?.lastError}).`,
+            data: { kind: 'safety_sweep_slo', workType: w.workType, stalled: w.stalled, passAgeSeconds: w.passAgeSeconds, repeatPoison: w.repeatPoison.slice(0, 5).map((r) => r.id) },
+          }),
+        ).catch(() => {});
+      }
+    }
   };
 
   try {
@@ -1538,113 +1732,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'promote-sos-grace') {
-        // SOS grace-expiry backstop [F-0003 / safety spec §4.1]. The client
-        // confirms the instant the grace bar completes (the happy path); this
-        // fires when the app was KILLED mid-grace — a closed app must never stop
-        // a life-safety escalation. The grace deadline is DB state and promotion
-        // is compare-and-set, so this is idempotent, safe to overlap, and
-        // catches up on any worker downtime. Loud: a backstop-promoted alert
-        // means a client died mid-SOS, which ops should see.
-        const { SosService } = await import('../modules/safety/sos.service');
-        const promoted = await new SosService(ctx.prisma, ctx.io).promoteExpiredGrace();
-        if (promoted.length > 0) {
-          ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
-        }
-        // [S-01] The escalation worker: backfill live alerts with no rows,
-        // page the platform for any ACTIVE alert whose ops page is still
-        // undelivered past the threshold (the watchdog), and drain what every
-        // ACTIVE alert owns (leased, once each, retried).
-        // [AUD-L4-016] The alarms run BEFORE the delivery batch: in an SMS
-        // outage the batch is up to 200 rows at the send timeout (minutes),
-        // and neither the failed-delivery page, the watchdog nor the ops-alert
-        // ladder may wait behind it.
-        const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
-        const escalationWorkerLive = !sosEscalationWorkerKilled();
-        if (escalationWorkerLive) {
-          const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
-          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
-        }
-        // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
-        // failed row of a live, real SOS (a contact's text, the ops page, the
-        // war room, the evidence) pages on-call operations once; the row keeps
-        // retrying. An alarm, not a delivery: it runs under the worker kill too.
-        {
-          const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
-          const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
-          await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
-            .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
-        }
-        const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
-        if (watchdog && watchdog.activeWithoutPage.length > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
-          // Legacy demo alerts can remain pending during retry backoff. They never
-          // page real operations, and are dropped BEFORE the cap of 20 pages a
-          // tick, so old demo alerts can never fill it and hide a real SOS (the
-          // scan drops them too; this is the second wall).
-          const realStuck: typeof watchdog.activeWithoutPage = [];
-          for (const stuck of watchdog.activeWithoutPage) {
-            if (realStuck.length >= 20) break;
-            if (stuck.tenantId && await isReviewTenantId(ctx.prisma, stuck.tenantId)) continue;
-            realStuck.push(stuck);
-          }
-          for (const stuck of realStuck) {
-            await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
-              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
-                tenantId: stuck.tenantId,
-                title: '🚨 SOS ACTIVE with no ops page delivered',
-                body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
-                data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
-              }),
-            ).catch(() => {});
-          }
-        }
-        // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
-        // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
-        // platform page), drills run on schedule, and zero-ACK is the gauge.
-        {
-          const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
-          const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
-          const { getChannels } = await import('../providers/notifications/channels');
-          const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
-          await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
-          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
-          for (const id of esc.platformPage) {
-            await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-              pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
-            ).catch(() => {});
-          }
-          await scanOpsAlerts(ctx.prisma).catch(() => null);
-          await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
-        }
-        // The SOS delivery batch, after every alarm above (the failed-delivery
-        // page, the watchdog, and the ops-alert ladder that re-pages an
-        // unacknowledged page): in an SMS outage it can take minutes.
-        if (escalationWorkerLive) {
-          const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
-          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
-        }
-        // [S-16 · operations] Every legacy plaintext trip-share token is a live
-        // exposure: rotate (revoke + null + tell the sharer) until none is left.
-        {
-          const { rotateLegacyTripShareTokens } = await import('../modules/safety/trip-share.service');
-          const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
-          const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
-          if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
-          // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
-          const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
-          await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
-        }
-        // [S-02] The retrigger log: import any legacy JSON history as rows,
-        // then report lost sequences and oversized hot rows.
-        const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
-        await importLegacyRetriggers(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-02] legacy retrigger import failed'));
-        await scanSosRetriggers(ctx.prisma).catch(() => null);
-        // §9.1 live trail: the same life-safety tick appends the mover's
-        // newest fix to every open alert's unsealed bundle — the war room
-        // replays this later. Cheap no-op when no alert is open.
-        const { EvidenceService } = await import('../modules/safety/evidence.service');
-        await new EvidenceService(ctx.prisma, ctx.io).appendLiveFixes().catch(() => {});
+        // [row 331] Drain only: an SOS tick queued here before the safety lane
+        // existed (scheduleRecurringJobs removes the old registration). It runs
+        // on the safety worker now.
+        await sosGraceTick();
         return;
       }
 
@@ -2000,58 +2091,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'guardian-sweep') {
-        // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
-        // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
-        // persisted driver fix dispatch reads, closes sessions whose ride
-        // ended. All state is DB rows and every mutation is create-unique or
-        // CAS — idempotent, overlap-safe, catches up after worker downtime.
-        const { GuardianService } = await import('../modules/safety/guardian.service');
-        const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
-        if (res.opened + res.closed + res.flagged + res.escalated > 0) {
-          ctx.log.info(res, 'Trip Guardian sweep');
-        }
-        // [S-05 · operations] Page maximum due age and the poison population,
-        // not processed counts: a sweep whose pass has stalled past the SLO,
-        // or a row that keeps failing, is a human's problem now.
-        // [S-06] The check-in delivery worker: drain what every ask owns,
-        // backfill asks with no rows, and page per deadline that must not run.
-        const { drainCheckinDeliveries, backfillCheckinDeliveries, scanCheckinDeliveries, checkinDeliveryKilled } = await import('../modules/safety/guardian-delivery');
-        const { NotificationService: GuardianNS, notifyAdmins: pageAdmins } = await import('../modules/notification/notification.service');
-        if (!checkinDeliveryKilled()) {
-          const back = await backfillCheckinDeliveries(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
-          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-06] check-in asks had no delivery rows — staged now');
-          const drained = await drainCheckinDeliveries(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), { limit: 200 }).catch(() => null);
-          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-06] check-in deliveries failed this tick');
-        }
-        const deliveries = await scanCheckinDeliveries(ctx.prisma).catch(() => null);
-        for (const held of (deliveries?.deadlineWithoutDelivery ?? []).slice(0, 20)) {
-          await opsPageOnce(ctx, `guardian-undelivered:${held.sessionId}`, 600, () =>
-            pageAdmins(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), {
-              tenantId: held.tenantId,
-              title: 'Guardian: hard check-in not delivered',
-              body: `Session ${held.sessionId} has waited ${held.ageSeconds}s with its hard check-in ${held.state.toLowerCase()}. The deadline is held; please look at the trip.`,
-              data: { kind: 'guardian_checkin_undelivered', sessionId: held.sessionId, delivery: held.state, watchdog: true },
-            }),
-          ).catch(() => {});
-        }
-        const { scanSweeps } = await import('../lib/sweep-cursor');
-        const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
-        const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
-        if (trouble.length > 0) {
-          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
-          for (const w of trouble) {
-            await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
-              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
-                tenantId: null,
-                title: `Safety sweep behind: ${w.workType}`,
-                body: w.stalled
-                  ? `The ${w.workType} sweep has not completed a pass for ${w.passAgeSeconds}s (current pass ${w.currentPassSeconds}s). Rows past the cursor are waiting.`
-                  : `The ${w.workType} sweep has ${w.repeatPoison.length} row(s) failing on every pass — the first: ${w.repeatPoison[0]?.id} (${w.repeatPoison[0]?.lastError}).`,
-                data: { kind: 'safety_sweep_slo', workType: w.workType, stalled: w.stalled, passAgeSeconds: w.passAgeSeconds, repeatPoison: w.repeatPoison.slice(0, 5).map((r) => r.id) },
-              }),
-            ).catch(() => {});
-          }
-        }
+        // [row 331] Drain only: a Trip Guardian tick queued here before the
+        // safety lane existed. It runs on the safety worker now.
+        await guardianTick();
         return;
       }
 
@@ -2269,6 +2311,22 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     { connection, concurrency: offerWorkerConcurrency() },
   );
 
+  // SAFETY: the safety lane [row 331 · AUD-L4-005]. The SOS grace backstop and
+  // the Trip Guardian tick only, on their own slots: a backlog of dispatch
+  // sweeps can no longer hold an SOS escalation or a guardian check, and with
+  // more than one slot a tick stuck behind a slow provider never holds the next.
+  const safetyWorker = buildWorker(
+    QUEUE_NAMES.SAFETY,
+    async (job: Job) => {
+      if (job.name === 'promote-sos-grace') {
+        await sosGraceTick();
+      } else if (job.name === 'guardian-sweep') {
+        await guardianTick();
+      }
+    },
+    { connection, concurrency: safetyWorkerConcurrency() },
+  );
+
   // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
   // a failure logs and waits for the next write or the boot reconciler; it
   // must never crash a worker or spam retries against a down Meili.
@@ -2298,7 +2356,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const allWorkers: Record<string, Worker> = {
     order: orderWorker, subscription: subscriptionWorker,
     settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker,
-    offer: offerWorker, notification: notificationWorker, search: searchWorker,
+    offer: offerWorker, safety: safetyWorker, notification: notificationWorker, search: searchWorker,
   };
 
   const workerResources = Object.entries(allWorkers).map(([name, worker]) => ({
@@ -2393,6 +2451,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     verificationWorker,
     dispatchWorker,
     offerWorker,
+    safetyWorker,
     notificationWorker,
     searchWorker,
     waitUntilReady: () => Promise.all(Object.values(allWorkers).map((worker) => worker.waitUntilReady())),
@@ -2783,7 +2842,18 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // highly-selective indexed lookup that returns nothing almost always. `|| `
   // (not `??`) so garbage/NaN/0 all fall back to the default; floored at 2s so a
   // misconfig can't turn it into pathological churn.
-  await queues.dispatchQueue.add('promote-sos-grace', {}, {
+  // [row 331 · AUD-L4-005] The two safety timers ride the safety queue. They
+  // were registered on the dispatch queue before, and a repeatable registration
+  // lives in Redis, not in the code: left alone it would keep queueing ticks
+  // behind the sweeps. Remove it (BullMQ removes its next scheduled run with it).
+  // Idempotent: after the first boot on this code there is none to remove.
+  for (const legacy of await queues.dispatchQueue.getRepeatableJobs()) {
+    if ((SAFETY_TIMER_JOBS as readonly string[]).includes(legacy.name)) {
+      await queues.dispatchQueue.removeRepeatableByKey(legacy.key);
+    }
+  }
+
+  await queues.safetyQueue.add('promote-sos-grace', {}, {
     repeat: { every: Math.max(2_000, Number(process.env['SOS_GRACE_SWEEP_MS']) || 10_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
@@ -2794,7 +2864,7 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // detector budget (sustain 90s, stops 3–5 min, check-in deadline 120s);
   // floored at 5s — the tick reads a handful of indexed rows but a misconfig
   // must not turn it into a stampede. Same `||` discipline as above.
-  await queues.dispatchQueue.add('guardian-sweep', {}, {
+  await queues.safetyQueue.add('guardian-sweep', {}, {
     repeat: { every: Math.max(5_000, Number(process.env['GUARDIAN_SWEEP_MS']) || 15_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
