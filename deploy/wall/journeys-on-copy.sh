@@ -19,7 +19,13 @@
 #      generated secrets), the two logins on it, each process's walled boot and
 #      the wall checks. The copy's own identity must then say staging.
 #   3. ONE walled process for the whole measured window: the copy's own worker
-#      (whose walled boot the rehearsal just attested) is stopped, and a private
+#      (whose walled boot the rehearsal just attested) is stopped. Then, on the
+#      COPY only, the journey roster's fixture fees (deploy/wall/fixture-fees.sql):
+#      its +5920 partners live on staging for weeks, so their trials end and
+#      billing suspends them for an unpaid fee; on the copy each gets the fresh
+#      trial a new partner is born with, and a store billing suspended gets back
+#      what billing took. No payment, receipt or ledger row; the copy is proved
+#      first (another cluster than the live one, and it says staging). Then a private
 #      api-journeys instance in the contract posture
 #      (deploy/docker-compose.journeys-copy.yml) serves the requests AND
 #      consumes the queues, so its own /metrics covers every request and every
@@ -45,8 +51,9 @@
 # ./deploy/wall/rehearsal.sh down (the copy, the instance, their volumes, store
 # and secrets). "JOURNEYS PASSED" is printed only
 # when every step held; any other end is non-zero ("JOURNEYS FAILED at step").
-# The live staging API and database are only READ (the identity query, and the
-# copy step's dump): nothing here starts, stops or writes to them.
+# The live staging API and database are only READ (its identity, size and
+# cluster id, in a READ ONLY session, and the copy step's dump): nothing here
+# starts, stops or writes to them.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY="$(cd "$HERE/.." && pwd)"
@@ -94,8 +101,13 @@ JRN=("${REH[@]}" -f "$DEPLOY/docker-compose.journeys-copy.yml" --profile journey
 IDENTITY_SQL="SELECT environment FROM deployment_identity WHERE id = 'singleton'"
 SIZE_SQL="SELECT pg_database_size(current_database())"
 read_one() {  # read_one <sql> <compose argv…>: one answer from that database, read-only
+  # (a READ ONLY session: Postgres itself refuses a write here, on either stack)
   local sql="$1"; shift
-  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$sql" 2>/dev/null
+  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY" -c "$1"' sh "$sql" 2>/dev/null
+}
+write_copy() {  # write_copy <sql>: the one write this script makes (the fixture reset), only ever
+  # on the COPY's database: the rehearsal project is the only target this helper knows.
+  "${REH[@]}" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$1" 2>/dev/null
 }
 identity_of() { read_one "$IDENTITY_SQL" "$@"; }  # the database's own word
 LIVE_IDENTITY="$(identity_of "${LIVE[@]}")" || die "could not read this host's database identity; is the staging stack up?"
@@ -169,6 +181,32 @@ STEP=instance
 # The instance is the ONLY queue consumer: the copy's worker stops first.
 "${REH[@]}" stop worker >/dev/null || die "the copy's worker could not be stopped"
 [ -z "$("${REH[@]}" ps -q worker 2>/dev/null)" ] || die "the copy's worker is still running: the journeys instance must be the only queue consumer"
+
+STEP=fixtures
+# [16 Oct] The journey roster's synthetic partners (+5920…) carry staging's own
+# fee history: their 14-day trials ended and billing suspended every one for
+# an unpaid weekly fee, correctly, so no journey could take an order or put a
+# mover online (0/8 on the first copy that booted). On the COPY only, they get
+# the fresh trial a new partner is born with (deploy/wall/fixture-fees.sql: two
+# UPDATEs, no payment, receipt, ledger or clock row). The target must prove it
+# is the copy first: another Postgres cluster than the live one (the rehearsal
+# copied everything but the cluster id) and, by the same identity check as
+# above, a copy of staging. The statement itself also refuses on any database
+# that does not say staging. Counts only are printed.
+CLUSTER_SQL="SELECT system_identifier::text FROM pg_control_system()"
+copy_cluster="$(read_one "$CLUSTER_SQL" "${REH[@]}")" || copy_cluster=""
+live_cluster="$(read_one "$CLUSTER_SQL" "${LIVE[@]}")" || live_cluster=""
+[[ "$copy_cluster" =~ ^[0-9]+$ && "$live_cluster" =~ ^[0-9]+$ ]] ||
+  die "could not read the copy's and the live cluster ids (the fixture reset needs both)"
+[ "$copy_cluster" != "$live_cluster" ] || die "the fixture reset would reach the live staging cluster, not the copy: nothing was changed"
+TARGET_IDENTITY="$(identity_of "${REH[@]}")" || TARGET_IDENTITY=""
+[ "$TARGET_IDENTITY" = staging ] || die "the fixture reset's target says '$TARGET_IDENTITY', not staging: nothing was changed"
+FIXTURE_SQL="$(cat "$HERE/fixture-fees.sql")" || die "could not read deploy/wall/fixture-fees.sql"
+touched="$(write_copy "$FIXTURE_SQL")" || die "the journey roster fixture fees could not be reset on the copy"
+[[ "$touched" =~ ^([0-9]+)\ ([0-9]+)$ ]] || die "the fixture reset answered unexpectedly"
+say "fixtures: ${BASH_REMATCH[1]} roster weekly fees set to a fresh 14-day trial on the copy, ${BASH_REMATCH[2]} billing-suspended roster stores reopened (no payment, receipt or ledger row; nothing on live staging)"
+
+STEP=instance
 export SWIFT_TAG="$SHA" LIVETEST_ADMIN_PHONE
 "${JRN[@]}" up -d api-journeys >/dev/null || die "the private journeys instance could not start"
 ready=0
@@ -193,7 +231,11 @@ fetch("http://127.0.0.1:3000/metrics", { headers: { authorization: `Bearer ${tok
   .catch(() => { console.log("metrics: unreachable"); process.exit(2); });'
 metrics() { "${JRN[@]}" exec -T api-journeys node -e "$METRICS_JS"; }
 # The pool gauge is a moment: sample it every 2 s through the journeys and jobs.
-# It also ends by itself once the scratch directory is gone.
+# The FIRST sample is taken here, in the foreground, so the measured window
+# opens before the journeys start instead of racing them (16 Oct CI: a
+# background first read landed after the runner had started). The loop also
+# ends by itself once the scratch directory is gone.
+metrics >>"$WORK/samples.prom" 2>/dev/null || echo 'sample: failed' >>"$WORK/samples.prom"
 ( while [ -d "$WORK" ] && [ ! -e "$WORK/stop" ]; do
     metrics >>"$WORK/samples.prom" 2>/dev/null || echo 'sample: failed' >>"$WORK/samples.prom"
     sleep 2
