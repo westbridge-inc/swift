@@ -149,6 +149,11 @@ services:
       METRICS_TOKEN_FILE: /run/secrets/METRICS_TOKEN
       HEALTH_DETAIL_TOKEN_FILE: /run/secrets/HEALTH_DETAIL_TOKEN
       TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
+      # [AUD-G7-023] Signs GET /public/emergency-policy (Ed25519; the app pins
+      # the public half). Generated ON this host by
+      # deploy/owner/emergency-policy-key.command; pilot-up refuses to deploy
+      # until the store holds it, before anything running is stopped.
+      EMERGENCY_POLICY_SIGNING_KEY_FILE: /run/secrets/EMERGENCY_POLICY_SIGNING_KEY
       # The API process serves HTTP only; the worker service below owns jobs.
       RUN_WORKERS: "0"
       STORAGE_DEPLOYMENT: managed

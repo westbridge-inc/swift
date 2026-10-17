@@ -51,6 +51,8 @@ vi.mock('../stores/storeSwitcher', async () => {
 });
 vi.mock('../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
 vi.mock('../hooks', () => ({ useMoverKind: fx.moverKind, useMoverSubscription: () => ({ data: { id: 'mover-sub', status: 'ACTIVE' }, refetch: vi.fn() }) }));
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../hooks/vendorops', () => ({ useVendorSubscription: () => ({ data: { id: 'subscription-A', status: 'ACTIVE' }, refetch: vi.fn() }) }));
 vi.mock('../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false }) }));
 vi.mock('../components/onboarding/WentLive', () => ({ useWentLive: vi.fn(), WentLivePopup: 'WentLivePopup' }));

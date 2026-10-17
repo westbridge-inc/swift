@@ -1,7 +1,7 @@
 import { teamInviteKeys } from '../hooks/teamInviteKeys';
 import * as Notifications from 'expo-notifications';
 import { navigationRef, safeNavigate } from '../navigation/navigationRef';
-import { getAuthSessionSnapshot, useAuthStore } from '../stores/authStore';
+import { getAuthSessionSnapshot, getLastSignedOutUserId, useAuthStore } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { selectionStillCurrent } from '../lib/storeSelection';
 
@@ -360,6 +360,17 @@ let pending: Tap | null = null;
 let installed = false;
 let routing = 0;
 
+/** [row 205 · DS256 F2] A tap made while signed out, held for the sign-in it
+ *  opens. Before this, it was routed at once into a root that does not mount
+ *  its screen (the picker, sign-in, a guest) and lost: a safety check-in or a
+ *  ride notice tapped after a session ended landed nowhere after signing back
+ *  in. It replays only for the account whose session this device last held
+ *  (that account's push token delivered it; logout revokes the token), once
+ *  that account is through every root gate. A different account, a cancelled
+ *  sign-in, or an unknown owner (a cold start after sign-out) drops it
+ *  silently. Process-local and one-shot, like the auth continuation. */
+let heldForSignIn: { data: Record<string, unknown>; forUserId: string } | null = null;
+
 function isVendorDestination({ dest, data }: Tap): boolean {
   // VendorRoot [PUSH-ROUTING]: the store's own screen and its tabs (stock,
   // the team, its documents) — validated and selected like every store route.
@@ -462,9 +473,42 @@ function routeTap(data: Record<string, unknown>) {
   const dest = destinationFor(data, openApp);
   const attempt = ++routing;
   pending = null;
+  heldForSignIn = null; // a newer tap replaces one still waiting for sign-in
   if (!dest) return;
+  const owner = getAuthSessionSnapshot();
+  if (!owner) { holdForSignIn(data); return; }
   const { selectedStoreId, storeGeneration } = useStoreSwitcher.getState();
-  void go({ dest, data, attempt, owner: getAuthSessionSnapshot(), selection: { selectedStoreId, storeGeneration } }).catch(() => undefined);
+  void go({ dest, data, attempt, owner, selection: { selectedStoreId, storeGeneration } }).catch(() => undefined);
+}
+
+function holdForSignIn(data: Record<string, unknown>) {
+  const forUserId = getLastSignedOutUserId();
+  if (!forUserId) return; // whose tap this is is unknown: the app opens normally
+  heldForSignIn = { data, forUserId };
+  useAuthStore.getState().promptLogin();
+}
+
+export type HeldTapResult = 'none' | 'waiting' | 'delivered' | 'dropped';
+
+/** RootNavigator calls this whenever its root gate changes. A tap held for
+ *  sign-in is routed once the account that owns it is signed in and the app
+ *  root is open; a different account or a cancelled sign-in drops it. */
+export function settleTapAfterSignIn(state: {
+  isAuthenticated: boolean; wantsAuth: boolean; entryGate: string;
+}): HeldTapResult {
+  const held = heldForSignIn;
+  if (!held) return 'none';
+  if (!state.isAuthenticated) {
+    if (state.wantsAuth) return 'waiting';
+    heldForSignIn = null; // sign-in cancelled (or never started): terminal
+    return 'dropped';
+  }
+  const owner = getAuthSessionSnapshot();
+  if (owner && owner.userId !== held.forUserId) { heldForSignIn = null; return 'dropped'; }
+  if (!owner || state.entryGate !== 'main' || !navigationRef.isReady()) return 'waiting';
+  heldForSignIn = null;
+  routeTap(held.data);
+  return 'delivered';
 }
 
 /** RootNavigator calls this from onReady — delivers a cold-start tap that
@@ -501,7 +545,7 @@ export function installNotificationTapRouter(): () => void {
 
   return () => {
     installed = false;
-    routing++; pending = null;
+    routing++; pending = null; heldForSignIn = null;
     sub.remove();
   };
 }
