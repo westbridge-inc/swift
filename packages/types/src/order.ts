@@ -67,6 +67,25 @@ export interface MmgDirectPaymentAction {
   url: string;
 }
 
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] On the customer's OWN order, once the store has accepted and
+ * until it marks the order "Paid by MMG": where to send the money, directly to the store, in MMG's app.
+ * Swift never holds, moves or confirms it. */
+export interface MmgStoreNumberPayment {
+  payTo: 'STORE_NUMBER';
+  provider: 'MMG';
+  fundsFlow: 'DIRECT_TO_VENDOR';
+  recipientName: string;
+  /** Canonical +592 mobile, e.g. "+5926001234". */
+  number: string;
+  /** How a person reads it, e.g. "+592 600 1234". */
+  numberDisplay: string;
+  /** The exact order total (goods + delivery fee + tip). */
+  amount: number;
+  currencyCode: string;
+  /** The server's own sentence: "Pay $X by MMG to <store>'s MMG number <number>." */
+  instruction: string;
+}
+
 export interface OrderCheckoutResult<TOrder = unknown> {
   order: TOrder;
   orders: TOrder[];
