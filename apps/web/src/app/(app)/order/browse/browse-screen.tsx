@@ -12,6 +12,7 @@ import { BROWSE_STALE_MS, fromPage, vendorListKey, type GuestRead } from '@/lib/
 export type BrowseSeed = { type: string; read: GuestRead<Vendor[]> } | null;
 import { VendorCard, VendorGridSkeleton, EmptyNote, VENDOR_GRID } from '@/components/order-ui';
 import { DataUnavailable } from '@/components/data-unavailable';
+import { CatalogueSearchBar } from '@/components/catalogue-search-bar';
 
 const TABS = [
   { key: '', label: 'All' },
@@ -38,6 +39,8 @@ function BrowseInner({ seed }: { seed: BrowseSeed }) {
         <span className="sw-eyebrow">Stores on Swift</span>
         <h1 className="sw-title mt-1">{TITLE[type] ?? 'Stores'}</h1>
       </div>
+      {/* [row 110] Search stores AND dishes, narrowed to this category. */}
+      <CatalogueSearchBar type={type} />
       <nav aria-label="Kinds of store" className="sw-chip-row">
         {TABS.map((t) => (
           <Link key={t.key} href={t.key ? `/order/browse?type=${t.key}` : '/order/browse'} replace

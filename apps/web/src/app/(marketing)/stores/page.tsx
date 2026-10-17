@@ -3,6 +3,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
 import { Section } from '@/components/site';
+import { CatalogueSearchBar } from '@/components/catalogue-search-bar';
 import { fetchStorefronts } from '@/lib/api';
 import { photo } from '@/lib/media';
 import styles from './stores.module.css';
@@ -31,6 +32,10 @@ export default async function StoresPage({ searchParams }: { searchParams: Promi
       <p className={styles.intro}>
         Every business here is document-verified and keeps 100% of what you pay them.
       </p>
+
+      {/* [row 110] Search stores AND the dishes and products inside them,
+          narrowed to the kind of store this page is showing. */}
+      <CatalogueSearchBar type={type} className="mt-6" />
 
       <nav className={styles.filters} aria-label="Store type">
         {TYPES.map((t) => (

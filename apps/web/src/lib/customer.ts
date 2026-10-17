@@ -225,6 +225,16 @@ export async function searchCatalogue(q: string): Promise<CatalogueResults> {
   return { stores: data?.vendors ?? [], items: data?.items ?? [] };
 }
 
+/** One "did you mean" word from GET /search/suggestions: a store's or a dish's name. */
+export interface SearchSuggestion { text: string; type: 'vendor' | 'item'; isCurrentlyOpen?: boolean }
+
+/** [row 110] The engine's suggestions while you type, as the phone's Search
+ *  shows them (open stores' first; prohibited items never, server-side). */
+export async function searchSuggestions(q: string): Promise<SearchSuggestion[]> {
+  const data = (await apiFetch(`/api/v1/search/suggestions?q=${encodeURIComponent(q)}`)).data;
+  return Array.isArray(data) ? data.filter((s): s is SearchSuggestion => typeof s?.text === 'string' && s.text.trim() !== '') : [];
+}
+
 // ── Market (goods across stores — the phone app's Market tab) ──────────────
 /** The server's launch-depth verdict; the tab shows only when it says so. */
 export interface MarketDepth { visible: boolean; items: number; vendors: number }
