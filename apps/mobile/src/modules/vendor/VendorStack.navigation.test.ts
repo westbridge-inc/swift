@@ -103,6 +103,7 @@ vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({})
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: () => null }));
 vi.mock('../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: () => null }));
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
+vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));
 vi.mock('../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));

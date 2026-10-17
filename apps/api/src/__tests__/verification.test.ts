@@ -339,6 +339,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
         ...(docTypeExpires(doc.docType) ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() } : {}),
         // [VERIFY-DOCS] …and types the ID/licence number or the clearance's issue date.
         ...reviewerTyped(doc.docType, doc.id),
+        // [R13] …and, for any motor vehicle's insurance, records the hire-or-reward (commercial use) decision.
+        ...(doc.docType === 'vehicle_insurance' ? { insurance: { insurerName: 'Synthetic Mutual', policyNumber: `SYN-${doc.id.slice(-6)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } } : {}),
       };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);

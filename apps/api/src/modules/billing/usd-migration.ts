@@ -1,4 +1,5 @@
 import type { OnAudit } from '../../lib/audit-writer';
+import { activePriceBook, bookAt } from './price-book';
 import type { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -53,9 +54,8 @@ export async function previewModeA(prisma: PrismaClient) {
   const rate = await resolveRateForRun(prisma, currency);
   if (!rate) return { error: 'NO_FX_RATE', rows: [] as unknown[] };
 
-  const entries = await prisma.priceBookEntry.findMany({ where: { active: true } });
-  const book = new Map<string, number>();
-  for (const e of entries) book.set(`${e.role}|${e.tier ?? ''}`, Number(e.amountUsd));
+  // [F2] The book in force now (a scheduled price is not yet a price).
+  const book = bookAt(await activePriceBook(prisma), new Date());
 
   const subs = await prisma.subscription.findMany({
     where: { status: { in: ['ACTIVE', 'TRIAL', 'PAST_DUE'] } },

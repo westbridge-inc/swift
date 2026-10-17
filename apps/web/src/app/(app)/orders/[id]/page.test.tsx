@@ -85,6 +85,19 @@ describe('[W-32] the payment that opens is the payment that was shown', () => {
     expect(await screen.findByText(/Thu, Sep 24, 9:00 AM/)).toBeTruthy();
   });
 
+  // [R14 · legal research D12] The server says when the store delivers with its own rider; the page prints exactly that.
+  it('shows the own-rider notice the server sent, and nothing when it sent none', async () => {
+    const NOTICE = "This order is delivered by the store's own rider, not a Swift rider.";
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'DELIVERY', ownRiderNotice: NOTICE } as never);
+    const view = render(<OrderDetailPage />);
+    expect((await screen.findByText(NOTICE)).getAttribute('role')).toBe('note');
+    view.unmount();
+    vi.spyOn(customer, 'getOrder').mockResolvedValue({ ...ORDER, fulfillment: 'DELIVERY', ownRiderNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();
+    expect(screen.queryByText(/store's own rider/)).toBeNull();
+  });
+
   it('says who is paid and how much BEFORE anything opens', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(/sends .* directly to Shanta Kitchen/)).toBeTruthy();
