@@ -383,10 +383,14 @@ describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]',
   // publicRoutes / qrPublicRoutes (/api/v1/public) and qrResolverRoutes (the printed
   // QR short links) are public pages by name: QR resolution and public profile reads.
   // legalRoutes (/legal) serves the published legal pages.
+  // smsInboundRoutes (/api/v1/sms) is the SMS provider calling with a texted reply [R22]:
+  // machine-to-machine, HMAC-signed by the provider and refused (403) unsigned, 503 dark
+  // until configured; it only ever withdraws marketing consent — proven in marketing-stop.test.ts.
   // testControlRoutes exists only in isolated load builds; production never registers it.
   const EXEMPT_PLUGINS = new Set([
     'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
     'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
+    'smsInboundRoutes',
   ]);
 
   it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {
