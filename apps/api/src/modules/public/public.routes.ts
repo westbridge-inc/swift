@@ -127,6 +127,9 @@ export async function publicRoutes(app: FastifyInstance) {
    * with a confirm; a market with no policy answers `numbers: null` and the
    * app falls back to its bundled table. A malformed stored policy is never
    * served as a policy. Unauthenticated: an emergency has no login step.
+   * [AUD-G7-023] A served policy also carries `envelope`: the same numbers
+   * signed with Ed25519 under a key the app pins (build 12+ trusts nothing
+   * else). The v1 fields stay byte-for-byte as before for builds 9-11.
    */
   app.get('/emergency-policy', async (request, reply) => {
     const { country } = z.object({ country: z.string().trim().length(2) }).parse(request.query ?? {});
@@ -134,7 +137,10 @@ export async function publicRoutes(app: FastifyInstance) {
     emergencyPolicyCounter.labels(served.status).inc();
     if (served.status === 'unknown-market') throw new NotFoundError('CountryConfig', country.toUpperCase());
     reply.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
-    if (served.status === 'served') return { success: true, data: served.signed };
+    if (served.status === 'served') {
+      if (served.envelopeProblem) request.log.error({ country: served.signed.country, problem: served.envelopeProblem }, '[AUD-G7-023] emergency policy served WITHOUT its Ed25519 envelope — build 12+ phones keep their last verified or bundled numbers');
+      return { success: true, data: served.envelope ? { ...served.signed, envelope: served.envelope } : served.signed };
+    }
     if (served.status === 'invalid') request.log.error({ country: served.country, problem: served.problem }, '[MOB-018] stored emergency policy is malformed — not served');
     return { success: true, data: { version: 1, country: served.country, numbers: null, reason: served.status === 'invalid' ? 'INVALID_POLICY' : 'NO_POLICY' } };
   });
