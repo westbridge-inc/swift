@@ -29,6 +29,7 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
     summary: [
       'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
       'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
     ],
   },
 ];

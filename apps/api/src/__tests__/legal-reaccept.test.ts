@@ -62,6 +62,7 @@ describe('who must accept, and what they are shown', () => {
     expect(v17).toMatch(/Identity checks are done by people/);
     expect(v17).toMatch(/no automated face-matching/);
     expect(v17).toMatch(/Customers never need a photo/);
+    expect(v17).toMatch(/if a business takes MMG, the MMG payment details it gives Swift are shown to its customer/);
   });
 
   it('partners re-accept their agreement with the Terms', () => {

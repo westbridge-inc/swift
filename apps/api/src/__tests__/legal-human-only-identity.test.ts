@@ -79,3 +79,12 @@ describe('[customers take no photos] the words say a customer never needs a phot
     expect(PRIVACY).toContain('campaigns and confirmation records are handled correctly first');
   });
 });
+
+// [Owner ruling 17 Oct · COORD] A business that takes MMG gives Swift its MMG payment details, and its own
+// customer is shown them on the order (customer.routes paymentAction: recipientName + the pay link today;
+// an MMG number once stores give one). The words cover both, so they stay true across that change.
+describe('[MMG direct pay] the Privacy Policy says the MMG details of a business are shown to its customer', () => {
+  it('Sharing names the MMG payment details, the account name, and that the customer pays the business directly', () => {
+    expect(PRIVACY).toContain('If a business takes MMG, the MMG payment details it gives Swift (its MMG number or pay link, and the name on that MMG account) are shown to you on your order, so you can pay the business directly.');
+  });
+});
