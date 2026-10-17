@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import { Prisma } from '@prisma/client';
-import { ACCOUNT_FIELDS, ALSO_COVERED, EXPORT_REGISTER, NOT_A_PERSON, OMIT_RULES, WITHHELD } from '../modules/user/data-export-register';
+import { ACCOUNT_FIELDS, ALSO_COVERED, EXPORT_REGISTER, NOT_A_PERSON, OMIT_REASON_TEXT, OMIT_RULES, WITHHELD, WITHHELD_REASON_TEXT, type OmitReason } from '../modules/user/data-export-register';
+import { EXPORT_NOTICE, OMIT_REASONS_IN_USE } from '../modules/user/data-export';
 
 const models = Prisma.dmmf.datamodel.models;
 const byName = new Map(models.map((m) => [m.name, m]));
@@ -72,6 +73,17 @@ describe('the export register', () => {
     }).map((f) => f.name);
     expect(problems).toEqual([]);
     for (const f of ACCOUNT_FIELDS) expect(user.fields.some((c) => c.name === f), f).toBe(true);
+  });
+
+  it('says exactly what the code leaves out: the notice names every column rule in use, and only those', () => {
+    const used = new Set<OmitReason>(OMIT_RULES.map(([r]) => r));
+    for (const e of EXPORT_REGISTER) { for (const r of Object.values(e.omit ?? {})) used.add(r); if (e.rest) used.add(e.rest); }
+    expect([...OMIT_REASONS_IN_USE].sort()).toEqual([...used].sort());
+    for (const r of Object.keys(OMIT_REASON_TEXT) as OmitReason[]) {
+      if (used.has(r)) expect(EXPORT_NOTICE, r).toContain(OMIT_REASON_TEXT[r]);
+      else expect(EXPORT_NOTICE, r).not.toContain(OMIT_REASON_TEXT[r]);
+    }
+    for (const w of Object.values(WITHHELD)) expect(WITHHELD_REASON_TEXT[w.reason]).toBeTruthy();
   });
 
   it('gives every category one name, and every entry a reader', () => {

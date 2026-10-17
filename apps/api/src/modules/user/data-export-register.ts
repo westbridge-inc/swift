@@ -21,24 +21,46 @@ export type OmitReason =
 
 /** Name rules, in order; the first match decides. A `by` column is always exported (it is the person). */
 export const OMIT_RULES: ReadonlyArray<readonly [OmitReason, RegExp]> = [
-  ['SECRET', /^(token|refreshToken|previousRefreshToken|passwordHash|tokenDigest|tokenPrefix|ridePin|pickupCode|transferCode|clientKey|idempotencyKey|clientIdempotencyKey|requestKey|requestHash|stateHash|dedupeKey|noticeDedupeKey|payloadHash|documentContentHash|contentHash|contentSha256|sha256|ipHmac|valueHash|payerHash|bindingDigest|digest|oldDigest|newDigest|sealHash|stepUpSessionId|stepUpBinding|paymentToken|courierTrackingToken|lockedUntil|failedLoginAttempts)$/],
+  // Any token column (session, refresh, push, payment, tracking) is a secret, by its name.
+  ['SECRET', /^token$|Token$/],
+  ['SECRET', /^(passwordHash|tokenDigest|tokenPrefix|ridePin|pickupCode|transferCode|clientKey|idempotencyKey|clientIdempotencyKey|requestKey|requestHash|stateHash|dedupeKey|noticeDedupeKey|payloadHash|documentContentHash|contentHash|contentSha256|sha256|ipHmac|valueHash|payerHash|bindingDigest|digest|oldDigest|newDigest|sealHash|stepUpSessionId|stepUpBinding|lockedUntil|failedLoginAttempts|deviceId|ridePinAttempts|pickupCodeAttempts|completionEvidence)$/],
   ['STORED_FILE', /^(avatar|fileUrl|fileKey|objectKey|selfieUrl|idDocumentUrl|mediaUrl|photoUrl|photos|portfolioPhotos|posterUrl|nationalIdUrl|driverLicenseUrl|vehicleInsuranceUrl|vehicleInspectionUrl|profilePhotoUrl|vehiclePhotoUrl|courierPackagePhotoUrl|courierProofPhotoUrl|courierProofIssuedUrl|courierReturnProofPhotoUrl|courierPickupProofIssuedUrl|courierPickupProofPhotoUrl)$/],
-  ['FRAUD_SAFETY', /^(riskFlagged|riskReason|riskScore|riskFactors|flags|flagged|flagReason|offPlatformFlag|safetyShadowRestrictedAt|signals|signalsFired|patternFlaggedAt|standing|enhancedSafetyMonitoring|deviationState|mmgClaimMismatchAt|doorCashMismatchAt)$/],
+  ['FRAUD_SAFETY', /^(riskFlagged|riskReason|riskScore|riskFactors|flags|flagged|flagReason|offPlatformFlag|safetyShadowRestrictedAt|signals|signalsFired|patternFlaggedAt|enhancedSafetyMonitoring|deviationState|mmgClaimMismatchAt|doorCashMismatchAt|lossProtectionSuspendedReason|stateReason)$/],
   ['OTHER_PERSON', /^(riderId|driverId|providerId|rateeId|raterId|recipientIds|counterpartyUserId|courierProofIssuedRiderId|courierPickupProofIssuedRiderId|holderRiderId|relayRiderId|assignedTo|candidatesTried|invitedBy|mergedIntoId|ownerId|vendorId|customerId)$|By$|ById$|ByUserId$/],
   ['SYSTEM', /^(tenantId|syntheticRunId|isSynthetic|riderAssignmentVersion|driverAssignmentVersion|fulfillmentModeVersion|mmgClaimRevision|mmgClaimResolvedRevision|revision|version|epoch|generation|attempts|maxAttempts|checkAttempts|noticeAttempts|leaseExpiresAt|leasedUntil|availableAt|claimedAt|lastError|noticeLastError|nextCheckAt|nextRetryAt|locationSessionId|actorSessionId|offerAttemptId|correlationId|hostedUrl|providerSessionRef|schemaVersion|purgeGeneration|configVersion|legalHoldId|kycRef|chatRoomId|subjectType|submissionId|deliveryReceipts)$/],
+  // The mover's live job pointers are a dispatch routing key, and the account's dormant wallet column must
+  // never be read (no-customer-funds-ingress.test.ts). Written as patterns so the source censuses that
+  // guard those names (mover-pointer-census, no-customer-funds-ingress) correctly see no reader here.
+  ['SYSTEM', /^current(Order|Ride)Id$|^wallet[A-Z]/],
 ];
+
+/**
+ * The file's own words for each column rule; the notice is built from the rules the register uses,
+ * so it says exactly what the code leaves out (account-export-register.test.ts checks both ways).
+ */
+export const OMIT_REASON_TEXT: Readonly<Record<OmitReason, string>> = {
+  SECRET: 'codes, keys and device identifiers that protect your account',
+  STORED_FILE: 'stored photos and document images, which are kept encrypted (contact Support to ask for a copy)',
+  FRAUD_SAFETY: 'some records kept to prevent fraud and to keep people safe',
+  OTHER_PERSON: 'details of other people (contacts you entered yourself, such as emergency contacts, are included)',
+  INTERNAL_NOTE: 'private notes staff wrote while handling a case',
+  SYSTEM: 'system bookkeeping that says nothing more about you',
+};
 
 /** Kinds of whole records that are not in the file. */
 export type WithheldReason = 'FRAUD_SAFETY' | 'OTHER_PEOPLE' | 'STAFF_WORK' | 'LEGAL_HOLD' | 'SYSTEM';
 
 /** The person's own words for each; the `withheld` list of the file is built from these. */
 export const WITHHELD_REASON_TEXT: Readonly<Record<WithheldReason, string>> = {
-  FRAUD_SAFETY: 'Fraud-prevention and safety-investigation records, and reports other people made about you.',
-  OTHER_PEOPLE: 'Records that are mainly about other people, such as each individual rating someone gave you (your rating summary is included).',
-  STAFF_WORK: 'Records of work you did as Swift staff or for a business, and the logs of staff access to accounts.',
-  LEGAL_HOLD: 'Records of a legal hold on your documents.',
-  SYSTEM: 'System bookkeeping that holds nothing about you beyond what this file already lists.',
+  FRAUD_SAFETY: 'Some records kept to prevent fraud and to keep people safe are not included.',
+  OTHER_PEOPLE: 'Records other people made about an order of yours, such as the delivery proof a mover filed, are not included.',
+  STAFF_WORK: 'Records of work you did as Swift staff or for a business, and logs of staff access to accounts, are not included.',
+  LEGAL_HOLD: 'Records of a legal hold on your documents are not included.',
+  SYSTEM: 'System bookkeeping that says nothing more about you is not included.',
 };
+
+/** Reasons whose record list is never shown: naming the checks would teach an abuser which ones exist. */
+export const UNLISTED_REASONS: ReadonlySet<WithheldReason> = new Set(['FRAUD_SAFETY']);
 
 /** Which profile ids a `via` entry reads by (a person with no such profile has none). */
 export type ExportVia = 'rider' | 'driver' | 'provider' | 'mover';
@@ -59,13 +81,19 @@ export interface ExportEntry {
   readonly omit?: Readonly<Record<string, OmitReason>>;
   /** The reason for every other column (work records: the rest of the record is the customer's). */
   readonly rest?: OmitReason;
+  /** A fixed extra filter, ANDed with the person match (never from the caller). */
+  readonly where?: Readonly<Record<string, unknown>>;
+  /** Timestamps given as the month only (YYYY-MM), so a single event cannot be matched to a person. */
+  readonly month?: readonly string[];
+  /** Only rows whose column is before the person's last daily rating fold (the boundary the app honours). */
+  readonly foldedBefore?: string;
 }
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
   'id', 'phone', 'email', 'emailChangedAt', 'firstName', 'lastName', 'selfieCapturedAt', 'roles', 'activeRole', 'lastMoverRole',
   'status', 'isPhoneVerified', 'isEmailVerified', 'acceptedTermsAt', 'tosVersion', 'trustLevel', 'lossProtectionSuspendedAt',
-  'lossProtectionSuspendedReason', 'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng', 'walletBalance',
+  'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng',
   'createdAt', 'updatedAt', 'lastActiveAt',
 ] as const;
 
@@ -79,12 +107,20 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'label', 'addressLine1', 'addressLine2', 'city', 'region', 'country', 'latitude', 'longitude', 'instructions', 'isDefault', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'orders', model: 'Order', by: ['customerId'], key: 'id',
-    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgPayUrlSnapshot', 'mmgRecipientNameSnapshot', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinAttempts', 'ridePinVerifiedAt', 'pickupCodeAttempts', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
+    category: 'orders', model: 'Order', by: ['customerId'], key: 'id', omit: { mmgPayUrlSnapshot: 'OTHER_PERSON', mmgRecipientNameSnapshot: 'OTHER_PERSON' },
+    fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'ratingsGiven', model: 'Rating', by: ['raterId'], key: 'id',
-    fields: ['id', 'orderId', 'raterId', 'type', 'score', 'comment', 'tags', 'isPublic', 'response', 'respondedAt', 'visibleAt', 'createdAt', 'state', 'stateReason', 'editableUntil', 'contextType', 'contextId'],
+    // Ratings about you: score, tags, words and the month. Never who gave it or for which order (ratings
+    // are anonymous); only once the double-blind window has shown it (rating.service.ts) and the daily
+    // fold has counted it (rating-standing.ts), so no single rating can be paired with a single trip.
+    category: 'ratingsReceived', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
+    where: { visibleAt: { not: null }, state: 'ACTIVE' }, foldedBefore: 'createdAt', month: ['createdAt'],
+    fields: ['rateeId', 'type', 'score', 'comment', 'tags', 'createdAt'],
+  },
+  {
+    category: 'ratingsGiven', model: 'Rating', by: ['raterId'], key: 'id', omit: { state: 'FRAUD_SAFETY' },
+    fields: ['id', 'orderId', 'raterId', 'type', 'score', 'comment', 'tags', 'isPublic', 'response', 'respondedAt', 'visibleAt', 'createdAt', 'editableUntil', 'contextType', 'contextId'],
   },
   {
     category: 'serviceJobs', model: 'ServiceJob', by: ['customerId'], key: 'id',
@@ -132,7 +168,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'sessions', model: 'Session', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'authMethod', 'rotatedAt', 'deviceId', 'deviceType', 'ipAddress', 'userAgent', 'expiresAt', 'createdAt'],
+    fields: ['id', 'userId', 'authMethod', 'rotatedAt', 'deviceType', 'ipAddress', 'userAgent', 'expiresAt', 'createdAt'],
   },
   {
     category: 'devices', model: 'DeviceToken', by: ['userId'], key: 'id',
@@ -147,8 +183,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['mimeType', 'sizeBytes', 'createdBy', 'createdAt', 'shreddedAt'],
   },
   {
-    category: 'livenessChecks', model: 'LivenessCheck', by: ['userId'], key: 'id', omit: { reviewNote: 'INTERNAL_NOTE' },
-    fields: ['id', 'userId', 'profile', 'purpose', 'score', 'outcome', 'reviewRequired', 'reviewedAt', 'createdAt'],
+    category: 'livenessChecks', model: 'LivenessCheck', by: ['userId'], key: 'id', omit: { reviewNote: 'INTERNAL_NOTE', score: 'FRAUD_SAFETY', reviewRequired: 'FRAUD_SAFETY' },
+    fields: ['id', 'userId', 'profile', 'purpose', 'outcome', 'reviewedAt', 'createdAt'],
   },
   {
     category: 'accountRecoveries', model: 'AccountRecovery', by: ['userId'], key: 'id',
@@ -163,12 +199,12 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'userId', 'caseId', 'fieldCode', 'note', 'resolvedAt', 'createdAt'],
   },
   {
-    category: 'deletionReceipts', model: 'DeletionReceipt', by: ['subjectId'], key: 'id',
-    fields: ['id', 'subjectId', 'docTypeCode', 'bytesDeleted', 'deletedAt', 'storeLocations', 'verificationProbeResult'],
+    category: 'deletionReceipts', model: 'DeletionReceipt', by: ['subjectId'], key: 'id', omit: { storeLocations: 'STORED_FILE' },
+    fields: ['id', 'subjectId', 'docTypeCode', 'bytesDeleted', 'deletedAt', 'verificationProbeResult'],
   },
   {
-    category: 'notifications', model: 'Notification', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'type', 'title', 'body', 'data', 'isRead', 'readAt', 'createdAt'],
+    category: 'notifications', model: 'Notification', by: ['userId'], key: 'id', omit: { data: 'SYSTEM' },
+    fields: ['id', 'userId', 'type', 'title', 'body', 'isRead', 'readAt', 'createdAt'],
   },
   {
     category: 'supportTickets', model: 'SupportTicket', by: ['userId'], key: 'id', omit: { adminNote: 'INTERNAL_NOTE' },
@@ -200,15 +236,15 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'cardPayments', model: 'CardSession', by: ['userId'], key: 'id',
-    fields: ['id', 'subscriptionId', 'userId', 'purpose', 'status', 'provider', 'environment', 'providerAccount', 'amount', 'currencyCode', 'periodStart', 'expiresAt', 'returnedAt', 'confirmedAt', 'lastCheckedAt', 'consentVersion', 'consentAt', 'failureCode', 'instrumentId', 'paymentId', 'providerTransactionRef', 'completionClaimedAt', 'completionEvidence', 'providerVoidState', 'providerVoidAt', 'providerRefundState', 'providerRefundAt', 'bookClaimedAt', 'resolution', 'resolvedAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'subscriptionId', 'userId', 'purpose', 'status', 'provider', 'environment', 'providerAccount', 'amount', 'currencyCode', 'periodStart', 'expiresAt', 'returnedAt', 'confirmedAt', 'lastCheckedAt', 'consentVersion', 'consentAt', 'failureCode', 'instrumentId', 'paymentId', 'providerTransactionRef', 'completionClaimedAt', 'providerVoidState', 'providerVoidAt', 'providerRefundState', 'providerRefundAt', 'bookClaimedAt', 'resolution', 'resolvedAt', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id',
-    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'candidates', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
+    category: 'mmgCheckouts', model: 'MmgCheckoutIntent', by: ['createdByUserId'], key: 'id', omit: { candidates: 'SYSTEM' },
+    fields: ['id', 'subscriptionId', 'merchantTransactionId', 'amount', 'currencyCode', 'status', 'createdByUserId', 'platform', 'expiresAt', 'replyAt', 'outcomeHint', 'mmgTransactionId', 'providerPaymentId', 'confirmedAt', 'reason', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id',
-    fields: ['id', 'subscriptionId', 'clockId', 'stageKey', 'userId', 'status', 'payload', 'createdAt', 'updatedAt'],
+    category: 'feeNotices', model: 'BillingFeeNotice', by: ['userId'], key: 'id', omit: { payload: 'SYSTEM' },
+    fields: ['id', 'subscriptionId', 'clockId', 'stageKey', 'userId', 'status', 'createdAt', 'updatedAt'],
   },
   {
     category: 'emergencyContacts', model: 'EmergencyContact', by: ['userId'], key: 'id',
@@ -227,8 +263,10 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'documentId', 'subjectId', 'expiresOn', 'notifyAt', 'suspendAt', 'lastNotified', 'suspendedAt', 'createdAt', 'updatedAt'],
   },
   {
-    category: 'ratingSummary', model: 'ActorRatingStat', by: ['subjectId'], key: 'id',
-    fields: ['id', 'subjectRole', 'subjectId', 'lifetimeCount', 'lifetimeSum', 'rollingCount', 'rollingSum', 'displayRating', 'topPositiveTags', 'topNegativeTags', 'actorVisibleAt', 'recomputedAt'],
+    // The folded view the app shows (rating-standing.ts): live counts, sums and tags would let one
+    // fresh rating be paired with one trip, so they stay out (they protect the people who rated).
+    category: 'ratingSummary', model: 'ActorRatingStat', by: ['subjectId'], key: 'id', rest: 'OTHER_PERSON',
+    fields: ['subjectRole', 'subjectId', 'displayRating', 'standing', 'actorVisibleAt'],
   },
   {
     category: 'customerProfile', model: 'Customer', by: ['userId'], key: 'id',
@@ -236,11 +274,11 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'riderProfile', model: 'Rider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'currentOrderId', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'averageRating', 'totalRatings', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'averageRating', 'totalRatings', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
   },
   {
     category: 'driverProfile', model: 'Driver', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'currentRideId', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'averageRating', 'totalRatings', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'averageRating', 'totalRatings', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',
@@ -268,7 +306,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'deliveriesAsRider', model: 'Order', by: ['riderId'], via: 'rider', key: 'id', rest: 'OTHER_PERSON',
-    fields: ['orderNumber', 'orderType', 'riderId', 'status', 'pickupAddress', 'courierPackageSize', 'billableKm', 'routeMatchedKm', 'deliveryFee', 'tipAmount', 'currencyCode', 'paymentMethod', 'isExpress', 'scheduledFor', 'placedAt', 'acceptedAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'createdAt'],
+    fields: ['orderNumber', 'orderType', 'riderId', 'status', 'courierPackageSize', 'billableKm', 'routeMatchedKm', 'deliveryFee', 'tipAmount', 'currencyCode', 'paymentMethod', 'isExpress', 'scheduledFor', 'placedAt', 'acceptedAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'createdAt'],
   },
   {
     category: 'tripsAsDriver', model: 'Order', by: ['driverId'], via: 'driver', key: 'id', rest: 'OTHER_PERSON',
@@ -291,16 +329,16 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'riderId', 'status', 'vehicleType', 'capacityPointsUsed', 'cashToCollectTotal', 'plannedDistanceM', 'plannedDurationS', 'startedAt', 'completedAt', 'createdAt'],
   },
   {
-    category: 'reimbursementClaims', model: 'ReimbursementClaim', by: ['riderId', 'driverId'], via: 'mover', key: 'id',
-    fields: ['id', 'orderId', 'riderId', 'driverId', 'amount', 'reason', 'gpsLat', 'gpsLng', 'status', 'reviewNote', 'reviewedAt', 'paidAt', 'paymentRef', 'paidAmount', 'evidence', 'evidenceComplete', 'handoverEvidenceId', 'createdAt'],
+    category: 'reimbursementClaims', model: 'ReimbursementClaim', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { gpsLat: 'OTHER_PERSON', gpsLng: 'OTHER_PERSON', evidence: 'OTHER_PERSON' },
+    fields: ['id', 'orderId', 'riderId', 'driverId', 'amount', 'reason', 'status', 'reviewNote', 'reviewedAt', 'paidAt', 'paymentRef', 'paidAmount', 'evidenceComplete', 'handoverEvidenceId', 'createdAt'],
   },
   {
     category: 'handoverPhotoProofs', model: 'HandoverPhotoProof', by: ['riderId', 'driverId'], via: 'mover', key: 'id',
     fields: ['id', 'orderId', 'actorId', 'riderId', 'driverId', 'purpose', 'mimeType', 'byteSize', 'sourceStatus', 'issuedAt', 'invalidatedAt', 'invalidationReason'],
   },
   {
-    category: 'cashHandoverRecords', model: 'CashHandoverEvidence', by: ['riderId', 'driverId'], via: 'mover', key: 'id',
-    fields: ['id', 'orderId', 'actorId', 'riderId', 'driverId', 'orderType', 'outcome', 'sourceStatus', 'filedAt', 'locationLat', 'locationLng', 'locationAt', 'declaredLat', 'declaredLng', 'arrivalLogId', 'arrivalAt', 'waitedMs', 'photoProofId', 'policyVersion', 'maxDistanceKm', 'maxLocationAgeMs', 'invalidatedAt', 'invalidationReason'],
+    category: 'cashHandoverRecords', model: 'CashHandoverEvidence', by: ['riderId', 'driverId'], via: 'mover', key: 'id', omit: { locationLat: 'OTHER_PERSON', locationLng: 'OTHER_PERSON', declaredLat: 'OTHER_PERSON', declaredLng: 'OTHER_PERSON' },
+    fields: ['id', 'orderId', 'actorId', 'riderId', 'driverId', 'orderType', 'outcome', 'sourceStatus', 'filedAt', 'locationAt', 'arrivalLogId', 'arrivalAt', 'waitedMs', 'photoProofId', 'policyVersion', 'maxDistanceKm', 'maxLocationAgeMs', 'invalidatedAt', 'invalidationReason'],
   },
   {
     category: 'serviceJobsAsProvider', model: 'ServiceJob', by: ['providerId'], via: 'provider', key: 'id', rest: 'OTHER_PERSON',
@@ -331,7 +369,6 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'TripSafetySession.driverUserId': { reason: 'FRAUD_SAFETY', note: 'trip safety monitoring and its risk score' },
   'SosAlert.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
   'SosRetrigger.counterpartyUserId': { reason: 'FRAUD_SAFETY', note: 'emergency alerts other people raised on a trip with you' },
-  'Rating.rateeId': { reason: 'OTHER_PEOPLE', note: 'each rating someone gave you (your rating summary is in ratingSummary)' },
   'ReimbursementClaim.customerId': { reason: 'OTHER_PEOPLE', note: 'a claim a mover made about an order of yours' },
   'HandoverPhotoProof.customerId': { reason: 'OTHER_PEOPLE', note: 'the handover proof a mover filed for an order of yours' },
   'CashHandoverEvidence.customerId': { reason: 'OTHER_PEOPLE', note: 'the cash handover record a mover filed for an order of yours' },

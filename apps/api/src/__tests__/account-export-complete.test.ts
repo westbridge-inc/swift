@@ -16,6 +16,7 @@ let app: FastifyInstance;
 const userIds: string[] = [];
 const MARK = nanoid(8);
 let seq = 0;
+const rooms: string[] = [];
 const service = () => new AccountService({ prisma: app.prisma, log: app.log, io: {} as never });
 
 beforeAll(async () => {
@@ -27,6 +28,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   const where = { userId: { in: userIds } };
+  await app.prisma.chatMessage.deleteMany({ where: { senderId: { in: userIds } } });
+  await app.prisma.chatRoom.deleteMany({ where: { id: { in: rooms } } });
+  await app.prisma.rating.deleteMany({ where: { raterId: { in: userIds } } });
+  await app.prisma.actorRatingStat.deleteMany({ where: { subjectId: { in: userIds } } });
+  await app.prisma.livenessCheck.deleteMany({ where });
   await app.prisma.order.deleteMany({ where: { OR: [{ customerId: { in: userIds } }, { rider: where }] } });
   await app.prisma.vendor.deleteMany({ where: { owner: where } });
   await app.prisma.vendorOwner.deleteMany({ where });
@@ -64,6 +70,14 @@ const order = (customerId: string, vendorId: string, i: number, extra: Record<st
   orderNumber: `EXP-${MARK}-${i}`, orderType: 'FOOD_DELIVERY' as const, customerId, vendorId, status: 'DELIVERED' as const,
   deliveryAddress: `${i} Customer Street`, deliveryLat: 6.8, deliveryLng: -58.15,
   subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 300, totalAmount: 1300, paymentMethod: 'CASH' as const, ...extra,
+});
+
+describe('the account export route', () => {
+  it('is rate-limited per person (each export is ~60 reads)', async () => {
+    const { readFileSync } = await import('node:fs'); const { join } = await import('node:path');
+    const routes = readFileSync(join(__dirname, '..', 'modules', 'user', 'customer.routes.ts'), 'utf8');
+    expect(routes).toContain("app.get('/account/export', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }");
+  });
 });
 
 describe('the account export', () => {
@@ -109,12 +123,98 @@ describe('the account export', () => {
     expect(whole).toMatchObject({ complete: true, notice: EXPORT_NOTICE, coverage: { addresses: { rows: 3, complete: true } } });
   });
 
-  it('tells the truth about what it leaves out', async () => {
+  it('tells the truth about what it leaves out, and never lists the fraud checks', async () => {
     const userId = await person();
-    const data = await service().exportData(userId) as { notice: string; withheld: Array<{ reason: string; what: string; records: string[] }> };
+    const data = await service().exportData(userId) as unknown as { notice: string; withheld: Array<{ reason: string; what: string; records?: string[] }> };
     expect(data.notice).not.toContain('This is the personal data Swift holds about your account');
     expect(data.withheld.map((w) => w.reason).sort()).toEqual(['FRAUD_SAFETY', 'LEGAL_HOLD', 'OTHER_PEOPLE', 'STAFF_WORK', 'SYSTEM']);
-    for (const w of data.withheld) expect(w.records.length).toBeGreaterThan(0);
+    for (const w of data.withheld) {
+      if (w.reason === 'FRAUD_SAFETY') expect(w).not.toHaveProperty('records'); // named in general only
+      else expect(w.records!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('holds only the person: ratings received without who gave them, own messages only, nothing still double-blind', async () => {
+    const a = await person();
+    const b = await person();
+    const owner = await person();
+    const v = await store(owner);
+    const rider = await app.prisma.rider.create({ data: { userId: b, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const shown = await app.prisma.order.create({ data: order(a, v.id, 7_001, { riderId: rider.id }) });
+    const blind = await app.prisma.order.create({ data: order(a, v.id, 7_002, { riderId: rider.id }) });
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+    await app.prisma.rating.create({ data: { orderId: shown.id, raterId: b, rateeId: a, type: 'RIDER_TO_CUSTOMER', score: 4, comment: `kind and quick ${MARK}`, visibleAt: new Date(), createdAt: threeDaysAgo } });
+    await app.prisma.rating.create({ data: { orderId: blind.id, raterId: b, rateeId: a, type: 'RIDER_TO_CUSTOMER', score: 1, comment: `still hidden ${MARK}`, createdAt: threeDaysAgo } });
+    // Shown, but given after the last daily fold: it would pair with today's one trip, so it waits.
+    const fresh = await app.prisma.order.create({ data: order(a, v.id, 7_004, { riderId: rider.id }) });
+    await app.prisma.rating.create({ data: { orderId: fresh.id, raterId: b, rateeId: a, type: 'RIDER_TO_CUSTOMER', score: 2, comment: `not folded yet ${MARK}`, visibleAt: new Date() } });
+    // The summary is the folded view only: never the live counts, sums or tags.
+    await app.prisma.actorRatingStat.create({ data: { subjectRole: 'CUSTOMER', subjectId: a, lifetimeCount: 3, lifetimeSum: 7, rollingCount: 3, rollingSum: 7, displayRating: 4.0, topNegativeTags: ['late'], actorVisibleAt: new Date(Date.now() - 86_400_000) } });
+    const room = await app.prisma.chatRoom.create({ data: { orderId: shown.id } });
+    rooms.push(room.id);
+    await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: a, message: `from a ${MARK}` } });
+    await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: b, message: `from b ${MARK}` } });
+    const data = await service().exportData(a) as unknown as Record<string, Array<Record<string, unknown>>>;
+    expect(data['ratingsReceived']).toEqual([{ rateeId: a, type: 'RIDER_TO_CUSTOMER', score: 4, comment: `kind and quick ${MARK}`, tags: [], createdAt: expect.stringMatching(/^\d{4}-\d{2}$/) }]);
+    // As the file carries it (JSON): Decimals and dates become strings.
+    expect(JSON.parse(JSON.stringify(data['ratingSummary']))).toEqual([{ subjectRole: 'CUSTOMER', subjectId: a, displayRating: '4', standing: 'NEW', actorVisibleAt: expect.any(String) }]);
+    expect(data['chatMessagesSent']).toEqual([expect.objectContaining({ message: `from a ${MARK}` })]);
+    const text = JSON.stringify(data);
+    for (const leak of [b, rider.id, `still hidden ${MARK}`, `from b ${MARK}`, `not folded yet ${MARK}`, '"lifetimeCount"', '"rollingSum"', '"topNegativeTags"']) expect(text).not.toContain(leak);
+    // The order a rating was for is not named on the rating (it would point at the rater).
+    expect(data['ratingsReceived']![0]).not.toHaveProperty('orderId');
+  });
+
+  it('never carries security internals or the fraud signals that fired', async () => {
+    const userId = await person();
+    await app.prisma.user.update({ where: { id: userId }, data: { lossProtectionSuspendedAt: new Date(), lossProtectionSuspendedReason: `velocity hit ${MARK}`, enhancedSafetyMonitoring: true } });
+    await app.prisma.session.create({ data: { userId, token: nanoid(24), refreshToken: nanoid(24), deviceId: `device-${MARK}`, deviceType: 'android', expiresAt: new Date(Date.now() + 86_400_000) } });
+    await app.prisma.notification.create({ data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Pay', body: 'Pay your fee', data: { checkoutUrl: `https://pay.example/signed-${MARK}` } } });
+    await app.prisma.livenessCheck.create({ data: { userId, profile: 'RIDER', selfieUrl: `liveness/${userId}/x.jpg`, outcome: 'BORDERLINE', score: 0.4321, reviewRequired: true } });
+    const owner = await person();
+    const v = await store(owner);
+    const o = await app.prisma.order.create({ data: order(userId, v.id, 7_003, { riskFlagged: true, riskReason: `collision ${MARK}`, ridePinAttempts: 3, mmgRecipientNameSnapshot: `Payee Fullname ${MARK}` }) });
+    // A rating quietly excluded as fake must not tell its author so.
+    await app.prisma.rating.create({ data: { orderId: o.id, raterId: userId, vendorId: v.id, type: 'CUSTOMER_TO_VENDOR', score: 5, state: 'EXCLUDED', stateReason: `ring ${MARK}` } });
+    const data = await service().exportData(userId) as unknown as Record<string, unknown>;
+    const text = JSON.stringify(data);
+    for (const leak of [`velocity hit ${MARK}`, `device-${MARK}`, `signed-${MARK}`, `collision ${MARK}`, `Payee Fullname ${MARK}`, '0.4321', `liveness/${userId}`]) expect(text).not.toContain(leak);
+    for (const key of ['enhancedSafetyMonitoring', 'reviewRequired', 'riskFlagged', 'ridePinAttempts', 'deviceId', 'state', 'stateReason']) expect(text).not.toContain(`"${key}"`);
+    expect((data['ratingsGiven'] as unknown[])).toHaveLength(1);
+    expect(text).not.toContain(`ring ${MARK}`);
+  });
+
+  it('reads every category only by the person: the register columns, equal to the person ids', async () => {
+    const userId = await person();
+    const rider = await app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const mine = new Set([userId, rider.id]);
+    const calls: Array<{ model: string; where: unknown }> = [];
+    const spy = new Proxy(app.prisma, { get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      if (typeof prop !== 'string' || !value || typeof value !== 'object' || !('findMany' in value)) return value;
+      const delegate = value as { findMany(a: unknown): Promise<unknown>; findUnique?(a: unknown): Promise<unknown> };
+      return { ...delegate,
+        findMany: (args: { where: unknown }) => { calls.push({ model: prop, where: args.where }); return delegate.findMany(args); },
+        findUnique: (args: { where: unknown }) => { calls.push({ model: prop, where: args.where }); return delegate.findUnique!(args); } };
+    } });
+    await exportPersonalData(spy, userId);
+    expect(calls.length).toBeGreaterThan(60);
+    const personMatch = (where: unknown): Array<Record<string, unknown>> => {
+      const w = where as { OR?: Array<Record<string, unknown>>; AND?: unknown[] };
+      if (w.OR) return w.OR;
+      return (w.AND ?? []).flatMap((part) => personMatch(part));
+    };
+    for (const call of calls) {
+      const w = call.where as Record<string, unknown>;
+      if ('id' in w || 'userId' in w || 'subjectId' in w) { expect(mine.has(String(w['id'] ?? w['userId'] ?? w['subjectId'])), call.model).toBe(true); continue; }
+      const match = personMatch(call.where);
+      expect(match.length, call.model).toBeGreaterThan(0);
+      for (const clause of match) {
+        const values = Object.values(clause);
+        expect(values, call.model).toHaveLength(1);
+        expect(mine.has(String(values[0])), `${call.model} ${JSON.stringify(clause)}`).toBe(true);
+      }
+    }
   });
 
   it('gives a rider their work record, never the customer’s address', async () => {
@@ -124,9 +224,13 @@ describe('the account export', () => {
     const v = await store(owner);
     const rider = await app.prisma.rider.create({ data: { userId: riderUser, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
     await app.prisma.order.create({ data: order(customer, v.id, 9_999, { riderId: rider.id, deliveredAt: new Date() }) });
+    // A parcel: the pickup address is the SENDER's own place (courier.routes.ts), not a store.
+    await app.prisma.order.create({ data: order(customer, v.id, 9_998, { riderId: rider.id, orderType: 'COURIER', pickupAddress: `Sender Home ${MARK}` }) });
     const data = await service().exportData(riderUser) as unknown as Record<string, unknown[]>;
-    expect(data['deliveriesAsRider']).toEqual([expect.objectContaining({ orderNumber: `EXP-${MARK}-9999`, deliveryFee: expect.anything() })]);
+    expect(data['deliveriesAsRider']).toEqual(expect.arrayContaining([expect.objectContaining({ orderNumber: `EXP-${MARK}-9999`, deliveryFee: expect.anything() })]));
+    expect(data['deliveriesAsRider']).toHaveLength(2);
     expect(JSON.stringify(data)).not.toContain('9999 Customer Street');
+    expect(JSON.stringify(data)).not.toContain(`Sender Home ${MARK}`);
     expect(data['orders']).toEqual([]);
   });
 });

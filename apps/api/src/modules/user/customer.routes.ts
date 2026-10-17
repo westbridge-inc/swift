@@ -934,7 +934,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** GET /account/export — DPA right of access + portability: the customer's own
    *  data as portable JSON. Documents' contents are never exported. */
-  app.get('/account/export', async (request: AuthRequest) => {
+  // [Row 331 · REVIEW-G S3-1] ~60 reads per export: a few an hour is plenty for a person, and keeps it from being a load lever.
+  app.get('/account/export', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async (request: AuthRequest) => {
     const data = await account.exportData(request.user.userId);
     return { success: true, data };
   });
