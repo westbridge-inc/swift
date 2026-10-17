@@ -3843,6 +3843,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
             ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
+            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
           }
         : null,
     };
