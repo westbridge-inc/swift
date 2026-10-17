@@ -116,5 +116,5 @@ ALTER TABLE billing_obligation_transitions DROP CONSTRAINT billing_obligation_tr
 ALTER TABLE billing_obligation_transitions ADD CONSTRAINT billing_obligation_transitions_kind_check CHECK (kind IN ('PAID','VOLUNTARY_RESUME'));
 ALTER TABLE billing_obligation_transitions DROP COLUMN IF EXISTS "suspensionEventId";
 ALTER TABLE billing_obligation_transitions ALTER COLUMN "paymentId" SET NOT NULL, ALTER COLUMN "successEventId" SET NOT NULL;
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261016210000_billing_return_reanchor';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261017090000_billing_return_reanchor';
 COMMIT;
