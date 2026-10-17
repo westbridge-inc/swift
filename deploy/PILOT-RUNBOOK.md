@@ -1305,7 +1305,14 @@ It refuses unless `deploy/.env` says `PILOT_ENV=staging` (and sets
 the host has room for the copy beside the live stack (2 GiB of memory
 available, and twice the database plus 2 GiB free on Docker's disk); then
 `rehearsal.sh up` builds the walled copy (which must say staging too), the
-copy's worker stops, and a private `api-journeys`
+copy's worker stops, and the journey roster's fixture fees are reset ON THE
+COPY ONLY (`deploy/wall/fixture-fees.sql`). The roster's +5920 partners live
+on staging for weeks, so their trials end and billing suspends them for an
+unpaid fee. On the copy each gets the fresh 14-day trial a new partner is born
+with, and a store that billing suspended gets back what billing took. No
+payment, receipt, ledger or clock row is written. The script first proves the
+target is the copy (another Postgres cluster than the live one, saying
+staging) and prints counts only. Then a private `api-journeys`
 (`deploy/docker-compose.journeys-copy.yml`: both logins, `TENANT_RLS_BIND=1`,
 deny, no port, the copy's internal network only, uploads to a throwaway
 store inside it) serves the journeys and runs the queues. The journeys: an
