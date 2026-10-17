@@ -578,7 +578,7 @@ export async function reanchorAtReturnInTx(tx: Tx, subscriptionId: string, now: 
   } });
   await tx.billingFeeNotice.updateMany({ where: { clockId: previous.id, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
   await tx.billingDunningClock.update({ where: { id: previous.id }, data: {
-    dueAt: resume, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n, runningSince: now,
+    dueAt: resume, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n, runningSince: resume,
     pausedAt: null, resumedAt: null, retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null,
   } });
   return resume;
