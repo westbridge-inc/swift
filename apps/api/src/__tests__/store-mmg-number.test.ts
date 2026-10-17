@@ -224,8 +224,12 @@ afterAll(async () => {
 
 describe('[PAYMENT-SIMPLIFY · ALG-34 parity] the store MMG number', () => {
   it('owner only, step-up first, a mobile only; a new number is STAGED, goes live after the cool-off, and the owner is told', async () => {
+    // A manager is refused for their ROLE, even holding a fresh step-up (not merely for lacking one).
+    await grantStepUp(app, manager.token);
     const byManager = await call('PUT', '/api/v1/vendor/profile', manager.token, { mmgNumber: NUMBER }, store());
     expect(byManager.statusCode, byManager.body).toBe(403);
+    expect(byManager.json().error.code).toBe('STAFF_FORBIDDEN');
+    expect(await sys(() => app.prisma.moneySurfaceCommand.count({ where: { entityId: vendorId } }))).toBe(0);
 
     const cold = await call('PUT', '/api/v1/vendor/profile', owner.token, { mmgNumber: NUMBER }, store());
     expect(cold.statusCode).toBe(403);
@@ -366,6 +370,7 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
     expect((await orderView(paidOrder.order.id)).json().data.canCancel).toBe(false);
     const refused = await call('POST', `/api/v1/customer/orders/${paidOrder.order.id}/cancel`, customer.token, {});
     expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_CANCEL_UNAVAILABLE'); // the paid-MMG refusal on the locked cancel path
     expect((await orderRow(paidOrder.order.id)).status).toBe('ACCEPTED');
   });
 
