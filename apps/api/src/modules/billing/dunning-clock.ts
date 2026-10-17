@@ -1,7 +1,7 @@
 import { billingEffectsReady } from './billing-cutover';
 import { hasMmgTerminalProof, mmgPaymentRaw } from './mmg-terminal-evidence';
 import { lockSubscriptionPayer, lockMoverFeeAuthority, type MoverFeeResolution } from '../subscription/mover-fee-authority';
-import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient, Subscription, SubscriptionPayment } from '@prisma/client';
+import type { BillingDunningClock, PaymentConfirmationHold, Prisma, PrismaClient, Subscription, SubscriptionPayment, SubscriptionStatus } from '@prisma/client';
 import { settledFeePeriodInTx, voluntaryResumeProofInTx, voluntaryLapseInTx } from './obligation-evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 
@@ -488,6 +488,90 @@ export async function resumeVoluntaryObligationInTx(tx: Tx, sub: Subscription, p
   } });
   await projectDunningClock(tx, next, now);
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// [BILLING-REANCHOR · board row 151 · GUARDRAILS §7, due 2026-11-06]
+// Owner/coordinator ruling (OWNER-DECISIONS "Weekly-fee arrears after a
+// pause", 4 Oct): no arrears for weeks a partner was suspended and not
+// operating; billing restarts at the week they return. A SUSPENDED or
+// CHURNED partner cannot operate (operate gate), so the payment that brings
+// them back buys the week that starts at the return instant, never the unpaid
+// week they were suspended for nor any week after it. The obligation moves
+// from its unpaid due date to the return instant WITHOUT a payment, as its own
+// consumed transition (RETURN_REANCHOR), proven by the SUSPENDED record of
+// that very obligation; the caller pays [return, return + 1 week) in the same
+// transaction, and the database admits nothing else (billing_obligation_proof,
+// billing_obligation_committed). A PAST_DUE partner is still operating inside
+// the 48-hour grace and keeps the week that fell due.
+// ---------------------------------------------------------------------------
+
+export const RETURN_REANCHOR_STATUSES: readonly SubscriptionStatus[] = ['SUSPENDED', 'CHURNED'];
+const isoDay = (at: Date) => at.toISOString().slice(0, 10);
+/** The SUSPENDED record the billing engine writes for an obligation (suspendAccessRows). */
+export const suspensionKey = (subscriptionId: string, due: Date) => `suspended:${subscriptionId}:${isoDay(due)}`;
+
+/** Read-only: the suspension that authorizes restarting this subscription's
+ *  billing at `now`, or null. Also used to price the week a return buys. */
+export async function returnReanchorProof(db: Tx | PrismaClient, sub: Subscription, now: Date) {
+  if (!RETURN_REANCHOR_STATUSES.includes(sub.status) || !sub.suspendedAt || sub.suspendedAt > now
+    || sub.nextBillingDate >= now) return null;
+  const suspension = await db.billingEvent.findUnique({ where: { idempotencyKey: suspensionKey(sub.id, sub.nextBillingDate) } });
+  if (!suspension || suspension.subscriptionId !== sub.id || suspension.type !== 'SUSPENDED' || suspension.createdAt > now) return null;
+  if (await db.billingObligationTransition.findUnique({ where: { suspensionEventId: suspension.id }, select: { id: true } })) return null;
+  if (await db.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${isoDay(sub.nextBillingDate)}` }, select: { id: true } })) return null;
+  return suspension;
+}
+
+/** Inside the settlement transaction, with the payer and subscription locked
+ *  and every confirmation of this obligation already resolved: move the
+ *  obligation to the return instant. Returns that instant (the start of the
+ *  week the payment buys), or null when the return cannot be proven — then
+ *  the payment pays the obligation as it stands and finance is told. */
+export async function reanchorAtReturnInTx(tx: Tx, subscriptionId: string, now: Date): Promise<Date | null> {
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+  if (!RETURN_REANCHOR_STATUSES.includes(sub.status)) return null;
+  const previous = await clockRow(tx, subscriptionId, now);
+  const suspension = await returnReanchorProof(tx, sub, now);
+  const held = previous.authorityHoldReason || previous.pausedAt
+    || await tx.paymentConfirmationHold.count({ where: { clockId: previous.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
+  if (!suspension || held || previous.subscriptionId !== sub.id || previous.dueAt.getTime() !== sub.nextBillingDate.getTime()) {
+    await tx.auditLog.create({ data: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entity: 'BillingDunningClock', entityId: previous.id,
+      changes: { clockId: previous.id, tenantId: previous.tenantId, subscriptionId: sub.id, status: sub.status,
+        epoch: previous.epoch, dueAt: previous.dueAt.toISOString(),
+        reason: !suspension ? 'SUSPENSION_UNPROVEN_OR_USED' : held ? 'OBLIGATION_HELD' : 'OBLIGATION_SOURCE_MISMATCH' } } });
+    return null;
+  }
+  const audit = await tx.auditLog.create({ data: {
+    action: 'BILLING_CLOCK_RETURN_REANCHOR', entity: 'BillingDunningClock', entityId: previous.id,
+    changes: { clockId: previous.id, tenantId: previous.tenantId, fromSubscriptionId: previous.subscriptionId,
+      subscriptionId: sub.id, previousEpoch: previous.epoch, nextEpoch: previous.epoch + 1,
+      previousDue: previous.dueAt.toISOString(), nextDue: now.toISOString(),
+      suspensionEventId: suspension.id, suspendedAt: sub.suspendedAt!.toISOString(), status: sub.status,
+      currencyCode: sub.currencyCode, amount: '0' },
+  } });
+  // The span not billed (the unpaid due date to the return) is the record's period.
+  await tx.billingObligationTransition.create({ data: {
+    tenantId: previous.tenantId, clockId: previous.id, fromSubscriptionId: previous.subscriptionId,
+    subscriptionId: sub.id, kind: 'RETURN_REANCHOR', fromEpoch: previous.epoch, toEpoch: previous.epoch + 1,
+    fromDue: previous.dueAt, toDue: now, effectiveAt: now, suspensionEventId: suspension.id, auditId: audit.id,
+    amount: 0, currencyCode: sub.currencyCode, periodStart: previous.dueAt, periodEnd: now,
+  } });
+  await tx.billingFeeNotice.updateMany({ where: { clockId: previous.id, epoch: previous.epoch, status: 'PENDING' }, data: { status: 'OBSOLETE' } });
+  await tx.billingDunningClock.update({ where: { id: previous.id }, data: {
+    dueAt: now, epoch: { increment: 1 }, version: { increment: 1 }, elapsedMs: 0n, runningSince: now,
+    pausedAt: null, resumedAt: null, retryAtMs: 0n, nudgeAtMs: null, churnAtMs: null,
+  } });
+  return now;
+}
+
+/** A week a return re-anchor did not bill: money that arrives for it later (a
+ *  late MMG approval, a card capture) is not owed for that week. It is kept as
+ *  fee credit, never dropped and never booked against the forgiven week. */
+export async function weekForgivenByReturnInTx(tx: Tx | PrismaClient, subscriptionId: string, periodStart: Date): Promise<boolean> {
+  return !!await tx.billingObligationTransition.findFirst({ where: {
+    kind: 'RETURN_REANCHOR', subscriptionId, periodStart: { lte: periodStart }, periodEnd: { gt: periodStart },
+  }, select: { id: true } });
 }
 
 export async function scheduleDunningFailure(tx: Tx, subscriptionId: string, now: Date) {

@@ -226,7 +226,10 @@ export function payScreenState(sub: any, now: Date = new Date()): PayScreenState
   // copy: it is PINV-8, and billing-suspension-retention.test.ts is its proof.
   if (phase === 'suspended' || phase === 'churned') {
     return {
-      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers,
+      // [BILLING-REANCHOR · board row 151] No arrears: the payment that brings a
+      // paused store back buys the week starting the day it is paid (the server
+      // restarts billing at the return), never a week that already went by.
+      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers: 'Covers 1 week from the day you pay',
       title: 'New orders are paused',
       body: `Paying ${money(due || fee)} turns them back on, usually within a minute.`,
       extra: 'Still yours while paused: this screen, your receipts, your earnings and support. Orders already in the kitchen still go out.',
