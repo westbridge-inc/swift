@@ -605,7 +605,7 @@ describe('the reply and the lookup — only MMG’s own records credit', () => {
     expect([Number(week.amount), Number(week.amountUsd)]).toEqual([1600, 8]);
     expect(await walletOf(s.subId)).toBe(500);
     expect(await topups(s.subId)).toHaveLength(1);
-  });
+  }, 180_000); // three billing runs walk every due subscription in the database
 
   it('the redirect alone never credits: a transaction MMG does not know leaves it confirming, the wallet untouched', async () => {
     const s = await makeSub();

@@ -2192,7 +2192,7 @@ export class BillingService {
     // transition (dunning-clock.ts); a PAST_DUE partner keeps the week due.
     // An issued instruction keeps its own week (billing_confirmation_source_immutable):
     // the return reaches this point as fee credit spent on the return week (below).
-    const returnAt = !settlePaymentId && ['SUSPENDED', 'CHURNED'].includes(authority.status) ? await reanchorAtReturnInTx(tx, sub.id, now) : null;
+    const returnAt = !settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status) ? await reanchorAtReturnInTx(tx, sub.id, now) : null;
     if (returnAt) {
       periodStart = returnAt;
       periodKey = returnAt.toISOString().slice(0, 10);
