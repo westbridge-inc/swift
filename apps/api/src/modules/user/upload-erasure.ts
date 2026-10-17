@@ -22,7 +22,8 @@ import { writeDeletionReceipt } from '../verification/purge-receipt';
  *
  * Same rules as the mover pass: the account closure must already be committed,
  * an object is touched only with proven authority (the subject's own namespace,
- * one owner, no other reference anywhere), a legal hold keeps everything, and an
+ * one owner, no other reference anywhere), a legal hold keeps everything (checked
+ * under the subject lock, in the same transaction as each write), and an
  * object whose absence is not confirmed stays an open obligation that the
  * account tombstone's daily retry sweep finishes.
  */
@@ -76,6 +77,18 @@ async function censusVisible(tx: Prisma.TransactionClient, tables: string[]): Pr
 /** The subject's row lock, taken before anything is read (the same lock order as the mover pass). */
 async function lockSubject(tx: Prisma.TransactionClient, userId: string) {
   await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE /* upload-erasure-authority */`;
+}
+
+/**
+ * Any active legal hold on the person freezes every erasure write of this module
+ * (uploads, liveness photos, fingerprints): the retry sweep finishes after release.
+ * Read inside the caller's transaction AFTER lockSubject: placing a hold takes the
+ * same users row lock (legal-hold.ts placeDocLegalHoldIn), so a hold is either
+ * committed and seen here, or waits until this transaction is done. Never a
+ * check-then-delete race.
+ */
+async function underLegalHold(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
+  return await tx.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null } }) > 0;
 }
 
 /** Only a committed closure authorizes any of this; checked once there is work to do. */
@@ -137,7 +150,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
     }
     if (!unclaimed.length) return { pending, held: 0, erased: 0 };
     // Uploads have no document-level hold; any active hold on the person keeps them all.
-    if (await tx.docLegalHold.count({ where: { subjectUserId: userId, releasedAt: null } }) > 0) {
+    if (await underLegalHold(tx, userId)) {
       return { pending, held: unclaimed.length, erased: 0 };
     }
     let erased = 0;
@@ -173,9 +186,11 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
  * its photo is confirmed gone: until then the row is the obligation.
  */
 export async function eraseLivenessSelfies(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return owed(log, userId, 'liveness selfie', { pending: 1, erased: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'liveness selfie', { pending: 1, held: 0, erased: 0 }, () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const rows = await tx.livenessCheck.findMany({ where: { userId }, select: { selfieUrl: true } });
+    // A hold keeps the photos AND their rows (the rows say where the photos are).
+    if (rows.length && await underLegalHold(tx, userId)) return { pending: 0, held: new Set(rows.map((r) => r.selfieUrl)).size, erased: 0 };
     const kept: string[] = [];
     let erased = 0;
     const leavePending = (key: string, reason: string) => {
@@ -201,7 +216,7 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
     }
     // Every row goes except those whose photo is still owed: they are the obligation.
     await tx.livenessCheck.deleteMany({ where: { userId, ...(kept.length ? { selfieUrl: { notIn: kept } } : {}) } });
-    return { pending: kept.length, erased };
+    return { pending: kept.length, held: 0, erased };
   }, { timeout: 60_000 }));
 }
 
@@ -212,18 +227,20 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
  * until it is purged, and the next re-sweep forgets it then. The deletion
  * receipts keep theirs (append-only legal evidence that no matcher reads).
  */
-export async function forgetErasedFingerprints(db: PrismaClient, userId: string, log?: Log): Promise<{ forgotten: number; pending: number }> {
-  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1 }, () => db.$transaction(async (tx) => {
+export async function forgetErasedFingerprints(db: PrismaClient, userId: string, log?: Log): Promise<{ forgotten: number; pending: number; held: number }> {
+  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1, held: 0 }, () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { phone: true } });
     // Never for a live account: its purged documents still answer the duplicate check.
-    if (user.phone !== `deleted:${userId}`) return { forgotten: 0, pending: 0 };
+    if (user.phone !== `deleted:${userId}`) return { forgotten: 0, pending: 0, held: 0 };
     const remembered = (await tx.encryptedObject.findMany({
       where: { createdBy: userId, shreddedAt: { not: null }, NOT: { sha256: ERASED_FINGERPRINT } }, select: { createdBy: true, shreddedAt: true, sha256: true },
     })).filter((o) => o.createdBy === userId && o.shreddedAt !== null && o.sha256 !== ERASED_FINGERPRINT);
-    if (!remembered.length) return { forgotten: 0, pending: 0 };
+    if (!remembered.length) return { forgotten: 0, pending: 0, held: 0 };
+    // A hold overwrites nothing of the person; the retry forgets them after release.
+    if (await underLegalHold(tx, userId)) return { forgotten: 0, pending: 0, held: remembered.length };
     // A census that cannot see every tenant cannot prove an object unreferenced: forget nothing, stay owed.
-    if (!await censusVisible(tx, ['verification_documents', 'riders', 'drivers', 'encrypted_objects'])) return { forgotten: 0, pending: 1 };
+    if (!await censusVisible(tx, ['verification_documents', 'riders', 'drivers', 'encrypted_objects'])) return { forgotten: 0, pending: 1, held: 0 };
     const forgotten = await tx.$executeRaw`
       UPDATE encrypted_objects AS eo SET sha256 = ${ERASED_FINGERPRINT}
       WHERE eo."createdBy" = ${userId} AND eo."shreddedAt" IS NOT NULL AND eo.sha256 <> ${ERASED_FINGERPRINT}
@@ -235,6 +252,6 @@ export async function forgetErasedFingerprints(db: PrismaClient, userId: string,
           WHERE k <> '' AND strpos(k, regexp_replace(eo."fileKey", '^.*/', '')) > 0)
       /* upload-erasure-forget-fingerprints */
     `;
-    return { forgotten, pending: 0 };
+    return { forgotten, pending: 0, held: 0 };
   }));
 }

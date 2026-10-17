@@ -783,6 +783,23 @@ describe('review corrections: deletion obligations and retry progress', () => {
     }) }));
   });
 
+  it('[Row 331] HTTP deletion under a legal hold records what the hold keeps on the audit row', async () => {
+    const h = harness();
+    h.db.auditLog.create.mockResolvedValue({});
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
+      deleted: false, status: 'PENDING_LEGAL_HOLD', heldDocuments: 1, heldMoverObjects: 0, heldUploads: 2,
+      pendingDocuments: 0, pendingAvatarObjects: 0, pendingUploads: 0, message: 'Held.',
+    });
+    const routes = await handlers(h, customerRoutes);
+    const result = await routes.get('delete /account')!({ user: { userId: A }, authSessionId: 'verified-synthetic-session' }, { code: vi.fn() });
+    // This harness speaks as build 9 (no modern receipts): its own word, with the real reason beside it.
+    expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingReason: 'PENDING_LEGAL_HOLD', heldUploads: 2 } });
+    expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      action: 'ACCOUNT_SELF_DELETION_PENDING',
+      changes: expect.objectContaining({ status: 'PENDING_LEGAL_HOLD', heldDocuments: 1, heldMoverObjects: 0, heldUploads: 2 }),
+    }) }));
+  });
+
   function accountHarness() {
     const h = harness();
     const person = Object.assign(h.people.get(A)!, { phone: 'synthetic-phone', firstName: 'Synthetic', lastName: 'Subject', email: 'subject@example.invalid', roles: ['CUSTOMER'] });

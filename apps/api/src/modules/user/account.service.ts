@@ -499,7 +499,8 @@ export class AccountService {
     //     leaves; case-bound safety evidence lives elsewhere under its own
     //     hold rules.
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone.
+    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone
+    // (a legal hold on the person keeps both, reported as held).
     const liveness = await eraseLivenessSelfies(prisma, storage, userId, this.app.log);
     pendingUploads += liveness.pending;
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
@@ -531,9 +532,11 @@ export class AccountService {
       },
     });
 
-    if (deferred.count > 0 || moverObjects.held > 0 || uploads.held > 0) {
+    // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
+    const heldUploads = uploads.held + liveness.held;
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
-        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads: uploads.held,
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
         pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
