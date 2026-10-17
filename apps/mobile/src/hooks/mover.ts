@@ -309,6 +309,10 @@ export type RunSummary = {
   next: { orderId: string; vendorName: string | null; status: string };
 };
 
+/** A stacked rider's live legs. One read for every observer of the query, so
+ *  a read-only observer (the live job feed) never brings a different fetch. */
+export const activeLegsQueryFn = () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs());
+
 /**
  * [B6] Every live leg — the primary first — plus the run summary. The singular
  * case is `useActiveJob` untouched: one leg, no run, the same query. Taxi is
@@ -321,7 +325,7 @@ export function useActiveJobs(kind: MoverKind | null) {
   const stacked = kind === 'RIDER' && !pv;
   const legsQ = useQuery({
     queryKey: ['mover', 'active', kind, 'legs'],
-    queryFn: () => unwrap<{ legs: any[]; run: RunSummary | null }>(riderApi.activeLegs()),
+    queryFn: activeLegsQueryFn,
     enabled: stacked,
     refetchInterval: POLL.moverLegs,
   });
