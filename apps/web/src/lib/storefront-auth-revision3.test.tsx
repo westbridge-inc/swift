@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import LoginPage from '@/app/login/page';
 import SignupPage from '@/app/signup/page';
 import * as auth from './auth';
-import * as customer from './customer';
+import * as customerLogin from './customer-login';
 import { queueStorefrontContinuation, readStorefrontContinuation, takeStorefrontContinuation } from './storefront-continuation';
 
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), query: '' }));
@@ -121,7 +121,7 @@ describe('QR-W-R2-2 cross-tab epoch', () => {
   });
   it('keeps this tab’s deliberate guest login and consumes the selection once', async () => {
     queueStorefrontContinuation(intent);
-    vi.spyOn(customer, 'verifyCustomerLogin').mockImplementation(async () => {
+    vi.spyOn(customerLogin, 'verifyCustomerLogin').mockImplementation(async () => {
       auth.adoptSession('new-customer');
       return { user: { id: 'new-customer' } };
     });
@@ -145,7 +145,7 @@ describe('QR-W-R2-3 explicit unrelated next supersedes the pending store', () =>
   it.each(['/cart', '/store/store-b'])('discards before login and returns to %s without later replay', async destination => {
     queueStorefrontContinuation(intent);
     nav.query = `next=${encodeURIComponent(destination)}`;
-    vi.spyOn(customer, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } });
+    vi.spyOn(customerLogin, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } });
     const view = render(<LoginPage />);
     expect(readStorefrontContinuation()).toBeNull();
     expect(screen.queryByRole('link', { name: 'Cancel and return to menu' })).toBeNull();

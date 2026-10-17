@@ -4,7 +4,7 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { sendOtp, verifyPartnerLogin } from '@/lib/auth';
-import { verifyCustomerLogin } from '@/lib/customer';
+import { verifyCustomerLogin } from '@/lib/customer-login';
 import { clearStorefrontContinuation, readStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { customerRoute } from '@/lib/customer-routes';
