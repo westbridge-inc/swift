@@ -30,8 +30,7 @@ import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } f
 // same transaction. A PAST_DUE partner (still operating inside the 48-hour
 // grace) keeps the week that fell due. A payment is credited only once and
 // never dropped: money that arrives for a week the return did not bill is
-// kept as fee credit. Continues the L03 builder's parked test
-// (evidence/BILLING-FIXES-20261004/parked/billing-reanchor.test.ts).
+// kept as fee credit. Continues an earlier builder's parked test of this rule.
 // ---------------------------------------------------------------------------
 
 // Each billing run walks every due subscription in the database.
