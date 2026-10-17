@@ -23,7 +23,8 @@ import {
 // published number instead ("contact the store"). Two exceptions stay free:
 // no mover was found (11 Oct rule, retries included) and an order that is very
 // late (the food-age cutoff the rescue sweep already enforces, and — owner
-// #52, 14 Oct — thirty minutes past the promised time). Swift never shows or
+// #52, 14 Oct; an hour since the owner's 17 Oct change, was thirty minutes —
+// sixty minutes past the promised time). Swift never shows or
 // implies a fee it cannot collect.
 //
 // The rule lives in the ONE cancel predicate (cancel-policy.ts): the preview
@@ -248,8 +249,8 @@ describe('[owner #46] a store order cancels free only while it waits for the sto
       const { vendorId, accountLine } = await makeVendor();
       const order = await makeStoreOrder(customer.userId, vendorId, 'ACCEPTED', {
         paymentMethod: 'MOBILE_MONEY', paymentStatus,
-        // 45 minutes past its promise: very late changes nothing while the store holds the money.
-        promisedAt: new Date(Date.now() - 45 * 60_000),
+        // 75 minutes past its promise (very late, owner 17 Oct: 60): changes nothing while the store holds the money.
+        promisedAt: new Date(Date.now() - 75 * 60_000),
       });
 
       const { data, body } = await preview(order.id, customer.token);
@@ -335,7 +336,8 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
     expect(refused.statusCode, refused.body).toBe(409);
   });
 
-  it('[owner #52] 30 minutes past the promised time: free at any stage before pickup; at 29 minutes: refused', async () => {
+  // [owner 17 Oct] A store order is very late an HOUR past its promise (was 30 minutes).
+  it('[owner #52 · 17 Oct] 60 minutes past the promised time: free at any stage before pickup; at 59 minutes: refused', async () => {
     const { vendorId } = await makeVendor();
     for (const [status, over] of [
       ['ACCEPTED', {}],
@@ -343,14 +345,14 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
       // the store's own courier, ready but not gone (no food-age cutoff applies to it)
       ['READY_FOR_PICKUP', { fulfillmentMode: 'VENDOR_DELIVERY', readyAt: new Date(Date.now() - 5 * 60_000) }],
     ] as const) {
-      const late = await makeStoreOrder(customer.userId, vendorId, status, { promisedAt: new Date(Date.now() - 31 * 60_000), ...over });
+      const late = await makeStoreOrder(customer.userId, vendorId, status, { promisedAt: new Date(Date.now() - 61 * 60_000), ...over });
       const shown = await preview(late.id, customer.token);
       expect(shown.data).toMatchObject({ canCancel: true, cancellationFee: 0, freeCancellationExpiresAt: null, cancellationMessage: TOO_LATE_MESSAGE, cancelUnavailable: null });
       const res = await inject('POST', `/api/v1/customer/orders/${late.id}/cancel`, customer.token, {});
       expect(res.statusCode, res.body).toBe(200);
       expect(res.json().data).toEqual({ message: 'Order cancelled because it was running very late.', cancellationFee: 0 });
     }
-    const notYet = await makeStoreOrder(customer.userId, vendorId, 'PREPARING', { promisedAt: new Date(Date.now() - 29 * 60_000) });
+    const notYet = await makeStoreOrder(customer.userId, vendorId, 'PREPARING', { promisedAt: new Date(Date.now() - 59 * 60_000) });
     const refused = await inject('POST', `/api/v1/customer/orders/${notYet.id}/cancel`, customer.token, {});
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error.code).toBe('STORE_ACCEPTED');
@@ -358,7 +360,8 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
 
   it('[owner #52] a pickup is late from "ready in about N minutes" — until the store marks it ready (then the customer is the late one)', async () => {
     const { vendorId } = await makeVendor();
-    const pickup = { fulfillment: 'PICKUP', fulfillmentMode: 'PICKUP', estimatedPrepTime: 15, placedAt: new Date(Date.now() - 46 * 60_000) };
+    // ready in about 15 minutes, placed 76 minutes ago: 61 minutes past (very late at 60, owner 17 Oct).
+    const pickup = { fulfillment: 'PICKUP', fulfillmentMode: 'PICKUP', estimatedPrepTime: 15, placedAt: new Date(Date.now() - 76 * 60_000) };
     const cooking = await makeStoreOrder(customer.userId, vendorId, 'PREPARING', pickup);
     expect((await inject('POST', `/api/v1/customer/orders/${cooking.id}/cancel`, customer.token, {})).statusCode).toBe(200);
     const ready = await makeStoreOrder(customer.userId, vendorId, 'READY_FOR_PICKUP', { ...pickup, readyAt: new Date(Date.now() - 20 * 60_000) });
@@ -369,7 +372,7 @@ describe('[owner #46] the two exceptions stay free after the store accepted', ()
 
   it('[DS1140 S3] a failed handover is never offered a cancel, even past its promise — the server would refuse it', async () => {
     const { vendorId } = await makeVendor();
-    const failed = await makeStoreOrder(customer.userId, vendorId, 'FAILED', { promisedAt: new Date(Date.now() - 31 * 60_000) });
+    const failed = await makeStoreOrder(customer.userId, vendorId, 'FAILED', { promisedAt: new Date(Date.now() - 61 * 60_000) });
     const { data } = await preview(failed.id, customer.token);
     expect(data).toMatchObject({ canCancel: false, freeCancellationWindow: false, cancellationMessage: null, cancelUnavailable: null });
     const res = await inject('POST', `/api/v1/customer/orders/${failed.id}/cancel`, customer.token, {});
