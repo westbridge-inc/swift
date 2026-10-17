@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from './legal.routes';
 import { publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
+import { OPERATOR } from './operator';
 
 /**
  * [Legal research G2 · R26 · owner 15 Oct 2026] A material change to the legal texts is not accepted by "continued
@@ -15,7 +16,7 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
   {
     version: '2026-10-16',
     summary: [
-      'The Terms and the Privacy Policy now name the company behind Swift — Westbridge Inc., with its registration number, address and phone — and our data protection officer.',
+      `The Terms and the Privacy Policy now name the company behind Swift — ${OPERATOR.name}, with its registration number, address and phone — and our data protection officer.`,
       'Swift never carries letters, documents or mail, and the Terms list everything Swift prohibits.',
       'Safety: Swift’s safety team is not an emergency service. In an emergency call Police 911, Fire 912 or Ambulance 913 first.',
       'Partners: Swift tells you in the app at least 14 days before a weekly-fee change, and refunds an unstarted week within 14 days when you close your account.',

@@ -66,6 +66,8 @@ type OrderDetail = {
   pickupCode?: string | null;
   /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
   ridePin?: string | null;
+  /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
+  ownRiderNotice?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -484,6 +486,11 @@ export default function OrderDetailPage() {
           <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
           <OpenSwiftApp />
         </section>
+      ) : null}
+
+      {/* [R14 · legal research D12] The server's words, shown while the store delivers with its own rider. */}
+      {order.ownRiderNotice ? (
+        <div className={styles.moneyNotice} role="note">{order.ownRiderNotice}</div>
       ) : null}
 
       {trackingError ? (

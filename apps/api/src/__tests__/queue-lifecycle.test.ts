@@ -54,6 +54,12 @@ vi.mock('bullmq', async () => {
       return { id: `${this.name}-${this.adds.length}` };
     }
 
+    // [row 331] The scheduler reads the repeatable registrations (to remove the
+    // safety timers' old dispatch-queue ones); a fresh fake Redis holds none.
+    async getRepeatableJobs() {
+      return [];
+    }
+
     async close() {
       this.closeCalls += 1;
       this.connection.disconnect();
@@ -253,7 +259,12 @@ describe('BullMQ lifecycle', () => {
     try {
       const worker = (bullState.workers as FakeWorker[]).find(w => w.name === QUEUE_NAMES.VERIFICATION)!;
       await expect(worker.processor({ name: 'retention-sweep', data: {} })).resolves.toBeUndefined();
-      expect(upsert).toHaveBeenCalledTimes(3);
+      // One idempotent seed per registry default, in order: the three original classes and
+      // [R23] the owner's retention table (chat, resolved support tickets, safety records).
+      expect(upsert.mock.calls.map(([arg]) => (arg as { where: { dataClass: string } }).where.dataClass)).toEqual([
+        'sessions.expired', 'signup_attempts', 'notifications.old',
+        'chat.order_messages', 'support_tickets.resolved', 'safety.records',
+      ]);
       expect(log.info).toHaveBeenCalledWith({
         enforced: [],
         skipped: [
@@ -281,13 +292,13 @@ describe('BullMQ lifecycle', () => {
     process.on('unhandledRejection', onUnhandled);
 
     try {
-      expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
+      expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
       await Promise.all(Array.from({ length: 100 }, (_, index) =>
         enqueueVendorAlertFollowup(queues, `order-${index}`),
       ));
       await new Promise<void>((resolve) => setImmediate(resolve));
 
-      expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
+      expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
       expect(notificationQueue.adds).toHaveLength(100);
       expect(notificationQueue.closeCalls).toBe(0);
       expect(unhandled).toEqual([]);
@@ -381,7 +392,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: false }))
       .rejects.toThrow(/verification-jobs failed readiness/);
 
-    expect(bullState.queues).toHaveLength(8); // [row 266] + the offer lane
+    expect(bullState.queues).toHaveLength(9); // [row 266] + the offer lane, [row 331] + the safety lane
     expect((bullState.queues as FakeQueue[]).every((queue) => queue.closeCalls === 1)).toBe(true);
     expect(bullState.workers).toHaveLength(0);
   });
@@ -406,7 +417,7 @@ describe('BullMQ lifecycle', () => {
     await expect(initializeJobRuntime(context(), { runWorkers: true }))
       .rejects.toThrow(/process-billing schedule failed/);
 
-    expect(bullState.workers).toHaveLength(8); // [row 266] + the offer worker
+    expect(bullState.workers).toHaveLength(9); // [row 266] + the offer worker, [row 331] + the safety worker
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.options.autorun === false)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.runCalls === 0)).toBe(true);
     expect((bullState.workers as FakeWorker[]).every((worker) => worker.closeCalls === 1)).toBe(true);

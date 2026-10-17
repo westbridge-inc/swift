@@ -101,7 +101,6 @@ const DISCLOSURE_WORDS: Record<string, string> = {
   legalName: 'the legal or trading name',
   address: 'the business address',
   contact: "the owner's verified phone",
-  operator: "Swift's own operator details (server configuration)",
   vendor: 'the store record',
 };
 

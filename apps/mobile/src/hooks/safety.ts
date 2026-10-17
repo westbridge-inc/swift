@@ -1,3 +1,5 @@
+import { requireAuthSessionSnapshot, requireAuthSessionForPrincipal } from '../stores/authStore';
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
@@ -197,8 +199,11 @@ export function useLivenessCheck() {
   return useMutation({
     mutationFn: async ({ photoUri, profile }: { photoUri: string; profile: 'DRIVER' | 'RIDER' }) => {
       const form = new FormData();
-      form.append('file', { uri: photoUri, name: 'liveness.jpg', type: 'image/jpeg' } as never);
-      const res = await safetyApi.livenessCheck(form, profile);
+      const owner = requireAuthSessionSnapshot();
+      form.append('file', await prepareUploadImage({ uri: photoUri, name: 'liveness.jpg', type: 'image/jpeg' }) as never);
+      const current = requireAuthSessionForPrincipal(owner);
+      const res = await safetyApi.livenessCheck(form, profile, current);
+      requireAuthSessionForPrincipal(owner);
       return res.data?.data as LivenessCheckOutcome;
     },
     // A pass changes what go-online will say — refetch the mover surface.

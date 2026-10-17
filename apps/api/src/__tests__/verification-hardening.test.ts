@@ -141,8 +141,10 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
     const notifications = new NotificationService(app.prisma, app.io);
     vi.spyOn(notifications, 'send').mockRejectedValueOnce(new Error('injected post-projection notification failure'));
     const failing = new VerificationService(app.prisma, notifications, getKycProvider());
+    // [R15] The GEI licence now expires (checked every January): the approval carries a date, as the reviewer path does.
+    const geiExpiry = new Date(Date.now() + 365 * 24 * 3600 * 1000);
 
-    await expect(failing.approveDocument(doc.id, 'admin-test'))
+    await expect(failing.approveDocument(doc.id, 'admin-test', geiExpiry))
       .rejects.toThrow('injected post-projection notification failure');
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).status)
       .toBe('APPROVED');
@@ -151,7 +153,7 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
 
     // Simulate the exact stale projection left by the pre-fix crash window.
     await app.prisma.serviceProvider.update({ where: { userId: sparky.id }, data: { isVerified: false } });
-    await expect(failing.approveDocument(doc.id, 'admin-test'))
+    await expect(failing.approveDocument(doc.id, 'admin-test', geiExpiry))
       .rejects.toMatchObject({ code: 'NOT_PENDING' });
     expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
       .toBe(true);

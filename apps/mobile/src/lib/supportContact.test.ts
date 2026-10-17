@@ -29,9 +29,14 @@ describe('the support contact', () => {
   });
 
   it('is the number and inbox the website publishes', () => {
+    // [Owner 15 Oct 2026 · R2] The website reads its phone and support inbox from the operator constant the Terms
+    // use (apps/api legal/operator.ts), through its legal snapshot; site.config.ts names them from there.
     const site = readFileSync(join(SRC, '../../web/src/site.config.ts'), 'utf8');
-    const phone = site.match(/^\s*phone: '([^']+)'/m)?.[1];
-    const email = site.match(/^\s*supportEmail: '([^']+)'/m)?.[1];
+    expect(site).toMatch(/^\s*phone: OPERATOR\.phone,/m);
+    expect(site).toMatch(/^\s*supportEmail: OPERATOR\.supportEmail,/m);
+    const snapshot = readFileSync(join(SRC, '../../web/src/legal/generated.ts'), 'utf8');
+    const phone = snapshot.match(/^\s*"phone": "([^"]+)"/m)?.[1];
+    const email = snapshot.match(/^\s*"supportEmail": "([^"]+)"/m)?.[1];
     expect(phone, 'the website config has no phone').toBeTruthy();
     expect(digits(phone!)).toBe(digits(SUPPORT_CONTACT.phoneE164));
     expect(email).toBe(SUPPORT_CONTACT.email);

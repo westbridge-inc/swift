@@ -79,6 +79,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
     'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'billing_card_action_required', 'fx_change_notice',
+    // [F2] A weekly fee change, told before it applies
+    'billing_rate_change',
     'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',

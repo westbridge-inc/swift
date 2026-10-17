@@ -2,10 +2,9 @@ import Fastify, { type RouteOptions } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
 import { helmetOptions } from './config/security-headers';
-import { rateLimitKey } from './utils/rate-limit-key';
+import { createRateLimitStore, rateLimitOptions } from './utils/rate-limit-options';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
@@ -145,31 +144,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // OTP/login limits weaken linearly with the fleet size you scale up for launch.
   // Dev/test keep the in-memory store (a shared Redis counter across vitest's
   // per-file workers would cross-contaminate the whole suite's rate-limit state).
-  const rateLimitRedis =
-    isProduction()
-      ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', {
-          connectionName: 'swift-rate-limit',
-          // A rate-limit store must fail OPEN, never queue or crash a request if
-          // Redis blips — the plugin degrades gracefully on a store error.
-          maxRetriesPerRequest: 1,
-          enableOfflineQueue: false,
-        })
-      : undefined;
-  await app.register(rateLimit, {
-    // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
-    // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Callers with a VERIFIED token are bucketed per userId;
-    // anonymous and unverifiable requests share the resolved-IP bucket (never
-    // the spoofable X-Forwarded-For) — see D1-01.
-    ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    // The key generator verifies the bearer token (captured lazily via the
-    // closure — app.jwt is decorated by authPlugin, registered below) so an
-    // attacker cannot mint a fresh bucket per fake token; unverified and
-    // anonymous requests share the resolved-IP bucket.
-    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
-    max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
-    timeWindow: '1 minute',
-  });
+  // [row 331 · G5-F3] The store fails OPEN with a logged alert, never a 500 on
+  // every route; /live does not consult it. Composed in utils/rate-limit-options.
+  const rateLimitRedis = isProduction() ? createRateLimitStore(process.env['REDIS_URL'] || 'redis://localhost:6379', app.log) : undefined;
+  // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
+  // can raise it without a code change (per-route limits on auth/OTP stay tight
+  // regardless). The key generator verifies the bearer token (captured lazily
+  // via the closure — app.jwt is decorated by authPlugin, registered below) so
+  // an attacker cannot mint a fresh bucket per fake token.
+  await app.register(rateLimit, rateLimitOptions({ store: rateLimitRedis, verify: (token) => app.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   });

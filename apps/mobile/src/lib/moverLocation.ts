@@ -275,12 +275,17 @@ export async function requestUsableMoverBackgroundPermission({
   getBackgroundPermission,
   requestBackgroundPermission,
   disclose,
+  onConsentGranted,
 }: {
   taskManagerAvailable: boolean;
   getForegroundPermission: () => Promise<{ status: string }>;
   getBackgroundPermission: () => Promise<{ status: string }>;
   requestBackgroundPermission: () => Promise<{ status: string }>;
   disclose: () => Promise<boolean>;
+  /** [R18] Told once the person accepted the disclosure AND the system sheet
+   *  granted access: the yes goes to the consent ledger. Fire-and-forget —
+   *  recording it never delays or fails going online. */
+  onConsentGranted?: () => Promise<unknown> | void;
 }) {
   // Never ask for background access when this installed binary cannot execute
   // the background task that would use it.
@@ -298,7 +303,11 @@ export async function requestUsableMoverBackgroundPermission({
     if (!(await disclose())) return false;
 
     const background = await requestBackgroundPermission();
-    return background.status === 'granted';
+    const grantedNow = background.status === 'granted';
+    if (grantedNow && onConsentGranted) {
+      try { void Promise.resolve(onConsentGranted()).catch(() => {}); } catch { /* never blocks GO */ }
+    }
+    return grantedNow;
   } catch {
     return false;
   }
