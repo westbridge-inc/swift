@@ -106,9 +106,10 @@ esac
 SEED_ADMIN_PHONE="${SEED_ADMIN_PHONE:-}"
 [ -n "$SEED_ADMIN_PHONE" ] || die "set SEED_ADMIN_PHONE (the first SUPER_ADMIN's E.164 phone) in the environment"
 # +592600 is DEMO_PHONE_PREFIX (apps/api/src/modules/ops/purge-plan.ts): the
-# range every demo seed mints and the demo purge classifies on. A real
-# SUPER_ADMIN inside it would be entangled with the demo classification, so
-# the ceremony refuses it. The phone value itself is never printed.
+# range every demo seed mints. The demo purge selects by the synthetic marker
+# only (the range is a live carrier range), but a real SUPER_ADMIN inside it
+# would still be confusable with the demo accounts, so the ceremony refuses
+# it. The phone value itself is never printed.
 [[ "$SEED_ADMIN_PHONE" != +592600* ]] ||
   die "SEED_ADMIN_PHONE must not start with +592600 — that range is the demo-seed/purge classification, never a real admin"
 # [OWNER EMAIL · Opus money review 14 Oct, S2-L] Solo approval in the apps

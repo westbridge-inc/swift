@@ -24,7 +24,7 @@ import type { Recovery } from './recovery-policy';
 // have their own delivery windows and are not this sweep's to judge.
 // ---------------------------------------------------------------------------
 
-export const OUTBOX_DEAD_LETTER_NAMES = ['order-outbox', 'mover-revocation-outbox', 'rating-outbox'] as const;
+export const OUTBOX_DEAD_LETTER_NAMES = ['order-outbox', 'mover-revocation-outbox', 'rating-outbox', 'verification-decision-outbox'] as const;
 export type OutboxDeadLetterName = typeof OUTBOX_DEAD_LETTER_NAMES[number];
 
 export function isOutboxDeadLetterName(name: string): name is OutboxDeadLetterName {
@@ -38,7 +38,7 @@ export const DEAD_LETTER_CLAIM_GRACE_MS = 10 * 60_000;
 /** What an operator may do with an outbox dead letter. */
 export const OUTBOX_RECOVERY: Recovery = {
   policy: 'SAFE_REPLAY',
-  why: 'An outbox row is an owed command, claimed under a lease and marked processed once: the order publisher adds its job under jobId = row id, the revocation effects and the rating commands are idempotent by construction. A requeue gives the same row a fresh retry budget; nothing runs twice that has already run.',
+  why: 'An outbox row is an owed command, claimed under a lease and marked processed once: the order publisher adds its job under jobId = row id, the revocation effects, the rating commands and the tail of an approval (the trial decision returns an existing subscription) are idempotent by construction. A requeue gives the same row a fresh retry budget; nothing runs twice that has already run.',
 };
 
 const publisherRows = { kind: { notIn: [...IN_PROCESS_OUTBOX_KINDS] } };
@@ -59,7 +59,11 @@ export async function stampExhaustedOutboxRows(prisma: PrismaClient, now: Date =
     where: { processedAt: null, deadLetteredAt: null, attempts: { gte: prisma.ratingOutbox.fields.maxAttempts }, OR: lapsed },
     data,
   });
-  return { 'order-outbox': order.count, 'mover-revocation-outbox': revocation.count, 'rating-outbox': rating.count };
+  const decision = await prisma.verificationDecisionOutbox.updateMany({
+    where: { processedAt: null, deadLetteredAt: null, attempts: { gte: prisma.verificationDecisionOutbox.fields.maxAttempts }, OR: lapsed },
+    data,
+  });
+  return { 'order-outbox': order.count, 'mover-revocation-outbox': revocation.count, 'rating-outbox': rating.count, 'verification-decision-outbox': decision.count };
 }
 
 const dead = { processedAt: null, deadLetteredAt: { not: null } };
@@ -70,6 +74,7 @@ export async function countOutboxDeadLetters(prisma: PrismaClient): Promise<Reco
     'order-outbox': await prisma.orderOutbox.count({ where: { ...publisherRows, ...dead } }),
     'mover-revocation-outbox': await prisma.moverRevocationOutbox.count({ where: dead }),
     'rating-outbox': await prisma.ratingOutbox.count({ where: dead }),
+    'verification-decision-outbox': await prisma.verificationDecisionOutbox.count({ where: dead }),
   };
 }
 
@@ -102,6 +107,11 @@ export async function listOutboxDeadLetters(prisma: PrismaClient, take = 50): Pr
   const order = await prisma.orderOutbox.findMany({ where: { ...publisherRows, ...dead }, orderBy: { deadLetteredAt: 'desc' }, take, select: { ...select, kind: true } });
   const revocation = await prisma.moverRevocationOutbox.findMany({ where: dead, orderBy: { deadLetteredAt: 'desc' }, take, select });
   const rating = await prisma.ratingOutbox.findMany({ where: dead, orderBy: { deadLetteredAt: 'desc' }, take, select: { ...select, command: true } });
+  // [S2-29] No payload column: the preview names the document the approval tail belongs to.
+  const decision = await prisma.verificationDecisionOutbox.findMany({
+    where: dead, orderBy: { deadLetteredAt: 'desc' }, take,
+    select: { id: true, attempts: true, lastError: true, deadLetteredAt: true, command: true, documentId: true },
+  });
   const row = (queue: OutboxDeadLetterName, name: string, r: { id: string; attempts: number; lastError: string | null; deadLetteredAt: Date | null; payload: unknown }): OutboxDeadLetter => ({
     queue, id: r.id, name, failedReason: r.lastError, attemptsMade: r.attempts, data: preview(r.payload), finishedOn: r.deadLetteredAt?.getTime() ?? 0,
   });
@@ -109,6 +119,7 @@ export async function listOutboxDeadLetters(prisma: PrismaClient, take = 50): Pr
     ...order.map((r) => row('order-outbox', r.kind, r)),
     ...revocation.map((r) => row('mover-revocation-outbox', 'revoke-mover', r)),
     ...rating.map((r) => row('rating-outbox', r.command, r)),
+    ...decision.map((r) => row('verification-decision-outbox', r.command, { ...r, payload: { documentId: r.documentId } })),
   ];
 }
 
@@ -127,6 +138,8 @@ export async function requeueOutboxDeadLetter(
     ? await prisma.orderOutbox.updateMany({ where, data })
     : queue === 'mover-revocation-outbox'
       ? await prisma.moverRevocationOutbox.updateMany({ where, data })
-      : await prisma.ratingOutbox.updateMany({ where, data });
+      : queue === 'rating-outbox'
+        ? await prisma.ratingOutbox.updateMany({ where, data })
+        : await prisma.verificationDecisionOutbox.updateMany({ where, data });
   return result.count === 1;
 }

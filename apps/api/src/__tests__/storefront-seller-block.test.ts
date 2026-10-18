@@ -236,3 +236,52 @@ describe('[R3] the refund rule is the store owner\'s own words, checked on write
     expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { refundRule: true } }))).refundRule).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [Triage row 248 · R3 · CAA s.70] The order receipt names who sold, from the SAME seller block the store page shows:
+// the legal name, address and published phone on file. With nothing on file it names the store by its trading name
+// and address (never a guess). Synthetic store, customer and order.
+// ---------------------------------------------------------------------------
+describe('[row 248] the order receipt says who sold', () => {
+  const orderIds: string[] = [];
+  afterAll(async () => {
+    await system(() => app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }));
+  });
+
+  async function deliveredOrderFrom(vendorId: string, n: number) {
+    const customer = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
+      phone: `+59269${NUM}${n}`, firstName: 'Rita', lastName: `Receipt${n}`, activeRole: 'CUSTOMER', roles: ['CUSTOMER'], countryCode: 'GY',
+      isPhoneVerified: true, customer: { create: {} },
+    } }));
+    users.push(customer.id);
+    const order = await system(() => app.prisma.order.create({ data: {
+      orderNumber: `SOLD-${RUN}-${n}`, orderType: 'FOOD_DELIVERY' as never, customerId: customer.id, vendorId,
+      status: 'DELIVERED' as never, fulfillment: 'DELIVERY' as never,
+      deliveryAddress: '5 Receipt Row', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 2500, subtotalMarkup: 0, subtotalCustomer: 2500, deliveryFee: 600, tipAmount: 0, discount: 0, totalAmount: 3100,
+      paymentMethod: 'CASH' as never,
+      items: { create: [{ itemId: 'x1', name: 'Pepperpot', quantity: 1, basePrice: 2500, markedUpPrice: 2500, markupAmount: 0, totalBase: 2500, totalMarkup: 0, totalCustomer: 2500 }] },
+    } }));
+    orderIds.push(order.id);
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/customer/orders/${order.id}/receipt`,
+      headers: { authorization: `Bearer ${await tokenFor(customer.id, 'CUSTOMER')}` },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.body;
+  }
+
+  it('names the seller’s legal name, address and published phone, as on the store page', async () => {
+    const { userId, vendorId } = await store(9);
+    await approved(userId, 'owner_national_id');
+    const html = await deliveredOrderFrom(vendorId, 9);
+    expect(html).toContain(`Sold by Asha Ramdin9 trading as Asha's Bakery ${RUN}9 — 9 Robb Street, Lacytown · +5926001300`);
+  });
+
+  it('with no legal name on file it names the store by its trading name and address, never a guess', async () => {
+    const { vendorId } = await store(2002, { publicPhone: null });
+    const html = await deliveredOrderFrom(vendorId, 2002);
+    expect(html).toMatch(new RegExp(`Sold by Asha's Bakery ${RUN}2002 — 2002 Robb Street, (Lacytown|Georgetown)`));
+    expect(html).not.toContain('trading as');
+  });
+});

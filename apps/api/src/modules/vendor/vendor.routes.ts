@@ -1,5 +1,6 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -3112,6 +3113,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'store-media', log: request.log });
     const { url } = await storage.upload({
       buffer,
       filename: file.filename,
@@ -3349,13 +3351,16 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /option-groups/:id — Update an option group */
+  // [Row 300 matrix] Under the tenant wall another tenant's item is invisible, so the
+  // group (or option) can come back with no item: that is "not yours", a 404 like the
+  // owner login answers, never a TypeError. Same check on every option route below.
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3383,7 +3388,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3402,7 +3407,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.groupId },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!group || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group || !group.item || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3439,7 +3444,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3466,7 +3471,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 

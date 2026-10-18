@@ -279,6 +279,16 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An advertiser owed a refund gets nothing back: the refund is recorded as owed, but bookings, inventory, the credit balance and the invoice stay as they were until it is released.',
     impact: 'money',
   },
+  {
+    key: 'upload_malware_scan',
+    setting: 'MALWARE_SCAN',
+    source: 'env',
+    enabledWhen: 'clamd',
+    title: 'Malware scan of uploaded photos and documents (row 312)',
+    whileOff:
+      'Uploaded photos and documents are stored after the type, size and decode checks only: no virus scanner sees them, and a person notices nothing. Turn on (with CLAMD_HOST, and CLAMD_PORT if not 3310) once the ClamAV scanner runs on this host or the private network.',
+    impact: 'safety',
+  },
 ];
 
 export interface DarkFeatureStatus extends DarkFeature {

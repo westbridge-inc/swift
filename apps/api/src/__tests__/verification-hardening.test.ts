@@ -139,17 +139,33 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
       },
     });
     const notifications = new NotificationService(app.prisma, app.io);
-    vi.spyOn(notifications, 'send').mockRejectedValueOnce(new Error('injected post-projection notification failure'));
+    // [S2-29 · KYC-DECISION-ATOMIC] The approval notice is an inbox row written IN the decision
+    // transaction and fanned out after commit, so the fallible side effect after the projection is
+    // that fan-out (and any direct send). Both fail here; the committed decision must still answer
+    // success, with its projection and its notice durable — never an error the reviewer retries.
+    const send = vi.spyOn(notifications, 'send').mockRejectedValue(new Error('injected post-projection notification failure'));
+    const realTo = app.io.to.bind(app.io);
+    const fanout = vi.spyOn(app.io, 'to').mockImplementation(((room: string) => {
+      if (room === `user:${sparky.id}`) throw new Error('injected post-projection notification failure');
+      return realTo(room);
+    }) as typeof app.io.to);
     const failing = new VerificationService(app.prisma, notifications, getKycProvider());
     // [R15] The GEI licence now expires (checked every January): the approval carries a date, as the reviewer path does.
     const geiExpiry = new Date(Date.now() + 365 * 24 * 3600 * 1000);
 
-    await expect(failing.approveDocument(doc.id, 'admin-test', geiExpiry))
-      .rejects.toThrow('injected post-projection notification failure');
+    try {
+      await expect(failing.approveDocument(doc.id, 'admin-test', geiExpiry))
+        .resolves.toMatchObject({ id: doc.id, status: 'APPROVED' });
+      expect(fanout.mock.calls.some(([room]) => room === `user:${sparky.id}`)).toBe(true);
+    } finally { fanout.mockRestore(); }
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).status)
       .toBe('APPROVED');
     expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)
       .toBe(true);
+    const notices = await app.prisma.notification.findMany({ where: { userId: sparky.id, title: 'Document approved' } });
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.data).toMatchObject({ kind: 'verification_approved', docId: doc.id, audience: 'earner' });
+    send.mockRestore();
 
     // Simulate the exact stale projection left by the pre-fix crash window.
     await app.prisma.serviceProvider.update({ where: { userId: sparky.id }, data: { isVerified: false } });
