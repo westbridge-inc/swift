@@ -262,7 +262,8 @@ describe('the SOS backstop and the Trip Guardian ride their own lane (row 331 ·
     expect(safety, 'a worker consumes the safety queue').toBeDefined();
     state.sweepGate.open = true;
     for (const name of ['stale-movers', 'checkout-outbox', 'dispatch-order', 'offer-timeout', 'reconcile-dispatch']) {
-      await safety!.processor({ name, data: { orderId: 'o-1' } });
+      // [#1794 S4] ... and it fails, so it dead-letters instead of passing as done.
+      await expect(safety!.processor({ name, data: { orderId: 'o-1' } }), name).rejects.toThrow(/safety lane runs only/);
     }
     expect(state.runs).toEqual([]);
   });

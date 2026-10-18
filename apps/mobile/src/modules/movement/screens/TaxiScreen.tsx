@@ -473,10 +473,9 @@ function TaxiBooking({ navigation }: any) {
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  // [Owner 16 Oct] Customers take no photos: the ID check is the only door.
   const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
   const needsL2 = door === 'identity';
-  const needsSelfie = door === 'selfie';
   // Joining the queue passes the same account gates as a request (the route
   // and the queue share one authority boundary), so its refusal must show,
   // with the same doors — never a silent tap.
@@ -751,14 +750,6 @@ function TaxiBooking({ navigation }: any) {
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
-          {needsSelfie ? (
-            <PillButton
-              label="Add your photo — your driver sees it"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('Selfie')}
-            />
-          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -828,14 +819,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'selfie' ? (
-                <PillButton
-                  label="Add your photo — your driver sees it"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('Selfie')}
-                />
               ) : null}
               {queueDoor === 'identity' ? (
                 <PillButton

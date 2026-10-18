@@ -4,6 +4,8 @@ import { buildBrowserContentSecurityPolicy } from '@/lib/browser-api-origin';
 import { coarsen, mapLinkUrl } from '@/lib/live-tracking';
 import { mapPixel } from '@/lib/store-pin';
 import { TILE_SIZE, TRACKING_ZOOM, TileMap, tilesAround } from './tile-map';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
+import { TEST_MAPTILER_KEY } from '@/test/map-tiles-fixture';
 import { TrackClient } from '@/app/track/[token]/track-client';
 import { TripShareClient } from '@/app/trip/[token]/trip-share-client';
 
@@ -15,14 +17,18 @@ import { TripShareClient } from '@/app/trip/[token]/trip-share-client';
 // What may leave for the tile host is unchanged or less: a ~1 km square, no
 // point, and never the page's address (W-47, M053).
 //
-// [Tile policy] OpenStreetMap's tile usage policy requires browsers to send a
-// Referer and may block referer-stripped traffic without notice. So tiles
-// send the site's ORIGIN only (strict-origin-when-cross-origin) — never the
-// path, where the trip and parcel pages carry their token. Links still go
-// with no referrer at all.
+// [Tile policy] Tiles send the site's ORIGIN only (strict-origin-when-cross-origin)
+// — never the path, where the trip and parcel pages carry their token. The
+// MapTiler key is restricted to the site's origins, which it reads from that
+// Referer. Links still go with no referrer at all.
+//
+// [WEB-TILES] The tiles are MapTiler's (lib/map-tiles.ts), credited
+// "© MapTiler © OpenStreetMap contributors"; a built site without the key
+// draws none and says so.
 // ---------------------------------------------------------------------------
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
+const MAPTILER = 'https://api.maptiler.com/maps/streets-v2/256';
 
 const PRECISE = { lat: 6.801347, lng: -58.155198 };
 
@@ -46,7 +52,7 @@ describe('[W7] the tile map', () => {
     const tiles = tilesAround(point, TRACKING_ZOOM);
     const pixel = mapPixel({ latitude: point.lat, longitude: point.lng }, TRACKING_ZOOM);
     const own = tiles.find((tile) => tile.left <= 0 && tile.left > -TILE_SIZE && tile.top <= 0 && tile.top > -TILE_SIZE)!;
-    expect(own.src).toBe(`https://tile.openstreetmap.org/15/${Math.floor(pixel.x / TILE_SIZE)}/${Math.floor(pixel.y / TILE_SIZE)}.png`);
+    expect(own.src).toBe(`${MAPTILER}/15/${Math.floor(pixel.x / TILE_SIZE)}/${Math.floor(pixel.y / TILE_SIZE)}.png?key=${TEST_MAPTILER_KEY}`);
     expect(Math.min(...tiles.map((tile) => tile.left))).toBeLessThanOrEqual(-512);
     expect(Math.max(...tiles.map((tile) => tile.left + TILE_SIZE))).toBeGreaterThanOrEqual(512);
     expect(Math.min(...tiles.map((tile) => tile.top))).toBeLessThanOrEqual(-128);
@@ -59,11 +65,12 @@ describe('[W7] the tile map', () => {
     const tiles = map.querySelectorAll('img');
     expect(tiles.length).toBeGreaterThan(4);
     for (const tile of Array.from(tiles)) {
-      expect(tile.getAttribute('src')).toMatch(/^https:\/\/tile\.openstreetmap\.org\//);
+      expect(tile.getAttribute('src')!.startsWith(`${MAPTILER}/15/`)).toBe(true);
       expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     }
+    expect(within(map).getByText((_, el) => el?.tagName === 'P' && el.textContent === '© MapTiler © OpenStreetMap contributors')).toBeTruthy();
     const links = Array.from(container.querySelectorAll('a'));
-    expect(links.length).toBe(2);
+    expect(links.length).toBe(3);
     for (const link of links) expect(link.getAttribute('referrerpolicy')).toBe('no-referrer');
     // [Row 108] A tile gets one retry; the map says it could not load only when the retry fails too.
     const src = tiles[0]!.getAttribute('src');
@@ -90,6 +97,19 @@ describe('[W7] the tile map', () => {
   });
 });
 
+describe('[WEB-TILES] a built site without the MapTiler key', () => {
+  it('draws no tiles — never OpenStreetMap — says so, credits nothing, and keeps the link', () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    expect(tilesAround(coarsen(PRECISE), TRACKING_ZOOM)).toEqual([]);
+    const { container } = render(<TileMap point={coarsen(PRECISE)} label="Courier location, approximate" linkHref={mapLinkUrl(PRECISE)} linkLabel="Open approximate map ↗" />);
+    const map = screen.getByRole('img', { name: 'Courier location, approximate' });
+    expect(map.querySelectorAll('img')).toHaveLength(0);
+    expect(within(map).getByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+    expect(container.textContent).not.toContain('OpenStreetMap contributors');
+    expect(screen.getByRole('link', { name: 'Open approximate map ↗' }).getAttribute('href')).toBe(mapLinkUrl(PRECISE));
+  });
+});
+
 describe('[W7] both shared pages draw it', () => {
   it('a parcel link shows the courier on the tile map — no frame', async () => {
     const view = {
@@ -99,7 +119,7 @@ describe('[W7] both shared pages draw it', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, ok: true, json: async () => ({ success: true, data: view }) })));
     const { container } = render(<TrackClient token="synthetic-parcel" />);
     const map = await screen.findByRole('img', { name: 'Courier location, approximate' });
-    expect(map.querySelectorAll('img[src^="https://tile.openstreetmap.org/15/"]').length).toBeGreaterThan(4);
+    expect(map.querySelectorAll('img[src^="https://api.maptiler.com/maps/streets-v2/256/15/"]').length).toBeGreaterThan(4);
     // The page itself is served with Referrer-Policy: no-referrer; each tile overrides it to the origin only.
     for (const tile of Array.from(map.querySelectorAll('img'))) expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     expect(container.querySelector('iframe')).toBeNull();
@@ -114,7 +134,7 @@ describe('[W7] both shared pages draw it', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, ok: true, json: async () => ({ success: true, data: view }) })));
     const { container } = render(<TripShareClient token="synthetic-trip" />);
     const map = await screen.findByRole('img', { name: 'Trip location, approximate' });
-    expect(map.querySelectorAll('img[src^="https://tile.openstreetmap.org/15/"]').length).toBeGreaterThan(4);
+    expect(map.querySelectorAll('img[src^="https://api.maptiler.com/maps/streets-v2/256/15/"]').length).toBeGreaterThan(4);
     for (const tile of Array.from(map.querySelectorAll('img'))) expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     expect(container.querySelector('iframe')).toBeNull();
   });

@@ -1222,10 +1222,11 @@ export async function riderRoutes(app: FastifyInstance) {
         addressLine1: true, city: true,
       },
     },
+    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
     customer: {
       select: {
         id: true,
-        firstName: true, lastName: true, phone: true,
+        firstName: true, phone: true,
       },
     },
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },

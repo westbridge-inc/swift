@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { homeCacheKey } from '../modules/user/home-cache';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // Browsing is open to everyone; only ordering/personal data needs an account.
 // Guests (no token) must see Home / vendors / menus / reviews, but be 401'd on
@@ -121,7 +122,7 @@ describe('guest browsing (no account)', () => {
     await app.prisma.tenant.create({ data: { id: dead, name: 'Dead operator', slug: dead, isActive: false } });
     const owner = await app.prisma.user.create({
       data: {
-        phone: `+5926360${String(Math.floor(Math.random() * 9000) + 1000)}`,
+        phone: testPhone(),
         firstName: 'Dead', lastName: 'Owner', tenantId: dead,
         roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never, isPhoneVerified: true,
       },

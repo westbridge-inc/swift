@@ -10,6 +10,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
 import { MATERIAL_CHANGES, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [Legal research G2 · R26 · Terms "Changes": "We announce material changes in the app … and ask you to accept
@@ -36,7 +37,34 @@ describe('who must accept, and what they are shown', () => {
     expect(before.summary.join(' ')).toMatch(/letters, documents or mail/);
     expect(acceptanceStatus({ tosVersion: '2026-10-16', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-16').needsAcceptance).toBe(false);
     // A later non-material version (not listed) asks nobody who accepted the material one.
-    expect(acceptanceStatus({ tosVersion: '2026-10-16', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-20').needsAcceptance).toBe(false);
+    expect(acceptanceStatus({ tosVersion: '2026-10-17', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-20').needsAcceptance).toBe(false);
+  });
+
+  // [COORD 16 Oct · 2026-10-17] A person who accepted NEITHER 2026-10-16 nor 2026-10-17 is shown BOTH summaries,
+  // oldest first — never only the newest — and a person who accepted 2026-10-16 is shown only what changed since.
+  it('every material change since the accepted version is summarised, oldest first', () => {
+    const v16 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-16')!.summary;
+    const v17 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-17')!.summary;
+    expect(v16.length).toBeGreaterThan(0);
+    expect(v17.length).toBeGreaterThan(0);
+    const skippedBoth = acceptanceStatus({ tosVersion: '2026-10-15', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-17');
+    expect(skippedBoth.needsAcceptance).toBe(true);
+    expect(skippedBoth.summary).toEqual([...v16, ...v17]);
+    const skippedOne = acceptanceStatus({ tosVersion: '2026-10-16', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-17');
+    expect(skippedOne.needsAcceptance).toBe(true);
+    expect(skippedOne.summary).toEqual([...v17]);
+    // Not yet served: 2026-10-17 neither asks nor summarises while 2026-10-16 is the served version.
+    expect(acceptanceStatus({ tosVersion: '2026-10-15', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-16').summary).toEqual([...v16]);
+    expect(acceptanceStatus({ tosVersion: '2026-10-17', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-17')).toMatchObject({ needsAcceptance: false, summary: [] });
+  });
+
+  it('the 2026-10-17 summary says what changed: people check identity, no face matching, customers never need a photo', () => {
+    const v17 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-17')!.summary.join(' ');
+    expect(v17).toMatch(/Identity checks are done by people/);
+    expect(v17).toMatch(/no automated face-matching/);
+    expect(v17).toMatch(/Customers never need a photo/);
+    expect(v17).toMatch(/if a business takes MMG, the MMG payment details it gives Swift are shown to its customer/);
+    expect(v17).toMatch(/a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name/);
   });
 
   it('partners re-accept their agreement with the Terms', () => {
@@ -54,7 +82,7 @@ const userIds: string[] = [];
 
 async function mkUser(roles: UserRole[], tosVersion: string | null) {
   const u = await app.prisma.user.create({
-    data: { phone: `+59200${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Re', lastName: `Accept${nanoid(5)}`, roles, activeRole: roles[0]!, isPhoneVerified: true, tosVersion },
+    data: { phone: testPhone(), firstName: 'Re', lastName: `Accept${nanoid(5)}`, roles, activeRole: roles[0]!, isPhoneVerified: true, tosVersion },
   });
   userIds.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: roles[0]!, jti: nanoid(8) });

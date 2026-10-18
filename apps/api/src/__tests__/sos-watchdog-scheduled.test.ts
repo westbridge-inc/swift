@@ -69,7 +69,10 @@ describe('scheduled SOS watchdog recipient isolation', () => {
         where: expect.objectContaining({ OR: [{ tenantId: subjectTenant }, { roles: { has: 'SUPER_ADMIN' } }] }),
       }));
     } else {
-      expect(ctx.redis.set).not.toHaveBeenCalled();
+      // No ops-page dedupe key was claimed: the review alert paged nobody. (The
+      // only other write is the completed tick's own stamp [#1794 S3-1].)
+      const keys = (ctx.redis.set as unknown as { mock: { calls: unknown[][] } }).mock.calls.map(([key]) => String(key));
+      expect(keys.filter((key) => !key.startsWith('safety:tick-completed:'))).toEqual([]);
     }
   });
 

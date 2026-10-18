@@ -118,7 +118,8 @@ export function MoverAccountScreen({ navigation }: any) {
     <Screen>
       <Header title="Account" />
       <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* Profile */}
+        {/* Profile. Every card below stacks with marginTop space.md and no
+            marginBottom — one gap between cards (owner 17 Oct: two touched). */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
             <T variant="title" tone="onBrand">
@@ -149,9 +150,7 @@ export function MoverAccountScreen({ navigation }: any) {
 
         {/* Movement R9 — Standing (daily-folded; today's ratings never show) */}
         {standingQ.data ? (
-          <View style={{ marginTop: space.md }}>
-            <StandingCard data={standingQ.data} />
-          </View>
+          <StandingCard data={standingQ.data} style={{ marginTop: space.md, marginBottom: 0 }} />
         ) : null}
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
@@ -195,6 +194,7 @@ export function MoverAccountScreen({ navigation }: any) {
         {isDriver ? (
           <MmgPayLinkCard
             who="rides"
+            style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}

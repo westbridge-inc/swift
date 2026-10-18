@@ -55,7 +55,8 @@ describe('[F-1218-02] the Privacy Policy is graded against the document state ma
   });
 
   it('the identity check is described in exactly one paragraph, so the words graded are the words served', () => {
-    expect(aiParagraph).toMatch(/Didit|ID Analyzer/);
+    // [2026-10-17 · human-only identity checks] The paragraph names the people who check, and the face-matching it does NOT use.
+    expect(aiParagraph).toMatch(/Identity verification is done by our verification team/);
     expect(aiParagraph).toMatch(/face[- ]match/i);
     expect(PRIVACY.split('<p><b>AI processing:</b>')).toHaveLength(2);
   });

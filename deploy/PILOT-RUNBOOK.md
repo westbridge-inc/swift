@@ -243,6 +243,12 @@ is exactly the API stack above.
    ({{LEGAL_ENTITY_NAME}}, {{COMPANY_ADDRESS}}, {{COMPANY_PHONE}}), the site's
    build refuses; `WEB_ALLOW_SITE_TOKENS=1` lets the staging site build and
    show them unfilled. That is an owner decision, and never for a public site.
+   The site's maps draw MapTiler's tiles with the owner's MapTiler browser key,
+   `WEB_MAPTILER_KEY` (a build argument, NEXT_PUBLIC_MAPTILER_KEY in the image).
+   It is public by design and restricted in MapTiler to the site's own names,
+   but the owner still enters it at a hidden prompt, never in chat. Without it
+   the built site draws no map tiles (it never falls back to OpenStreetMap's
+   servers), and no pin can be placed on its maps; the build log says so.
 3. Deploy as usual: `./deploy/pilot-up.sh "$APPROVED_SHA"`. With WEB_HOST set
    it builds `swift-web:<SHA>` from apps/web/Dockerfile for the same commit
    BEFORE anything is stopped (a site that fails to build leaves the running
@@ -1356,11 +1362,14 @@ the runner's SKIP whose executed steps all passed and whose only cases left
 to the target are the ones the script names (an MMG pay link needs an SMS
 step-up the copy cannot do). Then the system jobs `compliance-sample` and
 `expiry-sweep`. The instance's own metrics must hold: the 95th-percentile
-request time within 1 s, no query waiting for a pool connection, tenant and
-non-tenant bindings ran, and `nontenant_system_in_tx` = 0. The copy is removed
-however the run ends, after its api, worker and api-journeys logs (the last
-400 lines each, redacted) are kept in the run's results directory
-(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`) and the first `FATAL` lines are
+request time within 1 s, the pool never at its connection limit (the
+instance's own limit, read inside its container before the journeys; a query in
+flight at a sample is reported, not judged), tenant and non-tenant bindings ran,
+and `nontenant_system_in_tx` = 0. The copy is removed however the run ends,
+after its api, worker and api-journeys logs (the last 400 lines each, redacted)
+are kept in the run's results directory
+(`~/swift-journeys-copy/copy-<UTC>/copy-logs/`), with the instance's metrics
+samples (`metrics/`, redacted) once sampling began, and the first `FATAL` lines are
 printed, and `JOURNEYS PASSED` is printed only when every step held. The live staging API and database are only read. The copy has its own
 freshly generated secrets, so staging rows encrypted under the live key do not
 read on it; the journeys make their own accounts. Any failure is a stop:

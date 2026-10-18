@@ -59,7 +59,7 @@ export const MMG_SWAP_SETTLES_DIRECTLY =
  * the line itself is the record (an approved line IS the substitute), so only
  * the state remains.
  */
-export function substitutionView(line: {
+type ViewLine = {
   subStatus: string;
   name: string;
   quantity: number;
@@ -67,10 +67,37 @@ export function substitutionView(line: {
   substituteItemId: string | null;
   substituteName: string | null;
   substitutePrice: unknown;
+  substituteDecideBy?: Date | null;
   selectedOptions: readonly OptionSnapshot[];
-}, order: Parameters<typeof assertMmgFulfilmentAllowed>[0] & { totalAmount: unknown }) {
+};
+type ViewOrder = Parameters<typeof assertMmgFulfilmentAllowed>[0] & { totalAmount: unknown };
+
+/**
+ * [SUBSTITUTION · owner 17 Oct 2026] How long a store's swap question waits
+ * for the customer. An ops setting (env SUBSTITUTION_DECIDE_MINUTES), NOT the
+ * signed platform config: whole minutes, clamped to 3..30, default 10. Anything
+ * unreadable is the default — a typo never makes the wait endless or instant.
+ */
+export const SUBSTITUTION_DECIDE_MINUTES_DEFAULT = 10;
+export function substitutionDecideMinutes(raw: string | undefined = process.env['SUBSTITUTION_DECIDE_MINUTES']): number {
+  const trimmed = raw?.trim() ?? '';
+  if (!/^\d+$/.test(trimmed)) return SUBSTITUTION_DECIDE_MINUTES_DEFAULT;
+  return Math.min(30, Math.max(3, Number(trimmed)));
+}
+
+/**
+ * What happens when nobody answers in time — the SAFE default, never a silent
+ * swap: the line is REMOVED (it comes off the order and the total drops). An
+ * MMG order's total can't change in-app, so there the question is WITHDRAWN and
+ * the store settles the item with the customer directly; no money moves.
+ */
+export function substitutionNoAnswer(order: { paymentMethod: string | null }): 'REMOVE' | 'WITHDRAW' {
+  return order.paymentMethod === 'MOBILE_MONEY' ? 'WITHDRAW' : 'REMOVE';
+}
+
+export function substitutionView(line: ViewLine, order: ViewOrder) {
   if (line.subStatus === 'NONE') return null;
-  if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null };
+  if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null, decideBy: null, ifNoAnswer: null };
   const delta = substitutionLineChange(line).delta;
   const mmg = order.paymentMethod === 'MOBILE_MONEY';
   // Use the existing approval guard verbatim: a proposal may outlive the
@@ -98,5 +125,57 @@ export function substitutionView(line: {
     priceDelta: delta,
     decisions: { approve: !approvalHold && !negativeTotal && (!mmg || delta === 0), reject: !mmg },
     settlementGuidance,
+    // [SUBSTITUTION] The wait is bounded and the customer is told how: answer
+    // by decideBy, or ifNoAnswer happens (REMOVE = the item comes off and the
+    // total drops; WITHDRAW = MMG, the store settles it with you directly).
+    decideBy: line.substituteDecideBy ? line.substituteDecideBy.toISOString() : null,
+    ifNoAnswer: substitutionNoAnswer(order),
+  };
+}
+
+/**
+ * [SUBSTITUTION · owner 17 Oct 2026] The item fields a client WITHOUT the
+ * swapDecisions=v1 capability gets (iPhone build 9 / 11, Android vc5 / vc7).
+ *
+ * Those builds already carry a swap card — "{item} is out of stock. {store}
+ * suggests {substituteName} ({substitutePrice} × qty) instead. Rejecting removes
+ * the item and lowers your total. [Approve swap] [No thanks]" — wired to the
+ * same POST /customer/orders/:id/items/:lineId/substitution the server still
+ * serves. Hiding the flat fields from them (ruling A, 7 Oct) left the customer
+ * with NO way to see the question: the store waited on an answer nobody could
+ * give. Owner 17 Oct: the customer is ALWAYS told; old builds get true text.
+ *
+ * So the old card is switched on exactly when every word on it is true and
+ * both of its buttons work: both decisions are open (that already excludes MMG,
+ * a payment hold and a negative total). Options the customer chose that do not
+ * come with the swap are named in the substitute's name, the one place the
+ * old card prints it. Otherwise the line's NAME carries the true status.
+ * A removed line (refunded / rejected) says so and lists nothing charged, so the
+ * old item list adds up to the total it shows.
+ */
+export function legacySwapItemFields(line: ViewLine, order: ViewOrder): {
+  name?: string;
+  lineTotal?: number;
+  subStatus?: 'PENDING';
+  substituteName?: string;
+  substitutePrice?: number;
+} {
+  if (line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED') {
+    return { name: `${line.name} (removed, not charged)`, lineTotal: 0 };
+  }
+  if (line.subStatus !== 'PENDING') return {};
+  const view = substitutionView(line, order);
+  if (view?.decisions?.approve && view.decisions.reject) {
+    const lost = (view.original?.options.length ?? 0) > 0;
+    return {
+      subStatus: 'PENDING',
+      substituteName: `${line.substituteName ?? 'another item'}${lost ? ' (your chosen options don’t come with it)' : ''}`,
+      substitutePrice: Number(line.substitutePrice ?? 0),
+    };
+  }
+  return {
+    name: substitutionNoAnswer(order) === 'WITHDRAW'
+      ? `${line.name} (out of stock: the store will settle this item with you directly)`
+      : `${line.name} (out of stock: it is being removed and your total will go down)`,
   };
 }

@@ -168,6 +168,67 @@ export function safetyWorkerConcurrency(env: Record<string, string | undefined> 
   return Number.isSafeInteger(value) && value >= 2 && value <= 20 ? value : 4;
 }
 
+/** [row 331 · #1794 S3-1] Where each safety tick stamps its last COMPLETED
+ *  run (epoch ms). Read by checkSafetyLane, which runs on another lane. */
+export const safetyTickCompletedKey = (name: string): string => `safety:tick-completed:${name}`;
+
+/** [row 331 · #1794 S3-1] How long a safety tick may go without completing
+ *  before the platform is paged. Default 60 s: the SOS tick runs every 10 s,
+ *  the guardian every 15 s, and the lane has several slots, so a minute with no
+ *  completion means every slot is stuck or the lane stopped. 30 s .. 10 min;
+ *  anything else falls back to the default. */
+export function safetyTickStaleMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SAFETY_TICK_STALE_MS']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 60_000;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 30_000 && value <= 600_000 ? value : 60_000;
+}
+
+/** The OpsAlert title of the stalled-lane page (one open page at a time; closed when ticks complete again). */
+export const SAFETY_LANE_STALLED_TITLE = 'SOS safety lane stalled';
+
+/**
+ * [row 331 · #1794 review S3-1] Watch the safety lane from OUTSIDE it. Every
+ * SOS watchdog runs inside the safety ticks, so a lane whose slots are all held
+ * by calls that never settle, or whose worker stopped consuming, would page
+ * nobody (the DLQ alarm only sees FAILED jobs). The scheduler heartbeat, a
+ * dispatch-queue job, calls this every minute: a tick that has not completed
+ * within the window opens a platform page (an OpsAlert: SUPER_ADMIN push and an
+ * on-call text, delivered here, outside the lane); ticks completing again close
+ * it. Inside the boot grace nothing is judged: the first ticks have not run.
+ */
+export async function checkSafetyLane(
+  ctx: JobContext,
+  bootedAtMs: number,
+  nowMs: number = Date.now(),
+  staleMs: number = safetyTickStaleMs(),
+): Promise<{ stalled: string[] }> {
+  if (nowMs - bootedAtMs < staleMs) return { stalled: [] };
+  const stalled: Array<{ name: string; ageSeconds: number | null }> = [];
+  for (const name of SAFETY_TIMER_JOBS) {
+    const raw = await ctx.redis.get(safetyTickCompletedKey(name));
+    const at = raw !== null && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(at) || nowMs - at > staleMs) {
+      stalled.push({ name, ageSeconds: Number.isFinite(at) ? Math.round((nowMs - at) / 1000) : null });
+    }
+  }
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  if (stalled.length === 0) {
+    await resolveOpsPage(ctx.prisma, SAFETY_LANE_STALLED_TITLE, 'safety-lane-completing');
+    return { stalled: [] };
+  }
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const oldest = stalled.reduce<number | null>((max, s) => (s.ageSeconds === null ? max : Math.max(max ?? 0, s.ageSeconds)), null);
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) }, {
+    key: 'ops_page:safety-lane-stalled',
+    windowSeconds: 600,
+    title: SAFETY_LANE_STALLED_TITLE,
+    body: `${stalled.map((s) => `${s.name} ${s.ageSeconds === null ? 'has not completed since the worker started' : `last completed ${s.ageSeconds}s ago`}`).join('; ')}. The SOS backstop, its escalation retries and the SOS watchdogs run in this lane: an SOS may not be escalated. Restart the worker and check the SMS provider.`,
+    data: { kind: 'safety_sweep_slo', workType: 'safety-lane', stalled: true, ticks: stalled.map((s) => s.name), passAgeSeconds: oldest },
+  });
+  return { stalled: stalled.map((s) => s.name) };
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -566,6 +627,8 @@ export async function inTenantOf<T>(
 
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
+  // [#1794 S3-1] The boot grace of checkSafetyLane starts here.
+  const lanesBootedAt = Date.now();
   const constructedWorkers: Worker[] = [];
   const buildWorker = (
     name: string,
@@ -675,7 +738,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
           notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
             tenantId: stuck.tenantId,
-            title: '🚨 SOS ACTIVE with no ops page delivered',
+            title: 'URGENT: SOS ACTIVE with no ops page delivered',
             body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
             data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
           }),
@@ -695,7 +758,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
       for (const id of esc.platformPage) {
         await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
         ).catch(() => {});
       }
       await scanOpsAlerts(ctx.prisma).catch(() => null);
@@ -962,7 +1025,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📄 Settlement imports need a person',
+                title: 'Settlement imports need a person',
                 body: `${imports.unbalanced.length} published import(s) do not add up, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
@@ -991,7 +1054,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'agent-cash-duplicate-credits', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💵 MMG transactions credited more than once',
+                title: 'MMG transactions credited more than once',
                 body: `${duplicates.length} MMG transaction(s) hold more than one credited agent-cash record. Freeze them, reconcile against the MMG statement, and reverse only by hand — nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'agent-cash-duplicate-credits', count: duplicates.length },
               }),
@@ -1007,7 +1070,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'promo-funding-invariants', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🏷️ Promo funding invariants broken',
+                title: 'Promo funding invariants broken',
                 body: `${promoScan.invalidTerms} active promo(s) with invalid terms; ${promoScan.discountWithoutFunder.sinceEnforced} discounted order(s) since enforcement with no named funder; ${promoScan.tipFundingGap.sinceEnforced} order(s) since enforcement whose tip was discounted. Freeze the promo, then reconcile the orders.`,
                 data: { kind: 'billing_invariants', alert: 'promo-funding-invariants', invalidTerms: promoScan.invalidTerms, discountWithoutFunder: promoScan.discountWithoutFunder.sinceEnforced, tipFundingGap: promoScan.tipFundingGap.sinceEnforced },
               }),
@@ -1023,7 +1086,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'refunds-awaiting-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '↩️ Returns with an inferred refund await review',
+                title: 'Returns with an inferred refund await review',
                 body: `${refundReview.inferredOpen} open return(s) were computed by inference (no order snapshot) and ${refundReview.legacyOpen} legacy return(s) sit on discounted orders. Recompute each from the order's items and contact the store and customer before anything settles.`,
                 data: { kind: 'billing_invariants', alert: 'refunds-awaiting-review', inferredOpen: refundReview.inferredOpen, legacyOpen: refundReview.legacyOpen },
               }),
@@ -1039,7 +1102,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'fare-zone-ambiguity', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🗺️ Fare zones overlap at the same priority',
+                title: 'Fare zones overlap at the same priority',
                 body: `${zoneScan.ambiguousPairs.length} pair(s) of active fare zones overlap at equal priority in one market. Trips there price by the smallest zone until you give one of each pair a different priority or redraw it.`,
                 data: { kind: 'billing_invariants', alert: 'fare-zone-ambiguity', pairs: zoneScan.ambiguousPairs.slice(0, 10) },
               }),
@@ -1055,7 +1118,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'pricing-config-invalid', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💲 Pricing config is invalid',
+                title: 'Pricing config is invalid',
                 body: `${pricingScan.invalid.length} pricing column(s) fail the schema: ${pricingScan.invalid.map((i) => `${i.countryCode} ${i.kind}`).join(', ')}. Quotes there price from the last known good version until the column is fixed.`,
                 data: { kind: 'billing_invariants', alert: 'pricing-config-invalid', invalid: pricingScan.invalid.slice(0, 10) },
               }),
@@ -1076,7 +1139,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-refund-obligations', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad refund obligations need a person',
+                title: 'Ad refund obligations need a person',
                 body: `${adRefunds.failed} refund intent(s) FAILED after every retry and ${adRefunds.terminalWithoutIntent.length} cancelled or killed paid campaign(s) have no refund intent (run the backfill). ${adRefunds.awaitingPayout.count} executed intent(s) await a payout reference.`,
                 data: { kind: 'billing_invariants', alert: 'ad-refund-obligations', failed: adRefunds.failed, terminalWithoutIntent: adRefunds.terminalWithoutIntent.slice(0, 10), awaitingPayout: adRefunds.awaitingPayout.count },
               }),
@@ -1091,7 +1154,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-checkout-invariants', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad checkout invariants broken',
+                title: 'Ad checkout invariants broken',
                 body: `${adCheckout.paidWithoutInventory.length} paid campaign(s) have no confirmed inventory (stop serving and refund or re-book) and ${adCheckout.duplicateActiveInvoices.length} campaign(s) hold more than one active invoice (freeze and reconcile).`,
                 data: { kind: 'billing_invariants', alert: 'ad-checkout-invariants', paidWithoutInventory: adCheckout.paidWithoutInventory.slice(0, 10), duplicateActiveInvoices: adCheckout.duplicateActiveInvoices.slice(0, 10) },
               }),
@@ -1219,6 +1282,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
         await retryAccountErasures(ctx);
+        // [R23 · research C10] Customer accounts unused for 12 months: a notice, then (30 days
+        // on, still unused) the ordinary deletion pipeline. Its own retention receipt.
+        const { inactivitySweep } = await import('../modules/user/inactivity');
+        await inactivitySweep({ prisma: ctx.prisma, io: ctx.io, log: ctx.log });
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1475,7 +1542,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // Platform-wide ops page: an aggregate scan or infra alarm, not one
           // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
           tenantId: null,
-          title: '🛡️ Weekly safety digest',
+          title: 'Weekly safety digest',
           body: digest.lines.join(' · '),
           data: { kind: 'incident_weekly_digest', open: digest.open, breaches: digest.breaches, patterns: digest.patternsThisWeek },
         }).catch(() => {});
@@ -1627,6 +1694,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // settlements stop — silently. The heartbeat key's AGE (exposed as a
         // Prometheus gauge) makes that stall detectable and alertable.
         await ctx.redis.set('scheduler:heartbeat', String(Date.now()));
+        // [row 331 · #1794 S3-1] The safety lane, watched from this lane.
+        try {
+          await checkSafetyLane(ctx, lanesBootedAt);
+        } catch (err) {
+          ctx.log.error({ err }, '[row 331] the safety-lane watchdog could not run this beat — a stalled SOS lane is not being paged');
+        }
         // SWIFT-AUD-D7-02: pool saturation pages (dedup'd). Queries queueing
         // for a connection is the "API is about to brown-out" signal, and the
         // 60s heartbeat is the natural in-process sampling point.
@@ -1786,7 +1859,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ Ad creative review SLA at risk — ${cr.campaign.name}`,
+                title: `Ad creative review SLA at risk — ${cr.campaign.name}`,
                 body: 'A creative has been waiting for review for over 75% of the SLA window. Review it now.',
                 data: { kind: 'ad_review_sla_risk', creativeId: cr.id, campaignId: cr.campaignId },
               }),
@@ -1794,6 +1867,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }
           ctx.log.warn({ count: atRisk.length }, 'ads: creative review SLA at risk');
         }
+        return;
+      }
+
+      if (job.name === 'substitution-expiry') {
+        // [SUBSTITUTION · owner 17 Oct 2026] A store's swap question waits a
+        // bounded time: past it the line is removed (never silently swapped)
+        // or, on MMG, the question is withdrawn — so no order waits forever on
+        // an answer. CAS per line; each line runs in its own order's tenant.
+        const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
+          narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+        });
+        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;
       }
 
@@ -2155,7 +2241,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ SLA breached — case ${b.caseNumber} (${b.severity})`,
+                title: `SLA breached — case ${b.caseNumber} (${b.severity})`,
                 body: `The ${b.kind === 'ACK' ? 'acknowledge' : 'decide'} clock has blown. Work the case now.`,
                 data: { kind: 'incident_sla_breach', caseId: b.id, breach: b.kind, severity: b.severity },
               }),
@@ -2248,7 +2334,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           await opsPageOnce(ctx, 'taxi-unpaid-earning', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               tenantId: null,
-              title: '🚕 Cash jobs completed without a recorded payment',
+              title: 'Cash jobs completed without a recorded payment',
               body: `${taxiUnpaidDelivered.sinceEnforced} ride(s) and ${courierUnpaidDelivered.sinceEnforced} courier job(s) are delivered with no collected cash since the cash outcome became mandatory. A completion path is bypassing the cash step — review before a mover is paid for money nobody recorded.`,
               data: { kind: 'earnings_missing', variant: 'cash_unpaid_completion', taxi: taxiUnpaidDelivered.sinceEnforced, courier: courierUnpaidDelivered.sinceEnforced },
             }),
@@ -2262,7 +2348,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // Platform-wide ops page: an aggregate scan or infra alarm, not one
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
-              title: '💸 Movers were paid late by the reconciler',
+              title: 'Movers were paid late by the reconciler',
               body: `${healed.length} delivered order(s) had no earnings row and were healed. A completion path is losing the earnings write — investigate before a mover notices first.`,
               data: { kind: 'earnings_missing', count: healed.length },
             }),
@@ -2347,7 +2433,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await sosGraceTick();
       } else if (job.name === 'guardian-sweep') {
         await guardianTick();
+      } else {
+        // [#1794 S4] Never "done" for a job this lane does not run: it fails,
+        // dead-letters, and the DLQ alarm pages.
+        throw new UnrecoverableError(`The safety lane runs only ${SAFETY_TIMER_JOBS.join(' and ')}; "${job.name}" was put on it by mistake`);
       }
+      // [#1794 S3-1] Completed: stamp it for checkSafetyLane (another lane reads it).
+      // A failed stamp is logged, never a failed tick.
+      await ctx.redis.set(safetyTickCompletedKey(job.name), String(Date.now()))
+        .catch((err: unknown) => ctx.log.warn({ err, tick: job.name }, '[row 331] could not stamp a completed safety tick'));
     },
     { connection, concurrency: safetyWorkerConcurrency() },
   );
@@ -2611,6 +2705,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Ads reservation expiry [ads-platform spec §7.3]: every minute, release
   // RESERVED holds whose TTL lapsed so the inventory frees up for others.
   await queues.dispatchQueue.add('ads-release-expired', {}, {
+    repeat: { pattern: '* * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [SUBSTITUTION · owner 17 Oct 2026] Swap-question deadlines: every minute,
+  // remove (or, on MMG, withdraw) any swap the customer did not answer in time.
+  await queues.dispatchQueue.add('substitution-expiry', {}, {
     repeat: { pattern: '* * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
