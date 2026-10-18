@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor } from '../rating/rating-groups';
 import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
@@ -482,12 +483,12 @@ export async function ridesRoutes(app: FastifyInstance) {
     // heals rows born before the assignment hook/backfill.
     const { vehicleIdentityFor } = await import('./vehicle-identity');
     // R8.4: the ride card shows "{Driver} · {display}★" from the ONE mapper.
-    const { ratingSurfaces } = await import('../rating/rating-surface');
-    const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
+    // [COORD 18 Oct, option S] The driver's star is shown from whole groups of 5 only (display; dispatch keeps its math).
+    const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
+    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
       ? safeMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
@@ -511,9 +512,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
     if (ride.driver) {
-      const { ratingSurfaces } = await import('../rating/rating-surface');
-      const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
-      (ride.driver as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
+      const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
+      Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });
     }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.

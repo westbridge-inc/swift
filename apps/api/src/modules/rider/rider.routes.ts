@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingTotals } from '../rating/rating-groups';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -478,8 +479,8 @@ export async function riderRoutes(app: FastifyInstance) {
         stats: {
           totalDeliveries: rider.totalDeliveries,
           totalCourierJobs: rider.totalCourierJobs,
-          averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-          totalRatings: rider.totalRatings,
+          // [COORD 18 Oct, option S] from whole groups of 5 only (rating-groups.ts).
+          ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
           completionRate: rider.completionRate ? Number(rider.completionRate) : null,
           todayEarnings: Number(todayEarnings._sum.amount ?? 0),
           todayDeliveries,
@@ -2287,8 +2288,7 @@ export async function riderRoutes(app: FastifyInstance) {
         currentOrderId: rider.currentOrderId,
         totalDeliveries: rider.totalDeliveries,
         totalCourierJobs: rider.totalCourierJobs,
-        averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-        totalRatings: rider.totalRatings,
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         completionRate: rider.completionRate ? Number(rider.completionRate) : null,
         onlineHoursToday,
         todayDeliveries,

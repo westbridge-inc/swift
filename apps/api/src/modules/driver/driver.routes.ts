@@ -1,4 +1,5 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
+import { shownRatingFor } from '../rating/rating-groups';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
@@ -903,7 +904,7 @@ export async function driverRoutes(app: FastifyInstance) {
           vehicleColor: driver.vehicleColor,
           licensePlate: driver.licensePlate,
           vehiclePhotoUrl: driver.vehiclePhotoUrl,
-          rating: driver.averageRating,
+          rating: (await shownRatingFor(app.prisma, 'DRIVER', driver.userId)).average,
           currentLat: driver.currentLat,
           currentLng: driver.currentLng,
         },
@@ -1725,7 +1726,7 @@ export async function driverRoutes(app: FastifyInstance) {
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,
-        averageRating: driver.averageRating,
+        averageRating: (await shownRatingFor(app.prisma, 'DRIVER', request.user.userId)).average,
         acceptanceRate: driver.acceptanceRate,
         cancellationRate: driver.cancellationRate,
       },

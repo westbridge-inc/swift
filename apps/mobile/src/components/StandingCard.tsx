@@ -4,6 +4,7 @@ import { View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { Card, T, TonePill } from '../kit';
 import { Stars } from '../kit/controls';
+import { standingGroupNote } from './standingNote';
 
 // ---------------------------------------------------------------------------
 // Movement R — R9: the Standing module, 5-second-glance discipline.
@@ -23,6 +24,8 @@ export interface StandingData {
   topPositive: Array<{ tag: string; label: string; count: number }>;
   topNegative: Array<{ tag: string; label: string; count: number }>;
   coaching: Array<{ tag: string; label: string; line: string }>;
+  /** Set for a person: every figure is over whole groups of this many ratings, one bar per group. */
+  groupSize?: number;
 }
 
 const BAND: Record<string, { label: string; tone: 'brand' | 'success' | 'error' | 'neutral' }> = {
@@ -40,6 +43,7 @@ function tagLine(tags: StandingData['topPositive']): string {
 export function StandingCard({ data, title = 'Your standing' }: { data: StandingData; title?: string }) {
   const band = BAND[data.standing] ?? BAND['NEW']!;
   const maxBar = 28;
+  const groupNote = standingGroupNote(data.groupSize);
   return (
     <Card style={{ marginBottom: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -82,6 +86,11 @@ export function StandingCard({ data, title = 'Your standing' }: { data: Standing
         </View>
       </View>
 
+      {groupNote ? (
+        <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+          {groupNote}
+        </T>
+      ) : null}
       {data.topPositive.length > 0 ? (
         <T variant="caption" tone="muted" style={{ marginTop: space.md }}>
           Customers mention: {tagLine(data.topPositive)}

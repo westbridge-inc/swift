@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingsFor, shownSurface } from '../rating/rating-groups';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { RatingService } from '../rating/rating.service';
@@ -21,7 +22,6 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
-import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
@@ -316,7 +316,10 @@ export async function servicesRoutes(app: FastifyInstance) {
     // (`totalRatings > 0`) — a THIRD definition of the same rule, and one that
     // let a single 1-star rating brand a provider on the browse page.
     const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
-    const surfaces = await ratingSurfaces(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.id));
+    // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
+    // ranking below still reads the true mean (display only).
+    const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
+    const rankMean = new Map(visible.map((p) => [p.id, p.averageRating]));
 
     const ranked = visible
       .map((provider) => {
@@ -332,9 +335,9 @@ export async function servicesRoutes(app: FastifyInstance) {
           // The honest star line (displayRating / ratingBucket / topRated).
           // Kept alongside the raw fields, which the sort still uses as a
           // tie-break — ranking may read the true mean; DISPLAY may not.
-          ...(surfaces.get(provider.id) ?? NEW_ACTOR_SURFACE),
-          averageRating: provider.averageRating,
-          totalRatings: provider.totalRatings,
+          ...shownSurface(shown.get(provider.userId)!),
+          averageRating: shown.get(provider.userId)!.average,
+          totalRatings: shown.get(provider.userId)!.ratingCount,
           selfSkilled: qualifications.length === 0,
           certified: qualifications.length > 0,
           badges: qualifications.map((qualification) => qualification.type),
@@ -347,7 +350,7 @@ export async function servicesRoutes(app: FastifyInstance) {
       // Surface licensed (certified) providers first — strongest signal for high-risk trades.
       .sort((a, b) => (
         Number(b.certified) - Number(a.certified)
-        || b.averageRating - a.averageRating
+        || rankMean.get(b.id)! - rankMean.get(a.id)!
         || a.id.localeCompare(b.id)
       ));
 

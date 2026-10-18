@@ -22,7 +22,7 @@ describe('groupRatings', () => {
 
   it('nothing after the first rating still open to editing counts yet', () => {
     const rows = [row(5, 30), row(5, 29), row(5, 28), row(5, 27), row(1, 26, true), row(5, 20), row(5, 19)];
-    expect(groupRatings(rows, now)).toEqual({ groups: [], count: 0, sum: 0, average: null });
+    expect(groupRatings(rows, now)).toEqual({ groups: [], rows: [], count: 0, sum: 0, average: null });
   });
 
   it('an older rating with no edit window is final', () => {

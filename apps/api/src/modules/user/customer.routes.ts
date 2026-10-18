@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -857,8 +858,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  and riders rate them too; respect runs both ways). Aggregate only —
    *  never per-rating rows, never who said what. */
   app.get('/rating', async (request: AuthRequest) => {
-    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
-    return { success: true, data: surface };
+    // [COORD 18 Oct, option S] A customer's own star is shown from whole groups of 5 only (rating-groups.ts).
+    const { displayRating, ratingBucket, ratingCount, topRated } = await shownRatingFor(app.prisma, 'CUSTOMER', request.user.userId);
+    return { success: true, data: { displayRating, ratingBucket, ratingCount, topRated } };
   });
 
   app.get('/profile', async (request: AuthRequest) => {
@@ -2688,10 +2690,8 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
-    // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
-    const riderSurface = order.rider?.userId
-      ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
-      : null;
+    // R8.4: the live-order card shows "{Rider} · {display}★" — [COORD 18 Oct, option S] from whole groups of 5 only.
+    const riderSurface = order.rider?.userId ? shownSurface(await shownRatingFor(app.prisma, 'RIDER', order.rider.userId)) : null;
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
