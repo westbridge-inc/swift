@@ -1,8 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import { STORE_MAP_START } from '@/lib/store-pin';
 import { PinPicker, PIN_CITY_CENTRE, type ChosenPin } from './pin-picker';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
+import { TEST_MAPTILER_KEY } from '@/test/map-tiles-fixture';
 
 // ---------------------------------------------------------------------------
 // [WEB-PIN] The shared customer pin picker, on its own: what it hands its
@@ -24,6 +26,8 @@ let fetchMock: ReturnType<typeof mockApi>;
 const calls = (pathname: string) => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === pathname);
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
 const last = (onChange: ReturnType<typeof vi.fn>) => onChange.mock.calls.at(-1)?.[0] as ChosenPin | null | undefined;
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
@@ -157,14 +161,28 @@ describe('[WEB-PIN] the pin picker', () => {
     await waitFor(() => expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, address: null, named: true }));
   });
 
-  it('map tiles tell OpenStreetMap the site, never the page (its tile policy requires a Referer)', () => {
+  it('map tiles come from MapTiler, credited to MapTiler and OpenStreetMap, and tell MapTiler the site, never the page', () => {
     render(<PinPicker mapLabel="Test pin map" onChange={vi.fn()} />);
     const tiles = [...screen.getByRole('application').querySelectorAll('img')];
     expect(tiles.length).toBeGreaterThan(0);
     for (const tile of tiles) {
-      expect(tile.getAttribute('src')).toMatch(/^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/);
+      expect(tile.getAttribute('src')).toMatch(new RegExp(`^https://api\\.maptiler\\.com/maps/streets-v2/256/\\d+/\\d+/\\d+\\.png\\?key=${TEST_MAPTILER_KEY}$`));
+      // The key is restricted to the site's origins: the Referer carries the origin, never the page's path.
       expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     }
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === '© MapTiler © OpenStreetMap contributors')).toBeTruthy();
+  });
+
+  it('a built site without the MapTiler key draws no tiles, says so, and never hands over a pin', async () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    const onChange = vi.fn();
+    render(<PinPicker mapLabel="Test pin map" start={{ latitude: 6.8, longitude: -58.15 }} onChange={onChange} />);
+    expect(screen.getByRole('application').querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+    expect(screen.queryByText('Loading map…')).toBeNull();
+    expect(screen.queryByText(/OpenStreetMap contributors/)).toBeNull();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    expect(onChange.mock.calls.every(([pin]) => pin === null)).toBe(true);
   });
 
   it('a map that failed to load gives no pin until it is retried and seen', async () => {
