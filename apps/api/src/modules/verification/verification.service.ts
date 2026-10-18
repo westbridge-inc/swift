@@ -1453,12 +1453,17 @@ export class VerificationService {
 
     const outcome = await this.projectionTransaction(async (tx) => {
       await assertNotRecused(tx, review.reviewerId, candidate.userId);
-      const users = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "users"
+      const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
+        SELECT "id", "phone" FROM "users"
         WHERE "id" = ${candidate.userId}
         FOR UPDATE /* verification-document-decision-authority */
       `;
       if (!users[0]) throw new NotFoundError('User', candidate.userId);
+      // [#1879 · REVIEW-F S3-2] An erased account (its erasure marker commits under this same lock) is decided
+      // nothing: a document a legal hold kept would otherwise re-create the outbox row, the notice and a trial.
+      if (users[0].phone === `deleted:${candidate.userId}`) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Its documents cannot be decided.');
+      }
 
       if (requestedStatus === 'APPROVED') {
         const pending = await this.lockApprovalSubject(tx, docId);
@@ -2879,8 +2884,8 @@ export class VerificationService {
    * suspended by a lapsed document re-opens when verification is restored.
    */
   /**
-   * [GUARDRAILS §2 · #1879] The deletion write barrier for work owed after an approval, the one account
-   * erasure honours (the deletion-terminal statuses submitDocument refuses, or the erasure marker). Read
+   * [GUARDRAILS §2 · #1879] The deletion write barrier for work owed after an approval: the account erasure's
+   * own commit (status DEACTIVATED, or the deleted:<id> marker). Read
    * under the person's row lock (FOR SHARE): an erasure holding FOR UPDATE commits first, so an account
    * erased or being erased is seen closed here. The erasure deletes the outbox rows in that same transaction.
    * Not covered: an erasure that begins after this read and commits while the tail runs (the tail's writes are
@@ -2894,7 +2899,9 @@ export class VerificationService {
         FOR SHARE /* approval-tail-deletion-barrier */
       `;
       const person = rows[0];
-      return Boolean(person) && person!.phone !== `deleted:${userId}` && !['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(person!.status);
+      // [REVIEW-F S2-2] Only an erasure closes it: SUSPENDED and BANNED are reversible, and a reinstated
+      // person is still owed the trial. DEACTIVATED is the erasure's status commit; the marker is its tombstone.
+      return Boolean(person) && person!.phone !== `deleted:${userId}` && person!.status !== 'DEACTIVATED';
     });
   }
 

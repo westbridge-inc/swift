@@ -195,7 +195,9 @@ describe('D9-05 — account deletion (erasure)', () => {
     const u = await makeUser(['CUSTOMER']);
     const tenantId = (await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { tenantId: true } })).tenantId;
     await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId: `doc-${nanoid(8)}`, userId: u.userId, command: APPROVAL_TAIL } });
-    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(1);
+    // [REVIEW-F S4] A row the drain already processed names the person too: it goes as well.
+    await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId: `doc-${nanoid(8)}`, userId: u.userId, command: APPROVAL_TAIL, processedAt: new Date() } });
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(2);
 
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);
     expect(res.statusCode).toBe(200);
@@ -249,6 +251,41 @@ describe('D9-05 — account deletion (erasure)', () => {
     for (const s of tail) s.mockRestore();
     expect(await app.prisma.notification.count({ where: { userId: u.userId } })).toBe(notificationsBefore);
     expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(0);
+  });
+
+  it('[#1879 · REVIEW-F S2-2] a SUSPENDED (or BANNED) account is not erased: the approval tail still runs for it', async () => {
+    for (const status of ['SUSPENDED', 'BANNED'] as const) {
+      const u = await makeUser(['CUSTOMER']);
+      const tenantId = (await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { tenantId: true } })).tenantId;
+      const documentId = `doc-${nanoid(8)}`;
+      await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId, userId: u.userId, command: APPROVAL_TAIL } });
+      await app.prisma.user.update({ where: { id: u.userId }, data: { status } });
+      const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+      const projection = vi.spyOn(svc as never, 'projectVendorActivation' as never) as unknown as { mock: { calls: unknown[][] }; mockRestore(): void };
+      const spy = vi.spyOn(app.prisma.verificationDocument, 'findUnique').mockImplementationOnce((async () => ({ state: 'COMMITTED' })) as never);
+      try {
+        await expect(svc.processDecisionOutbox({ documentId, now: new Date(Date.now() + 1000) })).resolves.toEqual({ processed: 1, failed: 0 });
+      } finally { spy.mockRestore(); }
+      // Reversible: the tail ran (a reinstated person keeps what the approval owed), and the row closed as done.
+      expect({ status, ran: projection.mock.calls.length > 0 }).toEqual({ status, ran: true });
+      projection.mockRestore();
+      const row = await app.prisma.verificationDecisionOutbox.findFirstOrThrow({ where: { documentId } });
+      expect({ status, processed: row.processedAt !== null, lastError: row.lastError }).toEqual({ status, processed: true, lastError: null });
+    }
+  });
+
+  it('[#1879 · REVIEW-F S3-2] a document of an erased account is decided nothing (no outbox row, no notice, no trial)', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
+    const doc = await app.prisma.verificationDocument.create({ data: { userId: u.userId, role: 'CUSTOMER', docType: 'police_clearance', fileUrl: fileKey } });
+    // The erasure marker as the erasure commits it (a legal hold, say, kept this document past the purge).
+    await app.prisma.user.update({ where: { id: u.userId }, data: { phone: `deleted:${u.userId}`, status: 'DEACTIVATED' } });
+    const notificationsBefore = await app.prisma.notification.count({ where: { userId: u.userId } });
+    const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    await expect(svc.approveDocument(doc.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000))).rejects.toMatchObject({ code: 'ACCOUNT_CLOSED' });
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).status).toBe('PENDING');
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(0);
+    expect(await app.prisma.notification.count({ where: { userId: u.userId } })).toBe(notificationsBefore);
   });
 
   it('[NR-3 gap 3] the deletion write barrier: a deactivated account cannot grow identity data back', async () => {

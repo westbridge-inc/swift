@@ -194,7 +194,8 @@ export class AccountService {
         await tx.session.deleteMany({ where: { userId } });
         await tx.deviceToken.deleteMany({ where: { userId } });
         // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
-        // account, under this lock: a closed account is never given a trial, and the row's userId never
+        // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
+        // verification.service openForOwedWork), and the row's userId never
         // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
         await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
       };
