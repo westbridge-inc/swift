@@ -86,9 +86,15 @@ async function buildTestApp() {
   return server;
 }
 
+// [AUD-L7-008] This suite runs the app in development mode; the worker must
+// get its own mode back afterwards. Registered first, so it runs LAST (after
+// the teardown below unstubs).
+const NODE_ENV_AT_LOAD = process.env['NODE_ENV'];
+afterAll(() => { expect(process.env['NODE_ENV']).toBe(NODE_ENV_AT_LOAD); });
+
 beforeAll(async () => {
   vi.stubEnv('ADS_ENABLED', '1');
-  process.env['NODE_ENV'] = 'development';
+  vi.stubEnv('NODE_ENV', 'development'); // restored by vi.unstubAllEnvs() in afterAll
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
