@@ -190,7 +190,8 @@ describe('[STORE-ALERT] an earner can turn push on, and coming back from Setting
     expect(mocks.requestPermissions).toHaveBeenCalledTimes(1);
     expect(mocks.post).toHaveBeenCalledWith(
       'https://api.test/api/v1/customer/notifications/devices',
-      { token: 'ExponentPushToken[shared-device]', platform: 'ios' },
+      // [RINGER] registration also says what the binary can ring with (0 = no job ring)
+      { token: 'ExponentPushToken[shared-device]', platform: 'ios', alertsVersion: 0 },
       expect.anything(),
     );
     expect(mocks.openSettings).not.toHaveBeenCalled();
