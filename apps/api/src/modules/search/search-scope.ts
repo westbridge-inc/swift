@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { enterTenant, getTenantContext } from '../../plugins/tenant-context';
 import { searchScopeCounter } from '../../plugins/observability';
-import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
+import { hasSessionCookie, parseCookies } from '../auth/browser-session';
 
 // ---------------------------------------------------------------------------
 // [R048-003] THE PUBLIC MARKET / SEARCH SCOPE.
@@ -179,8 +179,7 @@ export function bindBrowseTenant(app: FastifyInstance) {
   const bindPublicTenant = bindPublicMarketTenant(app);
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const cookies = parseCookies(request.headers.cookie);
-    if (request.headers.authorization !== undefined ||
-      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
+    if (request.headers.authorization !== undefined || hasSessionCookie(cookies)) {
       await app.authenticate(request, reply);
     } else {
       await bindPublicTenant(request);

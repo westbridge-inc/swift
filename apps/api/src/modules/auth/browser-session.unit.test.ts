@@ -7,6 +7,8 @@ import {
   adoptCookieCredential,
   SIGNUP_CONTINUATION_COOKIE,
   clearSignupContinuationCookie,
+  hasSessionCookie,
+  sessionCookieNamesFor,
   resetBrowserOriginsForTests,
   setSessionCookies,
   setSignupContinuationCookie,
@@ -146,5 +148,25 @@ describe('browser signup continuation', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe('the browse gate and the cookie names agree on what a session cookie is', () => {
+  const PROD = { NODE_ENV: 'production' };
+  const req = (client?: string) => ({ headers: client ? { 'x-swift-client': client } : {} }) as unknown as FastifyRequest;
+
+  it('either pair — the plain one or the admin console\'s __Host- one — is a session to authenticate; anything else is a guest', () => {
+    expect(hasSessionCookie({ swift_at: 'a' })).toBe(true);
+    expect(hasSessionCookie({ swift_rt: 'r' })).toBe(true);
+    expect(hasSessionCookie({ '__Host-swift_at': 'a' })).toBe(true);
+    expect(hasSessionCookie({ '__Host-swift_rt': 'r' })).toBe(true);
+    expect(hasSessionCookie({ other: 'x', swift_signup: 's' })).toBe(false);
+  });
+
+  it('only the admin console under a Secure posture is host-bound; the web app and a native client keep the plain, path-scoped names', () => {
+    expect(sessionCookieNamesFor(req('admin-web'), PROD)).toEqual({ access: '__Host-swift_at', refresh: '__Host-swift_rt', accessPath: '/', refreshPath: '/' });
+    expect(sessionCookieNamesFor(req('web'), PROD)).toEqual({ access: 'swift_at', refresh: 'swift_rt', accessPath: '/api/v1', refreshPath: '/api/v1/auth' });
+    expect(sessionCookieNamesFor(req(), PROD).access).toBe('swift_at');
+    expect(sessionCookieNamesFor(req('admin-web'), { NODE_ENV: 'development', API_PUBLIC_URL: 'http://localhost:3000' }).access).toBe('swift_at');
   });
 });

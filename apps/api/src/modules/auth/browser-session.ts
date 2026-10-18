@@ -38,6 +38,55 @@ export const REFRESH_COOKIE_MAX_AGE_S = 30 * 24 * 3600;
 export const ACCESS_COOKIE_MAX_AGE_S = 15 * 60;
 export const SIGNUP_CONTINUATION_COOKIE_MAX_AGE_S = 10 * 60;
 
+// ---------------------------------------------------------------------------
+// THE ADMIN CONSOLE'S COOKIES ARE BOUND TO THE API HOST.
+//
+// A plain-named cookie can be SET for the API host by any sibling subdomain
+// (`Domain=.<site>`), and the web app's own session cookies live on the same
+// host under the same names: a session tossed into an admin's browser — or the
+// web app's session in the same browser — reached the admin console's requests
+// as if the admin had signed in (session fixation; one app's session read as
+// the other's). `__Host-` makes a browser refuse any Set-Cookie for that name
+// that is not Secure, at Path=/, with no Domain, so only the API host itself,
+// over TLS, can write it. The prefix needs Secure, so it applies only where the
+// cookies are Secure (the same `secure()` predicate as the writer below; plain
+// HTTP local development keeps the plain pair, which a browser would otherwise
+// drop), and Path=/, which the web app's path-scoped pair does not use — so the
+// web app is untouched. Reader and writer decide the names HERE, from the same
+// request: over TLS the admin console is authenticated ONLY by its `__Host-`
+// pair; a plain-named cookie on an admin-console request is not a credential.
+// ---------------------------------------------------------------------------
+
+export const HOST_COOKIE_PREFIX = '__Host-';
+export const ADMIN_BROWSER_CLIENT = 'admin-web';
+type Env = Record<string, string | undefined>;
+
+export interface SessionCookieNames {
+  readonly access: string;
+  readonly refresh: string;
+  readonly accessPath: string;
+  readonly refreshPath: string;
+}
+const PLAIN_SESSION_COOKIES: SessionCookieNames = Object.freeze({
+  access: ACCESS_COOKIE, refresh: REFRESH_COOKIE, accessPath: ACCESS_COOKIE_PATH, refreshPath: REFRESH_COOKIE_PATH,
+});
+const HOST_SESSION_COOKIES: SessionCookieNames = Object.freeze({
+  access: `${HOST_COOKIE_PREFIX}${ACCESS_COOKIE}`, refresh: `${HOST_COOKIE_PREFIX}${REFRESH_COOKIE}`, accessPath: '/', refreshPath: '/',
+});
+
+type RequestPosture = Pick<FastifyRequest, 'headers'> & { protocol?: string };
+
+/** The session cookie names and paths for this request's browser client under this transport. */
+export function sessionCookieNamesFor(request: RequestPosture, env: Env = process.env): SessionCookieNames {
+  return browserClientOf(request) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
+}
+
+/** Whether a cookie jar carries either session pair (the browse gate's "this is a session: authenticate it"). */
+export function hasSessionCookie(cookies: Record<string, string>): boolean {
+  return [PLAIN_SESSION_COOKIES, HOST_SESSION_COOKIES]
+    .some((names) => Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh));
+}
+
 export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
   const raw = request.headers[BROWSER_CLIENT_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
@@ -84,11 +133,11 @@ function originOf(request: Pick<FastifyRequest, 'headers'>): string | null {
  * browser client AND comes from an allowed origin. A cookie on a request
  * without both is not a credential.
  */
-export function bearerOrCookieToken(request: Pick<FastifyRequest, 'headers'>): string {
+export function bearerOrCookieToken(request: RequestPosture, env: Env = process.env): string {
   const bearer = request.headers.authorization;
   if (typeof bearer === 'string' && bearer.startsWith('Bearer ')) return bearer.slice('Bearer '.length);
   const cookies = parseCookies(request.headers['cookie']);
-  const cookie = cookies[ACCESS_COOKIE];
+  const cookie = cookies[sessionCookieNamesFor(request, env).access];
   if (!cookie) return '';
   if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
   const origin = originOf(request);
@@ -115,10 +164,10 @@ export function adoptCookieCredential(request: FastifyRequest): 'bearer' | 'cook
 }
 
 /** The refresh credential for the auth routes: the body's token (native apps) or the refresh cookie (browsers, same gate). */
-export function refreshCredentialOf(request: Pick<FastifyRequest, 'headers' | 'body'>): string | null {
+export function refreshCredentialOf(request: RequestPosture & Pick<FastifyRequest, 'body'>, env: Env = process.env): string | null {
   const body = (request.body ?? {}) as { refreshToken?: unknown };
   if (typeof body.refreshToken === 'string' && body.refreshToken) return body.refreshToken;
-  const cookie = parseCookies(request.headers['cookie'])[REFRESH_COOKIE];
+  const cookie = parseCookies(request.headers['cookie'])[sessionCookieNamesFor(request, env).refresh];
   if (!cookie) return null;
   if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
   const origin = originOf(request);
@@ -152,9 +201,16 @@ export function signupContinuationOf(request: Pick<FastifyRequest, 'headers' | '
 
 // Production always requires Secure. HTTPS staging does too: Fastify's
 // protocol respects TRUST_PROXY; never interpret forwarded headers ourselves.
-function secure(reply: FastifyReply, env: Record<string, string | undefined> = process.env): boolean {
-  if (isProduction(env) || reply.request?.protocol === 'https') return true;
+function secureTransport(request: { protocol?: string } | undefined, env: Env = process.env): boolean {
+  if (isProduction(env) || request?.protocol === 'https') return true;
   try { return new URL(env['API_PUBLIC_URL'] ?? '').protocol === 'https:'; } catch { return false; }
+}
+function secure(reply: FastifyReply, env: Env = process.env): boolean {
+  return secureTransport(reply.request, env);
+}
+/** The names the reply's own request decides (a reply built without a request is a plain one). */
+function cookieNamesForReply(reply: FastifyReply, env?: Env): SessionCookieNames {
+  return reply.request ? sessionCookieNamesFor(reply.request, env) : PLAIN_SESSION_COOKIES;
 }
 
 function cookie(reply: FastifyReply, name: string, value: string, path: string, maxAgeS: number, env?: Record<string, string | undefined>): string {
@@ -180,18 +236,30 @@ function appendSetCookies(reply: FastifyReply, values: string[]): void {
 
 /** Issue the session as cookies. Called only in cookie mode; the body carries no credential. */
 export function setSessionCookies(reply: FastifyReply, tokens: { accessToken: string; refreshToken: string }, env?: Record<string, string | undefined>): void {
+  const names = cookieNamesForReply(reply, env);
   appendSetCookies(reply, [
-    cookie(reply, ACCESS_COOKIE, tokens.accessToken, ACCESS_COOKIE_PATH, ACCESS_COOKIE_MAX_AGE_S, env),
-    cookie(reply, REFRESH_COOKIE, tokens.refreshToken, REFRESH_COOKIE_PATH, REFRESH_COOKIE_MAX_AGE_S, env),
+    cookie(reply, names.access, tokens.accessToken, names.accessPath, ACCESS_COOKIE_MAX_AGE_S, env),
+    cookie(reply, names.refresh, tokens.refreshToken, names.refreshPath, REFRESH_COOKIE_MAX_AGE_S, env),
   ]);
   browserSessionCounter.labels('cookie_issued').inc();
 }
 
 export function clearSessionCookies(reply: FastifyReply, env?: Record<string, string | undefined>): void {
-  appendSetCookies(reply, [
-    cookie(reply, ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
-    cookie(reply, REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
-  ]);
+  const names = cookieNamesForReply(reply, env);
+  const deletions = [
+    cookie(reply, names.access, '', names.accessPath, 0, env),
+    cookie(reply, names.refresh, '', names.refreshPath, 0, env),
+  ];
+  // An admin browser that signed in before the rebinding still holds the plain
+  // pair: it is no credential for the console any more, and sign-out is the
+  // moment to delete it rather than leave it to expire.
+  if (names !== PLAIN_SESSION_COOKIES) {
+    deletions.push(
+      cookie(reply, ACCESS_COOKIE, '', ACCESS_COOKIE_PATH, 0, env),
+      cookie(reply, REFRESH_COOKIE, '', REFRESH_COOKIE_PATH, 0, env),
+    );
+  }
+  appendSetCookies(reply, deletions);
   browserSessionCounter.labels('cookie_cleared').inc();
 }
 
