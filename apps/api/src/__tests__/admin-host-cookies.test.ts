@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { loginWithOtp, requestOtp } from './helpers/otp';
 import { resetBrowserOriginsForTests } from '../modules/auth/browser-session';
+import { bindBrowseTenant } from '../modules/search/search-scope';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,11 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
+  // a browse surface (search, the category rail, the market) as the website and a signed-in customer both call it
+  app.get('/browse-probe', { preHandler: bindBrowseTenant(app) }, async (request) => ({
+    userId: (request as { user?: { userId?: string } }).user?.userId ?? null,
+    guest: typeof request.publicTenantId === 'string',
+  }));
   await app.ready();
   const admin = await app.prisma.user.create({ data: { phone: adminPhone, firstName: 'Host', lastName: `Admin${RUN}`, roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } } });
   const other = await app.prisma.user.create({ data: { phone: otherPhone, firstName: 'Other', lastName: `Account${RUN}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE', isPhoneVerified: true } });
@@ -162,6 +168,36 @@ describe('the admin console over TLS: its session is a __Host- pair', () => {
     expect(line(raw, 'swift_rt')).toMatch(/Max-Age=0/);
     expect(line(raw, 'swift_rt')).toContain('Path=/api/v1/auth;');
     expect((await me(ADMIN, old)).statusCode).toBe(401);
+  });
+});
+
+describe('the browse gate reads only the pair that is this request\'s own', () => {
+  const browse = (headers: Record<string, string>, cookie: string) =>
+    app.inject({ method: 'GET', url: '/browse-probe', headers: { ...headers, cookie } });
+
+  it('B1: the website\'s guest browse in a browser that also holds a console session is a guest — the console\'s __Host- pair is not the website\'s', async () => {
+    const consoleSession = await signIn(ADMIN);
+    const res = await browse(WEB, cookieHeader(consoleSession.jar));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ userId: null, guest: true });
+  });
+
+  it('B2: the console\'s own __Host- pair is a session on its browse requests; a plain pair there is not', async () => {
+    const consoleSession = await signIn(ADMIN);
+    const own = await browse(ADMIN, cookieHeader(consoleSession.jar));
+    expect(own.statusCode, own.body).toBe(200);
+    expect(own.json()).toEqual({ userId: userIds[0], guest: false });
+    const tossed = await otherSession();
+    const plain = await browse(ADMIN, `swift_at=${tossed.accessToken}`);
+    expect(plain.statusCode, plain.body).toBe(200);
+    expect(plain.json()).toEqual({ userId: null, guest: true });
+  });
+
+  it('B3: the website\'s own plain pair is still a session on its browse requests', async () => {
+    const web = await signIn(WEB, otherPhone);
+    const res = await browse(WEB, cookieHeader(web.jar));
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toEqual({ userId: userIds[1], guest: false });
   });
 });
 

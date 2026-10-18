@@ -7,7 +7,7 @@ import {
   adoptCookieCredential,
   SIGNUP_CONTINUATION_COOKIE,
   clearSignupContinuationCookie,
-  hasSessionCookie,
+  carriesOwnSessionCookie,
   sessionCookieNamesFor,
   resetBrowserOriginsForTests,
   setSessionCookies,
@@ -155,12 +155,16 @@ describe('the browse gate and the cookie names agree on what a session cookie is
   const PROD = { NODE_ENV: 'production' };
   const req = (client?: string) => ({ headers: client ? { 'x-swift-client': client } : {} }) as unknown as FastifyRequest;
 
-  it('either pair — the plain one or the admin console\'s __Host- one — is a session to authenticate; anything else is a guest', () => {
-    expect(hasSessionCookie({ swift_at: 'a' })).toBe(true);
-    expect(hasSessionCookie({ swift_rt: 'r' })).toBe(true);
-    expect(hasSessionCookie({ '__Host-swift_at': 'a' })).toBe(true);
-    expect(hasSessionCookie({ '__Host-swift_rt': 'r' })).toBe(true);
-    expect(hasSessionCookie({ other: 'x', swift_signup: 's' })).toBe(false);
+  it('only the request\'s OWN pair is a session to authenticate: the console\'s __Host- pair for the console, the plain pair for the website and natives', () => {
+    const withCookie = (client: string | undefined, cookie: string) =>
+      ({ headers: { ...(client ? { 'x-swift-client': client } : {}), cookie } }) as unknown as FastifyRequest;
+    expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_at=a'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_rt=r'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('admin-web', 'swift_at=a; swift_rt=r'), PROD)).toBe(false);
+    expect(carriesOwnSessionCookie(withCookie('web', '__Host-swift_at=a; __Host-swift_rt=r'), PROD)).toBe(false);
+    expect(carriesOwnSessionCookie(withCookie('web', 'swift_at=a'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie(undefined, 'swift_rt=r'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('web', 'other=x; swift_signup=s'), PROD)).toBe(false);
   });
 
   it('only the admin console under a Secure posture is host-bound; the web app and a native client keep the plain, path-scoped names', () => {

@@ -81,10 +81,13 @@ export function sessionCookieNamesFor(request: RequestPosture, env: Env = proces
   return browserClientOf(request) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
 }
 
-/** Whether a cookie jar carries either session pair (the browse gate's "this is a session: authenticate it"). */
-export function hasSessionCookie(cookies: Record<string, string>): boolean {
-  return [PLAIN_SESSION_COOKIES, HOST_SESSION_COOKIES]
-    .some((names) => Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh));
+/** Whether a request carries ITS OWN session pair (the browse gate's "this is a session: authenticate it").
+ *  Only the pair this request's client reads counts: the console's `__Host-` pair is Path=/ on the API host, so
+ *  the website's requests from the same browser carry it too — and are still guests to the website. */
+export function carriesOwnSessionCookie(request: RequestPosture, env: Env = process.env): boolean {
+  const cookies = parseCookies(request.headers['cookie']);
+  const names = sessionCookieNamesFor(request, env);
+  return Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh);
 }
 
 export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
