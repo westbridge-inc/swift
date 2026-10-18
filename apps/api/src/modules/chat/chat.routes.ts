@@ -1,4 +1,5 @@
 import { emitToChatRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
@@ -63,6 +64,13 @@ const messagesQuerySchema = z.object({
 // closed room read-only. Every message leaves through the ONE serializer in
 // chat-authority.ts. There is no default tenant anywhere in this file.
 // ---------------------------------------------------------------------------
+
+/** [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer's photo is never served to the other
+ *  people in a room (the mover, the store): a photo an account holds from before the ruling stays unseen.
+ *  Partner photos are unchanged. */
+function customerPhotoHidden<P extends { role: string; user: { avatar: string | null } }>(p: P): P {
+  return p.role === 'customer' ? { ...p, user: { ...p.user, avatar: null } } : p;
+}
 
 export async function chatRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -153,7 +161,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // Loading/reconciling/signing history yields. A participant removed during
     // that work must not receive the snapshot it loaded before reassignment.
     const current = await assertRoomAccess(app.prisma, room.id, request.user.userId, { tenantId: request.tenantId });
-    return { success: true, data: { ...room, participants: room.participants.filter((p) => current.participants.has(p.userId)), messages } };
+    return { success: true, data: { ...room, participants: room.participants.filter((p) => current.participants.has(p.userId)).map(customerPhotoHidden), messages } };
   });
 
   /**
@@ -176,6 +184,7 @@ export async function chatRoutes(app: FastifyInstance) {
       chatGuardCounter.labels('media', 'media_rejected').inc();
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
+    await scanUpload(buffer, { surface: 'chat', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: chatMediaFolder(roomId) });
     if (!isServerIssuedMediaId(url, roomId)) throw new AppError(500, 'MEDIA_ID_UNEXPECTED', 'The storage provider returned an id outside the room folder');
     return { success: true, data: { mediaId: url } };
@@ -437,7 +446,7 @@ export async function chatRoutes(app: FastifyInstance) {
         participants: r.participants.filter((p) => current.participants.has(p.userId)).map((p) => ({
           userId: p.user.id,
           name: p.user.firstName,
-          avatar: p.user.avatar,
+          avatar: customerPhotoHidden(p).user.avatar,
           role: p.role,
         })),
         lastMessage,

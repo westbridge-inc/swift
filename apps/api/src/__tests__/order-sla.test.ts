@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { computeOrderSla, type SlaOrderInput, type SlaThresholdsMin } from '../modules/fulfillment/order-sla';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // FUL-008: order SLA clocks (Part 10B). The pure engine computes per-stage
@@ -117,18 +118,18 @@ beforeAll(async () => {
   await app.ready();
 
   const admin = await app.prisma.user.create({
-    data: { phone: `+59200812${nanoid(4)}`, firstName: 'Sla', lastName: 'Admin', roles: ['ADMIN'] as UserRole[], activeRole: 'ADMIN' as UserRole, isPhoneVerified: true, selfieCapturedAt: new Date(), admin: { create: { permissions: ['*'] } } },
+    data: { phone: testPhone(), firstName: 'Sla', lastName: 'Admin', roles: ['ADMIN'] as UserRole[], activeRole: 'ADMIN' as UserRole, isPhoneVerified: true, selfieCapturedAt: new Date(), admin: { create: { permissions: ['*'] } } },
   });
   userIds.push(admin.id);
   adminToken = app.jwt.sign({ userId: admin.id, role: 'ADMIN', jti: nanoid(8) });
   await app.prisma.session.create({ data: { authMethod: 'OTP', userId: admin.id, token: adminToken, refreshToken: nanoid(48), deviceId: 'sla', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
 
-  const owner = await app.prisma.user.create({ data: { phone: `+59200813${nanoid(4)}`, firstName: 'Sla', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER' as UserRole, isPhoneVerified: true } });
+  const owner = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Sla', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER' as UserRole, isPhoneVerified: true } });
   userIds.push(owner.id);
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
   const vendor = await app.prisma.vendor.create({ data: { ownerId: vo.id, name: 'SLA Diner', slug: `sla-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: '+5920081400', addressLine1: '1 St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' } });
   vendorId = vendor.id;
-  const cust = await app.prisma.user.create({ data: { phone: `+59200814${nanoid(4)}`, firstName: 'Sla', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER' as UserRole, isPhoneVerified: true, customer: { create: {} } } });
+  const cust = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Sla', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER' as UserRole, isPhoneVerified: true, customer: { create: {} } } });
   userIds.push(cust.id);
   customerId = cust.id;
 });

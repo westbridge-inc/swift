@@ -9,6 +9,7 @@ import { grantSuiteCapability } from '../lib/test-target-lock';
 import { applySeedPlan, buildSeedPlan, planApprovalRequest, planRequestFacts, type DesiredConfig } from '../modules/ops/seed-plan';
 import { approvalRequest, SOLO_COOLING_OFF_MS, SOLO_DEFAULT_LIFETIME_MS, SOLO_SHOW_LINE, type SignedApproval } from '../modules/ops/approver-signatures';
 import { desiredPlatformConfig, spineRequestContext } from '../modules/ops/platform-config';
+import { testPhone } from './helpers/fixture-ids';
 
 // This suite pins the deployment identity singleton for the whole file and restores it after.
 grantSuiteCapability('unscoped-mutation');
@@ -49,7 +50,7 @@ const sign = (name: string, request: string) => signWith(name, request).line;
 
 const HOUR = 60 * 60 * 1000;
 const KEY = `solo_${nanoid(6).toLowerCase()}`;
-const PHONE = `+5920477${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+const PHONE = testPhone();
 const userIds: string[] = [];
 let priorIdentity: { deploymentId: string; environment: string; note: string | null } | null = null;
 let supers: Array<{ id: string; roles: UserRole[]; activeRole: UserRole }> = [];
@@ -183,7 +184,7 @@ describe('[SOLO SEED] one pinned person mints the first SUPER_ADMIN, after the c
 
   it('an admin that appears while the solo seed runs: nothing lands and the approval is not used up', async () => {
     await noSuperAdmin();
-    const racer = await prisma.user.create({ data: { phone: `+5920478${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, firstName: 'Race', lastName: 'Admin', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE' }, select: { id: true } });
+    const racer = await prisma.user.create({ data: { phone: testPhone(), firstName: 'Race', lastName: 'Admin', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE' }, select: { id: true } });
     userIds.push(racer.id);
     try {
       const { desired, plan, ctx, request } = await soloCase(8, SOLO_COOLING_OFF_MS + 60_000);

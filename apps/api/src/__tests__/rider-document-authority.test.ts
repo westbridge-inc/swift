@@ -546,7 +546,10 @@ describe('submission and approval retain their actual vehicle authority', () => 
     } });
     await dual(mover);
     const reviewer = await fixture();
-    const approved = await verification().approveDocument(doc.id, reviewer.userId, new Date(Date.now() + DAY));
+    // [R13] a motorbike's policy carries the reviewer's hire-or-reward (commercial use) decision too
+    const approved = await verification().approveDocument(doc.id, reviewer.userId, new Date(Date.now() + DAY), {
+      insurerName: 'Synthetic Insurer', policyNumber: 'SYN-0002', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
+    });
     expect(approved.subjectId).toBe(subject!.subjectId);
     expect(approved.status).toBe('APPROVED');
   });

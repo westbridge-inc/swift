@@ -120,7 +120,8 @@ describe('(2) switching back on the same plate leaves no retired car on it', () 
     expect((await app.prisma.driver.findUniqueOrThrow({ where: { userId: mover.id } })).licensePlate).toBe('');
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { userId: mover.id } })).licensePlate).toBe(p1);
 
-    // The motorbike's insurance, bound to its plate, is approved as a motorbike's (no hire class demanded).
+    // The motorbike's insurance, bound to its plate, is judged as a motorbike's: [R13] a delivery vehicle's policy
+    // must permit use for hire or reward (commercial use), not carry passengers for hire as a taxi's must.
     const doc = await system(async () => {
       // The vehicle record the car step registered on that plate now says what the mover uses: a motorbike.
       const stored = await app.prisma.vehicleProfile.findUniqueOrThrow({ where: { registrationMark_countryCode: { registrationMark: p1, countryCode: 'GY' } } });
@@ -131,8 +132,11 @@ describe('(2) switching back on the same plate leaves no retired car on it', () 
         expiresAt: new Date(Date.now() + 100 * 86_400_000), fileUrl: `/uploads/verification/synthetic-${nanoid()}.enc`,
       } });
     });
-    const approved = await system(() => service.approveDocument(doc.id, reviewerId, undefined, {
+    await expect(system(() => service.approveDocument(doc.id, reviewerId, undefined, {
       insurerName: 'Synthetic Insurer', policyNumber: 'SYN-0001', coverageClass: 'PRIVATE', hireClassConfirmed: false, plateCrossChecked: true,
+    }))).rejects.toThrow(/a motor vehicle that delivers needs insurance that permits use for hire or reward \(commercial use\)/i);
+    const approved = await system(() => service.approveDocument(doc.id, reviewerId, undefined, {
+      insurerName: 'Synthetic Insurer', policyNumber: 'SYN-0001', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true,
     }));
     expect(approved).toMatchObject({ status: 'APPROVED' });
   });

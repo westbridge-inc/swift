@@ -175,7 +175,8 @@ const ORDER_BODY = {
   pickupAddress: '31 Sender Street, Georgetown',
   dropoffAddress: '7 Recipient Avenue, Georgetown',
   packageSize: 'MEDIUM' as const,
-  packageDescription: 'Documents for Aunty Pat',
+  // [Legal research A10 · R1] goods only: Swift no longer carries documents
+  packageDescription: 'A birthday gift for Aunty Pat',
   speed: 'STANDARD' as const,
   recipientName: 'Aunty Pat',
   recipientPhone: `${PHONE_PREFIX}999`,

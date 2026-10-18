@@ -25,6 +25,8 @@ import { log } from '../../utils/logger';
 import { billingAttemptReclaimCounter, billingTerminalWithoutOutcomeGauge, billingOutcomeRepairsCounter, billingTopupDuplicateFingerprintCounter, billingTopupDuplicateReferenceCounter, billingTopupTailsPendingGauge, billingUnkeyedTopupDuplicatesGauge, cardChargesReconciledCounter, cardIntentsUnknownGauge, fxChargesIneligibleCounter } from '../../plugins/observability';
 import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
+import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
+import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -186,7 +188,9 @@ interface UsdPricingCtx {
   rate: number;
   increment: number;
   currency: string;
-  book: Map<string, number>; // `${role}|${tier ?? ''}` → amountUsd
+  book: Map<string, number>; // `${role}|${tier ?? ''}` → amountUsd, in force now
+  /** Every active price-book row: a week is priced by the row in force when it starts (price-book.ts). */
+  rows?: PriceBookRow[];
 }
 
 /** SubscriptionType → price-book role. Tier = the subscription type itself. */
@@ -668,7 +672,9 @@ export class BillingService {
 
     // Waived subscriptions advance for free, with the audit trail intact
     if (sub.feeWaived || amount === 0) {
-      const applied = await this.applySuccessfulCharge(sub, 0, 'fee-waived', now, periodKey);
+      // [REVIEW-G #1769 S2-2] Booked with the price this week kept (as the checkout
+      // path books a waived week), so the next week measures a rise from it.
+      const applied = await this.applySuccessfulCharge(sub, 0, 'fee-waived', now, periodKey, undefined, priced.usdTrio);
       if (!applied) return 'skipped';
       // A waive covers ONE period — the admin notice promises "for this period".
       // Clear it so normal billing resumes next cycle instead of a permanent free
@@ -1379,7 +1385,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, paymentId, reported: { amountMinor: reported.amountMinor, currencyCode: reported.currencyCode }, intended }, '[PT-1] card provider reported a different amount or currency — held, nothing booked');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge held — the amount does not match',
+      title: 'Card charge held — the amount does not match',
       body: `The card provider reports ${reported.amountMinor} ${reported.currencyCode} (minor units) for payment ${paymentId}, but Swift asked for ${intended.amountMinor} ${intended.currencyCode}. Nothing was booked and the partner was not penalised. Reconcile against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-charge-amount-mismatch', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-amount-mismatch:${paymentId}`,
@@ -1398,7 +1404,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, instrumentId: instrument.id, bound: describeBinding(bound), configured: describeBinding(configured) }, '[PT-1 C2] card instrument bound to another provider setup — refused, nothing charged');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge refused — the card belongs to another provider setup',
+      title: 'Card charge refused — the card belongs to another provider setup',
       body: `The saved card for subscription ${sub.id} was issued by ${describeBinding(bound)}, but this server is set up for ${describeBinding(configured)}. Nothing was charged and the partner was not penalised. Restore the configuration, or ask the partner to add their card again.`,
       data: { kind: 'billing_invariants', alert: 'card-instrument-binding-mismatch', subscriptionId: sub.id, instrumentId: instrument.id },
       dedupeKey: `card-binding:${instrument.id}:${describeBinding(configured)}`,
@@ -1503,15 +1509,16 @@ export class BillingService {
       log().warn({ currency: tenant.settlementCurrency }, 'usd pricing enabled but NO FX rate exists — billing falls back to legacy local rates');
       return null;
     }
-    const entries = await this.prisma.priceBookEntry.findMany({ where: { active: true } });
-    const book = new Map<string, number>();
-    for (const e of entries) book.set(`${e.role}|${e.tier ?? ''}`, Number(e.amountUsd));
+    // [F2 · GUARDRAILS §7] The book in force now, and every row, so each week is
+    // priced by the row in force when it starts (a scheduled price never reaches back).
+    const rows = await activePriceBook(this.prisma);
     return {
       rateId: rate.id,
       rate: Number(rate.rate),
       increment: Number(tenant.roundingIncrement),
       currency: tenant.settlementCurrency,
-      book,
+      book: bookAt(rows, new Date()),
+      rows,
     };
   }
 
@@ -1604,7 +1611,7 @@ export class BillingService {
         log().error({ paymentId: row.id, subscriptionId: sub.id, providerRef: found.providerRef }, '[M-01] card charge captured by the processor with no local payment — settled by reconciliation');
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
-          title: '💳 A card charge was captured with no local payment — repaired',
+          title: 'A card charge was captured with no local payment — repaired',
           body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or money kept for the next weekly fee; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
@@ -1687,7 +1694,10 @@ export class BillingService {
   private priceFor(sub: Subscription, usd: UsdPricingCtx | null): { amount: Prisma.Decimal | number; usdTrio?: { amountUsd: number; fxRateId: string; fxRateUsed: number } } {
     if (!usd || sub.customRate) return { amount: this.amountFor(sub) };
     const role = SUB_TYPE_TRIAL_ROLE[sub.type] ?? 'VENDOR';
-    const amountUsd = usd.book.get(`${role}|${sub.type}`) ?? usd.book.get(`${role}|`);
+    // [F2 · GUARDRAILS §7] The price of the week being billed is the row in force when that week starts.
+    const amountUsd = usd.rows
+      ? rowFor(usd.rows, role, sub.type, sub.nextBillingDate)?.amountUsd
+      : usd.book.get(`${role}|${sub.type}`) ?? usd.book.get(`${role}|`);
     if (amountUsd === undefined) {
       log().warn({ subscriptionId: sub.id, type: sub.type }, 'usd pricing: no price-book entry — legacy local rate used');
       return { amount: this.amountFor(sub) };
@@ -1708,14 +1718,47 @@ export class BillingService {
    *  latest effective rate was charged unconditionally while a swallowed send
    *  left the database saying "noticed". */
   private async priceEligibleFor(sub: Subscription, usd: UsdPricingCtx | null): Promise<ReturnType<BillingService['priceFor']>> {
-    const priced = this.priceFor(sub, usd);
-    if (!usd || !priced.usdTrio) return priced;
+    const inForcePrice = this.priceFor(sub, usd);
+    if (!usd || !inForcePrice.usdTrio) return inForcePrice;
+    let priced: { amount: Prisma.Decimal | number; usdTrio: NonNullable<typeof inForcePrice.usdTrio> } = { amount: inForcePrice.amount, usdTrio: inForcePrice.usdTrio };
     const last = await this.prisma.billingEvent.findFirst({
       where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: { not: null } },
       orderBy: { createdAt: 'desc' },
-      select: { amount: true, currencyCode: true, fxRateId: true, fxRateUsed: true },
+      select: { amount: true, currencyCode: true, fxRateId: true, fxRateUsed: true, amountUsd: true, createdAt: true },
     });
     if (!last?.amount) return priced; // a first charge: nothing was announced before, nothing changed
+    // [F2 · GUARDRAILS §7 · REVIEW-G S2-1] A price-book price HIGHER than the one this
+    // partner last paid is charged only once they were told of that very row 14 days
+    // before the week starts, checked every week until it is charged (not only the
+    // first week after it takes effect); otherwise the week keeps the price reached
+    // before it. A lower price applies from the next week (coordinator ruling 15 Oct).
+    if (usd.rows) {
+      const role = SUB_TYPE_TRIAL_ROLE[sub.type] ?? 'VENDOR';
+      // The price last paid: the latest charge that recorded its USD price; else
+      // (a legacy GYD history) the latest charge of money. A zero, USD-less week
+      // (a waive booked without its price) never stands for the price in force
+      // then (REVIEW-G #1769 S2-2).
+      const paidRef = last.amountUsd !== null ? last
+        : await this.prisma.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amountUsd: { not: null } }, orderBy: { createdAt: 'desc' }, select: { amountUsd: true, createdAt: true } })
+          ?? await this.prisma.billingEvent.findFirst({ where: { subscriptionId: sub.id, type: 'CHARGE_SUCCESS', amount: { gt: 0 } }, orderBy: { createdAt: 'desc' }, select: { amountUsd: true, createdAt: true } })
+          ?? last;
+      const lastPaid = { amountUsd: paidRef.amountUsd === null ? null : Number(paidRef.amountUsd), createdAt: paidRef.createdAt };
+      const charge = await priceBookChargeFor(usd.rows, role, sub.type, sub.nextBillingDate, lastPaid, async (entryId) =>
+        (await this.prisma.billingEvent.findUnique({ where: { idempotencyKey: priceBookNoticeKey(sub.id, entryId) }, select: { deliveredAt: true } }))?.deliveredAt);
+      if (charge && charge.via !== 'IN_FORCE') {
+        // Told in time about this very price: the change is the one they were told of.
+        if (charge.via === 'TOLD' && charge.amountUsd === priced.usdTrio.amountUsd) return priced;
+        const inForce = priced.usdTrio.amountUsd;
+        const converted = convertUsdToLocal(charge.amountUsd, usd.rate, usd.increment);
+        priced = { amount: converted.amountLocal, usdTrio: { amountUsd: charge.amountUsd, fxRateId: usd.rateId, fxRateUsed: usd.rate } };
+        if (charge.amountUsd !== inForce) {
+          log().warn({ subscriptionId: sub.id, entryId: charge.row.id, inForceUsd: inForce, chargedUsd: charge.amountUsd, weekStart: sub.nextBillingDate }, '[F2] a higher price-book price not told 14 days before this week — the week keeps the price reached before it');
+        }
+        // A lower price than last time (no more in local money either): nothing to be told first.
+        if (charge.via === 'LOWER' && last.currencyCode === usd.currency && Number(priced.amount) <= Number(last.amount)) return priced;
+        if (charge.via === 'TOLD') return priced;
+      }
+    }
     if (!noticeRequired(Number(last.amount), Number(priced.amount))) return priced;
     if (last.fxRateId === usd.rateId) return priced; // the payer already paid at this very rate
     const notice = await this.prisma.billingEvent.findUnique({
@@ -2020,7 +2063,7 @@ export class BillingService {
     if (payment.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card payment held — its currency cannot be confirmed',
+      title: 'Card payment held — its currency cannot be confirmed',
       body: `A weekly card payment for subscription ${sub.id} was captured by the card provider (payment ${paymentId}, ${Number(payment.amount).toLocaleString()} in its issued currency), but its charge-attempt record is missing, so the currency it was issued in cannot be confirmed. Nothing was booked and the partner was not penalised. Reconcile it against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-capture-currency-unpinned', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-unpinned:${paymentId}`,
@@ -4769,6 +4812,23 @@ export class BillingService {
       return true;
     };
     return transaction ? apply(transaction) : this.prisma.$transaction(apply);
+  }
+
+  /**
+   * The scheduled weekly re-tier (tier-recalc). OFF until partners are told 14
+   * days ahead (weekly-retier.ts, owner legal plan R27): nobody moves to a new
+   * price. The two passes below stay callable for the day it comes back on.
+   */
+  async runWeeklyRetier(): Promise<{ on: boolean; vendorsChanged: number; moversChanged: number }> {
+    if (!WEEKLY_RETIER_ON) {
+      log().warn('[R27] weekly re-tier is OFF: no partner moves to a new weekly fee until the 14-day price-change notice ships');
+      return { on: false, vendorsChanged: 0, moversChanged: 0 };
+    }
+    const vendorsChanged = await this.recalculateVendorTiers();
+    // Movers re-tier on the same cadence: a vendor's basis is catalogue
+    // size, a mover's is the vehicle they currently have registered.
+    const moversChanged = await this.recalculateMoverTiers();
+    return { on: true, vendorsChanged, moversChanged };
   }
 
   /**

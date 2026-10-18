@@ -4,8 +4,9 @@ import { csvTextCell } from '../../utils/csv';
 // Sequential receipts [san spec 20.1] — gapless per tenant per year, proven
 // under concurrency by a row lock on the counter (scenario R). Every credit
 // gets one; the receipt row is the GRA-facing paper trail and survives DPA
-// erasure under the legal-obligation basis [20.5]. VAT renders only when
-// finance.vat_rate is configured (accountant question, LAUNCH_BLOCKERS).
+// erasure under the legal-obligation basis [20.5]. How a receipt reads (the
+// issuer, the week, "Not a VAT invoice", and a VAT line only once the company
+// is VAT-registered) is fee-receipt.ts [owner legal plan R11/R12].
 
 type Db = PrismaClient | Prisma.TransactionClient;
 

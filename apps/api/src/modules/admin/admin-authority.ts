@@ -340,6 +340,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
 
   // ── Finance ─────────────────────────────────────────────────────────────
   'GET /finance/revenue': c('C0', 'finance.read'),
+  'GET /finance/vat-tracker': c('C0', 'finance.read'),
   'GET /finance/settlements': c('C0', 'finance.read'),
   'GET /finance/cash-settlements': c('C0', 'finance.read'),
   'GET /finance/payment-mix': c('C0', 'finance.read'),
@@ -440,6 +441,7 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /billing/mover-fees/:userId': c('C0', 'billing.read'),
   'POST /billing/mover-fees/:userId/resolve': c('C4', 'billing.payment.attach', E.moverFee),
   'GET /billing/cash-journal': c('C0', 'billing.read'),
+  'GET /billing/receipts/:receiptNumber': c('C0', 'billing.read'),
   'GET /billing/settlement-batches': c('C0', 'billing.read'),
   'GET /billing/cash-kpis': c('C0', 'billing.read'),
   'GET /billing/san/:san': c('C1', 'billing.san.read'),

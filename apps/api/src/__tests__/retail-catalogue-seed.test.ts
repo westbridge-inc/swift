@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { seedRetailCatalogue } from '../modules/market/retail-catalogue.seed';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
 import { marketGate, MARKET_MIN_ITEMS, MARKET_MIN_VENDORS } from '../modules/market/launch-depth';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [MKT G3/G7] The retail catalogue, and the two silent failures it hit.
@@ -35,7 +36,7 @@ import { marketGate, MARKET_MIN_ITEMS, MARKET_MIN_VENDORS } from '../modules/mar
 //     category rail but their first.
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const tenantId = 'swift-default';
 /** Marks this file's throwaway rows as synthetic. Without it the owner below
  *  counts as an UNCLASSIFIED user, and `purge-plan.test.ts` asserts that its
@@ -65,7 +66,7 @@ beforeAll(async () => {
   weCreatedIt = true;
   const user = await prisma.user.create({
     data: {
-      phone: `+592819${String(Math.floor(Math.random() * 900000) + 100000)}`,
+      phone: testPhone(),
       firstName: 'Seed', lastName: `Owner${nanoid(4)}`,
       roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
       syntheticRunId: RUN_ID,

@@ -25,9 +25,10 @@ function guyanaOnlyGate(state: RootEntryState) {
   if (wantsAuth && !isAuthenticated) return 'auth';
   if (!intent) return 'role-picker';
   if (needsAuth) return 'auth';
-  // [E27] customers are not asked for a selfie merely to browse or order;
-  // [MOB-007] a signed-in state with no user holds for everyone
-  if (needsSelfie && (intent !== 'customer' || !hasUser)) return 'selfie';
+  // [Owner 16 Oct] customers take no photos: only an earner takes the selfie;
+  // [MOB-007] a signed-in customer state with no user holds on the sign-out hold, never a camera
+  if (needsSelfie && intent !== 'customer') return 'selfie';
+  if (needsSelfie && !hasUser) return 'hold';
   return 'main';
 }
 
@@ -75,10 +76,27 @@ describe('rootEntryGate', () => {
     ).toBe('main');
   });
 
-  it('[E27 / MOB-007] …but a signed-in customer state with NO user still holds, never opening the app', () => {
+  it('[MOB-007] …but a signed-in customer state with NO user still holds, never opening the app — on the hold, not a camera', () => {
     expect(
       rootEntryGate({ ...fresh, isAuthenticated: true, intent: 'customer', countryCode: 'GY', needsSelfie: true, hasUser: false }),
-    ).toBe('selfie');
+    ).toBe('hold');
+  });
+
+  it('[owner 16 Oct] a customer is never sent to the selfie gate, in any state', () => {
+    const b = [false, true];
+    for (const isAuthenticated of b) for (const wantsAuth of b) for (const anyPreview of b) for (const needsSelfie of b) for (const hasUser of b) {
+      expect(rootEntryGate({ ...fresh, isAuthenticated, wantsAuth, intent: 'customer', countryCode: 'GY', anyPreview, needsSelfie, hasUser })).not.toBe('selfie');
+    }
+  });
+
+  it('the hold is a sign-out screen with no camera, and the root navigator renders it', () => {
+    const nav = readFileSync(new URL('./RootNavigator.tsx', import.meta.url), 'utf8');
+    expect(nav).toMatch(/entryGate === 'hold' \? \(\s*<Stack\.Screen name="SessionHold" component=\{SessionHoldScreen\} \/>/);
+    const hold = readFileSync(new URL('../screens/auth/SessionHoldScreen.tsx', import.meta.url), 'utf8');
+    // No camera, no picker, no selfie screen, and nothing on it asks for a picture.
+    expect(hold).not.toMatch(/expo-camera|expo-image-picker|SelfieCapture|Take selfie|Add your photo|prepareUploadImage/);
+    expect(hold).toMatch(/useLogoutConfirm/);
+    expect(hold).toMatch(/\{logoutDialog\}/);
   });
 
   it.each(['mover', 'vendor', 'advertiser'] as const)(

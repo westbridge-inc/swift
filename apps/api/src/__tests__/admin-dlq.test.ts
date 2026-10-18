@@ -397,3 +397,40 @@ describe('[A-08] a dead job is only replayed if its class was certified for it',
     expect(row?.recovery?.why).toBeTruthy();
   });
 });
+
+describe('[row 267] the outboxes’ dead letters on the Background jobs page', () => {
+  it('lists an outbox dead letter beside the dead jobs, requeues it once against the stamp the operator saw, and refuses to discard it', async () => {
+    const id = `r267-admin-${nanoid(8)}`;
+    const stampedAt = new Date(Date.now() - 5_000);
+    await app.prisma.orderOutbox.create({
+      data: {
+        id, dedupeKey: id, orderId: `${id}-order`, kind: 'dispatch-order', queue: 'dispatch', payload: { version: 1, orderId: `${id}-order` },
+        attempts: 20, maxAttempts: 20, lastError: 'queue down', deadLetteredAt: stampedAt,
+      },
+    });
+    try {
+      const list = await app.inject({ method: 'GET', url: '/api/v1/admin/dlq', headers: adminHeaders() });
+      expect(list.statusCode).toBe(200);
+      const row = (list.json().data as Array<Record<string, unknown>>).find((r) => r['id'] === id);
+      expect(row).toMatchObject({ queue: 'order-outbox', name: 'dispatch-order', failedReason: 'queue down', attemptsMade: 20, finishedOn: stampedAt.getTime() });
+      expect((row!['recovery'] as { policy: string }).policy).toBe('SAFE_REPLAY');
+
+      const discard = await app.inject({ method: 'DELETE', url: `/api/v1/admin/dlq/order-outbox/${id}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(discard.statusCode).toBe(409);
+      expect(discard.json().error?.code ?? discard.json().code).toBe('OUTBOX_DEAD_LETTER_NOT_DISCARDABLE');
+      expect((await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id } })).deadLetteredAt).toEqual(stampedAt);
+
+      const stale = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue?expectedFinishedOn=${stampedAt.getTime() - 1}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(stale.statusCode).toBe(409);
+      const requeue = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue?expectedFinishedOn=${stampedAt.getTime()}`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(requeue.statusCode).toBe(200);
+      expect(await app.prisma.orderOutbox.findUniqueOrThrow({ where: { id } })).toMatchObject({ attempts: 0, deadLetteredAt: null });
+      const again = await app.inject({ method: 'POST', url: `/api/v1/admin/dlq/order-outbox/${id}/requeue`, headers: { ...adminHeaders(), 'x-swift-reason': TEST_ADMIN_REASON }, payload: {} });
+      expect(again.statusCode).toBe(409);
+      const audit = await app.prisma.auditLog.findFirst({ where: { action: 'REQUEUE_DLQ_JOB', entityId: `order-outbox:${id}` } });
+      expect(audit).not.toBeNull();
+    } finally {
+      await app.prisma.orderOutbox.deleteMany({ where: { id } });
+    }
+  });
+});

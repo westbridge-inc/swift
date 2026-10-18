@@ -25,6 +25,7 @@ import { CUSTODY_CASE_ENTITY, partyCaseView } from '../modules/custody/custody-c
 import { activateUserBlock } from '../modules/moderation/user-block.service';
 import { IncidentService } from '../modules/safety/incident.service';
 import { walkOrderStatus } from './helpers/order-status-walk';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006 · S0] AFTER PICKUP, A DELIVERY THAT GOES WRONG HAS AN OWNER.
@@ -196,7 +197,7 @@ beforeAll(async () => {
 
   const admin = await app.prisma.user.create({
     data: {
-      phone: `+5920037${String(Date.now()).slice(-5)}`, firstName: 'Ops', lastName: `Owner${RUN}`,
+      phone: testPhone(), firstName: 'Ops', lastName: `Owner${RUN}`,
       roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
       admin: { create: { permissions: ['*'] } },
     },

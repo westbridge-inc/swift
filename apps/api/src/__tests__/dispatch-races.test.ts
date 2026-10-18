@@ -177,9 +177,9 @@ function makeDelivery(customer: Actor, dropOffset = 0, over: { promisedAt?: Date
 }
 
 /** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
- *  customer's to cancel only when it is very late — 30 minutes past its
+ *  customer's to cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its
  *  promised time — so the customer-cancel cases below run on one. */
-const PAST_PROMISE = () => ({ promisedAt: new Date(Date.now() - 31 * 60_000) });
+const PAST_PROMISE = () => ({ promisedAt: new Date(Date.now() - 61 * 60_000) });
 
 /** A sender's parcel waiting at the pickup for a courier rider. */
 function makeCourier(sender: Actor) {

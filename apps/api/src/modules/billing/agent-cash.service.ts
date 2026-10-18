@@ -198,7 +198,8 @@ export async function payInfo(
       const { resolveRateForRun, dualDisplay } = await import('./fx');
       const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
       const [entry, rate] = await Promise.all([
-        prisma.priceBookEntry.findFirst({ where: { role, active: true }, orderBy: { effectiveFrom: 'desc' } }),
+        // [F2] The row in force now, never a scheduled one.
+        prisma.priceBookEntry.findFirst({ where: { role, active: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } }),
         resolveRateForRun(prisma, tenant.settlementCurrency),
       ]);
       if (entry && rate) {

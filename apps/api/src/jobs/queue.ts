@@ -45,6 +45,12 @@ const QUEUE_NAMES = {
    *  ~28 recurring sweeps, so a slow sweep tick could hold a rider's 20 s offer
    *  open long past its deadline and stall the cascade to the next mover. */
   OFFER: 'offer-jobs',
+  /** [row 331 · AUD-L4-005] The safety lane: the SOS grace backstop
+   *  (promote-sos-grace, every 10 s: promotion + the escalation ladder) and the
+   *  Trip Guardian tick (guardian-sweep) ONLY, on their own worker slots. They
+   *  used to share the dispatch queue's five slots with ~30 recurring sweeps,
+   *  so five slow sweeps at once delayed an SOS escalation. */
+  SAFETY: 'safety-jobs',
   SEARCH: 'search-jobs',
 } as const;
 
@@ -145,6 +151,84 @@ export function offerWorkerConcurrency(env: Record<string, string | undefined> =
   return Number.isSafeInteger(value) && value >= 1 && value <= 50 ? value : 10;
 }
 
+/** [row 331] The recurring jobs the safety lane runs, and nothing else. */
+export const SAFETY_TIMER_JOBS = ['promote-sos-grace', 'guardian-sweep'] as const;
+
+/** [row 331] Worker slots of the safety lane. Default 4: the two timers never
+ *  wait on each other, and a tick held by a slow SMS provider (its delivery
+ *  batch can take minutes in an outage) still leaves the next tick a slot —
+ *  both ticks are idempotent and safe to overlap. At least 2; env-tunable so
+ *  ops can widen it without a deploy; a value that is not a sane integer falls
+ *  back to the default rather than becoming NaN (a worker with NaN slots takes
+ *  none). */
+export function safetyWorkerConcurrency(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SAFETY_WORKER_CONCURRENCY']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 4;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 2 && value <= 20 ? value : 4;
+}
+
+/** [row 331 · #1794 S3-1] Where each safety tick stamps its last COMPLETED
+ *  run (epoch ms). Read by checkSafetyLane, which runs on another lane. */
+export const safetyTickCompletedKey = (name: string): string => `safety:tick-completed:${name}`;
+
+/** [row 331 · #1794 S3-1] How long a safety tick may go without completing
+ *  before the platform is paged. Default 60 s: the SOS tick runs every 10 s,
+ *  the guardian every 15 s, and the lane has several slots, so a minute with no
+ *  completion means every slot is stuck or the lane stopped. 30 s .. 10 min;
+ *  anything else falls back to the default. */
+export function safetyTickStaleMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SAFETY_TICK_STALE_MS']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 60_000;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 30_000 && value <= 600_000 ? value : 60_000;
+}
+
+/** The OpsAlert title of the stalled-lane page (one open page at a time; closed when ticks complete again). */
+export const SAFETY_LANE_STALLED_TITLE = 'SOS safety lane stalled';
+
+/**
+ * [row 331 · #1794 review S3-1] Watch the safety lane from OUTSIDE it. Every
+ * SOS watchdog runs inside the safety ticks, so a lane whose slots are all held
+ * by calls that never settle, or whose worker stopped consuming, would page
+ * nobody (the DLQ alarm only sees FAILED jobs). The scheduler heartbeat, a
+ * dispatch-queue job, calls this every minute: a tick that has not completed
+ * within the window opens a platform page (an OpsAlert: SUPER_ADMIN push and an
+ * on-call text, delivered here, outside the lane); ticks completing again close
+ * it. Inside the boot grace nothing is judged: the first ticks have not run.
+ */
+export async function checkSafetyLane(
+  ctx: JobContext,
+  bootedAtMs: number,
+  nowMs: number = Date.now(),
+  staleMs: number = safetyTickStaleMs(),
+): Promise<{ stalled: string[] }> {
+  if (nowMs - bootedAtMs < staleMs) return { stalled: [] };
+  const stalled: Array<{ name: string; ageSeconds: number | null }> = [];
+  for (const name of SAFETY_TIMER_JOBS) {
+    const raw = await ctx.redis.get(safetyTickCompletedKey(name));
+    const at = raw !== null && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(at) || nowMs - at > staleMs) {
+      stalled.push({ name, ageSeconds: Number.isFinite(at) ? Math.round((nowMs - at) / 1000) : null });
+    }
+  }
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  if (stalled.length === 0) {
+    await resolveOpsPage(ctx.prisma, SAFETY_LANE_STALLED_TITLE, 'safety-lane-completing');
+    return { stalled: [] };
+  }
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const oldest = stalled.reduce<number | null>((max, s) => (s.ageSeconds === null ? max : Math.max(max ?? 0, s.ageSeconds)), null);
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) }, {
+    key: 'ops_page:safety-lane-stalled',
+    windowSeconds: 600,
+    title: SAFETY_LANE_STALLED_TITLE,
+    body: `${stalled.map((s) => `${s.name} ${s.ageSeconds === null ? 'has not completed since the worker started' : `last completed ${s.ageSeconds}s ago`}`).join('; ')}. The SOS backstop, its escalation retries and the SOS watchdogs run in this lane: an SOS may not be escalated. Restart the worker and check the SMS provider.`,
+    data: { kind: 'safety_sweep_slo', workType: 'safety-lane', stalled: true, ticks: stalled.map((s) => s.name), passAgeSeconds: oldest },
+  });
+  return { stalled: stalled.map((s) => s.name) };
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -160,6 +244,7 @@ export type SwiftQueues = {
   verificationQueue: Queue;
   dispatchQueue: Queue;
   offerQueue: Queue;
+  safetyQueue: Queue;
   searchQueue: Queue;
 };
 
@@ -196,6 +281,7 @@ export function createQueues(
       verificationQueue: build(QUEUE_NAMES.VERIFICATION),
       dispatchQueue: build(QUEUE_NAMES.DISPATCH),
       offerQueue: build(QUEUE_NAMES.OFFER),
+      safetyQueue: build(QUEUE_NAMES.SAFETY),
       searchQueue: build(QUEUE_NAMES.SEARCH),
     };
   } catch (error) {
@@ -541,6 +627,8 @@ export async function inTenantOf<T>(
 
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
+  // [#1794 S3-1] The boot grace of checkSafetyLane starts here.
+  const lanesBootedAt = Date.now();
   const constructedWorkers: Worker[] = [];
   const buildWorker = (
     name: string,
@@ -548,7 +636,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     options: { connection: ConnectionOptions; concurrency: number },
   ): Worker => {
     // Two-phase boot: constructing a Worker normally starts its processor
-    // immediately. Keep every consumer dormant until all eight connections and
+    // immediately. Keep every consumer dormant until all nine connections and
     // every recurring schedule are committed by initializeJobRuntime.
     const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
@@ -590,6 +678,175 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       removeOnFail: 50,
     });
     return true;
+  };
+
+  // [row 331 · AUD-L4-005] The two safety timers, moved here unchanged from the
+  // dispatch worker. Each runs on the SAFETY worker below, on its own slots,
+  // never behind the dispatch sweeps; the dispatch worker only drains a tick
+  // queued there before the split.
+  const sosGraceTick = async (): Promise<void> => {
+    // SOS grace-expiry backstop [F-0003 / safety spec §4.1]. The client
+    // confirms the instant the grace bar completes (the happy path); this
+    // fires when the app was KILLED mid-grace — a closed app must never stop
+    // a life-safety escalation. The grace deadline is DB state and promotion
+    // is compare-and-set, so this is idempotent, safe to overlap, and
+    // catches up on any worker downtime. Loud: a backstop-promoted alert
+    // means a client died mid-SOS, which ops should see.
+    const { SosService } = await import('../modules/safety/sos.service');
+    const promoted = await new SosService(ctx.prisma, ctx.io).promoteExpiredGrace();
+    if (promoted.length > 0) {
+      ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
+    }
+    // [S-01] The escalation worker: backfill live alerts with no rows,
+    // page the platform for any ACTIVE alert whose ops page is still
+    // undelivered past the threshold (the watchdog), and drain what every
+    // ACTIVE alert owns (leased, once each, retried).
+    // [AUD-L4-016] The alarms run BEFORE the delivery batch: in an SMS
+    // outage the batch is up to 200 rows at the send timeout (minutes),
+    // and neither the failed-delivery page, the watchdog nor the ops-alert
+    // ladder may wait behind it.
+    const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
+    const escalationWorkerLive = !sosEscalationWorkerKilled();
+    if (escalationWorkerLive) {
+      const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+      if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
+    }
+    // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
+    // failed row of a live, real SOS (a contact's text, the ops page, the
+    // war room, the evidence) pages on-call operations once; the row keeps
+    // retrying. An alarm, not a delivery: it runs under the worker kill too.
+    {
+      const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
+      const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
+      await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
+        .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
+    }
+    const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
+    if (watchdog && watchdog.activeWithoutPage.length > 0) {
+      const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
+      // Legacy demo alerts can remain pending during retry backoff. They never
+      // page real operations, and are dropped BEFORE the cap of 20 pages a
+      // tick, so old demo alerts can never fill it and hide a real SOS (the
+      // scan drops them too; this is the second wall).
+      const realStuck: typeof watchdog.activeWithoutPage = [];
+      for (const stuck of watchdog.activeWithoutPage) {
+        if (realStuck.length >= 20) break;
+        if (stuck.tenantId && await isReviewTenantId(ctx.prisma, stuck.tenantId)) continue;
+        realStuck.push(stuck);
+      }
+      for (const stuck of realStuck) {
+        await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
+          notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+            tenantId: stuck.tenantId,
+            title: 'URGENT: SOS ACTIVE with no ops page delivered',
+            body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
+            data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
+          }),
+        ).catch(() => {});
+      }
+    }
+    // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
+    // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
+    // platform page), drills run on schedule, and zero-ACK is the gauge.
+    {
+      const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
+      const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
+      const { getChannels } = await import('../providers/notifications/channels');
+      const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
+      await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
+      const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
+      // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
+      for (const id of esc.platformPage) {
+        await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+        ).catch(() => {});
+      }
+      await scanOpsAlerts(ctx.prisma).catch(() => null);
+      await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
+    }
+    // The SOS delivery batch, after every alarm above (the failed-delivery
+    // page, the watchdog, and the ops-alert ladder that re-pages an
+    // unacknowledged page): in an SMS outage it can take minutes.
+    if (escalationWorkerLive) {
+      const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
+      if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
+    }
+    // [S-16 · operations] Every legacy plaintext trip-share token is a live
+    // exposure: rotate (revoke + null + tell the sharer) until none is left.
+    {
+      const { rotateLegacyTripShareTokens } = await import('../modules/safety/trip-share.service');
+      const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
+      const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
+      if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
+      // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
+      const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
+      await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
+    }
+    // [S-02] The retrigger log: import any legacy JSON history as rows,
+    // then report lost sequences and oversized hot rows.
+    const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
+    await importLegacyRetriggers(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-02] legacy retrigger import failed'));
+    await scanSosRetriggers(ctx.prisma).catch(() => null);
+    // §9.1 live trail: the same life-safety tick appends the mover's
+    // newest fix to every open alert's unsealed bundle — the war room
+    // replays this later. Cheap no-op when no alert is open.
+    const { EvidenceService } = await import('../modules/safety/evidence.service');
+    await new EvidenceService(ctx.prisma, ctx.io).appendLiveFixes().catch(() => {});
+  };
+
+  const guardianTick = async (): Promise<void> => {
+    // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
+    // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
+    // persisted driver fix dispatch reads, closes sessions whose ride
+    // ended. All state is DB rows and every mutation is create-unique or
+    // CAS — idempotent, overlap-safe, catches up after worker downtime.
+    const { GuardianService } = await import('../modules/safety/guardian.service');
+    const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
+    if (res.opened + res.closed + res.flagged + res.escalated > 0) {
+      ctx.log.info(res, 'Trip Guardian sweep');
+    }
+    // [S-05 · operations] Page maximum due age and the poison population,
+    // not processed counts: a sweep whose pass has stalled past the SLO,
+    // or a row that keeps failing, is a human's problem now.
+    // [S-06] The check-in delivery worker: drain what every ask owns,
+    // backfill asks with no rows, and page per deadline that must not run.
+    const { drainCheckinDeliveries, backfillCheckinDeliveries, scanCheckinDeliveries, checkinDeliveryKilled } = await import('../modules/safety/guardian-delivery');
+    const { NotificationService: GuardianNS, notifyAdmins: pageAdmins } = await import('../modules/notification/notification.service');
+    if (!checkinDeliveryKilled()) {
+      const back = await backfillCheckinDeliveries(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
+      if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-06] check-in asks had no delivery rows — staged now');
+      const drained = await drainCheckinDeliveries(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), { limit: 200 }).catch(() => null);
+      if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-06] check-in deliveries failed this tick');
+    }
+    const deliveries = await scanCheckinDeliveries(ctx.prisma).catch(() => null);
+    for (const held of (deliveries?.deadlineWithoutDelivery ?? []).slice(0, 20)) {
+      await opsPageOnce(ctx, `guardian-undelivered:${held.sessionId}`, 600, () =>
+        pageAdmins(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), {
+          tenantId: held.tenantId,
+          title: 'Guardian: hard check-in not delivered',
+          body: `Session ${held.sessionId} has waited ${held.ageSeconds}s with its hard check-in ${held.state.toLowerCase()}. The deadline is held; please look at the trip.`,
+          data: { kind: 'guardian_checkin_undelivered', sessionId: held.sessionId, delivery: held.state, watchdog: true },
+        }),
+      ).catch(() => {});
+    }
+    const { scanSweeps } = await import('../lib/sweep-cursor');
+    const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
+    const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
+    if (trouble.length > 0) {
+      const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
+      for (const w of trouble) {
+        await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
+          notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
+            tenantId: null,
+            title: `Safety sweep behind: ${w.workType}`,
+            body: w.stalled
+              ? `The ${w.workType} sweep has not completed a pass for ${w.passAgeSeconds}s (current pass ${w.currentPassSeconds}s). Rows past the cursor are waiting.`
+              : `The ${w.workType} sweep has ${w.repeatPoison.length} row(s) failing on every pass — the first: ${w.repeatPoison[0]?.id} (${w.repeatPoison[0]?.lastError}).`,
+            data: { kind: 'safety_sweep_slo', workType: w.workType, stalled: w.stalled, passAgeSeconds: w.passAgeSeconds, repeatPoison: w.repeatPoison.slice(0, 5).map((r) => r.id) },
+          }),
+        ).catch(() => {});
+      }
+    }
   };
 
   try {
@@ -687,11 +944,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           break;
         }
         case 'tier-recalc': {
-          const changed = await billing.recalculateVendorTiers();
-          // Movers re-tier on the same cadence: a vendor's basis is catalogue
-          // size, a mover's is the vehicle they currently have registered.
-          const moversChanged = await billing.recalculateMoverTiers();
-          ctx.log.info({ changed, moversChanged }, 'Tier recalculation complete');
+          // [R27] OFF until the 14-day price-change notice ships (weekly-retier.ts).
+          const result = await billing.runWeeklyRetier();
+          ctx.log.info(result, 'Tier recalculation complete');
           break;
         }
         case 'convert-trials': {
@@ -770,7 +1025,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📄 Settlement imports need a person',
+                title: 'Settlement imports need a person',
                 body: `${imports.unbalanced.length} published import(s) do not add up, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
@@ -799,7 +1054,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'agent-cash-duplicate-credits', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💵 MMG transactions credited more than once',
+                title: 'MMG transactions credited more than once',
                 body: `${duplicates.length} MMG transaction(s) hold more than one credited agent-cash record. Freeze them, reconcile against the MMG statement, and reverse only by hand — nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'agent-cash-duplicate-credits', count: duplicates.length },
               }),
@@ -815,7 +1070,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'promo-funding-invariants', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🏷️ Promo funding invariants broken',
+                title: 'Promo funding invariants broken',
                 body: `${promoScan.invalidTerms} active promo(s) with invalid terms; ${promoScan.discountWithoutFunder.sinceEnforced} discounted order(s) since enforcement with no named funder; ${promoScan.tipFundingGap.sinceEnforced} order(s) since enforcement whose tip was discounted. Freeze the promo, then reconcile the orders.`,
                 data: { kind: 'billing_invariants', alert: 'promo-funding-invariants', invalidTerms: promoScan.invalidTerms, discountWithoutFunder: promoScan.discountWithoutFunder.sinceEnforced, tipFundingGap: promoScan.tipFundingGap.sinceEnforced },
               }),
@@ -831,7 +1086,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'refunds-awaiting-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '↩️ Returns with an inferred refund await review',
+                title: 'Returns with an inferred refund await review',
                 body: `${refundReview.inferredOpen} open return(s) were computed by inference (no order snapshot) and ${refundReview.legacyOpen} legacy return(s) sit on discounted orders. Recompute each from the order's items and contact the store and customer before anything settles.`,
                 data: { kind: 'billing_invariants', alert: 'refunds-awaiting-review', inferredOpen: refundReview.inferredOpen, legacyOpen: refundReview.legacyOpen },
               }),
@@ -847,7 +1102,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'fare-zone-ambiguity', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🗺️ Fare zones overlap at the same priority',
+                title: 'Fare zones overlap at the same priority',
                 body: `${zoneScan.ambiguousPairs.length} pair(s) of active fare zones overlap at equal priority in one market. Trips there price by the smallest zone until you give one of each pair a different priority or redraw it.`,
                 data: { kind: 'billing_invariants', alert: 'fare-zone-ambiguity', pairs: zoneScan.ambiguousPairs.slice(0, 10) },
               }),
@@ -863,7 +1118,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'pricing-config-invalid', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💲 Pricing config is invalid',
+                title: 'Pricing config is invalid',
                 body: `${pricingScan.invalid.length} pricing column(s) fail the schema: ${pricingScan.invalid.map((i) => `${i.countryCode} ${i.kind}`).join(', ')}. Quotes there price from the last known good version until the column is fixed.`,
                 data: { kind: 'billing_invariants', alert: 'pricing-config-invalid', invalid: pricingScan.invalid.slice(0, 10) },
               }),
@@ -884,7 +1139,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-refund-obligations', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad refund obligations need a person',
+                title: 'Ad refund obligations need a person',
                 body: `${adRefunds.failed} refund intent(s) FAILED after every retry and ${adRefunds.terminalWithoutIntent.length} cancelled or killed paid campaign(s) have no refund intent (run the backfill). ${adRefunds.awaitingPayout.count} executed intent(s) await a payout reference.`,
                 data: { kind: 'billing_invariants', alert: 'ad-refund-obligations', failed: adRefunds.failed, terminalWithoutIntent: adRefunds.terminalWithoutIntent.slice(0, 10), awaitingPayout: adRefunds.awaitingPayout.count },
               }),
@@ -899,7 +1154,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-checkout-invariants', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad checkout invariants broken',
+                title: 'Ad checkout invariants broken',
                 body: `${adCheckout.paidWithoutInventory.length} paid campaign(s) have no confirmed inventory (stop serving and refund or re-book) and ${adCheckout.duplicateActiveInvoices.length} campaign(s) hold more than one active invoice (freeze and reconcile).`,
                 data: { kind: 'billing_invariants', alert: 'ad-checkout-invariants', paidWithoutInventory: adCheckout.paidWithoutInventory.slice(0, 10), duplicateActiveInvoices: adCheckout.duplicateActiveInvoices.slice(0, 10) },
               }),
@@ -1027,6 +1282,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
         await retryAccountErasures(ctx);
+        // [R23 · research C10] Customer accounts unused for 12 months: a notice, then (30 days
+        // on, still unused) the ordinary deletion pipeline. Its own retention receipt.
+        const { inactivitySweep } = await import('../modules/user/inactivity');
+        await inactivitySweep({ prisma: ctx.prisma, io: ctx.io, log: ctx.log });
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1121,6 +1380,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         }
         const expired = await verification.expireLapsedDocuments();
         const reminded = await verification.sendExpiryReminders();
+        // [R24] A partner's rejected document gets its clock first (30 days after the rejection
+        // for an ID-type document, the registry window otherwise), so the reaper below deletes
+        // the ones already due in the same run. A failure here never stops the reaper.
+        try {
+          await verification.scheduleRejectedDocumentRetention();
+        } catch (err) {
+          ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
+        }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;
         try {
@@ -1275,7 +1542,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // Platform-wide ops page: an aggregate scan or infra alarm, not one
           // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
           tenantId: null,
-          title: '🛡️ Weekly safety digest',
+          title: 'Weekly safety digest',
           body: digest.lines.join(' · '),
           data: { kind: 'incident_weekly_digest', open: digest.open, breaches: digest.breaches, patterns: digest.patternsThisWeek },
         }).catch(() => {});
@@ -1427,6 +1694,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // settlements stop — silently. The heartbeat key's AGE (exposed as a
         // Prometheus gauge) makes that stall detectable and alertable.
         await ctx.redis.set('scheduler:heartbeat', String(Date.now()));
+        // [row 331 · #1794 S3-1] The safety lane, watched from this lane.
+        try {
+          await checkSafetyLane(ctx, lanesBootedAt);
+        } catch (err) {
+          ctx.log.error({ err }, '[row 331] the safety-lane watchdog could not run this beat — a stalled SOS lane is not being paged');
+        }
         // SWIFT-AUD-D7-02: pool saturation pages (dedup'd). Queries queueing
         // for a connection is the "API is about to brown-out" signal, and the
         // 60s heartbeat is the natural in-process sampling point.
@@ -1491,6 +1764,31 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           ctx.log.warn({ err }, 'DLQ depth check failed — dead-letter paging is blind this cycle');
         }
 
+        // [row 267 · AUD-L4-021] The durable outboxes' dead letters page too.
+        // order_outbox, mover_revocation_outbox and rating_outbox used to retry a
+        // failing row for ever (or, for ratings, stop at 25 attempts and tell
+        // nobody). A spent row is now never claimed again; this sweep stamps it
+        // and pages, on the same alarm as the dead jobs, and the admin
+        // Background jobs page lists it for a requeue.
+        try {
+          const { sweepOutboxDeadLetters } = await import('./outbox-dead-letter');
+          const outboxes = await sweepOutboxDeadLetters(ctx.prisma);
+          if (outboxes.total > 0) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            await opsPageOnce(ctx, 'outbox-dead-letter', 1800, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // Platform-wide, like the dead-job page above.
+                tenantId: null,
+                title: `${outboxes.total} outbox command${outboxes.total === 1 ? '' : 's'} gave up`,
+                body: `${outboxes.queues.map((q) => `${q.count} ${q.queue}`).join(', ')}. Each was retried until its budget ran out. Open Platform → Background jobs to requeue them.`,
+                data: { kind: 'ops_dlq_non_empty', total: outboxes.total, queues: outboxes.queues },
+              }),
+            );
+          }
+        } catch (err) {
+          ctx.log.warn({ err }, 'Outbox dead-letter sweep failed — outbox dead letters are blind this cycle');
+        }
+
         // [C2 / WS-0.2] Routing degradation page. See osrmFallbackAlertPct above
         // for why a silent fallback is expensive rather than merely suboptimal.
         try {
@@ -1532,113 +1830,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'promote-sos-grace') {
-        // SOS grace-expiry backstop [F-0003 / safety spec §4.1]. The client
-        // confirms the instant the grace bar completes (the happy path); this
-        // fires when the app was KILLED mid-grace — a closed app must never stop
-        // a life-safety escalation. The grace deadline is DB state and promotion
-        // is compare-and-set, so this is idempotent, safe to overlap, and
-        // catches up on any worker downtime. Loud: a backstop-promoted alert
-        // means a client died mid-SOS, which ops should see.
-        const { SosService } = await import('../modules/safety/sos.service');
-        const promoted = await new SosService(ctx.prisma, ctx.io).promoteExpiredGrace();
-        if (promoted.length > 0) {
-          ctx.log.warn({ promoted, count: promoted.length }, 'SOS grace backstop promoted pending alerts to ACTIVE (client never confirmed)');
-        }
-        // [S-01] The escalation worker: backfill live alerts with no rows,
-        // page the platform for any ACTIVE alert whose ops page is still
-        // undelivered past the threshold (the watchdog), and drain what every
-        // ACTIVE alert owns (leased, once each, retried).
-        // [AUD-L4-016] The alarms run BEFORE the delivery batch: in an SMS
-        // outage the batch is up to 200 rows at the send timeout (minutes),
-        // and neither the failed-delivery page, the watchdog nor the ops-alert
-        // ladder may wait behind it.
-        const { drainSosEscalations, backfillSosEscalations, scanSosEscalations, sosEscalationWorkerKilled } = await import('../modules/safety/sos-escalation');
-        const escalationWorkerLive = !sosEscalationWorkerKilled();
-        if (escalationWorkerLive) {
-          const back = await backfillSosEscalations(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
-          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-01] live SOS alerts had no escalation rows — policy staged now');
-        }
-        // [AUD-L4-016] A failed delivery is a page, never only a log line: ANY
-        // failed row of a live, real SOS (a contact's text, the ops page, the
-        // war room, the evidence) pages on-call operations once; the row keeps
-        // retrying. An alarm, not a delivery: it runs under the worker kill too.
-        {
-          const { pageFailedSosEscalations } = await import('../modules/safety/sos-escalation');
-          const { NotificationService: FailureNS } = await import('../modules/notification/notification.service');
-          await pageFailedSosEscalations(ctx.prisma, new FailureNS(ctx.prisma, ctx.io))
-            .catch((err) => ctx.log.error({ errName: err instanceof Error ? err.name : typeof err }, '[AUD-L4-016] the failed-delivery pager could not run this tick'));
-        }
-        const watchdog = await scanSosEscalations(ctx.prisma).catch(() => null);
-        if (watchdog && watchdog.activeWithoutPage.length > 0) {
-          const { notifyAdmins, NotificationService: NS, isReviewTenantId } = await import('../modules/notification/notification.service');
-          // Legacy demo alerts can remain pending during retry backoff. They never
-          // page real operations, and are dropped BEFORE the cap of 20 pages a
-          // tick, so old demo alerts can never fill it and hide a real SOS (the
-          // scan drops them too; this is the second wall).
-          const realStuck: typeof watchdog.activeWithoutPage = [];
-          for (const stuck of watchdog.activeWithoutPage) {
-            if (realStuck.length >= 20) break;
-            if (stuck.tenantId && await isReviewTenantId(ctx.prisma, stuck.tenantId)) continue;
-            realStuck.push(stuck);
-          }
-          for (const stuck of realStuck) {
-            await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
-              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
-                tenantId: stuck.tenantId,
-                title: '🚨 SOS ACTIVE with no ops page delivered',
-                body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
-                data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
-              }),
-            ).catch(() => {});
-          }
-        }
-        // [S-19 · operations] Ops alerts: read receipts become "seen", an alert
-        // nobody acknowledged by its deadline escalates (re-push, on-call SMS,
-        // platform page), drills run on schedule, and zero-ACK is the gauge.
-        {
-          const { syncOpsAlertReadReceipts, escalateOverdueOpsAlerts, scanOpsAlerts, runOpsAlertDrillIfDue } = await import('../modules/safety/ops-alert');
-          const { NotificationService: OpsNS, notifyAdmins: pageOps } = await import('../modules/notification/notification.service');
-          const { getChannels } = await import('../providers/notifications/channels');
-          const opsNotifications = new OpsNS(ctx.prisma, ctx.io);
-          await syncOpsAlertReadReceipts(ctx.prisma).catch(() => 0);
-          const esc = await escalateOverdueOpsAlerts(ctx.prisma, opsNotifications, getChannels().sms).catch(() => ({ escalated: [] as string[], closed: [] as string[], platformPage: [] as string[] }));
-          // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
-          for (const id of esc.platformPage) {
-            await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-              pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
-            ).catch(() => {});
-          }
-          await scanOpsAlerts(ctx.prisma).catch(() => null);
-          await runOpsAlertDrillIfDue(ctx.prisma, opsNotifications).catch(() => null);
-        }
-        // The SOS delivery batch, after every alarm above (the failed-delivery
-        // page, the watchdog, and the ops-alert ladder that re-pages an
-        // unacknowledged page): in an SMS outage it can take minutes.
-        if (escalationWorkerLive) {
-          const drained = await drainSosEscalations(ctx.prisma, ctx.io, { limit: 200 }).catch(() => null);
-          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-01] SOS escalation deliveries failed this tick');
-        }
-        // [S-16 · operations] Every legacy plaintext trip-share token is a live
-        // exposure: rotate (revoke + null + tell the sharer) until none is left.
-        {
-          const { rotateLegacyTripShareTokens } = await import('../modules/safety/trip-share.service');
-          const { NotificationService: ShareNS } = await import('../modules/notification/notification.service');
-          const rot = await rotateLegacyTripShareTokens(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch(() => null);
-          if (rot && rot.rotated > 0) ctx.log.warn(rot, '[S-16] legacy plaintext trip-share tokens rotated');
-          // [L10 §2] A guardian who is a Swift user hears, in-app, how the monitoring they were given ended.
-          const { notifyTripShareGuardians } = await import('../modules/safety/trip-share.service');
-          await notifyTripShareGuardians(ctx.prisma, new ShareNS(ctx.prisma, ctx.io)).catch((err) => ctx.log.error({ err }, '[L10 §2] guardian outcome sweep failed'));
-        }
-        // [S-02] The retrigger log: import any legacy JSON history as rows,
-        // then report lost sequences and oversized hot rows.
-        const { importLegacyRetriggers, scanSosRetriggers } = await import('../modules/safety/sos-retrigger');
-        await importLegacyRetriggers(ctx.prisma).catch((err) => ctx.log.error({ err }, '[S-02] legacy retrigger import failed'));
-        await scanSosRetriggers(ctx.prisma).catch(() => null);
-        // §9.1 live trail: the same life-safety tick appends the mover's
-        // newest fix to every open alert's unsealed bundle — the war room
-        // replays this later. Cheap no-op when no alert is open.
-        const { EvidenceService } = await import('../modules/safety/evidence.service');
-        await new EvidenceService(ctx.prisma, ctx.io).appendLiveFixes().catch(() => {});
+        // [row 331] Drain only: an SOS tick queued here before the safety lane
+        // existed (scheduleRecurringJobs removes the old registration). It runs
+        // on the safety worker now.
+        await sosGraceTick();
         return;
       }
 
@@ -1664,7 +1859,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ Ad creative review SLA at risk — ${cr.campaign.name}`,
+                title: `Ad creative review SLA at risk — ${cr.campaign.name}`,
                 body: 'A creative has been waiting for review for over 75% of the SLA window. Review it now.',
                 data: { kind: 'ad_review_sla_risk', creativeId: cr.id, campaignId: cr.campaignId },
               }),
@@ -1672,6 +1867,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           }
           ctx.log.warn({ count: atRisk.length }, 'ads: creative review SLA at risk');
         }
+        return;
+      }
+
+      if (job.name === 'substitution-expiry') {
+        // [SUBSTITUTION · owner 17 Oct 2026] A store's swap question waits a
+        // bounded time: past it the line is removed (never silently swapped)
+        // or, on MMG, the question is withdrawn — so no order waits forever on
+        // an answer. CAS per line; each line runs in its own order's tenant.
+        const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
+          narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+        });
+        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;
       }
 
@@ -1858,6 +2066,33 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'vat-threshold-watch') {
+        // [Owner legal plan 15 Oct · R10] Daily: how close each real tenant's
+        // weekly fees are to the VAT registration threshold. Pages platform
+        // admins once a month per state, naming the 15-day deadline.
+        const { vatTracker, vatAlert } = await import('../modules/billing/vat-tracker');
+        const tenants = await ctx.prisma.tenant.findMany({ where: { kind: 'PRODUCTION', isActive: true }, select: { id: true } });
+        for (const { id } of tenants) {
+          const tracker = await vatTracker(ctx.prisma, id);
+          const alert = vatAlert(tracker);
+          if (alert) {
+            const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
+            const key = `vat-threshold:${id}:${tracker.status}:${tracker.months[tracker.months.length - 1]!.month}`;
+            await opsPageOnce(ctx, key, 32 * 86_400, () =>
+              notifyAdmins(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+                // The company's VAT position, not one tenant's event [NOC-A F45].
+                tenantId: null,
+                ...alert,
+                data: { kind: 'vat_threshold', status: tracker.status, tenantId: id, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months },
+                dedupeKey: key,
+              }),
+            );
+          }
+          ctx.log.info({ tenantId: id, status: tracker.status, last12Months: tracker.last12Months, expectedNext12Months: tracker.expectedNext12Months }, 'vat threshold watch');
+        }
+        return;
+      }
+
       if (job.name === 'agent-cash-sla') {
         // Suspense SLA [san spec 4.6]: an unmatched agent payment older than
         // 24h is a paid-but-suspended person — page the founder, deduped per
@@ -1967,58 +2202,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       }
 
       if (job.name === 'guardian-sweep') {
-        // Trip Guardian tick [safety spec §5]. Opens a session for every taxi
-        // that went RIDE_IN_PROGRESS, runs the L1 detectors off the SAME
-        // persisted driver fix dispatch reads, closes sessions whose ride
-        // ended. All state is DB rows and every mutation is create-unique or
-        // CAS — idempotent, overlap-safe, catches up after worker downtime.
-        const { GuardianService } = await import('../modules/safety/guardian.service');
-        const res = await new GuardianService(ctx.prisma, ctx.io).sweep();
-        if (res.opened + res.closed + res.flagged + res.escalated > 0) {
-          ctx.log.info(res, 'Trip Guardian sweep');
-        }
-        // [S-05 · operations] Page maximum due age and the poison population,
-        // not processed counts: a sweep whose pass has stalled past the SLO,
-        // or a row that keeps failing, is a human's problem now.
-        // [S-06] The check-in delivery worker: drain what every ask owns,
-        // backfill asks with no rows, and page per deadline that must not run.
-        const { drainCheckinDeliveries, backfillCheckinDeliveries, scanCheckinDeliveries, checkinDeliveryKilled } = await import('../modules/safety/guardian-delivery');
-        const { NotificationService: GuardianNS, notifyAdmins: pageAdmins } = await import('../modules/notification/notification.service');
-        if (!checkinDeliveryKilled()) {
-          const back = await backfillCheckinDeliveries(ctx.prisma).catch(() => ({ backfilled: [] as string[] }));
-          if (back.backfilled.length > 0) ctx.log.warn({ backfilled: back.backfilled }, '[S-06] check-in asks had no delivery rows — staged now');
-          const drained = await drainCheckinDeliveries(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), { limit: 200 }).catch(() => null);
-          if (drained && (drained.failed > 0 || drained.deadLettered > 0)) ctx.log.error(drained, '[S-06] check-in deliveries failed this tick');
-        }
-        const deliveries = await scanCheckinDeliveries(ctx.prisma).catch(() => null);
-        for (const held of (deliveries?.deadlineWithoutDelivery ?? []).slice(0, 20)) {
-          await opsPageOnce(ctx, `guardian-undelivered:${held.sessionId}`, 600, () =>
-            pageAdmins(ctx.prisma, new GuardianNS(ctx.prisma, ctx.io), {
-              tenantId: held.tenantId,
-              title: 'Guardian: hard check-in not delivered',
-              body: `Session ${held.sessionId} has waited ${held.ageSeconds}s with its hard check-in ${held.state.toLowerCase()}. The deadline is held; please look at the trip.`,
-              data: { kind: 'guardian_checkin_undelivered', sessionId: held.sessionId, delivery: held.state, watchdog: true },
-            }),
-          ).catch(() => {});
-        }
-        const { scanSweeps } = await import('../lib/sweep-cursor');
-        const sweeps = await scanSweeps(ctx.prisma).catch(() => []);
-        const trouble = sweeps.filter((w) => w.stalled || w.repeatPoison.length > 0);
-        if (trouble.length > 0) {
-          const { notifyAdmins, NotificationService: NS } = await import('../modules/notification/notification.service');
-          for (const w of trouble) {
-            await opsPageOnce(ctx, `sweep-slo:${w.workType}`, 1800, () =>
-              notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
-                tenantId: null,
-                title: `Safety sweep behind: ${w.workType}`,
-                body: w.stalled
-                  ? `The ${w.workType} sweep has not completed a pass for ${w.passAgeSeconds}s (current pass ${w.currentPassSeconds}s). Rows past the cursor are waiting.`
-                  : `The ${w.workType} sweep has ${w.repeatPoison.length} row(s) failing on every pass — the first: ${w.repeatPoison[0]?.id} (${w.repeatPoison[0]?.lastError}).`,
-                data: { kind: 'safety_sweep_slo', workType: w.workType, stalled: w.stalled, passAgeSeconds: w.passAgeSeconds, repeatPoison: w.repeatPoison.slice(0, 5).map((r) => r.id) },
-              }),
-            ).catch(() => {});
-          }
-        }
+        // [row 331] Drain only: a Trip Guardian tick queued here before the
+        // safety lane existed. It runs on the safety worker now.
+        await guardianTick();
         return;
       }
 
@@ -2055,7 +2241,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ SLA breached — case ${b.caseNumber} (${b.severity})`,
+                title: `SLA breached — case ${b.caseNumber} (${b.severity})`,
                 body: `The ${b.kind === 'ACK' ? 'acknowledge' : 'decide'} clock has blown. Work the case now.`,
                 data: { kind: 'incident_sla_breach', caseId: b.id, breach: b.kind, severity: b.severity },
               }),
@@ -2148,7 +2334,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           await opsPageOnce(ctx, 'taxi-unpaid-earning', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               tenantId: null,
-              title: '🚕 Cash jobs completed without a recorded payment',
+              title: 'Cash jobs completed without a recorded payment',
               body: `${taxiUnpaidDelivered.sinceEnforced} ride(s) and ${courierUnpaidDelivered.sinceEnforced} courier job(s) are delivered with no collected cash since the cash outcome became mandatory. A completion path is bypassing the cash step — review before a mover is paid for money nobody recorded.`,
               data: { kind: 'earnings_missing', variant: 'cash_unpaid_completion', taxi: taxiUnpaidDelivered.sinceEnforced, courier: courierUnpaidDelivered.sinceEnforced },
             }),
@@ -2162,7 +2348,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // Platform-wide ops page: an aggregate scan or infra alarm, not one
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
-              title: '💸 Movers were paid late by the reconciler',
+              title: 'Movers were paid late by the reconciler',
               body: `${healed.length} delivered order(s) had no earnings row and were healed. A completion path is losing the earnings write — investigate before a mover notices first.`,
               data: { kind: 'earnings_missing', count: healed.length },
             }),
@@ -2236,6 +2422,30 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     { connection, concurrency: offerWorkerConcurrency() },
   );
 
+  // SAFETY: the safety lane [row 331 · AUD-L4-005]. The SOS grace backstop and
+  // the Trip Guardian tick only, on their own slots: a backlog of dispatch
+  // sweeps can no longer hold an SOS escalation or a guardian check, and with
+  // more than one slot a tick stuck behind a slow provider never holds the next.
+  const safetyWorker = buildWorker(
+    QUEUE_NAMES.SAFETY,
+    async (job: Job) => {
+      if (job.name === 'promote-sos-grace') {
+        await sosGraceTick();
+      } else if (job.name === 'guardian-sweep') {
+        await guardianTick();
+      } else {
+        // [#1794 S4] Never "done" for a job this lane does not run: it fails,
+        // dead-letters, and the DLQ alarm pages.
+        throw new UnrecoverableError(`The safety lane runs only ${SAFETY_TIMER_JOBS.join(' and ')}; "${job.name}" was put on it by mistake`);
+      }
+      // [#1794 S3-1] Completed: stamp it for checkSafetyLane (another lane reads it).
+      // A failed stamp is logged, never a failed tick.
+      await ctx.redis.set(safetyTickCompletedKey(job.name), String(Date.now()))
+        .catch((err: unknown) => ctx.log.warn({ err, tick: job.name }, '[row 331] could not stamp a completed safety tick'));
+    },
+    { connection, concurrency: safetyWorkerConcurrency() },
+  );
+
   // SEARCH: debounced per-vendor index sync [SWIFT-UG-SRCH-01]. Best-effort —
   // a failure logs and waits for the next write or the boot reconciler; it
   // must never crash a worker or spam retries against a down Meili.
@@ -2265,7 +2475,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const allWorkers: Record<string, Worker> = {
     order: orderWorker, subscription: subscriptionWorker,
     settlement: settlementWorker, verification: verificationWorker, dispatch: dispatchWorker,
-    offer: offerWorker, notification: notificationWorker, search: searchWorker,
+    offer: offerWorker, safety: safetyWorker, notification: notificationWorker, search: searchWorker,
   };
 
   const workerResources = Object.entries(allWorkers).map(([name, worker]) => ({
@@ -2360,6 +2570,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     verificationWorker,
     dispatchWorker,
     offerWorker,
+    safetyWorker,
     notificationWorker,
     searchWorker,
     waitUntilReady: () => Promise.all(Object.values(allWorkers).map((worker) => worker.waitUntilReady())),
@@ -2433,7 +2644,8 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   });
 
   // [DOC-1 §1.3 · P1-3] The image-policy sweep: after the expiry sweep, purge the images of
-  // committed PERSONAL documents whose type is active and whose extraction succeeded.
+  // committed PERSONAL documents whose type is active and whose extraction succeeded, and
+  // [R24] every partner PERSONAL image 30 days after its decision.
   await queues.verificationQueue.add('image-policy-sweep', {}, {
     repeat: { pattern: '20 6 * * *' },
     removeOnComplete: 30,
@@ -2493,6 +2705,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Ads reservation expiry [ads-platform spec §7.3]: every minute, release
   // RESERVED holds whose TTL lapsed so the inventory frees up for others.
   await queues.dispatchQueue.add('ads-release-expired', {}, {
+    repeat: { pattern: '* * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [SUBSTITUTION · owner 17 Oct 2026] Swap-question deadlines: every minute,
+  // remove (or, on MMG, withdraw) any swap the customer did not answer in time.
+  await queues.dispatchQueue.add('substitution-expiry', {}, {
     repeat: { pattern: '* * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,
@@ -2570,6 +2790,13 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Billing invariants: nightly 03:30 (after the 03:00 money jobs settle).
   await queues.dispatchQueue.add('billing-invariants', {}, {
     repeat: { pattern: '30 3 * * *' },
+    removeOnComplete: 7,
+    removeOnFail: 7,
+  });
+  // [Owner legal plan 15 Oct · R10] VAT registration threshold watch, daily at
+  // 08:00 Guyana time (a working morning, so the page is read the same day).
+  await queues.dispatchQueue.add('vat-threshold-watch', {}, {
+    repeat: { pattern: '0 8 * * *', tz: GUYANA_TZ },
     removeOnComplete: 7,
     removeOnFail: 7,
   });
@@ -2742,7 +2969,18 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // highly-selective indexed lookup that returns nothing almost always. `|| `
   // (not `??`) so garbage/NaN/0 all fall back to the default; floored at 2s so a
   // misconfig can't turn it into pathological churn.
-  await queues.dispatchQueue.add('promote-sos-grace', {}, {
+  // [row 331 · AUD-L4-005] The two safety timers ride the safety queue. They
+  // were registered on the dispatch queue before, and a repeatable registration
+  // lives in Redis, not in the code: left alone it would keep queueing ticks
+  // behind the sweeps. Remove it (BullMQ removes its next scheduled run with it).
+  // Idempotent: after the first boot on this code there is none to remove.
+  for (const legacy of await queues.dispatchQueue.getRepeatableJobs()) {
+    if ((SAFETY_TIMER_JOBS as readonly string[]).includes(legacy.name)) {
+      await queues.dispatchQueue.removeRepeatableByKey(legacy.key);
+    }
+  }
+
+  await queues.safetyQueue.add('promote-sos-grace', {}, {
     repeat: { every: Math.max(2_000, Number(process.env['SOS_GRACE_SWEEP_MS']) || 10_000) },
     removeOnComplete: 20,
     removeOnFail: 20,
@@ -2753,7 +2991,7 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // detector budget (sustain 90s, stops 3–5 min, check-in deadline 120s);
   // floored at 5s — the tick reads a handful of indexed rows but a misconfig
   // must not turn it into a stampede. Same `||` discipline as above.
-  await queues.dispatchQueue.add('guardian-sweep', {}, {
+  await queues.safetyQueue.add('guardian-sweep', {}, {
     repeat: { every: Math.max(5_000, Number(process.env['GUARDIAN_SWEEP_MS']) || 15_000) },
     removeOnComplete: 20,
     removeOnFail: 20,

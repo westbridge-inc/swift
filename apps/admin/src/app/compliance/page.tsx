@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 /**
  * The liability shield. Three panels:
@@ -54,6 +55,13 @@ export default function CompliancePage() {
         An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
       </p>
 
+      {q.isLoading ? (
+        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-center text-[var(--muted)]">Loading…</div>
+      ) : q.isError ? (
+        // A failed read is never "nobody is operating outside the rules": say we could not look.
+        <QueryFailed error={q.error} what="the compliance checks" onRetry={() => void q.refetch()} retrying={q.isFetching} />
+      ) : (
+      <>
       {/* Open violations */}
       <h2 className="font-semibold mb-2">
         Open violations{' '}
@@ -188,6 +196,8 @@ export default function CompliancePage() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 }

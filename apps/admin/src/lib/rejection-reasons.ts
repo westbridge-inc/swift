@@ -16,7 +16,7 @@ export const REJECTION_REASONS = [
   { code: 'WRONG_DOCUMENT', label: 'Not the document asked for' },
   { code: 'FACE_MISMATCH', label: 'The face does not match' },
   { code: 'NAME_MISMATCH', label: 'The name does not match the account' },
-  { code: 'INSURANCE_NOT_HIRE', label: 'Insurance does not cover hire (taxi) work' },
+  { code: 'INSURANCE_NOT_HIRE', label: 'Insurance does not permit use for hire or reward' },
   { code: 'SUSPECTED_TAMPERING', label: 'Looks altered' },
   { code: 'DUPLICATE', label: 'Already used on another account' },
   { code: 'INCOMPLETE', label: 'Part of the document is cut off' },
