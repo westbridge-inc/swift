@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { searchCatalogue, type CatalogueResults } from '@/lib/customer';
+import { searchCatalogue, type CatalogueResults } from '@/lib/customer-search';
 import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { VendorCard, VendorGridSkeleton, EmptyNote, ItemCard, VENDOR_GRID } from '@/components/order-ui';
 import { MARKET_GRID } from '@/components/customer-skeletons';
