@@ -99,6 +99,9 @@ describe('[W6] the item sheet is not in the store page’s first load', () => {
   it('the server-drawn page carries the store’s tint, as before', async () => {
     const api = await import('@/lib/api');
     vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);
+    // [PERF #2] No live menu from the server here: the page draws as before.
+    const browseServer = await import('@/lib/browse-server');
+    vi.spyOn(browseServer, 'storeMenuForPage').mockResolvedValue(null);
     const { StorefrontPage } = await import('./storefront-page');
     const html = renderToString(await StorefrontPage({ params: Promise.resolve({ slug: store.slug }), searchParams: Promise.resolve({}) }));
     const tint = storefrontVerticalVariables('RESTAURANT') as Record<string, string>;

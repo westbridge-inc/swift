@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { fetchStorefront } from '@/lib/api';
+import { storeMenuForPage } from '@/lib/browse-server';
 import { storefrontVerticalVariables } from '@/lib/design-tokens';
 import { StorefrontExperience } from './storefront-experience';
 import { canonicalStorePath, requestedItem, type StoreQuery } from './store-path';
@@ -38,7 +39,10 @@ export async function StorefrontPage({ params, searchParams }: StorefrontRoutePr
   const query = searchParams ? await searchParams : {};
   const fromQr = query['src'] === 'qr';
   const returnPath = scannedReturnPath(store.slug, query);
+  // [PERF #2] A recent live menu arrives in the page, so Add works without the
+  // browser reading the store and its menu again first.
+  const liveMenu = await storeMenuForPage(store.id);
   // The store's vertical tint is worked out here, on the server, so the
   // design-token tables are not part of the page's first-load JavaScript.
-  return <StorefrontExperience key={`${store.slug}:${fromQr}`} store={store} returnPath={returnPath} fromQr={fromQr} initialItemId={requestedItem(query)} verticalStyle={storefrontVerticalVariables(store.vendorType)} />;
+  return <StorefrontExperience key={`${store.slug}:${fromQr}`} store={store} returnPath={returnPath} fromQr={fromQr} initialItemId={requestedItem(query)} verticalStyle={storefrontVerticalVariables(store.vendorType)} liveMenu={liveMenu} />;
 }

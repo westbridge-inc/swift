@@ -80,6 +80,7 @@ import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
+import { isOutboxDeadLetterName, listOutboxDeadLetters, OUTBOX_RECOVERY, requeueOutboxDeadLetter } from '../../jobs/outbox-dead-letter';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
 import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
@@ -6907,7 +6908,8 @@ export async function adminRoutes(app: FastifyInstance) {
   // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
   // jobs were invisible in the DLQ — added.
   // [row 266] 'offer' = the offer fast lane (offer timeouts only).
-  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'search'] as const;
+  // [row 331] 'safety' = the safety lane (the SOS backstop + Trip Guardian ticks).
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'safety', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
@@ -6969,6 +6971,9 @@ export async function adminRoutes(app: FastifyInstance) {
         });
       }
     }
+    // [row 267] The durable outboxes' dead letters sit beside the dead jobs:
+    // a command whose retry budget ran out, waiting for an operator.
+    for (const row of await listOutboxDeadLetters(app.prisma)) out.push({ ...row, recovery: OUTBOX_RECOVERY });
     out.sort((a, b) => Number(b['finishedOn'] ?? 0) - Number(a['finishedOn'] ?? 0));
     return { success: true, data: out.slice(0, 200) };
   });
@@ -7077,6 +7082,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string; acknowledgedReconciled?: string };
+    // [row 267] An outbox dead letter is requeued in the database: the same row,
+    // a fresh retry budget, compare-and-set on the stamp the operator saw.
+    if (isOutboxDeadLetterName(queue)) {
+      const finishedOn = expected.expectedFinishedOn === undefined ? undefined : Number(expected.expectedFinishedOn);
+      if (finishedOn !== undefined && !Number.isSafeInteger(finishedOn)) throw new AppError(400, 'VALIDATION_ERROR', 'expectedFinishedOn must be a timestamp in milliseconds');
+      await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { outbox: queue }, async () => {
+        if (!(await requeueOutboxDeadLetter(app.prisma, queue, id, finishedOn))) throw NO_LONGER_FAILED('it was already requeued or completed');
+      });
+      return { success: true, data: { queue, id, retried: true } };
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     // [A-08] Retry-safety is a property each job class has to EARN. The page
@@ -7110,6 +7125,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    // [row 267] An outbox row is an obligation someone is owed (a dispatch, a
+    // revocation, a safety intake): it is requeued or fixed, never discarded here.
+    if (isOutboxDeadLetterName(queue)) {
+      throw new AppError(409, 'OUTBOX_DEAD_LETTER_NOT_DISCARDABLE', 'An outbox command cannot be discarded from here. Requeue it, or fix what it is waiting on.');
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     await auditedDlqAction(

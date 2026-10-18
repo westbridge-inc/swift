@@ -6,7 +6,9 @@
 // verifies (a drill on a real device, legal/operations sign-off). So:
 //
 //   the server serves a signed, cacheable policy per market — verified
-//   numbers, per service (apps/api modules/country/emergency-policy.ts);
+//   numbers, per service (apps/api modules/country/emergency-policy.ts) —
+//   and this app trusts it ONLY when its Ed25519 signature verifies under a
+//   key pinned in the app [AUD-G7-023] (emergencyPolicySignature.ts);
 //   the app carries a bundled fallback for when the server cannot be reached;
 //   and ONE resolution decides what the SOS surfaces do:
 //     auto     a VERIFIED number: dialed immediately, first, before anything Swift-side
@@ -15,6 +17,9 @@
 //
 // Every decision is counted (emergency_dial_market) so a market that keeps
 // landing on `manual` is visible before someone needs it.
+
+import { EMERGENCY_POLICY_PINS, type EmergencyPolicyPin } from './emergencyPolicyPins';
+import { verifyEmergencyEnvelope } from './emergencyPolicySignature';
 
 export type EmergencyService = 'police' | 'fire' | 'ambulance';
 export const EMERGENCY_SERVICES: EmergencyService[] = ['police', 'fire', 'ambulance'];
@@ -31,6 +36,8 @@ export interface EmergencyPolicy {
   numbers: EmergencyNumbers;
   source: 'server' | 'bundled';
   expiresAt?: string;
+  /** A served policy's signed issue time (ms): an older one never replaces a newer one. */
+  issuedAt?: number;
 }
 
 export type EmergencyDial =
@@ -63,29 +70,31 @@ export function bundledPolicyFor(country: string | null | undefined): EmergencyP
   return numbers ? { country: code, numbers, source: 'bundled' } : null;
 }
 
-/** The API's `/public/emergency-policy` payload, validated; anything malformed or expired is not a policy. */
-export function parseServedPolicy(raw: unknown, now = Date.now()): EmergencyPolicy | null {
+/**
+ * [AUD-G7-023] The API's `/public/emergency-policy` payload → a policy ONLY when
+ * its Ed25519 `envelope` verifies under a key pinned in this app, for the market
+ * that was asked for (`country`), unexpired. The v1 fields beside it — numbers
+ * and an HMAC-shaped "signature" no phone can check, kept for builds 9-11 — are
+ * never read: anything able to alter the response could have written them.
+ * Anything else is not a policy; the caller keeps the last policy that verified,
+ * or the bundled numbers.
+ */
+export function parseServedPolicy(
+  raw: unknown,
+  country: string | null | undefined,
+  now = Date.now(),
+  pins: readonly EmergencyPolicyPin[] = EMERGENCY_POLICY_PINS,
+): EmergencyPolicy | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
-  if (r['version'] !== 1 || typeof r['country'] !== 'string' || !/^[A-Z]{2}$/.test(r['country'])) return null;
-  if (typeof r['expiresAt'] !== 'string') return null;
-  const expires = Date.parse(r['expiresAt']);
-  if (!Number.isFinite(expires) || expires <= now) return null;
-  const sig = r['signature'];
-  if (!sig || typeof sig !== 'object' || typeof (sig as Record<string, unknown>)['kid'] !== 'string' || typeof (sig as Record<string, unknown>)['value'] !== 'string') return null;
-  const nums = r['numbers'];
-  if (!nums || typeof nums !== 'object' || Array.isArray(nums)) return null;
-  const numbers: EmergencyNumbers = {};
-  for (const service of EMERGENCY_SERVICES) {
-    const entry = (nums as Record<string, unknown>)[service];
-    if (entry === undefined || entry === null) continue;
-    if (!entry || typeof entry !== 'object') return null;
-    const e = entry as Record<string, unknown>;
-    if (typeof e['number'] !== 'string' || !NUMBER_RE.test(e['number']) || typeof e['verified'] !== 'boolean') return null;
-    numbers[service] = { number: e['number'], verified: e['verified'] };
-  }
-  if (Object.keys(numbers).length === 0) return null;
-  return { country: r['country'], numbers, source: 'server', expiresAt: r['expiresAt'] };
+  const verified = verifyEmergencyEnvelope((raw as Record<string, unknown>)['envelope'], { country: (country ?? '').toUpperCase(), now, pins });
+  if (!verified) return null;
+  return Object.freeze({
+    country: verified.country,
+    numbers: verified.numbers as EmergencyNumbers,
+    source: 'server' as const,
+    expiresAt: new Date(verified.expiresAt).toISOString(),
+    issuedAt: verified.issuedAt,
+  });
 }
 
 /** The policy in force for a market: the server's (for that market, unexpired) wins; else the bundle; else nothing. */
