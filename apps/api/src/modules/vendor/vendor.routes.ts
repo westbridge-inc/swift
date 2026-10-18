@@ -1,4 +1,4 @@
-import { mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
+import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
@@ -2365,6 +2365,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [S1-6] The disagreement's evidence and the durable notice obligation
         // commit with the claim; the customer is told what the STORE said.
         ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // [owner 18 Oct 2026 · REVIEW-G S4] A "customer says paid, store silent" case closes with the store's tap.
+        await closeStoreSilentMmgCase(tx, order.id, 'PAID_BY_MMG', now);
         // Answer with the row as it now stands, attestation evidence included.
         const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
         return { won: true, order: claimedRow, notice, outboxId };

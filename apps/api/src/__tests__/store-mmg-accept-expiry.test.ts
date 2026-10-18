@@ -336,6 +336,22 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     expect(tap.statusCode, tap.body).toBe(200);
     expect((await orderRow(orderId)).mmgClaimMismatchAt).toBeNull();
     expect((await preparing(orderId)).statusCode).toBe(200);
+    // [REVIEW-G S4] The case closed with the tap, in the same commit.
+    expect(await cases(orderId)).toMatchObject([{ status: 'RESOLVED', resolution: 'ACTION_TAKEN' }]);
+  });
+
+  it('a customer who takes back "I paid" after 30:00 is cancelled by the rule, and the case closes with it', async () => {
+    const orderId = await placeOrder('MOBILE_MONEY');
+    await acceptedAgo(orderId, 10 * MIN);
+    expect((await customerSaysPaid(orderId, `MP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, '7')}`)).statusCode).toBe(200);
+    await backdate(orderId, 31 * MIN);
+    await sweep();
+    expect(await cases(orderId)).toHaveLength(1);
+    const back = await call('POST', `/api/v1/customer/orders/${orderId}/payment-claim`, customer.token, { paid: false });
+    expect(back.statusCode, back.body).toBe(200);
+    expect(await sweep()).toContain(orderId);
+    expect((await orderRow(orderId)).status).toBe('CANCELLED');
+    expect(await cases(orderId)).toMatchObject([{ status: 'RESOLVED', resolution: 'ACTION_TAKEN' }]);
   });
 
   it('only accepted, unpaid MMG orders expire: a waiting (not yet accepted) MMG order and an accepted CASH order are left alone', async () => {

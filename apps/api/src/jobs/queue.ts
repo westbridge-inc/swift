@@ -477,7 +477,7 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
  *  customer. Exported so tests drive it directly. */
 export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
-  const { MMG_ACCEPT_EXPIRY_REASON, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  const { MMG_ACCEPT_EXPIRY_REASON, closeStoreSilentMmgCase, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
   let order: { vendorId: string | null; customerId: string; orderNumber: string; fulfillment: string | null };
   try {
     ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
@@ -489,6 +489,8 @@ export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string
       cancellation: { by: null, reason: MMG_ACCEPT_EXPIRY_REASON },
       requireUnpaidMmgAcceptanceExpired: true,
       releaseStaleMoverPointer: true,
+      // A store-silent case (the customer had said "I paid", then took it back) closes with the cancel.
+      withinTransaction: async (tx) => { await closeStoreSilentMmgCase(tx, orderId, 'CANCELLED'); },
       invalidStatus: () => new AppError(409, 'MMG_ACCEPT_EXPIRY_NOT_ELIGIBLE', 'Order is paid, no longer accepted, or still within its MMG payment window'),
     }));
   } catch (error) {
