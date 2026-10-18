@@ -100,6 +100,18 @@ describe('[B2] "Worth trying right now" when a search finds nothing', () => {
     expect(asked(fetcher)).toBe(1);
   });
 
+  it('Shops with no match does not offer it either', async () => {
+    const fetcher = backend({ vendors: [{ id: 'v8', name: 'Test Kitchen', vendorType: 'RESTAURANT' }] });
+    vi.stubGlobal('fetch', fetcher);
+    render(<AppLayout><SearchPage /></AppLayout>);
+    fireEvent.change(box(), { target: { value: 'Rice' } });
+    expect(await screen.findByText('Test Kitchen')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Shops' }));
+    expect(await screen.findByText('No shops stores match “Rice”.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Worth trying right now' })).toBeNull();
+    expect(asked(fetcher)).toBe(0);
+  });
+
   it('a search that could not be asked is not "nothing matches": no invitation', async () => {
     const fetcher = backend({ searchDown: true });
     vi.stubGlobal('fetch', fetcher);
