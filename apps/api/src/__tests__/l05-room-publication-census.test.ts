@@ -30,7 +30,7 @@ function namesSensitiveRoom(arg: ts.Expression, ast: ts.SourceFile): boolean {
 }
 
 describe('sensitive room publication census', () => {
-  it('all 46 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
+  it('all 47 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
     const bypasses: string[] = []; let orderPublishers = 0;
     for (const file of sources(join(__dirname, '..'))) {
       const text = readFileSync(file, 'utf8');
