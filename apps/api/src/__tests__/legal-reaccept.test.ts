@@ -95,9 +95,11 @@ describe('[2026-10-18] a non-material bump asks nobody again', () => {
     expect(materialVersion('2026-10-18')).toBe('2026-10-17');
     for (const tosVersion of [null, '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17']) {
       for (const roles of [['CUSTOMER'], ['MOVER', 'CUSTOMER'], ['VENDOR_OWNER', 'CUSTOMER']] as UserRole[][]) {
-        const { currentVersion: _a, ...before } = acceptanceStatus({ tosVersion, roles }, '2026-10-17');
-        const { currentVersion: _b, ...after } = acceptanceStatus({ tosVersion, roles }, '2026-10-18');
-        expect(after, `${tosVersion} ${roles.join('+')}`).toEqual(before);
+        const before = acceptanceStatus({ tosVersion, roles }, '2026-10-17');
+        const after = acceptanceStatus({ tosVersion, roles }, '2026-10-18');
+        expect([before.currentVersion, after.currentVersion]).toEqual(['2026-10-17', '2026-10-18']);
+        // Everything but the served version itself is the same answer.
+        expect({ ...after, currentVersion: before.currentVersion }, `${tosVersion} ${roles.join('+')}`).toEqual(before);
       }
     }
     expect(acceptanceStatus({ tosVersion: '2026-10-17', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-18')).toMatchObject({ needsAcceptance: false, summary: [] });
