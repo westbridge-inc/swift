@@ -143,7 +143,7 @@ describe('[R3] every store page carries the seller block', () => {
   it('[PAYMENT-SIMPLIFY] switch off (default): MMG is named for a store with a valid MMG NUMBER, never for a pay link alone', async () => {
     vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
     vi.stubEnv('STORE_MMG_PAY_LINK', '');
-    const { vendorId, slug } = await store(9);
+    const { vendorId, slug } = await store(3001); // own index: main's row-248 receipt test uses 9
     await setStore(vendorId, { mmgPayUrl: LINK });
     expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
     await setStore(vendorId, { mmgNumber: '+5926001234' });
