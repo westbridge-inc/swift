@@ -1172,7 +1172,11 @@ export class MmgCheckoutService {
     // lookup declines them all. A redirect's error path, a transaction MMG does
     // not know, or a decline after a success answer is never "not paid": the
     // checkout keeps confirming, then expires without declaring failure.
-    const failed = verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound) ?? await this.declinedAsAnswered(intent, verdicts);
+    // [#1552 S4-1] A payment MMG's answer ties to this checkout, still waiting
+    // for MMG's history to show it, outranks any decline: it is never "not
+    // paid" while MMG may hold the money (it waits; a late check holds it).
+    const tiedWaiting = verdicts.some((v) => v.verdict === 'HOLD' && v.decisiveWhenLate === true);
+    const failed = tiedWaiting ? undefined : verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound) ?? await this.declinedAsAnswered(intent, verdicts);
     if (failed) return this.notPaid(intent, failed.reason, now);
 
     // Nothing is certain yet. A mismatch that may concern another transaction
