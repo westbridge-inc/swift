@@ -1026,6 +1026,13 @@ export async function customerRoutes(app: FastifyInstance) {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
               pendingAvatarObjects: result.pendingAvatarObjects,
+              pendingUploads: result.pendingUploads,
+            }),
+            // [Row 331] What a legal hold keeps is recorded as kept, never silently skipped.
+            ...(result.status === 'PENDING_LEGAL_HOLD' && {
+              heldDocuments: result.heldDocuments,
+              heldMoverObjects: result.heldMoverObjects,
+              heldUploads: result.heldUploads,
             }),
           },
         },

@@ -210,13 +210,17 @@ describe('[R3] the refund rule is the store owner\'s own words, checked on write
     expect((await appView(vendorId)).seller.refundRule).toBeNull();
   });
 
-  it.each([
+  // Each case has its own fixed store index (REFUSAL_BASE + its row), clear of every other
+  // store index in this file; storefront-seller-block-indexes.test.ts keeps them unique.
+  const REFUSAL_BASE = 4001;
+  const REFUSALS = [
     ['a link', 'Refunds: see https://example.com/refunds', 'REFUND_RULE_INVALID'],
     ['a web address without a scheme', 'Read www.example.com first', 'REFUND_RULE_INVALID'],
     ['more than 300 characters', `Refunds ${'x'.repeat(300)}`, 'REFUND_RULE_INVALID'],
     ['goods Swift never carries', 'No refunds on rum or cigarettes once opened.', 'REFUND_RULE_INVALID'],
-  ])('refuses %s, and keeps the rule on file as it was', async (_what, text, code) => {
-    const { userId, vendorId } = await store(8 + Math.floor(Math.random() * 1000));
+  ] as const;
+  it.each(REFUSALS.map(([what, text, code], row) => [what, text, code, REFUSAL_BASE + row] as const))('refuses %s, and keeps the rule on file as it was', async (_what, text, code, n) => {
+    const { userId, vendorId } = await store(n);
     await setStore(vendorId, { refundRule: 'Exchanges only.' });
     const res = await saveRefundRule(await tokenFor(userId), vendorId, text);
     expect(res.statusCode).toBe(400);

@@ -43,6 +43,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -2610,11 +2611,10 @@ export class VerificationService {
     result: T,
   ): Promise<T & { collided?: boolean }> {
     const mine = await resolveVerificationObject(this.prisma, { fileKey, userId });
-    const other = await this.prisma.encryptedObject.findFirst({
-      where: { sha256: mine.sha256, createdBy: { not: userId } },
-      select: { createdBy: true },
-    });
-    if (!other) return result;
+    // [Row 331 (c)] The other holder is a LIVE account: an erased one is never linked again.
+    const [otherId] = await liveDuplicateHolders(this.prisma, mine.sha256, userId);
+    if (!otherId) return result;
+    const other = { createdBy: otherId };
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(this.prisma);
     const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';
