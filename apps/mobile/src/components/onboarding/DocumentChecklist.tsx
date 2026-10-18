@@ -1,7 +1,9 @@
-import { View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { EmptyState, Spinner, T } from '../../kit';
+import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
+import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
 import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
@@ -31,6 +33,8 @@ export function DocumentChecklist({
   isError?: boolean;
   onRetry?: () => void;
 }) {
+  // [R17] uploads wait for the consent tick (unticked to start); a hook, so before the early returns
+  const [consented, setConsented] = useState(false);
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -92,8 +96,21 @@ export function DocumentChecklist({
         Required steps
       </T>
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
-        Upload these to activate your account. We review within 24 hours.
+        {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
+        Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
       </T>
+      {/* [R17 · legal research D2/B1] an unticked tick before any upload; the API records it in the consent ledger */}
+      <Pressable
+        onPress={() => setConsented((c) => !c)}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: consented }}
+        accessibilityLabel={DOCUMENT_CONSENT_TEXT}
+        testID="document-consent-tick"
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}
+      >
+        <BrandCheckbox checked={consented} onToggle={() => setConsented((c) => !c)} />
+        <T variant="label" tone="muted" style={{ flex: 1 }}>{DOCUMENT_CONSENT_TEXT}</T>
+      </Pressable>
       {isTaxiChecklist(checklist) ? (
         <T variant="label" style={{ marginBottom: space.sm }}>
           {TAXI_TWO_LICENCES}
@@ -138,6 +155,7 @@ export function DocumentChecklist({
         const doc = latestDoc(docType);
         return (
           <DocumentUploadCard
+            consented={consented}
             key={docType}
             role={role}
             docType={docType}
@@ -163,6 +181,7 @@ export function DocumentChecklist({
             const doc = latestDoc(docType);
             return (
               <DocumentUploadCard
+                consented={consented}
                 key={docType}
                 role={role}
                 docType={docType}

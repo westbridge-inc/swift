@@ -182,7 +182,8 @@ export function useSubmitIdentity() {
     mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
+        // [R17 · in-app ¶15] the screen's tick (build 12) is recorded in the consent ledger
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v1' },
         owner,
       ));
       requireAuthSessionForPrincipal(owner);
@@ -217,6 +218,8 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
+          consentTick: 'document_v1',
         }, current),
       );
       requireAuthSessionForPrincipal(owner);

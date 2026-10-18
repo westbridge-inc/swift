@@ -83,8 +83,33 @@ export async function confirmationReviewQueue(db: PrismaClient, tenantId: string
       reason: 'PAUSED_COVERAGE_UNPROVEN_OR_ALREADY_USED', beganAt: audit.createdAt, reviewDueAt: audit.createdAt, overdue: true,
       remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(clock, now)) }];
   });
-  return [...payments, ...obligations];
+  // [REVIEW-M #1832 S3-1] A suspended partner's payment that could not re-anchor
+  // (dunning-clock.ts writeReanchorReview) paid the week that fell due as it
+  // stood: the time suspended may have been billed. One read-only row per such
+  // payment from the last REANCHOR_REVIEW_DAYS days, never a PAID/UNPAID override.
+  const refused = await db.auditLog.findMany({ where: { entity: 'BillingDunningClock', action: 'BILLING_REANCHOR_REVIEW_REQUIRED',
+    createdAt: { gte: new Date(now.getTime() - REANCHOR_REVIEW_DAYS * 86_400_000) }, changes: { path: ['tenantId'], equals: tenantId } },
+    orderBy: [{ createdAt: 'desc' }, { id: 'asc' }], take: 200 });
+  const refusedClocks = refused.length ? await db.billingDunningClock.findMany({ where: { tenantId, id: { in: refused.map((audit) => audit.entityId) } } }) : [];
+  const refusedSubs = refused.length ? await db.subscription.findMany({ where: { id: { in: refused.map((audit) => String((audit.changes as Prisma.JsonObject | null)?.['subscriptionId'])) } },
+    select: { id: true, ...partnerSelect } }) : [];
+  const returns = refused.flatMap((audit) => {
+    const facts = audit.changes as Prisma.JsonObject | null;
+    const clock = refusedClocks.find((c) => c.id === audit.entityId);
+    const sub = refusedSubs.find((s) => s.id === facts?.['subscriptionId']);
+    if (!clock || !sub || facts?.['tenantId'] !== tenantId || facts['clockId'] !== clock.id || typeof facts['reason'] !== 'string') return [];
+    const paymentId = typeof facts['paymentId'] === 'string' ? facts['paymentId'] : null;
+    return [{ swiftReference: null, partner: partnerLabel(sub), settlementPayments: [], id: audit.id, subscriptionId: sub.id,
+      epoch: Number(facts['epoch']), clockEpoch: clock.epoch, clockVersion: clock.version, status: 'REVIEW_REQUIRED', resolvable: false,
+      source: 'RETURN_REANCHOR', sourceId: paymentId ?? sub.id, reason: `RETURN_NOT_REANCHORED_${facts['reason']}`,
+      beganAt: audit.createdAt, reviewDueAt: audit.createdAt, overdue: true,
+      remainingGraceMs: Math.max(0, FULL_FEE_GRACE_MS - activeOverdueMs(clock, now)) }];
+  });
+  return [...payments, ...obligations, ...returns];
 }
+
+/** How long a refused re-anchor stays on the finance queue (S3-1). */
+export const REANCHOR_REVIEW_DAYS = 30;
 
 export async function resolveFinanceConfirmation(db: PrismaClient, input: {
   id: string; tenantId: string; actorId: string; sourceId: string; epoch: number; clockVersion: number;

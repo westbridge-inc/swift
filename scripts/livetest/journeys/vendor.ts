@@ -121,6 +121,9 @@ export const VEND_01: Journey<Ctx> = {
   },
 };
 
+/** How long VEND-02 waits for the release sweep's new-order alert (two sweeps). */
+export const VEND02_ALERT_WAIT_MS = 20_000;
+
 export const VEND_02: Journey<Ctx> = {
   id: 'VEND-02',
   title: 'Accept order → ready (H-1 close)',
@@ -153,8 +156,12 @@ export const VEND_02: Journey<Ctx> = {
     await waitForRelease(ctx.roster.customers.C1!.session, A);
     const board = await GET('/vendor/orders?limit=50', R2.session.token);
     rec.check('after the hold the order is on the store board', JSON.stringify(board.json?.data ?? []).includes(A), '');
-    const alerts = await GET('/vendor/alerts/pending', R2.session.token);
-    rec.check('the store has an unread new-order alert for it', JSON.stringify(alerts.json?.data ?? []).includes(A), `→ ${brief(alerts)}`);
+    // The alert row is written by the release sweep (every 10 s), not at the
+    // hold's end, so wait for it (bounded) before the unchanged check.
+    const alertFor = (r: Awaited<ReturnType<typeof GET>>) => JSON.stringify(r.json?.data ?? []).includes(A);
+    let alerts = await GET('/vendor/alerts/pending', R2.session.token);
+    const alerted = alertFor(alerts) || !!(await waitFor(async () => alertFor(alerts = await GET('/vendor/alerts/pending', R2.session.token)), VEND02_ALERT_WAIT_MS, 1_000));
+    rec.check('the store has an unread new-order alert for it', alertFor(alerts), `→ ${brief(alerts)}${alerted ? '' : ` — no alert row ${VEND02_ALERT_WAIT_MS / 1000} s after the hold ended (the release sweep runs every 10 s)`}`);
     const acc = await PUT(`/vendor/orders/${A}/accept`, { estimatedPrepTime: 15 }, R2.session.token);
     rec.expect('the store accepts', acc, 200, undefined, `status=${acc.json?.data?.status}`);
     const bare = await PUT(`/vendor/orders/${B1}/reject`, {}, R2.session.token);

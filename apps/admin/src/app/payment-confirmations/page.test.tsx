@@ -140,6 +140,21 @@ describe('weekly-fee payment confirmations', () => {
     expect(legacy.textContent).toContain('Read-only');
     expect(within(legacy).queryByRole('button')).toBeNull();
   });
+  // [REVIEW-M #1832 S3-1] A suspended partner's payment that could not restart their billing at the
+  // return paid the week that fell due as it stood: finance sees each one, read-only, in words.
+  it('shows a payment that could not re-anchor as a read-only return payment, in words', async () => {
+    serve(undefined, [{ ...row, id: 'reanchor-audit', source: 'RETURN_REANCHOR', sourceId: 'payment-one', status: 'REVIEW_REQUIRED', resolvable: false,
+      reason: 'RETURN_NOT_REANCHORED_CLOCK_DISAGREES', swiftReference: null as unknown as string }]);
+    renderWithQuery(<Page />);
+    const table = await screen.findByRole('table', { name: 'Payment confirmations' });
+    const line = within(table).getAllByRole('row')[1]!;
+    expect(line.textContent).toContain('Return payment');
+    expect(line.textContent).toContain('payment-one');
+    expect(line.textContent).toContain("A suspended partner's payment paid the week that fell due as it stood (the server clock and the database clock disagreed): the days they were suspended may have been billed");
+    expect(line.textContent).toContain('Read-only. Compare the days billed with the time this partner was suspended');
+    expect(line.textContent).not.toContain('RETURN_NOT_REANCHORED');
+    expect(within(line).queryByRole('button')).toBeNull();
+  });
   it.each(['UNPAID', 'PAID'] as const)('posts the exact %s approval body and honestly waits without resubmitting', async (decision) => {
     const fetch = serve(undefined, [decision === 'PAID' ? { ...row, settlementPayments: credited } : row]);const { user } = renderWithQuery(<Page />);
     const form = await open(user, decision === 'PAID' ? 'Mark PAID' : 'Close as NOT PAID');

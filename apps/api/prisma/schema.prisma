@@ -366,6 +366,12 @@ model DeviceToken {
   platform  String
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  /// [RINGER · loud alerts 3/4] What the app installed on this device can
+  /// ring with, as the app reported it when it registered this token: 0 =
+  /// builds 9-11 and anything that reported nothing (sent exactly today's
+  /// push); 1 = the build with the job ring (the 'job_offers' Android
+  /// channel, the bundled ring tone, the iOS time-sensitive entitlement).
+  alertsVersion Int @default(0)
 
   @@map("device_tokens")
 }
@@ -3299,6 +3305,8 @@ model Subscription {
 model BillingEvent {
   obligationTransitions BillingObligationTransition[] @relation("ObligationSuccess")
   voluntaryResumes BillingObligationTransition[] @relation("ObligationLapse")
+  /// [BILLING-REANCHOR] The return re-anchor this SUSPENDED record authorized (used once).
+  returnReanchors BillingObligationTransition[] @relation("ObligationSuspension")
   id             String           @id @default(cuid())
   subscriptionId String
   subscription   Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -3367,7 +3375,8 @@ model BillingDunningClock {
 }
 
 /// Immutable consumed coverage. The database binds each epoch change to its
-/// original captured payment, successful charge, audit, and voluntary lapse.
+/// original captured payment, successful charge, audit, and voluntary lapse —
+/// or, for a RETURN_REANCHOR, to the suspension the partner returned from.
 model BillingObligationTransition {
   id String @id @default(cuid())
   tenantId String
@@ -3383,12 +3392,20 @@ model BillingObligationTransition {
   fromDue DateTime
   toDue DateTime
   effectiveAt DateTime
-  paymentId String
-  payment SubscriptionPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  successEventId String
-  successEvent BillingEvent @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Null only for RETURN_REANCHOR: a return re-anchor moves the obligation
+  /// with no payment (billing_obligation_reanchor_shape; proof in SQL).
+  paymentId String?
+  payment SubscriptionPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  successEventId String?
+  successEvent BillingEvent? @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   lapseEventId String? @unique
   lapseEvent BillingEvent? @relation("ObligationLapse", fields: [lapseEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// [BILLING-REANCHOR · board row 151] RETURN_REANCHOR only: the immutable
+  /// SUSPENDED billing record of the unpaid obligation the partner returned
+  /// from. No arrears: the time suspended is not billed, the operated grace is
+  /// (owner/coordinator 4 Oct; coordinator 17 Oct).
+  suspensionEventId String? @unique
+  suspensionEvent BillingEvent? @relation("ObligationSuspension", fields: [suspensionEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   auditId String @unique
   audit AuditLog @relation(fields: [auditId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   amount Decimal @db.Decimal(10, 2)

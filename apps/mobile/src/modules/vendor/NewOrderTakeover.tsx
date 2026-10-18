@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, ScrollView, Vibration, View } from 'react-native';
+import { Modal, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
@@ -10,15 +10,21 @@ import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
 import { rejectReasonsFor } from './rejectReasons';
 import { orderLineOptionsText } from './orderLineOptions';
 import { acceptClockLabel, takeoverSettled } from './acceptClock';
+import { useJobRing } from '../../hooks/useJobRing';
+import { RING_PERIOD_MS } from '../../services/jobRinger';
+import { hasJobRing } from '../../services/jobRingCapability';
+import { takeoverRingCopy } from './takeoverRingCopy';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
  * impossible to sleep through while the app is open, decidable from across a
  * kitchen. FULL-SCREEN on the paper surface — short-code in displayXl, items
  * at heading size, total in numL, one 64dp ACCEPT. The bell tile pulses in
- * time with the strong repeating buzz (every 5s until acknowledged). "View
- * later" dismisses honestly — the server's escalation ladder (re-alert → SMS)
- * still stands behind it. Multiple orders stack, worked first-in-first-out.
+ * time with the ring [RINGER]: Swift's tone (build 12) and a strong buzz,
+ * every 2 s until the order is answered, settles or its accept clock runs
+ * out. "View later" dismisses honestly — the server's escalation ladder
+ * (re-alert → SMS) still stands behind it. Multiple orders stack, worked
+ * first-in-first-out.
  */
 export function NewOrderTakeover({
   queue,
@@ -44,15 +50,14 @@ export function NewOrderTakeover({
   const insets = useSafeAreaInsets();
   const pulse = useSharedValue(1);
 
-  // The buzz loop lives exactly as long as the takeover does — and the bell
-  // pulses on the same beat, so the sound has a visual twin.
+  // The bell pulses on the ring's beat, so the sound has a visual twin. The
+  // ring itself (tone + buzz) is useJobRing below.
   useEffect(() => {
     if (!orderId) return;
     const beat = () => {
-      Vibration.vibrate([0, 400, 200, 400]);
-      // [design-100x Flow-13] The VIBRATION alarm stays on its beat — a missed
-      // order is money, and a kitchen bell is functional alerting. The VISUAL
-      // pulse honours Reduce Motion (the screen stays still; the buzz carries).
+      // [design-100x Flow-13] The ring stays on its beat — a missed order is
+      // money, and a kitchen bell is functional alerting. The VISUAL pulse
+      // honours Reduce Motion (the screen stays still; the ring carries).
       pulse.value = withSequence(
         withTiming(1.12, { duration: motion.duration.fast, reduceMotion: ReduceMotion.System }),
         withTiming(1, { duration: motion.duration.base, reduceMotion: ReduceMotion.System }),
@@ -61,11 +66,8 @@ export function NewOrderTakeover({
       );
     };
     beat();
-    const timer = setInterval(beat, 5000);
-    return () => {
-      clearInterval(timer);
-      Vibration.cancel();
-    };
+    const timer = setInterval(beat, RING_PERIOD_MS);
+    return () => clearInterval(timer);
   }, [orderId, pulse]);
 
   const bellStyle = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }] }));
@@ -92,6 +94,13 @@ export function NewOrderTakeover({
   useEffect(() => {
     if (orderId && settled) onDismiss(orderId);
   }, [orderId, settled, onDismiss]);
+
+  // [RINGER · owner ruling 15 Oct] Ring until the order is answered (Accept,
+  // Reject, or "View later" takes it off the takeover), settles elsewhere, or
+  // its accept clock runs out; never in the background.
+  const expired = Number.isFinite(respondByMs) && respondByMs <= nowTs;
+  useJobRing(!!orderId && !settled && !expired);
+  const [canRing] = useState(hasJobRing);
 
   if (!current) return null;
   const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
@@ -154,12 +163,10 @@ export function NewOrderTakeover({
             <Feather name="bell" size={34} color={color.brand[500]} />
           </Animated.View>
           {/* [Wave 3 vs reference 22] The eyebrow tells the vendor what the
-              sound will DO — the buzz genuinely repeats every 5s below, so
-              "chime repeats until you answer" is a promise this screen keeps. */}
+              sound will DO, and [RINGER] only what this phone really does:
+              the chime is build 12's ring tone; builds 9-11 only buzz. */}
           <T variant="micro" tone="brand" style={{ marginTop: space.lg }}>
-            {queue.length > 1
-              ? `● ${queue.length} new orders · chime repeats — first in, first`
-              : '● New order · chime repeats until you answer'}
+            {takeoverRingCopy(queue.length, canRing)}
           </T>
           <T variant="displayXl" center style={{ marginTop: 2 }}>
             #{o?.orderNumber ?? current.orderNumber ?? '…'}
