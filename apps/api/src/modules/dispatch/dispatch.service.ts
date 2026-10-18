@@ -2497,7 +2497,9 @@ export class DispatchService {
       include: {
         // [F-027-07] allow-list, not `include` — see utils/counterparty.
         rider: { select: riderCounterpartySelect({ withPhone: false }) },
-        driver: { include: { user: { select: { firstName: true } } } },
+        // [COORD 18 Oct, option S] The accepting driver is answered with their own row: never its live rating
+        // totals, which move with each single rating (what a person sees is whole groups only, rating-groups.ts).
+        driver: { omit: { averageRating: true, totalRatings: true }, include: { user: { select: { firstName: true } } } },
       },
     });
   }

@@ -60,6 +60,20 @@ describe('[option S] no person rating is displayed from a live figure', () => {
     expect(auth).toContain("if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));");
   });
 
+  it('no whole rider/driver/provider row is pulled in by a relation outside staff views, unless its live totals are omitted or replaced', () => {
+    const whole = /\b(driver|rider|serviceProvider)\s*:\s*(\{\s*(include|omit)\b|true\b)/g;
+    const found = sources.filter(({ file }) => !file.startsWith('admin/')).flatMap(({ file, text }) => [...text.matchAll(whole)].map((m) => {
+      const at = text.slice(m.index, m.index + 160);
+      return { file, ok: /omit: \{ averageRating: true, totalRatings: true \}/.test(at) || file === 'auth/auth.service.ts' };
+    }));
+    expect(found.length).toBeGreaterThanOrEqual(3); // the scan is not blind (sign-in rider + driver, the accept reply)
+    expect(found.filter((f) => !f.ok)).toEqual([]);
+  });
+
+  it('the driver row an accepting driver is answered with (claim and re-ask) omits the live totals', () => {
+    expect(read('dispatch/dispatch.service.ts')).toContain("driver: { omit: { averageRating: true, totalRatings: true }, include: { user: { select: { firstName: true } } } },");
+  });
+
   it('ranking still reads the true mean: only the DISPLAY of a provider star comes from the groups', () => {
     expect(read('services/services.routes.ts')).toContain('|| rankMean.get(b.id)! - rankMean.get(a.id)!');
   });
