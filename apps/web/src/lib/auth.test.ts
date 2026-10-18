@@ -411,6 +411,44 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
   });
 });
 
+describe('[Row 225] the server holds a write to the account this tab is showing', () => {
+  const expectedOf = (init?: RequestInit) => (init?.headers as Record<string, string> | undefined)?.['X-Swift-Expected-Principal'];
+
+  it('once the server has named the person, every request names them — a write the shared cookie no longer matches is refused there', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: JSON.stringify({ firstName: 'A' }) });
+    await auth.apiFetch('/api/v1/customer/orders');
+    expect(seen).toEqual(['u1', 'u1']);
+  });
+
+  it('a request sent before anyone is known names nobody — the first paint is not refused for it', async () => {
+    const auth = await loadAuth();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/home');
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('when the server answers SESSION_CHANGED, the write fails as a session change AND the tab learns who the cookie names now', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const heard = vi.fn();
+    auth.subscribeSession(heard);
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'The signed-in account changed in another tab.' } } }));
+    await expect(auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }))
+      .rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED' });
+    await vi.waitFor(() => expect(auth.getSessionPrincipal()).toBe('u2'));
+    expect(heard).toHaveBeenCalled();
+  });
+});
+
 describe('[Q7b] a returning customer is restored, and the app shell hears every change', () => {
   const trail = (fetchMock: ReturnType<typeof mockApi>) =>
     fetchMock.mock.calls.map(([url, init]) => `${(init?.method ?? 'GET').toUpperCase()} ${new URL(String(url)).pathname}`);
