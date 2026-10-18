@@ -15,6 +15,7 @@ import {
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import crypto from 'node:crypto';
 import { uniquePng } from './helpers/real-image';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Envelope encryption (onboarding spec §5): the bucket only ever holds
@@ -52,7 +53,7 @@ beforeAll(async () => {
   // Direct user + session (the orders.test pattern) — no OTP dance needed.
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Env', lastName: 'Crypt',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,
@@ -61,7 +62,7 @@ beforeAll(async () => {
   userId = user.id;
   const reviewer = await app.prisma.user.create({
     data: {
-      phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Env', lastName: 'Reviewer',
       roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, status: 'ACTIVE',
       isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
@@ -262,13 +263,13 @@ describe('retention purge shreds the envelope', () => {
 describe('duplicate-document detection [SWIFT-078 / MASTER-055]', () => {
   it('keeps applicant responses opaque and alerts only platform reviewers', async () => {
     const admin = await app.prisma.user.create({
-      data: { phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Adm', lastName: 'In', roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never, isPhoneVerified: true },
+      data: { phone: testPhone(), firstName: 'Adm', lastName: 'In', roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never, isPhoneVerified: true },
     });
     const tenantAdmin = await app.prisma.user.create({
-      data: { phone: `+59266${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Tenant', lastName: 'Admin', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
+      data: { phone: testPhone(), firstName: 'Tenant', lastName: 'Admin', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
     });
     const userB = await app.prisma.user.create({
-      data: { phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
+      data: { phone: testPhone(), firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
     });
     const tokenB = app.jwt.sign({ userId: userB.id, role: 'MOVER', jti: nanoid(8) });
     await app.prisma.session.create({ data: { userId: userB.id, token: tokenB, refreshToken: nanoid(48), deviceId: 't', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });

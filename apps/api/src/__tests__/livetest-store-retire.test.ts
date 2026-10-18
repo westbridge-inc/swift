@@ -19,7 +19,7 @@ describe('the heal sweep retires only stores the journeys minted themselves', ()
   it('a leftover journey store is retired', async () => {
     const { isJourneyMintedStore } = await load();
     expect(isJourneyMintedStore(minted)).toBe(true);
-    expect(isJourneyMintedStore({ ...minted, name: 'TEST-admin01', owner: { user: { phone: '+5920654321', firstName: 'TEST-admin01' } } })).toBe(true);
+    expect(isJourneyMintedStore({ ...minted, name: 'TEST-admin01', owner: { user: { phone: '+5920754321', firstName: 'TEST-admin01' } } })).toBe(true);
   });
 
   it('a real merchant with the same store name is never retired (a real subscriber number)', async () => {

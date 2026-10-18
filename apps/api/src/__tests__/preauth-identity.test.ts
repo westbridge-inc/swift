@@ -26,10 +26,11 @@ import {
   resolveIdentityByPhone,
   resolveSessionByRefreshCredential,
 } from '../modules/auth/preauth-identity';
+import { testPhone } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
-const PHONE = `+5920008${String(Math.floor(Math.random() * 900) + 100)}`;
+const PHONE = testPhone();
 const EMAIL = `preauth-${RUN}@example.test`;
 let userId = '';
 const session = { id: '', token: `tok-${RUN}-${nanoid(16)}`, refreshToken: `rt-${RUN}-${nanoid(32)}`, previous: `prev-${RUN}-${nanoid(32)}` };
