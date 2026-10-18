@@ -96,7 +96,7 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('a customer sign-in and a brand-new sign-up write no credential either — and both are credentialed, named requests', async () => {
-    const customer = await loadCustomer();
+    vi.resetModules();
     const { verifyCustomerLogin } = await import('@/lib/customer-login');
     const login = mockApi(() => ({
       body: { success: true, data: { isNewUser: false, user: { id: 'c1', roles: ['CUSTOMER'] }, session: 'cookie' } },
