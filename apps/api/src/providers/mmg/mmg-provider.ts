@@ -615,16 +615,16 @@ export class LiveMmgProvider implements MmgMerchantProvider {
         },
         async (res) => {
           // Terminal business rejection (e.g. INVALID_* / limit codes).
-          if (res.status === 422) return { kind: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
-          if (!res.ok) return { kind: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
-          return { kind: 'ok' as const, body: (await res.json()) as any };
+          if (res.status === 422) return { got: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { got: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { got: 'ok' as const, body: (await res.json()) as any };
         },
       );
-      if (read.kind === 'declined') {
+      if (read.got === 'declined') {
         const body = read.body;
         return { status: 'declined', transactionId: String(body?.transactionId ?? ''), reason: String(body?.message ?? 'MMG rejected the payment') };
       }
-      if (read.kind === 'http') {
+      if (read.got === 'http') {
         return { status: 'error', transactionId: '', reason: `MMG payment HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
       // 200 → { status: "pending", pendingReason: "approvalrequired",
@@ -654,17 +654,17 @@ export class LiveMmgProvider implements MmgMerchantProvider {
         `/e-merchant-initiated-transactions/reversal?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}&transactionId=${encodeURIComponent(req.transactionId)}`,
         { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
         async (res) => {
-          if (res.status === 422) return { kind: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
-          if (!res.ok) return { kind: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
-          return { kind: 'ok' as const, body: (await res.json()) as any };
+          if (res.status === 422) return { got: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { got: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { got: 'ok' as const, body: (await res.json()) as any };
         },
       );
-      if (read.kind === 'declined') {
+      if (read.got === 'declined') {
         // [MMG REVERSAL] MMG's business refusal: an ANSWER ("no"), unlike a
         // transport failure. The lookup still decides what Swift records.
         return { status: 'declined', transactionId: req.transactionId, reason: String(read.body?.message ?? 'MMG reversal rejected') };
       }
-      if (read.kind === 'http') {
+      if (read.got === 'http') {
         return { status: 'error', transactionId: req.transactionId, reason: `MMG reversal HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
       const body: any = read.body;
