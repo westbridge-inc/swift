@@ -225,8 +225,21 @@ export function payScreenState(sub: any, now: Date = new Date()): PayScreenState
   // and then lists what the vendor still has. That list is not reassurance
   // copy: it is PINV-8, and billing-suspension-retention.test.ts is its proof.
   if (phase === 'suspended' || phase === 'churned') {
+    // [BILLING-REANCHOR · board row 151] No arrears: the days the store was
+    // paused are not charged (the server moves the due date on by exactly the
+    // time paused), so no paid-through date that already went by is shown.
+    // [REVIEW-M #1832 S3-3] The week bought still counts the days traded before
+    // the pause (the grace), so "1 week" alone overstates it: name the next bill
+    // date paying now gives (due date + time paused + 7 days), or say so.
+    const dueAt = sub?.nextBillingDate ? new Date(sub.nextBillingDate).getTime() : NaN;
+    const pausedAt = sub?.suspendedAt ? new Date(sub.suspendedAt).getTime() : NaN;
+    const nextBill = Number.isFinite(dueAt) && Number.isFinite(pausedAt) && pausedAt >= dueAt && pausedAt <= now.getTime()
+      ? shortDate(new Date(dueAt + (now.getTime() - pausedAt) + 7 * 86_400_000).toISOString()) : '';
+    const pausedCovers = nextBill
+      ? `Covers 1 week · next bill ${nextBill} · the days orders were paused are not charged`
+      : 'Covers 1 week, counting the days you traded before the pause · the days orders were paused are not charged';
     return {
-      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers,
+      band: 'paused', tone: 'paused', eyebrow: 'DUE NOW', amountGyd: due || fee, covers: pausedCovers,
       title: 'New orders are paused',
       body: `Paying ${money(due || fee)} turns them back on, usually within a minute.`,
       extra: 'Still yours while paused: this screen, your receipts, your earnings and support. Orders already in the kitchen still go out.',

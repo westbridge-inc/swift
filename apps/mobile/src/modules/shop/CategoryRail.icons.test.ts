@@ -13,6 +13,7 @@ vi.mock('../../kit', () => ({ T: 'T' }));
 
 import { CategoryRail } from './CategoryRail';
 import { CATEGORY_ICON, CATEGORY_ICON_DEFAULT, categoryIcon } from '../../lib/categoryIcon';
+import { CATEGORY_ICON_KEYS } from '@swift/types';
 
 type El = React.ReactElement<Record<string, any>>;
 const isEmoji = (ch: string) => (/\p{Extended_Pictographic}/u.test(ch) && /\p{Emoji}/u.test(ch)) || ch === '️';
@@ -77,5 +78,34 @@ describe('the other category surfaces never print the category emoji', () => {
     'modules/shop/CategoryRail.tsx',
   ])('%s reads no .emoji field', (p) => {
     expect(read(p)).not.toMatch(/\.emoji\b|\{emoji\}|\bemoji\s*[:=,})]/);
+  });
+});
+
+// [#1836 S4-1] An admin-created category carries DiscoveryCategory.iconKey,
+// chosen from the shared list (@swift/types CATEGORY_ICON_OPTIONS). The app
+// draws a known key, ignores an unknown one, and every key on the list is a
+// real glyph in the installed icon font.
+describe('a category the admin gave an icon draws that icon', () => {
+  it('prefers a known iconKey over the slug map, and ignores an unknown one', () => {
+    const withKey = { ...cat('brand-new-thing', 'Brand New'), iconKey: 'teddy-bear' };
+    const bogus = { ...cat('pizza', 'Pizza'), iconKey: 'not-a-glyph' };
+    const rail2 = CategoryRail({ data: { enabled: true, categories: [withKey, bogus, cat('pets', 'Pets'), cat('fish', 'Fish')] } as any, loading: false, onChip: vi.fn(), onSeeAll: vi.fn() }) as El;
+    const icons = [withKey, bogus].map((item) => {
+      const out = { icons: [] as string[], text: [] as string[] };
+      collect(expand(rail2.props['renderItem']({ item })), out);
+      return out.icons;
+    });
+    expect(icons).toEqual([['teddy-bear'], ['pizza']]);
+    expect(categoryIcon('pizza', null)).toBe('pizza');
+    expect(categoryIcon(null, 'toString')).toBe(CATEGORY_ICON_DEFAULT);
+  });
+
+  it('every icon on the admin list is a real glyph, and the list covers every slug-mapped icon', () => {
+    const glyphs = JSON.parse(readFileSync(require.resolve('@expo/vector-icons/build/vendor/react-native-vector-icons/glyphmaps/MaterialCommunityIcons.json'), 'utf8')) as Record<string, number>;
+    expect(CATEGORY_ICON_KEYS.filter((k) => !Object.prototype.hasOwnProperty.call(glyphs, k))).toEqual([]);
+    expect(new Set(CATEGORY_ICON_KEYS).size).toBe(CATEGORY_ICON_KEYS.length);
+    const keys = new Set<string>(CATEGORY_ICON_KEYS);
+    expect([...new Set(Object.values(CATEGORY_ICON))].filter((v) => !keys.has(v))).toEqual([]);
+    expect(keys.has(CATEGORY_ICON_DEFAULT)).toBe(true);
   });
 });

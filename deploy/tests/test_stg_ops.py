@@ -352,9 +352,9 @@ class SeedProductionScript(unittest.TestCase):
 
     def test_refuses_a_phone_inside_the_demo_purge_range(self):
         # [D1] +592600 is DEMO_PHONE_PREFIX: every demo seed mints numbers in
-        # it and the demo purge classifies on it. A real SUPER_ADMIN inside it
-        # would be entangled with the demo classification, so the ceremony
-        # refuses it before anything runs.
+        # it. The demo purge selects by the synthetic marker only, but a real
+        # SUPER_ADMIN inside the range would be confusable with the demo
+        # accounts, so the ceremony refuses it before anything runs.
         result = self.run_script(SEED_ADMIN_PHONE="+5926000000")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("592600", result.stderr)
@@ -996,6 +996,8 @@ class LiveCaddyReadinessWait(unittest.TestCase):
         self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
         self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
         self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
+        # The website gate's two live serves also wait for a handshake on every name they reach.
+        self.assertEqual(source.count("self.every_name_has_tls(lambda host: "), 2)
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -2475,8 +2477,20 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403
+                            and self.every_name_has_tls(lambda host: self.fetch(name, f"https://{host}/")[0] != 0))
         return name
+
+    # Caddy's internal issuer makes each name's certificate on its own, so the API
+    # answering says nothing about the website's name: until its certificate exists
+    # a handshake for it ends in "tlsv1 alert internal error". Every live test waits
+    # (by the same wall time) until each name it reaches completes a handshake with
+    # any HTTP status, then asserts exactly what it asserted before.
+    TLS_NAMES = (WEB_HOST, *PUBLIC_ALIASES.split(), ADMIN_HOST)
+
+    @classmethod
+    def every_name_has_tls(cls, answers_with_a_status, names=TLS_NAMES) -> bool:
+        return all(answers_with_a_status(host) for host in names)
 
     def reached_website(self, out, path, host=WEB_HOST, authorization=""):
         self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
@@ -2636,8 +2650,10 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
         def answers() -> bool:
             try:
-                return raw_https(port, API_HOST, "/metrics")[0] == 403
-            except OSError:
+                return (raw_https(port, API_HOST, "/metrics")[0] == 403
+                        and self.every_name_has_tls(lambda host: bool(raw_https(port, host, "/")[0]),
+                                                    (WEB_HOST, ADMIN_HOST)))
+            except OSError:  # ssl.SSLError (a name with no certificate yet) is an OSError
                 return False
         wait_for_test_caddy(self, name, answers)
         return port

@@ -180,11 +180,11 @@ describe('paid coverage alone permits a new obligation after voluntary pause', (
     await billing.setBillingRail(f.sub.id, 'CASH');
     const transition = await db.billingObligationTransition.findFirstOrThrow({ where: { clockId: f.clock.id, kind: 'VOLUNTARY_RESUME' } });
     expect(await db.billingObligationTransition.count({ where: { clockId: f.clock.id } })).toBe(2);
-    await expect(db.subscriptionPayment.update({ where: { id: transition.paymentId }, data: { amount: 1 } })).rejects.toThrow();
-    await expect(db.billingEvent.update({ where: { id: transition.successEventId }, data: { paymentRef: 'wrong' } })).rejects.toThrow();
+    await expect(db.subscriptionPayment.update({ where: { id: transition.paymentId! }, data: { amount: 1 } })).rejects.toThrow();
+    await expect(db.billingEvent.update({ where: { id: transition.successEventId! }, data: { paymentRef: 'wrong' } })).rejects.toThrow();
     await expect(db.billingObligationTransition.update({ where: { id: transition.id }, data: { toEpoch: 99 } })).rejects.toThrow();
     await expect(db.billingDunningClock.delete({ where: { id: f.clock.id } })).rejects.toThrow();
-    await expect(db.subscriptionPayment.delete({ where: { id: transition.paymentId } })).rejects.toThrow();
+    await expect(db.subscriptionPayment.delete({ where: { id: transition.paymentId! } })).rejects.toThrow();
     const counts = await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE swift_app');
       await tx.$executeRaw`SELECT set_config('app.current_tenant', ${f.clock.tenantId}, true)`;

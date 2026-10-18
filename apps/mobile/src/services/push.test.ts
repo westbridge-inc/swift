@@ -8,12 +8,14 @@ const mocks = vi.hoisted(() => ({
   requestPermissions: vi.fn(async () => ({ status: 'granted' })),
   getPushToken: vi.fn(async () => ({ data: 'ExponentPushToken[shared-device]' })),
   setChannel: vi.fn(async () => undefined),
+  platform: { OS: 'ios' as 'ios' | 'android' },
+  hasJobRing: vi.fn(() => false),
   openSettings: vi.fn(async () => undefined),
   appStateListeners: [] as Array<(state: string) => void>,
 }));
 
 vi.mock('react-native', () => ({
-  Platform: { OS: 'ios' },
+  Platform: mocks.platform,
   Linking: { openSettings: mocks.openSettings },
   AppState: {
     addEventListener: (_event: string, listener: (state: string) => void) => {
@@ -22,8 +24,15 @@ vi.mock('react-native', () => ({
     },
   },
 }));
+// [RINGER] Whether this binary has the job ring (build 12) is a native fact.
+vi.mock('./jobRingCapability', () => ({
+  JOB_OFFERS_CHANNEL: 'job_offers',
+  JOB_RING_SOUND: 'swift_job_ring.wav',
+  hasJobRing: mocks.hasJobRing,
+  jobAlertsVersion: () => (mocks.hasJobRing() ? 1 : 0),
+}));
 vi.mock('expo-notifications', () => ({
-  AndroidImportance: { HIGH: 4 },
+  AndroidImportance: { HIGH: 4, MAX: 5 },
   setNotificationHandler: vi.fn(),
   setNotificationChannelAsync: mocks.setChannel,
   getPermissionsAsync: mocks.getPermissions,
@@ -70,6 +79,8 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   mocks.current = { ...sessionA };
+  mocks.platform.OS = 'ios';
+  mocks.hasJobRing.mockReturnValue(false);
   mocks.getPermissions.mockResolvedValue({ status: 'granted' });
   mocks.getPushToken.mockResolvedValue({ data: 'ExponentPushToken[shared-device]' });
   mocks.appStateListeners = [];
@@ -111,6 +122,46 @@ describe('push registration ownership', () => {
   });
 });
 
+describe('[RINGER] job alerts: the channel and what the server is told', () => {
+  it('build 12 on Android: creates the Job offers channel with the tone, at MAX, leaving Do Not Disturb to the partner', async () => {
+    mocks.platform.OS = 'android';
+    mocks.hasJobRing.mockReturnValue(true);
+    mocks.post.mockResolvedValue({ data: { success: true } });
+    const push = await import('./push');
+    await push.registerIfGranted();
+
+    const channels = mocks.setChannel.mock.calls.map((call) => (call as unknown as [string, Record<string, unknown>]));
+    expect(channels.map(([id]) => id)).toEqual(['default', 'job_offers']);
+    expect(channels[1]![1]).toMatchObject({
+      name: 'Job offers',
+      importance: 5,
+      sound: 'swift_job_ring.wav',
+      enableVibrate: true,
+      bypassDnd: false,
+    });
+    expect(mocks.post.mock.calls[0]?.[1]).toEqual({ token: 'ExponentPushToken[shared-device]', platform: 'android', alertsVersion: 1 });
+  });
+
+  it('builds 9-11 on Android (this JS over the air): never creates the channel soundless, reports alertsVersion 0', async () => {
+    mocks.platform.OS = 'android';
+    mocks.post.mockResolvedValue({ data: { success: true } });
+    const push = await import('./push');
+    await push.registerIfGranted();
+
+    expect(mocks.setChannel.mock.calls.map((call) => (call as unknown as [string])[0])).toEqual(['default']);
+    expect(mocks.post.mock.calls[0]?.[1]).toEqual({ token: 'ExponentPushToken[shared-device]', platform: 'android', alertsVersion: 0 });
+  });
+
+  it('iOS reports the same native fact', async () => {
+    mocks.hasJobRing.mockReturnValue(true);
+    mocks.post.mockResolvedValue({ data: { success: true } });
+    const push = await import('./push');
+    await push.registerIfGranted();
+    expect(mocks.setChannel).not.toHaveBeenCalled();
+    expect(mocks.post.mock.calls[0]?.[1]).toEqual({ token: 'ExponentPushToken[shared-device]', platform: 'ios', alertsVersion: 1 });
+  });
+});
+
 // [STORE-ALERT 18 Oct 2026] A store iPhone was never asked for notifications:
 // iOS starts undetermined, the session start only registers when permission
 // is ALREADY granted, and nothing in the store app could ask or open Settings.
@@ -139,7 +190,8 @@ describe('[STORE-ALERT] an earner can turn push on, and coming back from Setting
     expect(mocks.requestPermissions).toHaveBeenCalledTimes(1);
     expect(mocks.post).toHaveBeenCalledWith(
       'https://api.test/api/v1/customer/notifications/devices',
-      { token: 'ExponentPushToken[shared-device]', platform: 'ios' },
+      // [RINGER] registration also says what the binary can ring with (0 = no job ring)
+      { token: 'ExponentPushToken[shared-device]', platform: 'ios', alertsVersion: 0 },
       expect.anything(),
     );
     expect(mocks.openSettings).not.toHaveBeenCalled();

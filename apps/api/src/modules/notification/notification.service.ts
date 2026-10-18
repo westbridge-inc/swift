@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
-import { alertClassOf, pushOptionsFor } from '../../providers/notifications/alert-class';
+import { alertClassOf } from '../../providers/notifications/alert-class';
+import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
 import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
@@ -160,13 +161,14 @@ export async function escalateVendorAlert(
         persistent: true,
         reAlert: true,
       });
-      const tokens = await prisma.deviceToken.findMany({
+      // [RINGER] Each device is told what its app can ring with: the job
+      // ring for a build that has it, today's push for builds 9-11.
+      const devices = await prisma.deviceToken.findMany({
         where: { userId: alert.userId, isActive: true },
-        select: { token: true },
+        select: PUSH_DEVICE_SELECT,
       });
-      if (tokens.length > 0) {
-        await channels.push
-          .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, payload, pushOptionsFor(payload))
+      if (devices.length > 0) {
+        await pushToDevices(channels.push, devices, 'Order still waiting!', alert.body, payload)
           .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
           .catch((err) => {
             // [STORE-ALERT] The re-alert used to swallow this without a trace.
@@ -603,20 +605,21 @@ export class NotificationService {
 
       if (!prefs.push) recordNoPushDevice(data);
       if (prefs.push) {
-        const tokens = await this.prisma.deviceToken.findMany({
+        const devices = await this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true }, orderBy: { token: 'asc' },
+          select: PUSH_DEVICE_SELECT, orderBy: { token: 'asc' },
         });
-        if (tokens.length === 0) recordNoPushDevice(data);
-        if (tokens.length > 0) {
+        if (devices.length === 0) recordNoPushDevice(data);
+        if (devices.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
-          // kind picks how urgently it travels (alert-class.ts).
-          const options = pushOptionsFor(data);
+          // kind picks how urgently it travels (alert-class.ts); [RINGER] each
+          // device's app picks whether a ringing push also rings with the job
+          // ring (device-push.ts), and builds 9-11 get exactly today's push.
           const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
-          const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
-            { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
+          const effect = () => pushToDevices(this.channels.push, devices, notification!.title, notification!.body, data,
+            this.channels.push.supportsHandoff && handoff ? { handoff } : {});
           await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
             .then(async (r) => {
               if (r && r.sent > 0) pushSubmitted = true;

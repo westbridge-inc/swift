@@ -513,7 +513,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.addButton,
 .chooseButton {
   padding-inline: var(--swift-space-lg);
   font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
@@ -521,12 +520,15 @@
   line-height: var(--swift-leading-label);
 }
 
+/* [Triage row 113] The Add button is the shared maroon "+" circle (components/add-plus); the button keeps the
+   touch-size hit area around it. */
 .addButton {
+  padding: 0;
   color: var(--swift-white);
-  background: var(--swift-red);
+  background: transparent;
 }
 
-.addButton:hover {
+.addButton:hover > [data-add-plus] {
   background: var(--swift-red-600);
 }
 

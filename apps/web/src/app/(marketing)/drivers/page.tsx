@@ -7,7 +7,7 @@ import { launch } from '@/site.config';
 export const metadata: Metadata = {
   title: 'For riders and drivers',
   description:
-    'Deliver or drive on Swift and keep 100% of every delivery fee, fare and tip. One flat weekly fee, paid by you — never a commission taken from your earnings.',
+    'Deliver or drive on Swift and keep 100% of every delivery fee, fare and tip. One flat weekly fee, paid by you — no commission on orders.',
   alternates: { canonical: 'https://swiftgy.com/drivers' },
 };
 
