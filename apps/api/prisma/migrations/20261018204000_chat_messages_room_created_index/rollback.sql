@@ -4,5 +4,5 @@
 BEGIN;
 SET LOCAL lock_timeout = '10s';
 DROP INDEX IF EXISTS "chat_messages_chatRoomId_createdAt_idx";
-DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261016210000_chat_messages_room_created_index';
+DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261018204000_chat_messages_room_created_index';
 COMMIT;

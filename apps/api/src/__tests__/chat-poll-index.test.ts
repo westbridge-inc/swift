@@ -17,7 +17,7 @@ import { testPrismaClient } from './helpers/test-prisma-client';
 
 const INDEX = 'chat_messages_chatRoomId_createdAt_idx';
 const MIGRATIONS = join(process.cwd(), 'prisma/migrations');
-const ONLINE = '20261016210000_chat_messages_room_created_index';
+const ONLINE = '20261018204000_chat_messages_room_created_index';
 
 /** What PostgreSQL executes: the file without its comment lines. */
 const executable = (dir: string, file = 'migration.sql') => readFileSync(join(MIGRATIONS, dir, file), 'utf8')
