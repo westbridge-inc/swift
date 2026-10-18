@@ -14,6 +14,7 @@ import { inTenantOf } from '../jobs/queue';
 import { algoConfig, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 grantSuiteCapability('unscoped-mutation');
 
@@ -31,7 +32,7 @@ grantSuiteCapability('unscoped-mutation');
 // ---------------------------------------------------------------------------
 
 const SPOT = { lat: 6.71, lng: -57.61 }; // remote: no other suite's movers here
-const PHONE = `+5920031${String(Math.floor(Math.random() * 900) + 100)}`;
+const PHONE = testPhone();
 const QUEUE_SRC = readFileSync(join(__dirname, '..', 'jobs', 'queue.ts'), 'utf8');
 let app: FastifyInstance;
 let dispatch: DispatchService;

@@ -11,6 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { digitRun, mediaUrlCarriesSecret, normaliseDigits, redactOrderSecrets, SECRET_REDACTION } from '../modules/chat/secret-guard';
 import { orderSocketFixture } from './helpers/order-socket-fixture';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [F-027-12] The handover secret must never travel over chat.
@@ -51,7 +52,7 @@ beforeAll(async () => {
   const mk = async (n: string) =>
     app.prisma.user.create({
       data: {
-        phone: `+59263${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: n, lastName: 'Guard',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true,

@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, staffAddDailyCap, spendStaffAddAllowance } from '../modules/vendor/staff-invites';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up. Until STAFF_INVITE_ACCEPT is on, adding a known number
@@ -28,7 +29,7 @@ const userIds: string[] = [];
 const vendorIds: string[] = [];
 const vendorOwnerIds: string[] = [];
 
-const phone = () => `+59246${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = () => testPhone();
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   const user = await app.prisma.user.create({

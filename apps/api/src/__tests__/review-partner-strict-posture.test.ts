@@ -35,6 +35,7 @@ import { appRoleDdl } from '../lib/tenant-rls';
 import { assertTenantWall, attestationOf, readRlsFacts, appSideWallGaps } from '../lib/rls-attestation';
 import { hashReviewCode } from '../modules/review/credentials';
 import { installDdl } from './helpers/install-ddl';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] this suite creates the NOLOGIN probe group and two LOGIN roles by raw DDL, exactly as tenant-wall-binds-app does.
 grantSuiteCapability('ddl');
@@ -46,7 +47,7 @@ const SYSTEM_LOGIN = 'swift_rls_system_login';
 const SYSTEM_URL = TEST_URL.replace(/\/\/[^@]+@/, `//${SYSTEM_LOGIN}:probe@`);
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const REVIEW = `review-strict-${RUN}`;
-const PHONE = `+59200094${String(Math.floor(Math.random() * 90) + 10)}`;
+const PHONE = testPhone();
 const CODE = '864213';
 const CREDENTIAL_ID = `rc-${RUN}-strict`;
 const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND'] as const;
