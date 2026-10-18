@@ -45,6 +45,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { assertClaimableUpload } from './upload-window';
 import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
@@ -557,7 +558,9 @@ export class VerificationService {
           }
         }
       }
-      await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
+      // [Row 249] Under the person's lock (FOR SHARE/UPDATE, which the unclaimed-upload sweep's FOR UPDATE waits on):
+      // an upload past the claim window is refused, so a document never claims one the sweep is about to erase.
+      assertClaimableUpload(await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId }));
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
       // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
       // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
@@ -722,7 +725,8 @@ export class VerificationService {
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
     if (authority && authority.userUpdatedAt.getTime() !== user.updatedAt.getTime()) throw moverAuthorityChanged();
-    await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId });
+    // [Row 249] Refused up front with its own words; the creation transaction checks it again under the lock.
+    assertClaimableUpload(await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId }));
 
     // Movers (riders + taxi drivers) may submit any doc required for a vehicle
     // class they actually hold; other roles validate against their named
@@ -927,7 +931,9 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Your ID is already on file.');
     }
     const object = await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
-    if (selfieUrl !== undefined) await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
+    assertClaimableUpload(object);
+    // [Row 249] The selfie is checked, never linked: an old one may be gone with the unclaimed-upload sweep.
+    if (selfieUrl !== undefined) assertClaimableUpload(await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId }));
 
     // [DGP-1 · DOC-1 §2] the ID check sends the national ID — same gate as any document.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
