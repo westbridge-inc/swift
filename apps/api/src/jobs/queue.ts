@@ -1343,6 +1343,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'verification-decision-outbox') {
+        // [S2-29 · KYC-DECISION-ATOMIC] Finish what committed approvals still owe — the trial
+        // decision — when the request that approved them did not: a lease-claimed, idempotent drain.
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+        const drained = await new VerificationService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), getKycProvider()).processDecisionOutbox();
+        if (drained.processed > 0 || drained.failed > 0) {
+          ctx.log.info(`Verification decision outbox: ${drained.processed} processed / ${drained.failed} retried`);
+        }
+        return;
+      }
+
       if (job.name === 'expiry-sweep') {
         const { VerificationService } = await import('../modules/verification/verification.service');
         const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
@@ -2639,6 +2652,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [S2-29 · KYC-DECISION-ATOMIC] Every 5 minutes: the trial decision of any approval whose request
+  // did not finish it (a failed or interrupted tail). Most rows are drained by the request itself.
+  await queues.verificationQueue.add('verification-decision-outbox', {}, {
+    repeat: { pattern: '*/5 * * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
