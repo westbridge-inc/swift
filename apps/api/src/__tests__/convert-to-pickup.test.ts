@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Delivery→pickup conversion (availability spec §4.2): the ONE additive
@@ -61,7 +62,7 @@ beforeAll(async () => {
 
   const me = await app.prisma.user.create({
     data: {
-      phone: `+59253${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Con', lastName: 'Vert',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true,
@@ -84,7 +85,7 @@ beforeAll(async () => {
 
   const riderUser = await app.prisma.user.create({
     data: {
-      phone: `+59252${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Busy', lastName: 'Rider',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,

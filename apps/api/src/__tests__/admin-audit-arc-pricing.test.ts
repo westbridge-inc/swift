@@ -11,6 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { refusalName, refuseAuditWhere, allowAuditAgain as allowAuditAgainShared, dropAuditRefusal } from './helpers/audit-refusal';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE ARC: A HELPER THAT OWNS ITS TRANSACTION TAKES THE AUDIT IN.
@@ -64,7 +65,7 @@ beforeAll(async () => {
     code: ZY, name: 'Zed-Y Test Market', currencyCode: 'ZYD', currencySymbol: 'Y$', usdExchangeRate: 100, isActive: false,
     subscriptionTiers: { mover: 1000, smallVendor: 2000, largeVendor: 5000 }, documentChecklists: {} } });
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'Arc', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });

@@ -12,6 +12,7 @@ import { loginWithOtp } from './helpers/otp';
 import { nanoid } from 'nanoid';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Admin actions leave a trail. The scoped onResponse hook must write an audit
@@ -153,7 +154,7 @@ describe('admin audit trail', () => {
   it('rejects an ordinary admin from identity data without writing a view audit', async () => {
     const ordinaryAdmin = await app.prisma.user.create({
       data: {
-        phone: `+592${nanoid(8)}`,
+        phone: testPhone(),
         firstName: 'Ordinary',
         lastName: 'Admin',
         roles: ['ADMIN'],

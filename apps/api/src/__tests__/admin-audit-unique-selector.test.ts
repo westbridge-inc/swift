@@ -15,6 +15,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-004 · C-01 / Codex URGENT-REPORT-092] THE SNAPSHOT QUERIED THE WRONG
@@ -127,7 +128,7 @@ beforeAll(async () => {
   await app.ready();
   const admin = await app.prisma.user.create({
     data: {
-      phone: `+59273${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Selector', lastName: `Admin${RUN.slice(0, 4)}`,
+      phone: testPhone(), firstName: 'Selector', lastName: `Admin${RUN.slice(0, 4)}`,
       roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
       admin: { create: { permissions: ['*'] } },
     },
