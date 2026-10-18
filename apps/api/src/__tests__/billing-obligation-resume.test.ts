@@ -6,6 +6,7 @@ import { currentDunningClock, activeOverdueMs, resolveConfirmationInTx } from '.
 import { confirmationReviewQueue } from '../modules/billing/confirmation-finance';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { testPhone } from './helpers/fixture-ids';
 
 const db = new PrismaClient();
 const DAY = 86_400_000;
@@ -17,7 +18,7 @@ const billing = new BillingService(db, notifications as never, getPaymentProvide
 
 async function fixture(paid = true) {
   const key = randomUUID();
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(1e10 + Math.random() * 9e10)}`, firstName: 'Resume', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
+  const user = await db.user.create({ data: { phone: testPhone(), firstName: 'Resume', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
   users.push(user.id);
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: { ownerId: owner.id, name: 'Resume fixture', slug: `resume-${key}`, vendorType: 'RESTAURANT',

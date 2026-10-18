@@ -23,7 +23,7 @@ export function CategoryFeedScreen() {
   const cartClearance = useCartBarClearance();
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { slug, name, emoji } = route.params as { slug: string; name: string; emoji: string };
+  const { slug, name } = route.params as { slug: string; name: string };
   const { latitude, longitude, status } = useLocationStore();
   const locationFix = grantedLocationFix(latitude, longitude, status);
 
@@ -57,7 +57,7 @@ export function CategoryFeedScreen() {
 
   return (
     <Screen>
-      <Header title={`${emoji} ${name}`} />
+      <Header title={name} />
       {vendorsQ.isLoading ? (
         <LoadingBlock />
       ) : vendorsQ.isError ? (
@@ -78,8 +78,8 @@ export function CategoryFeedScreen() {
                 {siblings.map((c) => (
                   <Chip
                     key={c.slug}
-                    label={`${c.emoji} ${c.name}`}
-                    onPress={() => navigation.setParams({ slug: c.slug, name: c.name, emoji: c.emoji })}
+                    label={c.name}
+                    onPress={() => navigation.setParams({ slug: c.slug, name: c.name })}
                   />
                 ))}
               </View>

@@ -19,7 +19,9 @@ describe('capture allowlists [DCR-1 NR5-01]', () => {
     // Pinned 2026-08-19 from the nr5-allowlists ingress census. If this fails,
     // you changed what Swift captures: update the registry, THEN this pin,
     // and cite the purpose in the commit message.
-    expect(hash).toBe('f244ad6ad4819d5c');
+    // 2026-10-15 [R18]: + driver 'consent.backgroundLocation' (proof of the
+    // separately-asked background-location consent, DPA s.7(1)).
+    expect(hash).toBe('868947f09acf5972');
     // Structural minimums that must never silently shrink:
     expect(CAPTURE_ALLOWLISTS.customer.length).toBeGreaterThan(10);
     expect(CAPTURE_ALLOWLISTS.third_party).toContain('courier.recipientPhone');

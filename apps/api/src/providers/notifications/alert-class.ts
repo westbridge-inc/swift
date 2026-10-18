@@ -79,6 +79,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
     'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'billing_card_action_required', 'fx_change_notice',
+    // [F2] A weekly fee change, told before it applies
+    'billing_rate_change',
     'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
@@ -106,6 +108,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
+    // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
+    'vat_threshold',
     'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
     'settlement_deposit_mismatch', 'earnings_missing', 'agent_cash_sla',
     'incident_new', 'incident_sla_breach', 'incident_weekly_digest', 'incident_pattern_cross_reporter',

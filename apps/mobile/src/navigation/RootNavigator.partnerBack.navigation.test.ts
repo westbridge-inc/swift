@@ -147,7 +147,7 @@ vi.mock('../lib/storage', () => ({
 vi.mock('../lib/adsQueue', () => ({ retireAdEventScope: () => undefined }));
 vi.mock('../lib/analytics', () => ({ track: () => undefined }));
 vi.mock('../lib/payLink', () => ({ openPayLink: async () => false }));
-vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, preparePushTokenForLogout: async () => null }));
+vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, installPushForegroundRetry: () => () => undefined, preparePushTokenForLogout: async () => null }));
 vi.mock('../services/attribution', () => ({ ensureFirstLaunchClaim: () => undefined, flushAttributedDestination: () => undefined }));
 vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => ({ connected: false }), disconnectSocket: () => undefined, reconnectSocketForStoreHandoff: () => undefined }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation: async () => undefined }));
@@ -163,6 +163,8 @@ vi.mock('../hooks', async () => {
     useActiveJob: () => ({ data: null }), useBroadcastLocation: () => undefined, useMoverKind: () => ({ kind: 'RIDER', profile: null }),
   };
 });
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../kit/toast', () => ({ toast: { show: () => undefined, success: () => undefined, info: () => undefined, error: (message: string) => { fx.toasts.push(message); } } }));
 vi.mock('../kit', async () => {
   const R = await import('react');

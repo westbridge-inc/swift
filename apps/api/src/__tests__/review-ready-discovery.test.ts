@@ -9,6 +9,7 @@ import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { discoveryRoutes, resetDiscoveryCacheForTests, CATEGORY_DISCOVERY_FLAG } from '../modules/discovery/discovery.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [REVIEW-READY] What an App Store reviewer abroad sees on Home.
@@ -120,7 +121,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200771${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Ready', lastName: 'Customer',
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
       isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId,

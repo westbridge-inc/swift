@@ -16,6 +16,7 @@ import {
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -121,7 +122,7 @@ export default function DiscoveryPage() {
           <h1 className="text-2xl font-semibold">Discovery</h1>
           <p className="mt-1 max-w-2xl text-sm text-neutral-500">
             The category taxonomy customers browse by, and the queue of categories vendors have asked for.
-            {' '}{tagged} of {cats.length} categories are visible to customers.
+            {categories.isSuccess ? <>{' '}{tagged} of {cats.length} categories are visible to customers.</> : null}
           </p>
         </div>
         <div className="text-right">
@@ -172,7 +173,10 @@ export default function DiscoveryPage() {
           </div>
 
           {requests.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
-          {!requests.isLoading && rows.length === 0 ? (
+          {requests.isError ? (
+            <QueryFailed error={requests.error} what="the category requests" onRetry={() => void requests.refetch()} retrying={requests.isFetching} />
+          ) : null}
+          {!requests.isLoading && !requests.isError && rows.length === 0 ? (
             <p className="text-sm text-neutral-500">Nothing in this queue.</p>
           ) : null}
 
@@ -287,6 +291,9 @@ export default function DiscoveryPage() {
       ) : (
         <section className="space-y-3">
           {categories.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
+          {categories.isError ? (
+            <QueryFailed error={categories.error} what="the categories" onRetry={() => void categories.refetch()} retrying={categories.isFetching} />
+          ) : null}
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-neutral-500">
               <tr>

@@ -797,9 +797,16 @@ describe('GOLD-2 · VEND-03 — grocery substitution on an MMG order', () => {
 
     beforeAll(async () => {
       ({ orderId, riceLineId } = await marketBag());
+      // [SUBSTITUTION 17 Oct · #1830] A dearer swap on MMG is no longer proposed: nobody could
+      // answer it, so the order would wait forever. The stock-out itself is still not resolvable
+      // in-app; this pin keeps proving that on a question opened before the rule (fixtured).
       const proposed = await call('POST', `/api/v1/vendor/orders/${orderId}/items/${riceLineId}/substitute`, marketOwner.token, { substituteItemId: market.riceLarge }, asStore(marketId));
-      expect(proposed.statusCode, proposed.body).toBe(200);
-      expect(proposed.json().data.subStatus).toBe('PENDING');
+      expect(proposed.statusCode, proposed.body).toBe(409);
+      expect(proposed.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+      await sys(() => app.prisma.orderItem.update({
+        where: { id: riceLineId },
+        data: { subStatus: 'PENDING', substituteItemId: market.riceLarge, substituteName: 'Rice 10kg', substitutePrice: 3000 },
+      }));
       lineTotal = Number((await sys(() => app.prisma.orderItem.findUniqueOrThrow({ where: { id: riceLineId } }))).totalCustomer);
       expect(lineTotal).toBe(3600);
       totalBefore = Number((await orderRow(orderId)).totalAmount);

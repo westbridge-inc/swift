@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { scanUpload } from '../../lib/malware-scan';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -151,6 +152,8 @@ export async function verificationRoutes(app: FastifyInstance) {
       if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
       await inspectImage(buffer, sniffed);
     }
+    // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
+    await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the

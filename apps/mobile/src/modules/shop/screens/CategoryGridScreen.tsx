@@ -2,6 +2,8 @@
 import React from 'react';
 import { ScrollView, Pressable, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { categoryIcon } from '../../../lib/categoryIcon';
 import { color, fontSize, radius, space } from '@swift/ui';
 import { useDiscoveryCategories } from '../../../hooks/customer';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -58,7 +60,7 @@ export function CategoryGridScreen() {
                 {cats.map((c) => (
                   <Pressable
                     key={c.slug}
-                    onPress={() => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+                    onPress={() => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
                     accessibilityRole="button"
                     accessibilityLabel={c.name}
                   >
@@ -74,8 +76,7 @@ export function CategoryGridScreen() {
                             justifyContent: 'center',
                           }}
                         >
-                          {/* Emoji glyph metric, derived from the scale. */}
-                          <T style={{ fontSize: fontSize.base * 2, lineHeight: fontSize.base * 2 + space.sm }}>{c.emoji}</T>
+                          <MaterialCommunityIcons name={categoryIcon(c.slug)} size={fontSize.base * 2} color={color.brand[600]} />
                         </View>
                         <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
                           {c.name}

@@ -26,7 +26,8 @@ export async function frictionKpis(prisma: PrismaClient, days = 30, asOf = new D
     prisma.enforcementAction.count({ where: { level: 'DENY_TRIAL', createdAt: window } }),
     prisma.enforcementAction.count({ where: { reasonCode: 'RETROACTIVE_TRIAL_REVOKE', createdAt: window } }),
     prisma.enforcementAction.count({ where: { level: 'BLOCK_PENDING_FOUNDER', createdAt: window } }),
-    prisma.enforcementAction.count({ where: { reasonCode: 'VELOCITY_DEVICE', createdAt: window } }),
+    // [AUD-1 row 301] the signup rungs: one device, or one network (VELOCITY_NETWORK)
+    prisma.enforcementAction.count({ where: { reasonCode: { in: ['VELOCITY_DEVICE', 'VELOCITY_NETWORK'] }, createdAt: window } }),
     prisma.signupAttempt.count({ where: { createdAt: window } }),
     prisma.signupAttempt.count({ where: { createdAt: window, outcome: 'REVIEW_FIRST' } }),
   ]);

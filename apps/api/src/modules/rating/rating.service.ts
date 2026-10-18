@@ -237,7 +237,8 @@ export class RatingService {
   async processRatingOutbox(opts: { ratingId?: string; limit?: number; now?: Date } = {}): Promise<{ processed: number; failed: number }> {
     const now = opts.now ?? new Date();
     const rows = await this.prisma.ratingOutbox.findMany({
-      where: { processedAt: null, availableAt: { lte: now }, attempts: { lt: 25 }, ...(opts.ratingId ? { ratingId: opts.ratingId } : {}) },
+      // [row 267] The retry budget is the row's own (maxAttempts, 25 by default); a spent row is a dead letter.
+      where: { processedAt: null, deadLetteredAt: null, availableAt: { lte: now }, attempts: { lt: this.prisma.ratingOutbox.fields.maxAttempts }, ...(opts.ratingId ? { ratingId: opts.ratingId } : {}) },
       orderBy: { createdAt: 'asc' },
       take: opts.limit ?? 200,
     });

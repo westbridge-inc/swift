@@ -654,7 +654,7 @@ export function HomeScreen() {
         <CategoryRail
           data={discovery.data}
           loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
 

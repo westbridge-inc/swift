@@ -91,6 +91,13 @@ declare const styles: {
   readonly section: string;
   readonly sectionTitle: string;
   readonly select: string;
+  readonly seller: string;
+  readonly sellerFact: string;
+  readonly sellerFacts: string;
+  readonly sellerLabel: string;
+  readonly sellerRights: string;
+  readonly sellerTitle: string;
+  readonly sellerValue: string;
   readonly sheet: string;
   readonly sheetAdd: string;
   readonly sheetFooter: string;

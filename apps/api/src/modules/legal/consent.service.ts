@@ -33,7 +33,7 @@ export type ConsentDocumentType =
   | 'age_declaration';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
-export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
+export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket' | 'sms';
 
 /** The document set each subject type must grant at account creation (INV-NR1a). */
 export const REQUIRED_CONSENTS: Record<ConsentSubjectType, ConsentDocumentType[]> = {

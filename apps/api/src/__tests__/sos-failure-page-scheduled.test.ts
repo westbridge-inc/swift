@@ -5,7 +5,8 @@ import { NotificationService } from '../modules/notification/notification.servic
 // ---------------------------------------------------------------------------
 // [AUD-L4-016] The failed-delivery pager must be WIRED to the SOS tick, not
 // merely exist. The tick used to drain the outbox and, when a delivery failed,
-// write one log line: nobody was paged. This runs the real dispatch worker's
+// write one log line: nobody was paged. This runs the real safety worker's
+// [row 331: the safety lane, no longer the dispatch worker]
 // "promote-sos-grace" job with the SOS modules as recorders and requires the
 // pager to run on every tick — under the worker kill switch too (it is an
 // alarm, not a delivery). sos-escalation-failure-page.test.ts proves what the
@@ -56,8 +57,8 @@ async function runSosTick() {
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   } as unknown as JobContext;
   await createWorkers(ctx, {} as never);
-  const processor = state.workers.get(QUEUE_NAMES.DISPATCH);
-  expect(processor, 'the dispatch worker exists').toBeDefined();
+  const processor = state.workers.get(QUEUE_NAMES.SAFETY);
+  expect(processor, 'the safety worker exists').toBeDefined();
   await processor!({ name: 'promote-sos-grace', data: {} });
   return ctx;
 }
