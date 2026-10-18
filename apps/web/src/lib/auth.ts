@@ -319,6 +319,9 @@ export async function apiFetch(
         ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
+        // [Row 225] The account this page is acting as: the API refuses a write
+        // whose cookie (shared by every tab) now names someone else.
+        ...(requestSession.principal && { 'X-Swift-Expected-Principal': requestSession.principal }),
       },
     });
   };
@@ -346,6 +349,8 @@ export async function apiFetch(
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }
+  // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
+  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') void sessionProbe();
   if (isClosedDemoAnswer(res.status, json)) {
     await endClosedDemo({ redirect: policy.redirectOnExpired !== false });
     throw new ApiRequestError(DEMO_ENDED_NOTICE, 410, 'REVIEW_SESSION_CLOSED');
