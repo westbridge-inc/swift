@@ -30,7 +30,7 @@ type ReceiptOrder = {
   deliveryAddress: string | null;
   vendor: { name: string; addressLine1: string; city: string; phone: string } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
-  items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
+  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null }>;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
@@ -78,11 +78,16 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
           : shortCash
             ? `Paid ${formatMoney(order.doorCashCollectedAmount, currency, { whole: true })} in cash on delivery (${formatMoney(shortfall, currency, { whole: true })} not collected)`
             : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+  // [SUBSTITUTION · owner 17 Oct] A line that came off the order (the store
+  // removed it, the customer declined the swap, or nobody answered in time)
+  // was never charged: the receipt says so and prices it at nothing, so the
+  // rows add up to the Items total the order actually carries.
+  const removed = (i: { subStatus?: string | null }) => i.subStatus === 'REFUNDED' || i.subStatus === 'REJECTED';
   const rows = order.items
     .map(
       (i) => `<tr>
-        <td>${i.quantity}× ${esc(i.name)}</td>
-        <td class="num">${money(i.totalCustomer)}</td>
+        <td>${i.quantity}× ${esc(i.name)}${removed(i) ? ' (removed, not charged)' : ''}</td>
+        <td class="num">${money(removed(i) ? 0 : i.totalCustomer)}</td>
       </tr>`,
     )
     .join('\n');

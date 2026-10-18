@@ -9,6 +9,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { inoperableSubscriptionWhere, subscriptionOperability } from '../modules/subscription/operate-gate';
+import { testPhone } from './helpers/fixture-ids';
 
 const db = new PrismaClient();
 const HOUR = 3_600_000;
@@ -23,7 +24,7 @@ const billing = new BillingService(db, new NotificationService(db, io as never),
 async function fixture() {
   const key = randomUUID();
   const user = await db.user.create({ data: {
-    phone: `+592${Math.floor(Math.random() * 9_000_000_000) + 1_000_000_000}`,
+    phone: testPhone(),
     firstName: 'Clock', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER',
   } });
   users.push(user.id);

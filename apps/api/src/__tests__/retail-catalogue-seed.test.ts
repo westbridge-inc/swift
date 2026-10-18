@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { seedRetailCatalogue } from '../modules/market/retail-catalogue.seed';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
 import { marketGate, MARKET_MIN_ITEMS, MARKET_MIN_VENDORS } from '../modules/market/launch-depth';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [MKT G3/G7] The retail catalogue, and the two silent failures it hit.
@@ -65,7 +66,7 @@ beforeAll(async () => {
   weCreatedIt = true;
   const user = await prisma.user.create({
     data: {
-      phone: `+592819${String(Math.floor(Math.random() * 900000) + 100000)}`,
+      phone: testPhone(),
       firstName: 'Seed', lastName: `Owner${nanoid(4)}`,
       roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
       syntheticRunId: RUN_ID,

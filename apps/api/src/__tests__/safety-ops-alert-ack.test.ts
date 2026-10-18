@@ -14,6 +14,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getChannels } from '../providers/notifications/channels';
 import { escalateOverdueOpsAlerts, syncOpsAlertReadReceipts, scanOpsAlerts, runOpsAlertDrillIfDue, acknowledgeOpsAlert } from '../modules/safety/ops-alert';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { testPhone } from './helpers/fixture-ids';
 
 // Trip Guardian M4c — the graduated check-in ladder (§5.3, self-test §14-E):
 // L2 soft check-in → L3 hard check-in with a server deadline → L4 auto-SOS.
@@ -106,7 +107,7 @@ const io = { to: () => ({ emit: () => {} }), in: () => ({ fetchSockets: async ()
 const sos = () => new SosService(app.prisma, io);
 const notifications = () => new NotificationService(app.prisma, io);
 const alertIds: string[] = []; const opsAlertIds: string[] = [];
-const ONCALL = `+5927${String(Date.now()).slice(-8)}`;
+const ONCALL = testPhone();
 const opsAlertFor = (sosAlertId: string) => app.prisma.opsAlert.findFirstOrThrow({ where: { sosAlertId }, include: { recipients: true } });
 const escalationPushes = (userId: string) => app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'ops_alert_escalated' } } });
 const oncallTexts = () => devChannelLog.filter((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL).length;

@@ -8,6 +8,7 @@ import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
+import { storeSwapWaitText } from '../../orders/substitutionCopy';
 import { toast } from '../../../kit/toast';
 import { parsePartyCaseView, partyCaseWorthShowing, storeCanConfirmReturn } from '../../../lib/custodyRecovery';
 import { money } from '../../../lib/money';
@@ -360,6 +361,11 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                         Waiting on the customer: {it.substituteName}
                       </T>
                     ) : null}
+                    {pending && storeSwapWaitText(it.substituteDecideBy, order.paymentMethod) ? (
+                      <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
+                        {storeSwapWaitText(it.substituteDecideBy, order.paymentMethod)}
+                      </T>
+                    ) : null}
                     {closed ? (
                       <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
                         {it.subStatus === 'REFUNDED' ? 'Refunded — out of stock' : 'Customer declined the substitute'}
@@ -402,6 +408,26 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
                         </T>
                       </Pressable>
                     )}
+                  </View>
+                ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The store is never stuck
+                    waiting: while the customer decides, it can take the item
+                    off instead (the server removes it, lowers the total and
+                    tells the customer). Not on MMG: its total can't change
+                    in-app, and the server refuses. */}
+                {pickable && pending && order.paymentMethod !== 'MOBILE_MONEY' ? (
+                  <View style={{ marginLeft: 64 }}>
+                    <Pressable
+                      onPress={() => picking.refundLine.mutate({ orderId: order.id, lineId: it.id })}
+                      disabled={picking.refundLine.isPending}
+                      hitSlop={6}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remove ${it.name} instead`}
+                    >
+                      <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 4 }}>
+                        Remove item instead
+                      </T>
+                    </Pressable>
                   </View>
                 ) : null}
               </View>

@@ -1,7 +1,7 @@
 import { screen, render } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import TaxiPage from './page';
-import * as customer from '@/lib/customer';
+import * as customer from '@/lib/customer-rides';
 import * as geolocate from '@/lib/geolocate';
 
 // The pilot removes booking entirely. Keep the former W-17/W-18 regression

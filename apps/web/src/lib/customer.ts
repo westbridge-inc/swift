@@ -6,7 +6,6 @@
 import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
 import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
-import { retailCategories } from './browse-keys';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 export { sendOtp };
@@ -14,49 +13,6 @@ export { sendOtp };
 // ── Auth (customer) ────────────────────────────────────────────────────────
 // The customer sign-in code check lives in ./customer-login, so the sign-in
 // page loads it without this whole client.
-
-const API_BASE = API_URL;
-
-/** Verify the OTP without deciding a role — returns whether the number is new. */
-export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
-  const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
-    method: 'POST', credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
-    body: JSON.stringify({ phone, code }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
-  const d = json.data;
-  if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
-  return { isNewUser: true, signedIn: false };
-}
-
-/** Register a brand-new account with the chosen role (after OTP verify). */
-export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean; ageConfirmed?: boolean }): Promise<{ user: any; roles: string[] }> {
-  const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
-    method: 'POST', credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
-    body: JSON.stringify({ countryCode: 'GY', ...body }),
-  });
-  const json = await res.json().catch(() => ({}));
-  const registered = json?.data?.user;
-  if (!res.ok || !registered?.id) throw new Error(json?.error?.message || 'Could not create your account.');
-  adoptSession(registered.id);
-  return { user: json.data.user, roles: json.data.user?.roles ?? [] };
-}
-
-/** Mandatory transact-gate photo. The API validates the actual image bytes and
- * is the only writer of avatar/selfieCapturedAt. */
-export async function uploadSelfie(file: File): Promise<{ user: any }> {
-  const form = new FormData();
-  form.append('file', file, file.name || 'swift-profile-photo.jpg');
-  return (await apiFetch('/api/v1/auth/selfie', { method: 'POST', body: form })).data as { user: any };
-}
-
-/** Partner onboarding — turn a fresh account into a vendor or a mover. */
-export async function becomePartner(body: any) {
-  return (await apiFetch('/api/v1/partner/become', { method: 'POST', body: JSON.stringify(body) })).data;
-}
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface Vendor {
@@ -186,28 +142,6 @@ export async function getPublicStorefront(slug: string): Promise<StorefrontDetai
   }
   return json.data as StorefrontDetail;
 }
-/** A store as GET /search returns it — one wire shape whichever engine answered. */
-export interface SearchStore {
-  id: string; name: string; slug: string | null; vendorType: string;
-  logoUrl: string | null; coverImageUrl: string | null; cuisineTypes: string[];
-  city: string | null; estimatedPrepTime: number | null; isCurrentlyOpen: boolean;
-  displayRating: number | null; ratingCount: number; topRated: boolean;
-}
-export interface CatalogueResults { stores: SearchStore[]; items: MarketItem[] }
-/** How many stores and how many dishes one search shows. */
-export const SEARCH_PAGE = 30;
-/**
- * [SEARCH 13 Oct] The search engine the phone app's Search tab uses: stores
- * AND the dishes and products inside them, forgiving of a misspelling, a
- * plural or the words in another order. The website searched store names and
- * descriptions only (the store list's `?search=`), so "pepperpot" never found
- * the stores that sell it.
- */
-export async function searchCatalogue(q: string): Promise<CatalogueResults> {
-  const data = (await apiFetch(`/api/v1/search?q=${encodeURIComponent(q)}&limit=${SEARCH_PAGE}`)).data as { vendors?: SearchStore[]; items?: MarketItem[] } | undefined;
-  return { stores: data?.vendors ?? [], items: data?.items ?? [] };
-}
-
 // ── Market (goods across stores — the phone app's Market tab) ──────────────
 /** The server's launch-depth verdict; the tab shows only when it says so. */
 export interface MarketDepth { visible: boolean; items: number; vendors: number }
@@ -223,7 +157,7 @@ export interface MarketCategory { slug: string; name: string; vertical: string }
 
 /** Public reads with no session attached: nothing on them is personal, and a
  *  stale cookie must never turn browsing into a sign-in redirect. */
-async function publicGet<T>(path: string): Promise<T> {
+export async function publicGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
@@ -236,16 +170,6 @@ async function publicGet<T>(path: string): Promise<T> {
 
 export function getMarketDepth(): Promise<MarketDepth> {
   return publicGet<MarketDepth>('/api/v1/market/depth');
-}
-export function getMarketItems(params: { category?: string; cursor?: string }): Promise<{ items: MarketItem[]; nextCursor: string | null }> {
-  const qs = new URLSearchParams({ sort: 'popular' });
-  if (params.category) qs.set('category', params.category);
-  if (params.cursor) qs.set('cursor', params.cursor);
-  return publicGet(`/api/v1/market/items?${qs}`);
-}
-/** The goods categories the Market chips offer — only ones with a live store. */
-export async function getMarketCategories(): Promise<MarketCategory[]> {
-  return retailCategories(await publicGet<unknown>('/api/v1/discovery/categories?vertical=RETAIL'));
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────
@@ -407,6 +331,10 @@ export async function addAddress(body: { label: string; addressLine1: string; ad
 }
 
 // ── Checkout & orders ─────────────────────────────────────────────────────
+// Orders, rides, courier and place search live in their own modules
+// (customer-orders, customer-rides, customer-courier, customer-places), as do
+// sign-up (customer-account), search (customer-search) and the Market goods
+// (customer-market): only the pages that use them load them. [PERF]
 export async function checkout(body: CheckoutBody, idempotencyKey: string) {
   return (await apiFetch('/api/v1/customer/checkout', {
     method: 'POST',
@@ -414,45 +342,6 @@ export async function checkout(body: CheckoutBody, idempotencyKey: string) {
     body: JSON.stringify(body),
   })).data;
 }
-export async function getOrders(): Promise<any[]> { return (await apiFetch('/api/v1/customer/orders')).data as any[]; }
-export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}`)).data; }
-export async function cancelOrder(id: string, reason: string) {
-  return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
-}
-
-// ── Taxi ──────────────────────────────────────────────────────────────────
-export async function rideAvailability(lat: number, lng: number): Promise<{ level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes?: number | null; gate?: boolean }> {
-  return (await apiFetch(`/api/v1/rides/availability?lat=${lat}&lng=${lng}`)).data;
-}
-export async function rideEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }) {
-  return (await apiFetch('/api/v1/rides/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-export async function activeRide(): Promise<any> { return (await apiFetch('/api/v1/rides/active')).data; }
-export async function getRide(id: string): Promise<any> { return (await apiFetch(`/api/v1/rides/${encodeURIComponent(id)}`)).data; }
-export async function watchRide(body: { lat: number; lng: number }) {
-  return apiFetch('/api/v1/rides/availability/watch', { method: 'POST', body: JSON.stringify(body) });
-}
-
-// ── Courier ────────────────────────────────────────────────────────────────
-export async function courierEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; packageSize: string }) {
-  return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-/** POST /courier/order — the server's own fields: the recipient is required and what is inside is `packageDescription` (there is no `notes`).
- *  `declaresNoProhibitedItems` is the sender's tick "This parcel has no prohibited items" [owner #67]. */
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName: string; recipientPhone: string; packageDescription?: string; expectedFee?: number; declaresNoProhibitedItems?: boolean }) {
-  return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-
-// ── Places (taxi pickup/dropoff search) ─────────────────────────────────────
-export interface Place { placeId: string; primary: string; secondary?: string; label?: string; lat?: number; lng?: number; }
-export async function placesAutocomplete(q: string, near?: { lat: number; lng: number }): Promise<Place[]> {
-  const qs = new URLSearchParams({ q, ...(near ? { lat: String(near.lat), lng: String(near.lng) } : {}) });
-  return (await apiFetch(`/api/v1/places/autocomplete?${qs}`)).data as Place[];
-}
-export async function placeDetails(placeId: string): Promise<{ lat: number; lng: number; label: string }> {
-  return (await apiFetch(`/api/v1/places/details?placeId=${encodeURIComponent(placeId)}`)).data;
-}
-
 // [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
 // and "GY$NaN" for a broken one. Free and unknown are different facts, and a
 // customer must never be shown either as the other.
