@@ -37,7 +37,7 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { goOnlineRefusal } from '../subscription/go-online-refusals';
-import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { handoverAttemptState, handoverCodeMatches, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
@@ -1242,7 +1242,8 @@ export async function driverRoutes(app: FastifyInstance) {
       if (locked) {
         throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
       }
-      if (current.ridePin !== pin) {
+      // [Row 207] Constant time, through the one handover-code comparison.
+      if (!handoverCodeMatches(current.ridePin, pin)) {
         await tx.order.update({
           where: { id },
           data: { ridePinAttempts: { increment: 1 } },
