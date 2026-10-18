@@ -8,10 +8,11 @@ import {
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -371,7 +372,11 @@ export class AccountService {
       // due pointer; it cannot prevent the other personal-data cleanup.
       let evidence;
       try {
-        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+        // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
+        // since the census keeps the document; the tombstone retry then defers it as held.
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
+        if (!fenced) { pendingDocuments += 1; continue; }
+        evidence = fenced;
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
         // Refusal is an unresolved obligation, never proof of destruction.
@@ -386,13 +391,28 @@ export class AccountService {
         pendingDocuments += 1;
         continue;
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+      const closed = await prisma.$transaction(async (tx) => {
+        // [Row 243] The close re-checks the hold under the person's row lock (placeDocLegalHoldIn takes the same lock
+        // first). A hold that landed since the census keeps the record and its extracted values: that includes a
+        // document whose image R24 already purged (fileUrl ''), which never enters the fence above. A document a
+        // concurrent purge already closed is not closed (or receipted) twice.
+        await bindTenantTransaction(tx);
+        const person = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
+        `;
+        if (person.length !== 1) return false;
+        const close = await tx.verificationDocument.updateMany({
+          where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
+        });
+        if (close.count !== 1) return false;
         // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
         await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
         await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
         await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        return true;
       });
+      // Held (or already closed) since the census: the tombstone retry defers or skips it.
+      if (!closed) pendingDocuments += 1;
     }
 
     const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
