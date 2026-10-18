@@ -1,9 +1,10 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import {
-  ACCOUNT_FIELDS, EXPORT_REGISTER, OMIT_REASON_TEXT, OMIT_RULES, RATING_MONTH_FLOOR, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
+  ACCOUNT_FIELDS, EXPORT_REGISTER, OMIT_REASON_TEXT, OMIT_RULES, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
   type ExportEntry, type OmitReason, type WithheldReason,
 } from './data-export-register';
+import { PERSON_RATING_ROLES, RATING_GROUP_SIZE, ratingGroupsFor } from '../rating/rating-groups';
 
 /**
  * [Row 331 · DSAR-ERASURE (b) · DPA right of access + portability] The person's
@@ -41,11 +42,7 @@ function portable(row: Row): Row {
 async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[], ceiling: number, fold: Date) {
   // Bounded to the person: the register's own columns, equal to the person's own ids, only.
   const person = { OR: entry.by.flatMap((column) => ids.map((id) => ({ [column]: id }))) };
-  const fixed = [
-    entry.where,
-    entry.foldedBefore && { [entry.foldedBefore]: { lt: fold } },
-    entry.byMonth && { [entry.month![0]!]: { lt: settledBefore(fold, entry.byMonth.settleDays) } },
-  ].filter(Boolean);
+  const fixed = [entry.where, entry.foldedBefore && { [entry.foldedBefore]: { lt: fold } }].filter(Boolean);
   const match = fixed.length ? { AND: [person, ...fixed] } : person;
   const select = Object.fromEntries([...entry.fields, entry.key].map((f) => [f, true]));
   const rows: Row[] = [];
@@ -67,31 +64,22 @@ async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[],
     return portable(r);
   });
   if (entry.sortBy) kept.sort((a, b) => compareBy(a, b, entry.sortBy!));
-  return { rows: entry.byMonth ? settledMonths(kept, entry, complete) : kept, complete };
-}
-
-/** The start of the latest month that ended at least `days` before the fold: every month before it is settled. */
-function settledBefore(fold: Date, days: number): Date {
-  const edge = new Date(fold.getTime() - days * 86_400_000);
-  return new Date(Date.UTC(edge.getUTCFullYear(), edge.getUTCMonth(), 1));
+  return { rows: kept, complete };
 }
 
 /**
- * One row per settled month, oldest first: how many and their average (rounded as the app rounds,
- * rating-standing.ts), or only `fewerThan` when the month had fewer than the floor. A category cut short
- * at the ceiling gives no months at all (it is marked incomplete): rows are read in id order, so any
- * month could be partial, and a partial month would differ from the next file's.
+ * The ratings a person received (not as a store), only in whole groups of 5, per role: the ONE cut
+ * their app shows too (rating-groups.ts). A group gives the months it spans and its average.
  */
-function settledMonths(rows: Row[], entry: ExportEntry, complete: boolean): Row[] {
-  const { floor, average } = entry.byMonth!;
-  const monthOf = entry.month![0]!;
-  const months = new Map<string, number[]>();
-  for (const r of rows) months.set(String(r[monthOf]), [...(months.get(String(r[monthOf])) ?? []), Number(r[average])]);
-  if (!complete) return [];
-  const ordered = [...months.entries()].sort(([x], [y]) => x.localeCompare(y));
-  return ordered.map(([month, scores]): Row => (scores.length < floor
-    ? { month, fewerThan: floor }
-    : { month, count: scores.length, [`${average}Average`]: Math.round((scores.reduce((t, x) => t + x, 0) / scores.length) * 100) / 100 }));
+async function receivedRatingGroups(db: PrismaClient, userId: string): Promise<Row[]> {
+  const rows: Row[] = [];
+  for (const role of PERSON_RATING_ROLES) {
+    const { groups } = await ratingGroupsFor(db, { role, userId });
+    for (const g of groups) {
+      rows.push({ as: role, from: g.from.toISOString().slice(0, 7), to: g.to.toISOString().slice(0, 7), count: g.count, scoreAverage: g.average });
+    }
+  }
+  return rows;
 }
 
 /** Plain value order on the given columns (numbers as numbers, anything else as its JSON text). */
@@ -117,9 +105,9 @@ export const OMIT_REASONS_IN_USE: readonly OmitReason[] = (() => {
 export const EXPORT_NOTICE =
   'This file is a copy of the personal data Swift holds about you, by category ("coverage" lists them all). '
   + 'Chat messages you sent are included; messages other people sent you are not. '
-  + 'Ratings you received as a customer, rider, driver or provider are given by month, never one by one: for each month, once it is over and '
-  + `no rating can still be given or edited for it (about a week later), how many you received and their average score, or only that there were fewer than ${RATING_MONTH_FLOOR}. `
-  + 'Never the words, the tags, who gave them or for which trip. '
+  + `Ratings you received as a customer, rider, driver or provider are given only in groups of ${RATING_GROUP_SIZE}, in the order they came: `
+  + 'for each group, the months it spans and its average score. The newest appear once a whole group can no longer be edited (about a week after its last rating). '
+  + 'Never one by one: never the words, the tags, who gave them or for which trip. '
   + `Left out on purpose: ${OMIT_REASONS_IN_USE.map((r) => OMIT_REASON_TEXT[r]).join('; ')}. `
   + '"withheld" lists the kinds of records that are not in this file.';
 
@@ -153,7 +141,8 @@ export async function exportPersonalData(db: PrismaClient, userId: string, optio
   const coverage: Record<string, { rows: number; complete: boolean }> = {};
   for (const entry of EXPORT_REGISTER) {
     const ids = entry.via ? via[entry.via] : [userId];
-    const { rows, complete } = ids.length ? await readCategory(db, entry, ids, ceiling, fold) : { rows: [], complete: true };
+    const { rows, complete } = entry.groups ? { rows: await receivedRatingGroups(db, userId), complete: true }
+      : ids.length ? await readCategory(db, entry, ids, ceiling, fold) : { rows: [], complete: true };
     categories[entry.category] = rows;
     coverage[entry.category] = { rows: rows.length, complete };
   }

@@ -9,7 +9,6 @@
  * account-export-register.test.ts red, so the export can never quietly fall
  * behind the data, and nothing new leaks into it unreviewed.
  */
-import { RATING_WINDOW_DAYS } from '../rating/rating-math';
 import { TYPES_FOR_ROLE } from '../rating/rating-stats.service';
 
 /** Why a column of an exported table is left out. */
@@ -19,7 +18,7 @@ export type OmitReason =
   | 'FRAUD_SAFETY' // fraud-prevention and safety signals
   | 'OTHER_PERSON' // another person's details, or the staff member who acted
   | 'INTERNAL_NOTE' // a private note staff wrote while handling a case
-  | 'RATING_TOTAL' // a running rating total that moves with each single rating (ratings are given by settled month instead)
+  | 'RATING_TOTAL' // a running rating total that moves with each single rating (ratings are given in groups of 5 instead)
   | 'SYSTEM'; // bookkeeping with no information about the person (versions, leases, tenant ids)
 
 /** Name rules, in order; the first match decides. A `by` column is always exported (it is the person). */
@@ -49,7 +48,7 @@ export const OMIT_REASON_TEXT: Readonly<Record<OmitReason, string>> = {
   FRAUD_SAFETY: 'some records kept to prevent fraud and to keep people safe',
   OTHER_PERSON: 'details of other people (contacts you entered yourself, such as emergency contacts, are included)',
   INTERNAL_NOTE: 'private notes staff wrote while handling a case',
-  RATING_TOTAL: 'running rating totals, which change with each single rating (your ratings are given by month instead)',
+  RATING_TOTAL: 'running rating totals, which change with each single rating (your ratings are given in groups of 5 instead)',
   SYSTEM: 'system bookkeeping that says nothing more about you',
 };
 
@@ -96,25 +95,18 @@ export interface ExportEntry {
   /** The file's row order (after `month`): never creation order, which would pair the k-th row with the k-th trip. */
   readonly sortBy?: readonly string[];
   /**
-   * The rows are given only as one row per SETTLED month (the first `month` column), never row by row:
-   * `{ month, count, <average>Average }`, or `{ month, fewerThan: floor }` (no count, no average) when the
-   * month had fewer than `floor`. A month is settled once it ended at least `settleDays` before the fold,
-   * so nothing in it can still be given, edited or released: a month's row never changes from one export
-   * to the next, and no two exports differ by one rating.
+   * The rows are never given one by one: the category is the person's ratings received, cut into whole
+   * groups of 5 by the ONE partition the app shows too (modules/rating/rating-groups.ts), per role.
    */
-  readonly byMonth?: { readonly floor: number; readonly average: string; readonly settleDays: number };
+  readonly groups?: true;
 }
 
 /**
  * Only a STORE's reviews are listed one by one with their words and tags: the store's reviews page already
  * shows each one. Every other rating a person received (as a customer, rider, driver or provider), whose app
- * shows no single rating, is given by settled month only (COORD rulings 17 Oct 23:38Z and 18 Oct).
+ * shows no single rating, is given only in whole groups of 5 (COORD rulings 17 Oct 23:38Z and 18 Oct, option S).
  */
 export const STORE_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.VENDOR];
-/** A settled month with fewer ratings than this is given only as "fewer than" this. */
-export const RATING_MONTH_FLOOR = 5;
-/** A month is given once it has been over this many days: past the rating, edit and double-blind windows. */
-export const RATING_MONTH_SETTLE_DAYS = RATING_WINDOW_DAYS;
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
@@ -147,11 +139,11 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['rateeId', 'score', 'comment', 'tags', 'createdAt'],
   },
   {
-    // Every other rating about you (as a customer, rider, driver or provider): by settled month only, how many
-    // and their average, or only "fewer than 5". No words, tags, rater role, order or single score.
-    category: 'ratingsReceivedByMonth', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
-    where: { state: 'ACTIVE', type: { notIn: STORE_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
-    byMonth: { floor: RATING_MONTH_FLOOR, average: 'score', settleDays: RATING_MONTH_SETTLE_DAYS },
+    // Every other rating about you (as a customer, rider, driver or provider): only in whole groups of 5, in the
+    // order given, each with its months and average: the ONE cut your app shows (rating-groups.ts). No words,
+    // tags, rater role, order or single score; the newest appear once a group of 5 is complete and final.
+    category: 'ratingsReceivedInGroups', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
+    where: { state: 'ACTIVE', type: { notIn: STORE_RATING_TYPES } }, groups: true,
     fields: ['rateeId', 'score', 'createdAt'],
   },
   {
@@ -299,12 +291,6 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'documentId', 'subjectId', 'expiresOn', 'notifyAt', 'suspendAt', 'lastNotified', 'suspendedAt', 'createdAt', 'updatedAt'],
   },
   {
-    // The folded view the app shows (rating-standing.ts): live counts, sums and tags would let one
-    // fresh rating be paired with one trip, so they stay out (they protect the people who rated).
-    category: 'ratingSummary', model: 'ActorRatingStat', by: ['subjectId'], key: 'id', rest: 'OTHER_PERSON',
-    fields: ['subjectRole', 'subjectId', 'displayRating', 'standing', 'actorVisibleAt'],
-  },
-  {
     category: 'customerProfile', model: 'Customer', by: ['userId'], key: 'id',
     fields: ['id', 'userId', 'totalOrders', 'totalSpent', 'referralCode', 'createdAt'],
   },
@@ -388,6 +374,8 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
 
 /** Person links that are not exported, keyed `Model.column`, each with its reason. */
 export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason; readonly note: string }>> = {
+  // A live cache that moves with each single rating; the ratings themselves are given in groups of 5 instead.
+  'ActorRatingStat.subjectId': { reason: 'SYSTEM', note: 'the running rating summary the app keeps (your ratings are given in groups of 5 instead)' },
   'IdentityKey.accountId': { reason: 'FRAUD_SAFETY', note: 'identity signals used to stop one person opening many accounts' },
   'IdentityClusterMember.accountId': { reason: 'FRAUD_SAFETY', note: 'links between accounts found by fraud checks' },
   'FaceTemplate.accountId': { reason: 'FRAUD_SAFETY', note: 'face-match template used only to stop repeat sign-ups' },

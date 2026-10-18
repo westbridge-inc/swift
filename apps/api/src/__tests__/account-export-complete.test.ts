@@ -156,21 +156,20 @@ describe('the account export', () => {
     await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: b, message: `from b ${MARK}` } });
     const data = await service().exportData(a) as unknown as Record<string, Array<Record<string, unknown>>>;
     // A customer's app shows no single rating, so neither does the file (COORD 18 Oct): no words, no rater role,
-    // and the rating only inside its month's figures once that month is settled (this one is not yet).
+    // and a rating only inside a whole group of 5 (this person has one shown rating, so no group yet).
     expect(data['ratingsReceived']).toEqual([]);
-    expect(data['ratingsReceivedByMonth']).toEqual([]);
-    // As the file carries it (JSON): Decimals and dates become strings.
-    expect(JSON.parse(JSON.stringify(data['ratingSummary']))).toEqual([{ subjectRole: 'CUSTOMER', subjectId: a, displayRating: '4', standing: 'NEW', actorVisibleAt: expect.any(String) }]);
+    expect(data['ratingsReceivedInGroups']).toEqual([]);
+    // The live rating summary moves with each single rating: withheld (one partition only, rating-groups.ts).
+    expect(data['ratingSummary']).toBeUndefined();
     expect(data['chatMessagesSent']).toEqual([expect.objectContaining({ message: `from a ${MARK}` })]);
     const text = JSON.stringify(data);
-    for (const leak of [b, rider.id, `kind and quick ${MARK}`, `still hidden ${MARK}`, `from b ${MARK}`, `not folded yet ${MARK}`, 'RIDER_TO_CUSTOMER', '"lifetimeCount"', '"rollingSum"', '"topNegativeTags"']) expect(text).not.toContain(leak);
+    for (const leak of [b, rider.id, `kind and quick ${MARK}`, `still hidden ${MARK}`, `from b ${MARK}`, `not folded yet ${MARK}`, 'RIDER_TO_CUSTOMER', '"lifetimeCount"', '"rollingSum"', '"topNegativeTags"', '"displayRating"']) expect(text).not.toContain(leak);
   });
 
-  // COORD rulings 17 Oct 23:38Z + 18 Oct: only a store's reviews are listed one by one. Every other rating a person
-  // received is given by SETTLED month only (no rating can still be given, edited or released for it), so two
-  // exports never differ by one rating: { month, count, scoreAverage }, or { month, fewerThan: 5 } alone.
-  const monthStart = (back: number) => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth() - back, 10)); };
-  const monthOf = (back: number) => monthStart(back).toISOString().slice(0, 7);
+  // COORD rulings 17 Oct 23:38Z + 18 Oct (option S): only a store's reviews are listed one by one. Every other rating
+  // a person received is given ONLY in whole groups of 5 final ratings (rating-groups.ts), the one cut the app shows.
+  const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000);
+  const month = (d: Date) => d.toISOString().slice(0, 7);
   type Received = { type: 'CUSTOMER_TO_RIDER' | 'CUSTOMER_TO_DRIVER' | 'CUSTOMER_TO_PROVIDER' | 'RIDER_TO_CUSTOMER'; score: number; at: Date; extra?: Record<string, unknown> };
   async function received(rateeId: string, ratings: Received[]) {
     const rater = await person();
@@ -178,62 +177,64 @@ describe('the account export', () => {
     const v = await store(owner);
     for (const [i, r] of ratings.entries()) {
       const o = await app.prisma.order.create({ data: order(rater, v.id, 7_200 + seq * 20 + i) });
+      const createdAt = new Date(r.at.getTime() + i * 1_000);
       await app.prisma.rating.create({ data: {
         orderId: o.id, raterId: rater, rateeId, type: r.type, score: r.score, comment: `words ${i} ${MARK}`, tags: [`tag${i}-${MARK}`],
-        visibleAt: new Date(), createdAt: new Date(r.at.getTime() + i * 1_000), ...r.extra,
+        visibleAt: new Date(), createdAt, editableUntil: new Date(createdAt.getTime() + 7 * 86_400_000), ...r.extra,
       } });
     }
     return rater;
   }
   const leaks = (text: string, rater: string) => {
-    for (let i = 0; i < 6; i++) for (const leak of [`words ${i} ${MARK}`, `tag${i}-${MARK}`]) expect(text).not.toContain(leak);
+    for (let i = 0; i < 14; i++) for (const leak of [`words ${i} ${MARK}`, `tag${i}-${MARK}`]) expect(text).not.toContain(leak);
     for (const leak of ['CUSTOMER_TO_RIDER', 'CUSTOMER_TO_DRIVER', 'CUSTOMER_TO_PROVIDER', 'RIDER_TO_CUSTOMER', rater]) expect(text).not.toContain(leak);
   };
+  const groupsOf = async (userId: string) => ((await service().exportData(userId)) as unknown as Record<string, unknown>)['ratingsReceivedInGroups'];
 
-  it('gives a settled month of 5 or more as its count and average only, whatever role the person was rated in', async () => {
+  it('gives ratings received only in whole groups of 5, per role, with their months and average', async () => {
     const ratee = await person();
+    const at = daysAgo(40);
     const rater = await received(ratee, [
-      { type: 'CUSTOMER_TO_RIDER', score: 5, at: monthStart(2) },
-      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2) },
-      { type: 'CUSTOMER_TO_DRIVER', score: 4, at: monthStart(2) },
-      { type: 'RIDER_TO_CUSTOMER', score: 2, at: monthStart(2) },
-      // Still double-blind (the release sweep is late): a settled month counts it, so the month never changes later.
-      { type: 'CUSTOMER_TO_PROVIDER', score: 3, at: monthStart(2), extra: { visibleAt: null } },
+      ...[5, 1, 4, 2, 3, 5, 5].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at })), // 7: one group (the first 5)
+      ...[4, 4, 5, 3, 4].map((score) => ({ type: 'RIDER_TO_CUSTOMER' as const, score, at })), // as a customer
+      ...[2, 5].map((score) => ({ type: 'CUSTOMER_TO_DRIVER' as const, score, at })), // 2: no group yet
     ]);
     const data = await service().exportData(ratee) as unknown as Record<string, unknown>;
-    expect(data['ratingsReceivedByMonth']).toEqual([{ month: monthOf(2), count: 5, scoreAverage: 3 }]);
+    expect(data['ratingsReceivedInGroups']).toEqual([
+      { as: 'CUSTOMER', from: month(at), to: month(at), count: 5, scoreAverage: 4 },
+      { as: 'RIDER', from: month(at), to: month(at), count: 5, scoreAverage: 3 },
+    ]);
     expect(data['ratingsReceived']).toEqual([]);
     leaks(JSON.stringify(data), rater);
   });
 
-  it('gives a settled month of fewer than 5 as "fewer than 5" only: no count, no average; an open month not at all', async () => {
+  it('two exports never differ by one rating: the groups move only by a whole new group of 5 (the difference attack)', async () => {
     const ratee = await person();
-    const rater = await received(ratee, [
-      { type: 'CUSTOMER_TO_RIDER', score: 2, at: monthStart(3) },
-      { type: 'CUSTOMER_TO_DRIVER', score: 5, at: monthStart(3) },
-      { type: 'RIDER_TO_CUSTOMER', score: 4, at: monthStart(3) },
-      { type: 'CUSTOMER_TO_PROVIDER', score: 1, at: monthStart(3) },
-      // Never counted: excluded as fake (it would make the month 5).
-      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(3), extra: { state: 'EXCLUDED' } },
-      // The month still open (or just ended): nothing yet, so the next export cannot differ by this one rating.
-      ...[5, 5, 5, 5, 5].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: new Date(Date.now() - 86_400_000) })),
-    ]);
-    const data = await service().exportData(ratee) as unknown as Record<string, unknown> & { notice: string };
-    expect(data['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }]);
-    leaks(JSON.stringify(data), rater);
-    expect(data.notice).toContain('Ratings you received as a customer, rider, driver or provider are given by month, never one by one: for each month, once '
-      + 'it is over and no rating can still be given or edited for it (about a week later), how many you received and their average score, or only '
-      + 'that there were fewer than 5. Never the words, the tags, who gave them or for which trip.');
+    await received(ratee, [3, 3, 3, 3, 3].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: daysAgo(30) })));
+    const first = await groupsOf(ratee) as unknown[];
+    expect(first).toEqual([{ as: 'RIDER', from: month(daysAgo(30)), to: month(daysAgo(30)), count: 5, scoreAverage: 3 }]);
+    // One more final rating, a 1: the file is the same, so nothing can be subtracted to find it.
+    await received(ratee, [{ type: 'CUSTOMER_TO_RIDER', score: 1, at: daysAgo(20) }]);
+    expect(await groupsOf(ratee)).toEqual(first);
+    // Four more: a whole new group appears; the first is unchanged.
+    await received(ratee, [5, 5, 5, 5].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: daysAgo(10) })));
+    expect(await groupsOf(ratee)).toEqual([first[0], { as: 'RIDER', from: month(daysAgo(20)), to: month(daysAgo(10)), count: 5, scoreAverage: 4.2 }]);
   });
 
-  it('a by-month category cut short at the ceiling gives no months at all (any of them could be partial)', async () => {
+  it('a rating still open to editing holds back everything after it; an excluded one never counts', async () => {
     const ratee = await person();
-    await received(ratee, [5, 5, 5, 5, 5, 4].map((score, i) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: monthStart(i < 3 ? 3 : 2) })));
-    const cut = await exportPersonalData(app.prisma, ratee, { ceiling: 5 }) as unknown as Record<string, unknown> & { coverage: Record<string, unknown> };
-    expect(cut.coverage['ratingsReceivedByMonth']).toEqual({ rows: 0, complete: false });
-    expect(cut['ratingsReceivedByMonth']).toEqual([]); // month 2 had only 2 of its 3 rows: no month is given from a cut read
-    const whole = await exportPersonalData(app.prisma, ratee) as unknown as Record<string, unknown>;
-    expect(whole['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }, { month: monthOf(2), fewerThan: 5 }]);
+    await received(ratee, [
+      ...[4, 4, 4, 4].map((score) => ({ type: 'CUSTOMER_TO_PROVIDER' as const, score, at: daysAgo(30) })),
+      { type: 'CUSTOMER_TO_PROVIDER', score: 1, at: daysAgo(29), extra: { state: 'EXCLUDED' } }, // counted, it would close a group
+      { type: 'CUSTOMER_TO_PROVIDER', score: 2, at: daysAgo(3) }, // still editable (7-day window)
+    ]);
+    expect(await groupsOf(ratee)).toEqual([]);
+    await app.prisma.rating.updateMany({ where: { rateeId: ratee, score: 2 }, data: { editableUntil: daysAgo(1) } });
+    expect(await groupsOf(ratee)).toEqual([{ as: 'SERVICE_PROVIDER', from: month(daysAgo(30)), to: month(daysAgo(3)), count: 5, scoreAverage: 3.6 }]);
+    const data = await service().exportData(ratee) as unknown as { notice: string };
+    expect(data.notice).toContain('Ratings you received as a customer, rider, driver or provider are given only in groups of 5, in the order they came: '
+      + 'for each group, the months it spans and its average score. The newest appear once a whole group can no longer be edited (about a week after '
+      + 'its last rating). Never one by one: never the words, the tags, who gave them or for which trip.');
   });
 
   it('a mover never gets the live rating totals: they move with each single rating', async () => {
@@ -244,7 +245,7 @@ describe('the account export', () => {
     expect(data['riderProfile']![0]).not.toHaveProperty('averageRating');
     expect(data['riderProfile']![0]).not.toHaveProperty('totalRatings');
     expect(JSON.stringify(data)).not.toMatch(/"(averageRating|totalRatings)"/);
-    expect((data as unknown as { notice: string }).notice).toContain('running rating totals, which change with each single rating (your ratings are given by month instead)');
+    expect((data as unknown as { notice: string }).notice).toContain('running rating totals, which change with each single rating (your ratings are given in groups of 5 instead)');
   });
 
   it('never carries security internals or the fraud signals that fired', async () => {
@@ -288,7 +289,7 @@ describe('the account export', () => {
     };
     for (const call of calls) {
       const w = call.where as Record<string, unknown>;
-      if ('id' in w || 'userId' in w || 'subjectId' in w) { expect(mine.has(String(w['id'] ?? w['userId'] ?? w['subjectId'])), call.model).toBe(true); continue; }
+      if ('id' in w || 'userId' in w || 'subjectId' in w || 'rateeId' in w) { expect(mine.has(String(w['id'] ?? w['userId'] ?? w['subjectId'] ?? w['rateeId'])), call.model).toBe(true); continue; }
       const match = personMatch(call.where);
       expect(match.length, call.model).toBeGreaterThan(0);
       for (const clause of match) {
