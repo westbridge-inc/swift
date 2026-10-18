@@ -4,7 +4,8 @@ import { Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import { getMarketCategories, getMarketDepth, getMarketItems, money, type MarketCategory, type MarketDepth, type MarketItem } from '@/lib/customer';
+import { getMarketDepth, money, type MarketCategory, type MarketDepth, type MarketItem } from '@/lib/customer';
+import { getMarketCategories, getMarketItems } from '@/lib/customer-market';
 
 /** What the server drew into the page (page.tsx), and for which category. */
 export type MarketPageSeed = {

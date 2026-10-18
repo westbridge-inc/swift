@@ -28,6 +28,8 @@ function driverProfile(over: Record<string, unknown> = {}) {
     mmgPayUrl: LIVE,
     mmgPayUrlPending: null,
     mmgPayUrlApplyAt: null,
+    // These cases cover the link's ON path (DRIVER_MMG_PAY_LINK=1 on the server).
+    mmgPayLinkEnabled: true,
     ...over,
   };
 }
@@ -90,5 +92,26 @@ describe('[W-31] the pay link says where the money actually goes', () => {
     vi.spyOn(moverApi, 'getDriverProfile').mockResolvedValue(driverProfile({ mmgPayUrl: null }) as never);
     renderWithQuery(<AccountPage />);
     expect(await screen.findByText(/riders cannot pay you by MMG/)).toBeTruthy();
+  });
+});
+
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+// drop-off, cash or MMG. The card exists only while the server says the link is on.
+describe('[PAYMENT-SIMPLIFY] the pay link card follows the server switch', () => {
+  it('switch off: no pay link card, no link box, nothing to save', async () => {
+    vi.spyOn(moverApi, 'getDriverProfile').mockResolvedValue(driverProfile({ mmgPayLinkEnabled: false, mmgPayUrl: null }) as never);
+    renderWithQuery(<AccountPage />);
+    expect(await screen.findByText('Ann Driver')).toBeTruthy();
+    expect(screen.queryByText(/Your MMG pay link/)).toBeNull();
+    expect(screen.queryByPlaceholderText('https://pay.mmg.gy/…')).toBeNull();
+  });
+
+  it('an API that does not say (older server) also hides it: off is the default', async () => {
+    const older: Record<string, unknown> = driverProfile();
+    delete older['mmgPayLinkEnabled'];
+    vi.spyOn(moverApi, 'getDriverProfile').mockResolvedValue(older as never);
+    renderWithQuery(<AccountPage />);
+    expect(await screen.findByText('Ann Driver')).toBeTruthy();
+    expect(screen.queryByText(/Your MMG pay link/)).toBeNull();
   });
 });

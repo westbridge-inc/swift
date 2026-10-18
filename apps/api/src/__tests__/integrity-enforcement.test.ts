@@ -108,9 +108,12 @@ afterAll(async () => {
 describe('scenario H — device velocity (Part 5)', () => {
   it('the 3rd signup from one device in 24h enters REVIEW_FIRST; earlier ones are untouched', async () => {
     const device = `dev-${nanoid(10)}`;
+    // A network of this run's own: the network rung (AUD-1 row 301) counts every signup from one
+    // network for 24 h, so a fixed address would carry earlier runs' signups on a kept database.
+    const ip = `190.${80 + Math.floor(Math.random() * 16)}.${Math.floor(Math.random() * 256)}.7`;
     const [u1, u2, u3] = [await makeUser(), await makeUser(), await makeUser()];
     for (const u of [u1, u2, u3]) {
-      captureSignup(app.prisma, { userId: u.id, role: 'VENDOR', phone: u.phone, deviceId: device, ip: '190.83.99.7' });
+      captureSignup(app.prisma, { userId: u.id, role: 'VENDOR', phone: u.phone, deviceId: device, ip });
       // Sequential settle — the velocity count is per completed attempt.
       await waitFor(() => app.prisma.signupAttempt.findFirst({ where: { deviceHash: { not: null }, outcome: { in: ['CREATED', 'REVIEW_FIRST'] }, createdAt: { gte: new Date(Date.now() - 5000) } } }));
       await new Promise((r) => setTimeout(r, 120));

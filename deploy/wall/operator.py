@@ -52,7 +52,15 @@ from urllib.parse import quote, unquote, urlsplit
 HERE = Path(__file__).resolve().parent
 _spec = importlib.util.spec_from_file_location('wall_logins', HERE / 'logins.py')
 logins = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(logins)
+# No bytecode beside the planner: this runs from the deployed checkout (/opt/swift), which
+# must stay clean, and rls-logins.sh starts python3 -I under env -i, where
+# PYTHONDONTWRITEBYTECODE never arrives (17 Oct: deploy/wall/__pycache__ was left behind).
+_write_bytecode = sys.dont_write_bytecode
+sys.dont_write_bytecode = True
+try:
+    _spec.loader.exec_module(logins)
+finally:
+    sys.dont_write_bytecode = _write_bytecode
 Refusal = logins.Refusal
 require = logins.require
 

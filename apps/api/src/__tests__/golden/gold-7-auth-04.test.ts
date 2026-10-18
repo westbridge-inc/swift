@@ -97,7 +97,9 @@ describe('GOLD-7 · AUTH-04 — completed-order erasure retry', () => {
     const retained = await h.call('GET', `/api/v1/vendor/orders/${id}`, owner.token, undefined, { 'x-vendor-id': store.vendorId });
     expect(retained.statusCode).toBe(200);
     expect(retained.json().data).toMatchObject({ id, status: 'COMPLETED',
-      customer: { firstName: 'Deleted', lastName: 'User', phone: null }, deliveryAddress: null, deliveryLat: null, deliveryLng: null });
+      customer: { firstName: 'Deleted', phone: null }, deliveryAddress: null, deliveryLat: null, deliveryLng: null });
+    // [COORD 17 Oct · data minimisation] A store is never served a customer's last name, erased or not.
+    expect(retained.json().data.customer).not.toHaveProperty('lastName');
     expect(Number((await h.sys(() => h.app.prisma.order.findUniqueOrThrow({ where: { id } }))).totalAmount)).toBe(Number(completed.totalAmount));
   });
 });
