@@ -140,7 +140,7 @@ export function cartPaymentOptions(
           icon: 'smartphone',
           title: 'Pay with MMG',
           // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The number is shown only after the store accepts.
-          sub: 'When the business accepts, your order shows its MMG number and the exact amount. You pay the business directly in MMG. Swift never holds the money.',
+          sub: 'When the business accepts, your order shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG. Swift never holds the money.',
         }
       : {
           key: 'MMG',
@@ -189,7 +189,7 @@ export function placedOrderConfirmationCopy(input: {
   mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
 }): string {
   if (input.submittedMethod === 'MOBILE_MONEY' && input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
-    return 'When the business accepts, your order screen shows its MMG number and the exact amount to send. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.';
+    return 'When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.';
   }
   if (input.submittedMethod === 'MOBILE_MONEY') {
     if (input.paymentAction) {

@@ -100,7 +100,7 @@ export function MmgNumberCard({
             <LabeledInput
               value={input}
               onChangeText={setInput}
-              placeholder="+592 600 1234"
+              placeholder="+592 6xx xxxx"
               keyboardType="phone-pad"
               error={error ?? undefined}
             />

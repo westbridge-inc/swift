@@ -187,6 +187,19 @@ afterAll(async () => {
 });
 
 describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "Paid by MMG" cancels 30 minutes after acceptance', () => {
+  it('[REVIEW-F S2-1] accepting an unpaid MMG order tells the customer to pay, how much and by when — never "preparing", never the number', async () => {
+    const orderId = await placeOrder('MOBILE_MONEY');
+    const res = await accept(orderId);
+    expect(res.statusCode, res.body).toBe(200);
+    await vi.waitFor(async () => expect((await notices(customer.userId, orderId)).length).toBeGreaterThan(0));
+    const pushes = await notices(customer.userId, orderId);
+    const pay = pushes.find((n) => n.title === 'Pay by MMG to confirm your order');
+    expect(pay, JSON.stringify(pushes.map((n) => n.title))).toBeTruthy();
+    expect(pay!.body).toMatch(/^Window Diner accepted order \S+\. Pay GY\$[\d,]+ by MMG — open your order for the number — by \d{1,2}:\d{2} [AP]M, or it cancels automatically\.$/);
+    expect(pay!.body).not.toContain('6001234'); // a push shows on the lock screen: never the number
+    expect(pushes.some((n) => /is preparing it/.test(n.body))).toBe(false);
+  });
+
   it('at 29 minutes it stays (and both sides see when it will cancel); at 30 it cancels once, and both are told why', async () => {
     const orderId = await placeOrder('MOBILE_MONEY');
     const acceptedAt = await acceptedAgo(orderId, 29 * MIN);

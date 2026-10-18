@@ -713,7 +713,7 @@ export default function OrderDetailPage() {
                           : payableMmgAction
                             ? `Swift does not hold this payment. This verified link sends ${money(payableMmgAction.amount)} directly to ${payableMmgAction.recipientName}.`
                           : order.status === 'PENDING'
-                            ? 'When the business accepts, this page shows its MMG number and the exact amount. Swift does not hold this payment.'
+                            ? 'When the business accepts, this page shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. Swift does not hold this payment.'
                             : 'Swift does not hold this payment. No verified MMG payment details are on this order; do not pay from unverified details.'
                       : order.paymentMethod === 'CASH'
                         ? paymentCaptured

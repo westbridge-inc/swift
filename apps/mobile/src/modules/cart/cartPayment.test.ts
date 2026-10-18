@@ -119,7 +119,7 @@ describe('[PAYMENT-SIMPLIFY] MMG to the store number', () => {
     expect(caps.mmg.available).toBe(false);
     const options = cartPaymentOptions(caps, { appointmentOnly: false, pickup: false });
     expect(options.map((o) => o.key)).toEqual(['CASH', 'MMG']);
-    expect(options[1]!.sub).toBe('When the business accepts, your order shows its MMG number and the exact amount. You pay the business directly in MMG. Swift never holds the money.');
+    expect(options[1]!.sub).toBe('When the business accepts, your order shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG. Swift never holds the money.');
   });
 
   it('a chosen MMG checks out to the number, and says so', () => {
@@ -153,6 +153,6 @@ describe('[PAYMENT-SIMPLIFY] MMG to the store number', () => {
 
   it('the confirmation says the number comes on the order once the business accepts', () => {
     expect(placedOrderConfirmationCopy({ appointment: false, pickup: false, held: false, submittedMethod: 'MOBILE_MONEY', paymentAction: null, mmgPayTo: 'STORE_NUMBER' }))
-      .toBe('When the business accepts, your order screen shows its MMG number and the exact amount to send. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.');
+      .toBe('When the business accepts, your order screen shows its MMG number and the exact amount to send. Pay within 30 minutes of it accepting, or the order cancels automatically. You pay the business directly in MMG; it marks the order paid when the money arrives. Swift never holds the money.');
   });
 });

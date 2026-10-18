@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { formatMoney } from '../../utils/currency-amount';
 
 // ---------------------------------------------------------------------------
 // [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An MMG order the store ACCEPTED but
@@ -91,6 +92,15 @@ export function mmgPayByCustomerLine(payBy: Date, storeName: string): string {
 /** The store's line on an accepted order that waits for its MMG payment. */
 export function mmgPayByStoreLine(payBy: Date): string {
   return `Cancels automatically at ${clock(payBy)} unless you mark it "Paid by MMG".`;
+}
+
+/** [REVIEW-F S2-1] The customer's push when the store ACCEPTS an unpaid MMG order: pay, how much, by when.
+ *  Never "preparing" (nothing is prepared before "Paid by MMG"), and never the number (a push shows on the lock screen). */
+export function mmgAcceptedPushCopy(orderNumber: string, storeName: string, amount: number, currencyCode: string, payBy: Date): { title: string; body: string } {
+  return {
+    title: 'Pay by MMG to confirm your order',
+    body: `${storeName} accepted order ${orderNumber}. Pay ${formatMoney(amount, currencyCode, { whole: true })} by MMG — open your order for the number — by ${clock(payBy)}, or it cancels automatically.`,
+  };
 }
 
 /** What the customer is told when it cancels (push + the order card). */

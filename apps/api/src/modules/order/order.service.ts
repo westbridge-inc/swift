@@ -79,7 +79,7 @@ import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
-import { isExpiredUnpaidMmgAcceptance } from './mmg-accept-expiry';
+import { isExpiredUnpaidMmgAcceptance, mmgAcceptedPayBy, mmgAcceptedPushCopy } from './mmg-accept-expiry';
 
 interface CheckoutInput {
   userId: string;
@@ -2951,6 +2951,17 @@ export class OrderService {
         // the food order spine.
         if (order.fulfillment === 'APPOINTMENT') {
           await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
+        } else if (mmgAcceptedPayBy(order)) {
+          // [owner 18 Oct 2026 · REVIEW-F S2-1] Accepted, not yet paid by MMG: nothing is prepared until "Paid
+          // by MMG", and the 30-minute clock starts now — the customer is told to pay, how much and by when.
+          const copy = mmgAcceptedPushCopy(order.orderNumber, order.vendor?.name || 'The store', Number(order.totalAmount), order.currencyCode, mmgAcceptedPayBy(order)!);
+          await this.notifications.send({
+            userId: order.customerId,
+            type: 'ORDER_UPDATE',
+            title: copy.title,
+            body: copy.body,
+            data: { orderId, orderNumber: order.orderNumber, status: 'ACCEPTED', paymentPending: 'MMG' },
+          });
         } else {
           await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         }
