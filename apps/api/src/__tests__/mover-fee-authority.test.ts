@@ -167,6 +167,39 @@ describe('one mover fee across actual role surfaces', () => {
     expect((await call(f.token, 'GET', 'driver/subscription')).json().data.autoRenew).toBe(true);
   });
 
+  // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z] A taxi activation never raises, at once, a fee the mover
+  // has already paid a week at: the higher taxi card rate waits for the 14-day fee-change notice (F2).
+  // Before any paid week (a trial) the role they activate prices the first fee, in either order (above).
+  it('a mover who has paid a week at their rate is not raised at once by a taxi activation', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const rider = await subscriptions.startTrialForRider(f.riderId);
+      const riderRate = Number(rider.weeklyRate);
+      expect(riderRate).toBeLessThan(8000); // the taxi card rate
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: riderRate, paymentMethod: 'CASH', status: 'CAPTURED',
+        paidAt: new Date(), periodStart: rider.currentPeriodStart, periodEnd: rider.currentPeriodEnd } });
+      const after = await subscriptions.startTrialForDriver(f.driverId);
+      expect(after.id).toBe(rider.id);
+      expect(Number(after.weeklyRate)).toBe(riderRate);
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: rider.id } })).weeklyRate)).toBe(riderRate);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } })).toBe(0);
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.feeType).toBe('TAXI_DRIVER');
+    });
+  });
+
+  it('a mover who has paid a week above the taxi card rate gets the cut at once on a taxi activation', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const rider = await app.prisma.subscription.update({ where: { id: (await subscriptions.startTrialForRider(f.riderId)).id }, data: { weeklyRate: 9000 } });
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: 9000, paymentMethod: 'CASH', status: 'CAPTURED',
+        paidAt: new Date(), periodStart: rider.currentPeriodStart, periodEnd: rider.currentPeriodEnd } });
+      const after = await subscriptions.startTrialForDriver(f.driverId);
+      expect(Number(after.weeklyRate)).toBe(8000);
+      const change = await app.prisma.billingEvent.findMany({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } });
+      expect(change.map((e) => [Number(e.amount), e.idempotencyKey.endsWith(':9000->8000')])).toEqual([[8000, true]]);
+    });
+  });
+
   it('a held pair exposes both sources and prevents all new weekly debits and settings resume', async () => {
     const f = await legacy('funded');
     // [SAFE-B] A stepped-up session: the refusal below is the hold's, not the step-up's.
