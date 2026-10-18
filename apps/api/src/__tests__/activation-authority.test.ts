@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -408,6 +409,39 @@ describe('EV-ACT-15 — admin mover verify is checklist-gated; rejection revokes
     });
     expect(ok.statusCode).toBe(200);
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).documentsVerified).toBe(true);
+  });
+
+  // [S2-29 · KYC-DECISION-ATOMIC] The trial decision must follow the reviewer-typed identity capture
+  // (system login, own transaction), so the approval commits an outbox row that owes it. A failed
+  // trial start never fails the committed approval; the sweep starts the trial exactly once.
+  it('[S2-29] a failed trial start never fails the approval: the decision owes it, and the sweep starts it once', async () => {
+    const user = await makeUser('Owed');
+    const rider = await app.prisma.rider.create({
+      data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: false },
+    });
+    for (const docType of MOTORCYCLE_DOCS.filter((d) => d !== 'drivers_licence')) await approvedDoc(user.id, docType);
+    const last = await app.prisma.verificationDocument.create({
+      data: { userId: user.id, role: 'VENDOR_OWNER' as never, docType: 'drivers_licence', fileUrl: `test/${marker}/licence-owed`, status: 'PENDING' },
+    });
+    const fault = vi.spyOn(SubscriptionService.prototype, 'startTrialForRider').mockRejectedValueOnce(new Error('synthetic fault: the trial start fails after the decision'));
+    let hit = 0;
+    try {
+      await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
+      hit = fault.mock.calls.length;
+    } finally { fault.mockRestore(); }
+    expect(hit).toBe(1);
+    // The approval stands and owes its trial: decided, no subscription yet, one row still owed.
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: last.id } })).status).toBe('APPROVED');
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(0);
+    const owed = await app.prisma.verificationDecisionOutbox.findUniqueOrThrow({ where: { documentId_command: { documentId: last.id, command: 'APPROVAL_TAIL' } } });
+    expect(owed).toMatchObject({ processedAt: null, attempts: 1, userId: user.id });
+    expect(owed.lastError).toMatch(/synthetic fault/);
+    // The sweep (after the backoff) finishes it once; a second pass starts nothing.
+    const later = new Date(Date.now() + 2 * 3600_000);
+    expect(await svc.processDecisionOutbox({ documentId: last.id, now: later })).toEqual({ processed: 1, failed: 0 });
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(1);
+    expect(await svc.processDecisionOutbox({ documentId: last.id, now: later })).toEqual({ processed: 0, failed: 0 });
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(1);
   });
 
   it('a negative decision forces an online rider offline in the same write', async () => {
