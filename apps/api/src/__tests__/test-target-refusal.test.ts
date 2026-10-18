@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { refuseNonTestDatabaseInVitest, TestTargetLockError } from '../lib/test-target-lock';
-import { createScopedProcessClient } from '../plugins/prisma';
+import { createScopedProcessClient, setSystemPrismaClient, systemPrismaClient } from '../plugins/prisma';
 import { testPrismaClient } from './helpers/test-prisma-client';
 
 // [AUD-G7-040] Inside a vitest worker, no Prisma client is ever built on a
@@ -39,6 +39,17 @@ describe('[AUD-G7-040] a test builds Prisma clients on disposable databases only
   it('the process client and the raw test client both refuse the development database in this worker', () => {
     expect(refusal(() => createScopedProcessClient({ datasourceUrl: DEV_DB }))?.code).toBe('TARGET_REFUSED');
     expect(refusal(() => testPrismaClient(DEV_DB))?.code).toBe('TARGET_REFUSED');
+  });
+
+  it('the system client (SYSTEM_DATABASE_URL) refuses the development database in this worker too', () => {
+    setSystemPrismaClient(null); // drop any cached system client so this build is real
+    vi.stubEnv('SYSTEM_DATABASE_URL', DEV_DB);
+    try {
+      expect(refusal(() => systemPrismaClient())?.code).toBe('TARGET_REFUSED');
+    } finally {
+      vi.unstubAllEnvs();
+      setSystemPrismaClient(null);
+    }
   });
 
   it('a process outside vitest still builds its client on any URL, exactly as before (the plugin module, imported for real)', () => {
