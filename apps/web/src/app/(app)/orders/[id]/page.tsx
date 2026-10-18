@@ -24,6 +24,7 @@ import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
 
 // [Row 117] A taxi ride's code, driver position and SOS — only while the server
@@ -108,6 +109,11 @@ type OrderDetail = {
   /** [owner #46/#50] Why there is no Cancel, and who to contact instead. */
   cancelUnavailable?: { code: string; message: string; contactPhone?: string | null } | null;
   cancellationReason?: string | null;
+  /** [owner 18 Oct 2026] Why an unpaid MMG order closed by itself, in the customer's words (null otherwise). */
+  cancellationNotice?: string | null;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
+   *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
+  mmgPayment?: unknown;
 };
 
 type Stage = { label: string; statuses: string[] };
@@ -425,6 +431,10 @@ export default function OrderDetailPage() {
   const payableMmgAction = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
     ? mmgAction
     : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number, on the same terms as the server sends it.
+  const storeMmgPayment = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
+    ? parseMmgStorePayment(order.mmgPayment)
+    : null;
 
   // [W-32] The refetch is a positive control, and it was only half of one: it
   // re-verified that SOME payment action was still available and then opened
@@ -523,7 +533,7 @@ export default function OrderDetailPage() {
           <p className={styles.eyebrow}>{vendorName} · {order.orderNumber}</p>
           <h1 ref={statusHeadingRef} tabIndex={-1} id="order-status-heading" className={styles.title}>{statusHeading(order)}</h1>
           <p className={styles.updateNote}>
-            {stopped ? cancelResult ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
+            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>
@@ -787,9 +797,13 @@ export default function OrderDetailPage() {
                         ? 'Swift records the MMG payment as received and the order as refunded. The business handles that refund directly; Swift never held the money.'
                         : paymentCaptured
                           ? 'The business confirmed it received your MMG transfer directly. No additional payment is due through Swift.'
+                          : storeMmgPayment
+                            ? `${storeMmgPayment.instruction} ${mmgStorePaymentNote(storeMmgPayment)}`
                           : payableMmgAction
                             ? `Swift does not hold this payment. This verified link sends ${money(payableMmgAction.amount)} directly to ${payableMmgAction.recipientName}.`
-                            : 'Swift does not hold this payment. No verified MMG payment link is available on this order; do not pay from unverified details.'
+                          : order.status === 'PENDING'
+                            ? 'When the business accepts, this page shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. Swift does not hold this payment.'
+                            : 'Swift does not hold this payment. No verified MMG payment details are on this order; do not pay from unverified details.'
                       : order.paymentMethod === 'CASH'
                         ? paymentCaptured
                           ? refunded
@@ -804,6 +818,9 @@ export default function OrderDetailPage() {
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
                         : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
+                {storeMmgPayment && mmgStorePaymentDeadline(storeMmgPayment) ? (
+                  <p><strong>{mmgStorePaymentDeadline(storeMmgPayment)}</strong></p>
+                ) : null}
                 {payableMmgAction ? (
                   <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
                     {openingPayment ? 'Rechecking payment…' : `Pay ${payableMmgAction.recipientName} by MMG`}

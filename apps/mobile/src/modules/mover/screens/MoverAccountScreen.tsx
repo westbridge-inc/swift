@@ -8,6 +8,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, space } from '@swift/ui';
 import { Card, Header, LinkText, PillButton, Screen, SettingsRow, T, TonePill, useLogoutConfirm } from '../../../kit';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { driverApi } from '../../../services/api';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useVerificationStatus, useEarningsSummary, useMoverSubscription, useSetMoverBillingMethod, useUploadVehiclePhoto, useMoverStanding } from '../../../hooks';
@@ -229,6 +230,7 @@ export function MoverAccountScreen({ navigation }: any) {
             onPress={() => navigation?.navigate?.('WeeklyFee')}
           />
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData')} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — safety, pay, account" onPress={() => navigation?.navigate?.('GetHelp')} />
           <SettingsRow icon="refresh-cw" label="Switch app" sub="Swift · Swift Business" onPress={() => setSwitcherOpen(true)} />
         </Card>
@@ -261,7 +263,7 @@ export function MoverAccountScreen({ navigation }: any) {
             </T>
           </View>
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-            Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
+            Swift only charges a flat weekly fee — no commission on orders. You&apos;re paid directly by the customer: in cash, or into your own MMG account where you offer it.
           </T>
         </Card>
 

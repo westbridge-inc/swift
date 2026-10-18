@@ -1,4 +1,6 @@
+import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import { eraseMoverObjects } from './mover-object-erasure';
+import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
@@ -8,10 +10,11 @@ import {
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -274,7 +277,7 @@ export class AccountService {
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
       // Marked wound down with the cutoff, so no billing repair or fee payment
       // can reopen a closed account's store (it reopens billing holds only).
-      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' } });
+      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
@@ -371,7 +374,11 @@ export class AccountService {
       // due pointer; it cannot prevent the other personal-data cleanup.
       let evidence;
       try {
-        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+        // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
+        // since the census keeps the document; the tombstone retry then defers it as held.
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
+        if (!fenced) { pendingDocuments += 1; continue; }
+        evidence = fenced;
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
         // Refusal is an unresolved obligation, never proof of destruction.
@@ -386,17 +393,40 @@ export class AccountService {
         pendingDocuments += 1;
         continue;
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+      const closed = await prisma.$transaction(async (tx) => {
+        // [Row 243] The close re-checks the hold under the person's row lock (placeDocLegalHoldIn takes the same lock
+        // first). A hold that landed since the census keeps the record and its extracted values: that includes a
+        // document whose image R24 already purged (fileUrl ''), which never enters the fence above. A document a
+        // concurrent purge already closed is not closed (or receipted) twice.
+        await bindTenantTransaction(tx);
+        const person = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
+        `;
+        if (person.length !== 1) return false;
+        const close = await tx.verificationDocument.updateMany({
+          where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
+        });
+        if (close.count !== 1) return false;
         // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
         await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
         await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
         await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        return true;
       });
+      // Held (or already closed) since the census: the tombstone retry defers or skips it.
+      if (!closed) pendingDocuments += 1;
     }
 
     const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
     pendingDocuments += moverObjects.pending;
+
+    // [Row 331 · DSAR-ERASURE (a)] Uploads no document or mover pointer claims (the optional L2
+    // ID selfie, an abandoned onboarding file) go too, with a receipt; a hold keeps them.
+    const uploads = await eraseUnclaimedUploads(prisma, storage, userId, this.app.log);
+    // [Row 331 (c)] Everything shredded above stops carrying its content hash, so the same
+    // document uploaded later cannot find this account again (held objects keep theirs until purged).
+    const fingerprints = await forgetErasedFingerprints(prisma, userId, this.app.log);
+    let pendingUploads = uploads.pending + fingerprints.pending;
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
@@ -490,7 +520,10 @@ export class AccountService {
     //     leaves; case-bound safety evidence lives elsewhere under its own
     //     hold rules.
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
+    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone
+    // (a legal hold on the person keeps both, reported as held).
+    const liveness = await eraseLivenessSelfies(prisma, storage, userId, this.app.log);
+    pendingUploads += liveness.pending;
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
@@ -520,18 +553,20 @@ export class AccountService {
       },
     });
 
-    if (deferred.count > 0 || moverObjects.held > 0) {
+    // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
+    const heldUploads = uploads.held + liveness.held;
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
-        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held,
-        pendingDocuments, pendingAvatarObjects,
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }
 
-    if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0 || pendingUploads > 0) {
       return {
         deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
-        pendingDocuments, pendingAvatarObjects,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
         ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
       };
