@@ -3,7 +3,7 @@
 import { FIXTURE_PNG, upload, type Session } from '../client.js';
 import type { Journey, Recorder } from '../journey.js';
 import {
-  GET, POST, PUT, DEL, req, sleep, codeOf, brief, pick, waitFor,
+  GET, POST, PUT, DEL, req, sleep, brief, pick, waitFor,
   placeOrder, orderIdsOf, customerOrder, waitForRelease, clearCart, ensureAddress, idemKey,
 } from './common.js';
 import type { Ctx } from './context.js';
@@ -152,8 +152,13 @@ export const CUST_02: Journey<Ctx> = {
       const r = await placeOrder(C5.session, R1.vendorId!, i1!.itemId, C5.lat, C5.lng, { payment: method, pickup: !delivery });
       rec.deny(`checkout with ${method}`, r, [400], ['VALIDATION_ERROR']);
     }
+    // [PAYMENT-SIMPLIFY #1848 · owner 17 Oct] MMG pays the store's NUMBER. An app that asks the old pay-link way
+    // (builds 9-11) is told to update — those builds turn any MMG_* refusal into cash; a pay-to-number checkout at a
+    // store that has no MMG number is refused as not set up. Nothing is written either way.
     const mmg = await placeOrder(C5.session, R1.vendorId!, i1!.itemId, C5.lat, C5.lng, { payment: 'MOBILE_MONEY', pickup: !delivery });
-    rec.deny('MMG checkout at a store with no pay link', mmg, [400], ['MMG_NOT_AVAILABLE']);
+    rec.deny('an MMG checkout the old pay-link way is told to update the app (builds 9-11 fall back to cash)', mmg, [400], ['MMG_UPDATE_APP']);
+    const mmgNumber = await placeOrder(C5.session, R1.vendorId!, i1!.itemId, C5.lat, C5.lng, { payment: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER', pickup: !delivery });
+    rec.deny("MMG to the store's number at a store with no MMG number", mmgNumber, [400], ['MMG_NOT_AVAILABLE']);
 
     // cash, with an idempotency key; replay; changed body under the same key
     const key = idemKey(ctx.runId, 'cust02-cash');
@@ -196,12 +201,14 @@ export const CUST_02: Journey<Ctx> = {
       for (const id of orderIdsOf(co)) await POST(`/customer/orders/${id}/cancel`, { reason: 'journey cleanup' }, C5.session.token);
     }
 
-    const stepUp = await PUT('/vendor/profile', { mmgPayUrl: 'https://pay.mmg.gy/vendor/test' }, R1.session.token);
-    // Refused for one of two reasons, both closing the door on this target: pay links are not
-    // configured here (MMG_PAY_URL_ALLOWED_HOSTS unset → 503), or they are and a fresh SMS step-up is required.
-    rec.deny('a vendor cannot set an MMG pay link without a step-up (or at all where links are unconfigured)', stepUp, [403, 503], ['STEP_UP_REQUIRED', 'MMG_PAY_LINKS_NOT_CONFIGURED']);
-    rec.skipCase('MMG checkout', `a vendor pay link needs a step-up whose code only reaches the owner by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply), and Phase A has no SMS provider${codeOf(stepUp) === 'MMG_PAY_LINKS_NOT_CONFIGURED' ? '; pay links are also unconfigured on this target (MMG_PAY_URL_ALLOWED_HOSTS unset)' : ''} — no store can hold a link on this target`);
-    rec.skipCase('dispute hold', 'the MMG claim/disagreement hold needs an MMG order, which needs a vendor pay link (step-up by SMS)');
+    // [PAYMENT-SIMPLIFY #1848] The store's pay link is replaced by its MMG number (switch STORE_MMG_PAY_LINK, OFF):
+    // a new link is refused before any step-up; the number itself needs the owner's fresh step-up.
+    const link = await PUT('/vendor/profile', { mmgPayUrl: 'https://pay.mmg.gy/vendor/test' }, R1.session.token);
+    rec.deny('a store can no longer set an MMG pay link (replaced by its MMG number; refused before any step-up)', link, [409], ['MMG_PAY_LINK_OFF']);
+    const number = await PUT('/vendor/profile', { mmgNumber: '+5920000000' }, R1.session.token);
+    rec.deny("the store's MMG number takes only a Guyana mobile: a fixture number is refused, nothing is written (its step-up is proven in CI: store-mmg-number.test)", number, [400], ['INVALID_MMG_NUMBER']);
+    rec.skipCase('MMG checkout', "an MMG order needs a store with a live MMG number; setting one needs the owner's step-up, whose code only reaches the owner by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply), and Phase A has no SMS provider — no store can hold a number on this target");
+    rec.skipCase('dispute hold', "the MMG claim/disagreement hold needs an MMG order, which needs a store's MMG number (step-up by SMS)");
   },
 };
 
