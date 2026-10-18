@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingTotals } from '../rating/rating-groups';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
@@ -311,6 +312,10 @@ export class AuthService {
       include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
+    // rider or driver row (they move with each single rating): the whole-groups figure instead.
+    if (user.rider) Object.assign(user.rider, await shownRatingTotals(this.app.prisma, 'RIDER', user.id));
+    if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));
 
     // [L04 · AUTH-2] The code proves the phone, not that the account may sign
     // in. Status is read under the User lock (the order ban/suspend and

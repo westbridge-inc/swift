@@ -120,7 +120,10 @@ function harness() {
     },
     encryptedObject: {
       findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
-      findMany: vi.fn(async (query: any) => referencePage([...objects.values()], query, 'fileKey')),
+      // [#1449 follow-up] The upload route first asks for the uploader's own identical recent upload (a lost-reply retry).
+      findMany: vi.fn(async (query: any) => query?.where?.sha256
+        ? [...objects.values()].filter((o: any) => o.sha256 === query.where.sha256 && o.createdBy === query.where.createdBy && o.shreddedAt === null)
+        : referencePage([...objects.values()], query, 'fileKey')),
       findFirst: vi.fn(async () => null), updateMany: vi.fn(async ({ where }: any) => {
         const object = objects.get(where.fileKey);
         if (object) { (object as any).wrappedDek = null; object.shreddedAt = new Date(); }
