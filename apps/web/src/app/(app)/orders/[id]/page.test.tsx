@@ -51,6 +51,8 @@ beforeEach(() => {
   opened = { location: { replace: vi.fn() }, close: vi.fn(), opener: {} };
   vi.stubGlobal('open', vi.fn(() => opened));
   vi.spyOn(orders, 'getOrder').mockResolvedValue(ORDER as never);
+  // [Row 117] Web taxi booking is off (the server's default) unless a case says otherwise.
+  vi.spyOn(rides, 'rideCapabilities').mockResolvedValue({ maxStops: 0 });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -182,6 +184,55 @@ describe('taxi safety continues in the mobile app', () => {
     render(<OrderDetailPage />);
     await payButton();
     expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+
+  it('a failed capabilities read keeps the app notice: nothing on the web claims ride safety', async () => {
+    vi.mocked(rides.rideCapabilities).mockRejectedValue(new Error('down'));
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_EN_ROUTE', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, ridePin: '482913', ridePinVerified: false } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/Open the Swift app for your safety PIN and SOS/)).toBeTruthy();
+    expect(screen.queryByText('482913')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Emergency/ })).toBeNull();
+  });
+});
+
+describe('[Row 117] with web taxi booking on, the trip page carries the ride’s safety tools', () => {
+  beforeEach(() => {
+    vi.mocked(rides.rideCapabilities).mockResolvedValue({ maxStops: 0, webBooking: true });
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_EN_ROUTE', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({
+      id: ORDER.id, ridePin: '482913', ridePinVerified: false,
+      driver: { vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', licensePlate: 'PXX 1234', user: { firstName: 'Dev' } },
+    } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue({ id: ORDER.id, driver: { currentLat: 6.81, currentLng: -58.16, user: { firstName: 'Dev', phone: '+5920000000' } } } as never);
+  });
+
+  it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('482913')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Ride safety' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Your driver’s position' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Emergency — get help now' })).toBeTruthy();
+    expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+
+  it('the SOS pages Swift for THIS ride', async () => {
+    vi.spyOn(rides, 'rideSos').mockResolvedValue({ status: 'ACTIVE' });
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'Emergency — get help now' }));
+    await user.click(screen.getByRole('button', { name: 'Alert Swift’s safety team' }));
+    await waitFor(() => expect(rides.rideSos).toHaveBeenCalledWith('order-1', null));
+  });
+
+  it('a delivery never asks whether web taxi booking is on', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(ORDER as never);
+    render(<OrderDetailPage />);
+    await payButton();
+    expect(rides.rideCapabilities).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Ride safety' })).toBeNull();
   });
 });
 

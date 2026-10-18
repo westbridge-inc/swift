@@ -242,7 +242,8 @@ describe('[W-18 / W-19] the shared location field enforces it', () => {
     const page = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
     const form = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/taxi-fare-estimate.tsx'), 'utf8'));
     expect(page + form).not.toMatch(/<input|placesAutocomplete|requestRide|createRideRequest|\/rides\/(?:request|queue)/);
-    expect(page).toContain('Taxi booking is unavailable on the web.');
+    // [Row 117] The app section moved into the client tree (it changes only while web booking is on).
+    expect(form).toContain('Taxi booking is unavailable on the web.');
   });
 });
 

@@ -80,6 +80,8 @@ export default defineConfig({
       TAXI_WAITING_CHARGE: '',
       // [PAYMENT-SIMPLIFY] The driver's MMG pay link is off unless a test switches it on.
       DRIVER_MMG_PAY_LINK: '',
+      // [Row 117] Web taxi booking is off unless a test switches it on.
+      WEB_TAXI_BOOKING: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)

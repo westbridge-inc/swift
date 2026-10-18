@@ -17,6 +17,7 @@ import {
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
 import { assertHirePassengers } from './hire-passengers';
+import { assertWebBookingCarriesQuoteAndKey, taxiMobileAppRequired, webTaxiBookingEnabled } from './web-taxi-booking';
 import { readRideItinerary } from './taxi-stops-read';
 import { hasTaxiPassengerCustody } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
@@ -105,9 +106,13 @@ export async function ridesRoutes(app: FastifyInstance) {
   const creationAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
     // Cookie provenance is set only after JWT and live-session verification.
     // A bearer is not proof of a mobile app; do not trust a client-name header.
-    if (request.authCredentialSource === 'cookie') {
-      throw new AppError(403, 'TAXI_MOBILE_APP_REQUIRED', 'Book taxi rides in the Swift mobile app for your safety PIN and SOS.');
-    }
+    if (request.authCredentialSource === 'cookie') throw taxiMobileAppRequired();
+  }] };
+  // [Row 117] The booking door itself: shut to a browser session exactly as
+  // above unless WEB_TAXI_BOOKING is on (web-taxi-booking.ts). The queue keeps
+  // creationAuth: it stays phone-only either way.
+  const requestAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
+    if (request.authCredentialSource === 'cookie' && !webTaxiBookingEnabled()) throw taxiMobileAppRequired();
   }] };
   const fareService = new FareService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
@@ -199,11 +204,14 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  booking: how many stops a ride may carry (TAXI_MAX_STOPS, 0 = none). The
    *  app shows "+ Add stop" only while this is above 0. */
   app.get('/capabilities', auth, async (request) => {
+    // [Row 117] A browser session is told it may book only while
+    // WEB_TAXI_BOOKING is on; every other answer is today's, byte for byte.
+    const web = request.authCredentialSource === 'cookie' && webTaxiBookingEnabled() ? { webBooking: true as const } : {};
     // [TAXI waiting charge] With TAXI_WAITING_CHARGE on, the waiting terms of
     // the customer's market too (CONTRACT §8.2). Off: today's answer exactly.
-    if (!taxiWaitingEnabled()) return { success: true, data: { maxStops: taxiMaxStops() } };
+    if (!taxiWaitingEnabled()) return { success: true, data: { maxStops: taxiMaxStops(), ...web } };
     const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
-    return { success: true, data: { maxStops: taxiMaxStops(), waiting: waitingDisclosure(await fareService.waitingTerms(user.countryCode)) } };
+    return { success: true, data: { maxStops: taxiMaxStops(), waiting: waitingDisclosure(await fareService.waitingTerms(user.countryCode)), ...web } };
   });
 
   /** POST /request — create the ride at the quoted fare and start dispatch.
@@ -219,7 +227,7 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  sends none and books as before (logged). An Idempotency-Key makes the request one
    *  command, the checkout way: a retry under the same key is answered with
    *  the first answer (201, replayed) and never books a second ride. */
-  app.post('/request', creationAuth, async (request, reply) => {
+  app.post('/request', requestAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     // [R9] No hire for more than 7 passengers: refused first, nothing read or written.
     assertHirePassengers(body.passengerCount);
@@ -229,6 +237,11 @@ export async function ridesRoutes(app: FastifyInstance) {
     const stops = planTaxiStops(body);
     if (stops.length === 0) assertRoadTripInMarket(body);
     assertQuotedFare(stops.length, body.expectedFare);
+    const idemKey = request.headers['idempotency-key'];
+    const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
+    // [Row 117] A browser booking (only past requestAuth while WEB_TAXI_BOOKING
+    // is on) carries the fare it showed and one key, before anything is read.
+    if (request.authCredentialSource === 'cookie') assertWebBookingCarriesQuoteAndKey(body.expectedFare, key);
     const ride: RideRequestBody = {
       pickup: body.pickup,
       dropoff: body.dropoff,
@@ -248,8 +261,6 @@ export async function ridesRoutes(app: FastifyInstance) {
       request.log.info({ event: 'ride_request_unquoted', rideClass: body.rideClass }, '[PRICE-LOCK] ride requested without the fare the passenger was shown (an app from before the lock); booked at the server fare');
     }
 
-    const idemKey = request.headers['idempotency-key'];
-    const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
     if (!key) {
       const { answer } = await createRideRequest(app, fareService, dispatch, userId, ride);
       reply.code(201);

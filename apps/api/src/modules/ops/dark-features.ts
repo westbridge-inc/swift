@@ -144,6 +144,16 @@ export const DARK_FEATURES: DarkFeature[] = [
       "A passenger pays the driver directly at drop-off, in cash or by MMG, with no in-app pay link: the trip-end screen shows no 'Pay with MMG' button, the driver's Account screen shows no MMG pay link card, and a new link is refused. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
     impact: 'money',
   },
+  {
+    key: 'web_taxi_booking',
+    setting: 'WEB_TAXI_BOOKING',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Taxi booking on the website',
+    whileOff:
+      "The website's Taxi page shows real fare estimates and says 'Book a taxi in the Swift app'; a ride request from a browser session is refused (TAXI_MOBILE_APP_REQUIRED) and the ride page points to the app for the safety PIN and SOS. Phone booking is unchanged. Kept OFF until web booking passes the app's safety bar and a staging run, then the owner decides (16 Oct 2026).",
+    impact: 'safety',
+  },
   // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in
   // normal running; set to 1 it switches its capability off. The census in
   // dark-features.test.ts fails on any *_KILL the API reads that is not here.

@@ -5,11 +5,13 @@ import Link from 'next/link';
 import { Pictogram } from '@/components/glyphs';
 import { LocationField } from '@/components/location-field';
 import { useCustomerSession } from '@/components/customer-session';
+import { OpenSwiftApp } from '@/components/open-swift-app';
 import { money } from '@/lib/customer';
-import { rideEstimate } from '@/lib/customer-rides';
+import { activeRide, rideCapabilities, rideEstimate } from '@/lib/customer-rides';
 import { signInPath, signUpPath } from '@/lib/customer-routes';
 import type { PickedPlace } from '@/lib/place';
 import { FARE_UNAVAILABLE, TAXI_TIER_META, readTaxiEstimate, taxiEstimateRefusal, type TaxiEstimate } from '@/lib/taxi-fare';
+import { TaxiBooking } from './taxi-booking';
 
 // [WEB-PIN] Either end may be pinned on the map, as on the courier page. The
 // map's code loads only when a pin is asked for.
@@ -35,11 +37,77 @@ export function TaxiFareEstimate() {
   // Address search and fares are account calls: nothing is asked of the
   // server until the shell knows who this is.
   if (session.status === 'checking') {
-    return <p role="status" className="sw-caption">Opening fare estimates…</p>;
+    return (
+      <>
+        <p role="status" className="sw-caption">Opening fare estimates…</p>
+        <TaxiAppSection bookingOn={false} />
+      </>
+    );
   }
-  if (session.status === 'guest') return <GuestFareDoor />;
+  if (session.status === 'guest') return <><GuestFareDoor /><TaxiAppSection bookingOn={false} /></>;
   // A different person after sign-out or a restored session starts afresh.
-  return <FareForm key={session.epoch} />;
+  return <SignedInTaxi key={session.epoch} />;
+}
+
+type Booking = { on: boolean; activeRideId: string | null };
+
+/** A signed-in customer: estimates, and booking only while the server says so. */
+function SignedInTaxi() {
+  // [Row 117] Booking is offered only while the SERVER says so (WEB_TAXI_BOOKING
+  // on); anything else — off, an old server, a failed read — is estimates only.
+  const [booking, setBooking] = useState<Booking>({ on: false, activeRideId: null });
+  useEffect(() => {
+    let live = true;
+    rideCapabilities()
+      .then(async (capabilities) => {
+        if (!live || capabilities?.webBooking !== true) return;
+        const active = await activeRide().catch(() => null);
+        if (live) setBooking({ on: true, activeRideId: typeof active?.id === 'string' && active.id ? active.id : null });
+      })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+  return (
+    <>
+      <FareForm booking={booking} onBookingOff={() => setBooking({ on: false, activeRideId: null })} />
+      <TaxiAppSection bookingOn={booking.on} />
+    </>
+  );
+}
+
+const APP_TIERS = ['ECONOMY', 'COMFORT', 'XL', 'GROUP'] as const;
+
+/**
+ * Booking in the app, said plainly. While web booking is off (and for anyone
+ * the server has not told otherwise), the pilot's words: rides are booked in
+ * the app. While it is on, the app is the other way to book.
+ */
+function TaxiAppSection({ bookingOn }: { bookingOn: boolean }) {
+  return (
+    <section aria-labelledby="taxi-book-in-app" className="mt-8 flex max-w-[720px] flex-col">
+      <h2 id="taxi-book-in-app" className="sw-heading">{bookingOn ? 'You can also book in the Swift app' : 'Book a taxi in the Swift app'}</h2>
+      {bookingOn ? (
+        <p className="mt-2 text-[15px] leading-[22px] text-[var(--swift-muted)]">The app has your ride code, SOS, trip sharing and driver checks too.</p>
+      ) : (
+        <>
+          <p className="mt-2 text-[15px] leading-[22px] text-[var(--swift-muted)]">Taxi rides are booked in the Swift mobile app during the pilot.</p>
+          <p className="mt-1 text-[15px] leading-[22px] text-[var(--swift-muted)]">
+            Use the app for your safety PIN, SOS, trip sharing and driver checks.
+            Taxi booking is unavailable on the web.
+          </p>
+        </>
+      )}
+      <ul className="mt-5 grid grid-cols-4 gap-2" aria-label="Ride types in the app">
+        {APP_TIERS.map((rideClass) => (
+          <li key={rideClass} className="flex flex-col items-center gap-1.5 rounded-2xl bg-[var(--swift-sunken)] px-1 py-4 text-[13px] font-medium leading-[18px]">
+            <Pictogram name={TAXI_TIER_META[rideClass].pictogram} size={30} />
+            {TAXI_TIER_META[rideClass].label}
+          </li>
+        ))}
+      </ul>
+      <div className="mt-6"><OpenSwiftApp /></div>
+    </section>
+  );
 }
 
 /** The phone's taxi door for a visitor (TaxiSignedOut), for an estimate. */
@@ -58,7 +126,7 @@ function GuestFareDoor() {
   );
 }
 
-function FareForm() {
+function FareForm({ booking, onBookingOff }: { booking: Booking; onBookingOff: () => void }) {
   const [pickupText, setPickupText] = useState('');
   const [pickup, setPickup] = useState<PickedPlace | null>(null);
   const [dropoffText, setDropoffText] = useState('');
@@ -66,6 +134,8 @@ function FareForm() {
   const [quote, setQuote] = useState<Quote | null>(null);
   const [round, setRound] = useState(0);
   const [pinning, setPinning] = useState<'pickup' | 'dropoff' | null>(null);
+  // Why the fare on screen was refreshed, or why booking went away.
+  const [notice, setNotice] = useState<string | null>(null);
   // Where focus returns when the map closes: the button that opened it.
   const pinButtons = { pickup: useRef<HTMLButtonElement>(null), dropoff: useRef<HTMLButtonElement>(null) };
   const returnFocus = useRef<'pickup' | 'dropoff' | null>(null);
@@ -99,14 +169,14 @@ function FareForm() {
     <div className="grid grid-cols-1 items-start gap-x-12 gap-y-6 split:grid-cols-[minmax(0,1fr)_380px]">
       <div className="flex min-w-0 flex-col gap-3">
         <LocationField label="Pick up from" text={pickupText} place={pickup} near={pickup}
-          onChange={(t, p) => { setPickupText(t); setPickup(p); }} />
+          onChange={(t, p) => { setPickupText(t); setPickup(p); setNotice(null); }} />
         {pinning === 'pickup' ? (
           <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
             <PlacePinPanel
               title="Pin the pickup"
               mapLabel="Pickup pin map"
               start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
-              onUse={(place) => { setPickupText(place.label); setPickup(place); closePin('pickup'); }}
+              onUse={(place) => { setPickupText(place.label); setPickup(place); setNotice(null); closePin('pickup'); }}
               onCancel={() => closePin('pickup')}
             />
           </Suspense>
@@ -115,14 +185,14 @@ function FareForm() {
         )}
 
         <LocationField label="Going to" text={dropoffText} place={dropoff} near={pickup}
-          onChange={(t, p) => { setDropoffText(t); setDropoff(p); }} />
+          onChange={(t, p) => { setDropoffText(t); setDropoff(p); setNotice(null); }} />
         {pinning === 'dropoff' ? (
           <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
             <PlacePinPanel
               title="Pin the destination"
               mapLabel="Destination pin map"
               start={dropoff ? { latitude: dropoff.lat, longitude: dropoff.lng } : null}
-              onUse={(place) => { setDropoffText(place.label); setDropoff(place); closePin('dropoff'); }}
+              onUse={(place) => { setDropoffText(place.label); setDropoff(place); setNotice(null); closePin('dropoff'); }}
               onCancel={() => closePin('dropoff')}
             />
           </Suspense>
@@ -133,6 +203,7 @@ function FareForm() {
 
       <aside className="flex flex-col gap-3 split:sticky split:top-4" aria-live="polite">
         <span className="sw-eyebrow">Fare estimate</span>
+        {notice && <p role="status" className="sw-note sw-note-info">{notice}</p>}
         {!current ? (
           <p className="sw-caption text-[15px] leading-[22px]">Set your pickup and destination to see the fare.</p>
         ) : current.state === 'pricing' ? (
@@ -144,6 +215,15 @@ function FareForm() {
               <button type="button" className="sw-btn sw-btn-outline sw-btn-md" onClick={() => setRound((n) => n + 1)}>Try again</button>
             )}
           </div>
+        ) : booking.on ? (
+          <TaxiBooking
+            estimate={current.estimate}
+            pickup={current.pickup}
+            dropoff={current.dropoff}
+            activeRideId={booking.activeRideId}
+            onFareChanged={(message) => { setNotice(message); setRound((n) => n + 1); }}
+            onBookingOff={(message) => { setNotice(message); onBookingOff(); }}
+          />
         ) : (
           <FareTiers estimate={current.estimate} />
         )}
