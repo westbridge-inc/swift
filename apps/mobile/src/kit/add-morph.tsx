@@ -24,6 +24,7 @@ export function AddMorph({
   busy = false,
   disabled = false,
   size = 'md',
+  addLabel = 'Add to cart',
 }: {
   qty: number;
   onAdd: () => void;
@@ -32,6 +33,8 @@ export function AddMorph({
   busy?: boolean;
   disabled?: boolean;
   size?: keyof typeof SIZES;
+  /** [Triage row 113] What the collapsed "+" says to a screen reader (e.g. "Add Rice to cart"). */
+  addLabel?: string;
 }) {
   const dim = SIZES[size];
   const open = qty > 0;
@@ -97,7 +100,7 @@ export function AddMorph({
           disabled={busy || disabled}
           hitSlop={8}
           accessibilityRole="button"
-          accessibilityLabel="Add to cart"
+          accessibilityLabel={addLabel}
           style={{ width: dim.h, height: dim.h, alignItems: 'center', justifyContent: 'center' }}
         >
           <Feather name="plus" size={dim.icon} color={color.white} />

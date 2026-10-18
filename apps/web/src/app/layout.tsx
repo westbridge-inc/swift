@@ -37,7 +37,7 @@ export const metadata: Metadata = {
   twitter: {
     card: 'summary_large_image',
     title: 'Swift',
-    description: `One app for ${launch.markets[0]}. Zero commission — ever.`,
+    description: `One app for ${launch.markets[0]}. No commission on orders.`,
   },
   robots: { index: true, follow: true },
   // IDENTITY LAW [SITE-1.1 Part 2]: the company is the author, never a person.

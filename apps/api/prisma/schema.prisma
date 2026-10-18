@@ -7348,6 +7348,35 @@ model RatingOutbox {
   @@map("rating_outbox")
 }
 
+/// [S2-29 · KYC-DECISION-ATOMIC] The work a committed document approval still owes once its
+/// transaction has committed: the trial decision (and the rest of afterApproval). It must follow
+/// the reviewer-typed identity capture, which runs on the system login in its own transaction, so
+/// it cannot be part of the decision transaction; this row is written IN that transaction instead,
+/// drained right after commit and by the sweep, and the drain is idempotent.
+model VerificationDecisionOutbox {
+  id          String    @id @default(cuid())
+  tenantId    String    @default("swift-default")
+  documentId  String
+  userId      String
+  command     String
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  processedAt DateTime?
+  lastError   String?
+  /// Retried at most this many times; then a dead letter: never claimed again, paged
+  /// (ops_dlq_non_empty) and listed on the admin Background jobs page until requeued.
+  maxAttempts    Int       @default(25)
+  deadLetteredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([documentId, command])
+  @@index([tenantId])
+  @@index([processedAt, availableAt])
+  @@map("verification_decision_outbox")
+}
+
 // ─── [DOC-1 §4.1–4.2] The document registry — data, not code ────────────────
 // Adding a market or a document class is rows, not a code change. Every row
 // seeded from the country checklists starts INACTIVE: `is_active` requires

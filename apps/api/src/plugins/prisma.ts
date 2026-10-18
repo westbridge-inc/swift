@@ -154,6 +154,7 @@ const TENANT_QUERY_EXTENSIONS = {
   mmgRefundObligation: scoped,
   mmgRefundSend: scoped,
   ratingOutbox: scoped,
+  verificationDecisionOutbox: scoped,
   privilegedApproval: scoped,
   sensitiveReadLog: scoped,
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory

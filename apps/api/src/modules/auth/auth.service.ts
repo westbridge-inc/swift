@@ -28,7 +28,7 @@ import {
   disconnectSessionSockets as disconnectAuthorizationSessionSockets,
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
-import { isDevelopment, isProduction } from '../../utils/runtime-mode';
+import { isProduction } from '../../utils/runtime-mode';
 import {
   armDevelopmentSignupGeneration,
   consumePasswordResetOtpGeneration,
@@ -204,10 +204,9 @@ export class AuthService {
     if (purpose === 'password-reset') await storePasswordResetOtp(this.app.redis, phone, otp);
     else await storeSignupOtp(this.app.redis, phone, otp);
 
-    if (isDevelopment()) {
-      this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
-    }
-
+    // [M013] The code goes to the SMS channel only, never to a log line, in
+    // development too (local sign-in uses DEV_OTP_BYPASS; the dev adapter keeps
+    // what it "sent" in memory for tests).
     // Delivery rides the swappable SMS channel (Twilio-class adapter later).
     // Do NOT claim success when the send fails — the user would wait forever
     // for a code that never left the building. send-otp runs before any
