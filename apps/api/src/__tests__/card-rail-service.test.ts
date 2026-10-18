@@ -22,6 +22,7 @@ import type { CardRailProvider } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [PT-1] The hosted card loop, end to end, on the real simulator and the real
@@ -33,7 +34,7 @@ import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 
 const DAY = 24 * 60 * 60 * 1000;
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
-const PHONE = `+59200742${String(Date.now()).slice(-4)}`;
+const PHONE = testPhone();
 const OTHER_TENANT = `pt1-card-${RUN.toLowerCase()}`;
 /** [AX297 F3] This run's own simulator namespace: the teardown deletes exactly it. */
 const PREFIX = runKeyPrefix(RUN);

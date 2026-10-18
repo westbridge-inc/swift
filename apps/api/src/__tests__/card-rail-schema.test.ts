@@ -24,9 +24,10 @@ import { prismaPlugin, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { TENANT_LINEAGE_TABLES, TENANT_TABLES, policyPredicateIsCanonical } from '../lib/tenant-rls';
+import { testPhone } from './helpers/fixture-ids';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
-const PHONE = `+59200742${String(Date.now()).slice(-5)}`;
+const PHONE = testPhone();
 const REVIEW = `pt1s-${RUN.toLowerCase()}`;
 const PRODUCTION = 'swift-default';
 const TABLES = ['payment_instruments', 'card_sessions', 'card_observations'] as const;

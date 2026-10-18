@@ -115,7 +115,7 @@ describe('the screen', () => {
     expect(record).toContain("else riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });");
     const capture = body(SCREEN, 'const captureCourierProof', 'const markDelivered');
     expect(capture).toContain("async (outcome?: 'paid' | FailedOutcome)");
-    expect(capture).toContain('{ orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined }');
+    expect(capture).toContain('{ orderId: job.id, uri: captured.uri, outcome, authSession: owner ?? undefined }');
   });
   it('the courier branch precedes the generic cash door, so a courier never reaches the bare handover', () => {
     const courierDoor = SCREEN.indexOf(') : isCourier ? (');

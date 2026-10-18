@@ -24,7 +24,7 @@ export function customerIdFact(doc: Pick<ReviewDocument, 'docType' | 'status' | 
     // A reviewer is named only when the row names one; an older row without it claims nothing.
     return doc.reviewedBy ? 'On file — approved by a reviewer.' : 'On file.';
   }
-  if (doc.status === 'PENDING') return 'Held for a person by the automatic checks — the history below says why. Approving it unlocks big orders; taxi rides also need the customer’s profile photo.';
+  if (doc.status === 'PENDING') return 'Held for a person by the automatic checks — the history below says why. Approving it unlocks big orders and taxi rides.';
   return null;
 }
 

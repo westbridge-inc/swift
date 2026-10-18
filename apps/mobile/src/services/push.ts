@@ -1,4 +1,4 @@
-import { Platform } from 'react-native';
+import { AppState, Linking, Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import axios from 'axios';
@@ -174,4 +174,55 @@ export async function preparePushTokenForLogout(session: AuthSessionSnapshot): P
     pushTokensBySession.delete(key);
     if (registeredSessionKey === key) registeredSessionKey = null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// [STORE-ALERT 18 Oct 2026] An earner's phone must be able to ring.
+//
+// iOS starts every install "undetermined", and the only OS prompt in the app
+// was the one-time priming card at three moments (an order placed, a driver
+// application, a store created IN the app). A store owner who signed in on an
+// iPhone was never asked, held no push token, and a new order rang nothing:
+// only the backup SMS arrived. These helpers let the earner dashboards ask
+// (services/notification-priming maybePrimeEarnerNotifications), show the
+// state (components/PushOffStrip) and re-register when the person comes back
+// from Settings (installPushForegroundRetry).
+// ---------------------------------------------------------------------------
+
+/** What turning push on takes on this phone: nothing, the OS prompt, or Settings. */
+export type PushPermission = 'granted' | 'ask' | 'settings';
+
+export async function pushPermission(): Promise<PushPermission> {
+  try {
+    const permission = await Notifications.getPermissionsAsync();
+    if (permission.status === 'granted') return 'granted';
+    // iOS asks once: after that canAskAgain is false and only Settings can turn
+    // it on. Android 13+ may ask again after a first refusal.
+    return permission.canAskAgain === false ? 'settings' : 'ask';
+  } catch {
+    return 'ask';
+  }
+}
+
+/** The earner's "Turn on": the OS prompt while it can still be shown (and the
+ *  registration that follows a yes), otherwise this app's page in Settings. */
+export async function turnOnPush(): Promise<PushPermission> {
+  const now = await pushPermission();
+  if (now === 'settings') {
+    await Linking.openSettings().catch(() => undefined);
+    return now;
+  }
+  if (now === 'ask') await registerDeviceForPush();
+  return pushPermission();
+}
+
+/** Re-run the silent registration whenever the app comes to the foreground:
+ *  someone who turned notifications on in Settings registers the moment they
+ *  return, not at the next cold start. register() no-ops once this session's
+ *  token is on the server. */
+export function installPushForegroundRetry(): () => void {
+  const subscription = AppState.addEventListener('change', (state) => {
+    if (state === 'active') void registerIfGranted();
+  });
+  return () => subscription.remove();
 }

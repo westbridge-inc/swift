@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { applySeedPlan, buildSeedPlan, promoteBootstrapAdmin } from '../modules/ops/seed-plan';
 import { consumeApprovals } from '../modules/ops/approver-signatures';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [PROD-PATH] Fail closed even if the approval verifier were wrong. Here the
@@ -60,10 +61,10 @@ describe('[PROD-PATH] two consumed approvals, or no change — even past a broke
 
   it('a break-glass promotion refuses before the account is written', async () => {
     if ((await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } })) === 0) {
-      const first = await promoteBootstrapAdmin(prisma, URL_, `+59260093${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, { actor: 'test' });
+      const first = await promoteBootstrapAdmin(prisma, URL_, testPhone(), { actor: 'test' });
       userIds.push(first.userId);
     }
-    const phone = `+59260092${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const phone = testPhone();
     await expect(promoteBootstrapAdmin(prisma, URL_, phone, { approvals: anyApproval, approverKeys: '' })).rejects.toMatchObject({ code: 'APPROVALS_REQUIRED' });
     expect(await prisma.user.count({ where: { phone } })).toBe(0);
   });
@@ -82,7 +83,7 @@ describe('[PROD-PATH] two consumed approvals, or no change — even past a broke
 
   it('[#1448 review] a production plan mints a first SUPER_ADMIN only for the phone its approvals name, even past a broken verifier', async () => {
     const supers = await prisma.user.findMany({ where: { roles: { has: 'SUPER_ADMIN' } }, select: { id: true, roles: true, activeRole: true } });
-    const phone = `+59261554${String(Math.floor(Math.random() * 1e3)).padStart(3, '0')}`;
+    const phone = testPhone();
     await setIdentity('production');
     try {
       for (const u of supers) {

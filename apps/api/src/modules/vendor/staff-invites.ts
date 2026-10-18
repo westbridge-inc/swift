@@ -24,6 +24,13 @@ import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-po
 // ---------------------------------------------------------------------------
 
 export const STAFF_INVITE_KIND = 'staff_invite';
+/**
+ * [R21 · research B11 · DPA s.21] The person invited did not give Swift their
+ * number for this purpose: the store owner typed it. So the invite tells them,
+ * before they accept, what Swift will use it for and where the policy is. The
+ * same words are on the phone's Accept card (pinned by its test).
+ */
+export const STAFF_INVITE_DATA_NOTICE = "Swift will use your number to send you this store's order alerts. See our Privacy Policy.";
 const STAFF_INVITE_REVOKED = 'STAFF_INVITE_REVOKED';
 const STAFF_INVITES_WITHDRAWN = 'STAFF_INVITES_WITHDRAWN';
 const grantKey = (vendorId: string, userId: string) => JSON.stringify([vendorId, userId]);
@@ -216,7 +223,7 @@ export async function deliverStaffInvite(
     // lock; sender.send would write through a separate client and fan out early.
     const notification = await tx.notification.create({ data: {
       userId: input.targetUserId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Team invite',
-      body: `${vendor.name} invited you to join their team as ${roleWords}. Open your notifications to accept or decline.`,
+      body: `${vendor.name} invited you to join their team as ${roleWords}. Open your notifications to accept or decline. ${STAFF_INVITE_DATA_NOTICE}`,
       data: {
         kind: 'staff_invite', vendorId: input.vendorId, storeName: vendor.name,
         role: input.role, invitedBy: input.inviterId,

@@ -119,7 +119,8 @@ export function MoverAccountScreen({ navigation }: any) {
     <Screen>
       <Header title="Account" />
       <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
-        {/* Profile */}
+        {/* Profile. Every card below stacks with marginTop space.md and no
+            marginBottom — one gap between cards (owner 17 Oct: two touched). */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
           <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[500] }}>
             <T variant="title" tone="onBrand">
@@ -150,9 +151,7 @@ export function MoverAccountScreen({ navigation }: any) {
 
         {/* Movement R9 — Standing (daily-folded; today's ratings never show) */}
         {standingQ.data ? (
-          <View style={{ marginTop: space.md }}>
-            <StandingCard data={standingQ.data} />
-          </View>
+          <StandingCard data={standingQ.data} style={{ marginTop: space.md, marginBottom: 0 }} />
         ) : null}
 
         {/* Vehicle — customers see this photo when you accept (§5) */}
@@ -175,7 +174,7 @@ export function MoverAccountScreen({ navigation }: any) {
                 </T>
               </View>
               <LinkText
-                label={uploadVehiclePhoto.isPending ? 'Uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
+                label={uploadVehiclePhoto.isPending ? 'Still uploading…' : profile?.vehiclePhotoUrl ? 'Change photo' : 'Add photo'}
                 onPress={pickVehiclePhoto}
               />
             </View>
@@ -185,16 +184,21 @@ export function MoverAccountScreen({ navigation }: any) {
               </T>
             ) : null}
             {uploadVehiclePhoto.isError ? (
-              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-                Upload failed — try a different photo.
-              </T>
+              <View style={{ marginTop: space.sm }}>
+                <T variant="caption" tone="error">Upload failed — your selected photo is kept for retry.</T>
+                {uploadVehiclePhoto.variables ? <LinkText label="Retry saved photo" onPress={() => uploadVehiclePhoto.mutate(uploadVehiclePhoto.variables)} /> : null}
+              </View>
             ) : null}
           </Card>
         ) : null}
 
-        {isDriver ? (
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+            drop-off, cash or MMG: the card shows only while the server says the link
+            is on (DRIVER_MMG_PAY_LINK). Off, or a server that does not say, means no card. */}
+        {isDriver && (profile as { mmgPayLinkEnabled?: unknown } | null | undefined)?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="rides"
+            style={{ marginTop: space.md, marginBottom: 0 }}
             value={profile?.mmgPayUrl}
             pending={profile?.mmgPayUrlPending ? { url: profile.mmgPayUrlPending, applyAt: profile.mmgPayUrlApplyAt ?? null } : null}
             saving={saveMmgLink.isPending}

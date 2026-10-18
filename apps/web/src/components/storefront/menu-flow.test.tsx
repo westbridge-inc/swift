@@ -230,6 +230,20 @@ describe('[W6] the item sheet', () => {
     expect(customer.addToCart).not.toHaveBeenCalled();
   });
 
+  it('[R3 · CAA s.70] the store page carries the seller block from the server render; an older API without one shows none', async () => {
+    const seller = { legalName: 'Fixture Trader trading as Sample Kitchen', address: 'Fixture street', phone: null,
+      payment: { cash: true as const, storeMmg: false }, refundRule: null,
+      statutoryRights: "This does not affect your rights under Guyana's Consumer Affairs Act 2011 to return goods or get a refund from the business." };
+    const view = render(<StorefrontExperience store={{ ...store(), seller }} returnPath="/store/sample-kitchen" />);
+    const block = screen.getByRole('region', { name: 'Seller information' });
+    expect(within(block).getByText('Fixture Trader trading as Sample Kitchen')).toBeTruthy();
+    expect(within(block).getAllByText('Ask the store')).toHaveLength(2);
+    expect(within(block).getByText(seller.statutoryRights)).toBeTruthy();
+    view.unmount();
+    render(<StorefrontExperience store={store()} returnPath="/store/sample-kitchen" />);
+    expect(screen.queryByRole('region', { name: 'Seller information' })).toBeNull();
+  });
+
   it('traps Tab, makes the page behind inert, closes on Escape and returns focus to the button that opened it', async () => {
     render(<main><StorefrontExperience store={store()} returnPath="/store/sample-kitchen" /></main>);
     const trigger = screen.getByRole('button', { name: 'Choose options for Curry & roti' });

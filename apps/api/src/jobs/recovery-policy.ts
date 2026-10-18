@@ -77,6 +77,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-invariants': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'vat-threshold-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'booking-reminders': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'checkout-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: claimNextRow takes a due row under FOR UPDATE SKIP LOCKED with a claim lease, publishes under jobId = row id, and stamps processedAt on success. A replay finds only unprocessed rows; a crash between the add and the processedAt mark re-claims after the lease lapses and re-adds the same jobId, which BullMQ collapses while the job still exists.' },
   'collusion-affinity-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -119,6 +120,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'route-match': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
   'stale-movers': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'substitution-expiry': { policy: 'SAFE_REPLAY', why: 'Removes (or, on MMG, withdraws) swap questions past their deadline. Every write is a compare-and-set on the open question with its deadline already passed (subStatus PENDING, substituteDecideBy <= now) under the order-row lock; a closed question no longer matches, so a replay changes nothing and sends nothing. The customer is told only by the compare-and-set winner. A question with no deadline gets one by a compare-and-set on NULL, so a replay cannot extend a running wait.' },
   'supply-watch-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'sync-vendor': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'tier-recalc': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -141,6 +143,7 @@ export type JobName =
   | 'batching-shadow-scan'
   | 'billing-fx-notices'
   | 'billing-invariants'
+  | 'vat-threshold-watch'
   | 'booking-reminders'
   | 'checkout-outbox'
   | 'collusion-affinity-scan'
@@ -183,6 +186,7 @@ export type JobName =
   | 'route-match'
   | 'scheduler-heartbeat'
   | 'stale-movers'
+  | 'substitution-expiry'
   | 'supply-watch-scan'
   | 'sync-vendor'
   | 'tier-recalc'

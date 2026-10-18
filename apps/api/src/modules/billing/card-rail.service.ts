@@ -1009,7 +1009,7 @@ export class CardRailService {
     log().error({ sessionId: session.id, subscriptionId: session.subscriptionId, failureCode }, '[PT-1] card session held for a person — nothing granted');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: session.tenantId,
-      title: '💳 Card session held for review',
+      title: 'Card session held for review',
       body: `Card session ${session.id} (${session.purpose}) for subscription ${session.subscriptionId} was held: ${failureCode}. Nothing was granted or booked. ${detail ?? `${recordedRef ? `Provider transaction ${recordedRef}. ` : ''}Check the provider before acting.`}`,
       data: {
         kind: 'billing_invariants', alert: 'card-session-held', subscriptionId: session.subscriptionId, sessionId: session.id, failureCode,
@@ -1024,7 +1024,7 @@ export class CardRailService {
     log().error({ sessionId: session.id, bound: describeBinding(bindingOf(session)), configured: describeBinding(provider.binding) }, '[PT-1 C2] card session belongs to another provider setup — nothing asked, nothing granted');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: session.tenantId,
-      title: '💳 Card session refused — it belongs to another provider setup',
+      title: 'Card session refused — it belongs to another provider setup',
       body: `Card session ${session.id} was opened with ${describeBinding(bindingOf(session))}, but this server is set up for ${describeBinding(provider.binding)}. Nothing was granted. Restore the configuration; the session is checked again on the next sweep.`,
       data: { kind: 'billing_invariants', alert: 'card-session-binding-mismatch', subscriptionId: session.subscriptionId, sessionId: session.id },
       dedupeKey: `card-session-binding:${session.id}:${describeBinding(provider.binding)}`,

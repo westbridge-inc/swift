@@ -400,6 +400,36 @@ describe('[§8] a partner saving and editing items', () => {
     expect(renamed.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'rum' });
   });
 
+  // [R4 · owner 15 Oct] The expanded permanent list answers exactly like the old classes, through the real routes.
+  it('the expanded list: goods refused outright in the partner\'s words, a mention held, legal services refused', async () => {
+    const before = await app.prisma.item.count({ where: { vendorId: vendor.id } });
+    for (const [name, words] of [
+      [`${RUN} Fireworks 10 pack`, 'fireworks and explosives'],
+      [`${RUN} Weed killer 1L`, 'pesticides and toxic chemicals'],
+      [`${RUN} Raw gold`, 'raw gold, diamonds and precious stones'],
+      [`${RUN} Toy pistol`, 'firearms, ammunition and replicas'],
+      [`${RUN} Twa twa`, 'protected wildlife'],
+      [`Counterfeit Rolex ${RUN}`, 'counterfeit goods'],
+      [`Prepaid Visa ${RUN}`, 'currency and payment cards'],
+      [`Legal consultation ${RUN}`, 'legal services'],
+    ] as const) {
+      const res = await createItem({ name });
+      expect(res.statusCode, name).toBe(409);
+      expect(res.json().error, name).toMatchObject({ code: 'PROHIBITED_ITEM', message: `Swift doesn't allow this item: ${words}.` });
+    }
+    expect(await app.prisma.item.count({ where: { vendorId: vendor.id } })).toBe(before);
+    const held = await createItem({ name: `Gun ${RUN}` });
+    expect(held.statusCode).toBe(200);
+    expect(held.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', prohibitedClass: 'WEAPONS', term: 'gun' });
+    const tool = await createItem({ name: `Hot glue gun ${RUN}` });
+    expect(tool.statusCode).toBe(200);
+    expect(tool.json().data.catalogueCheck ?? null).toBeNull();
+    // A person can remove a held item as one of the new classes; the partner reads the class in plain words.
+    const removed = await inject('POST', `/api/v1/admin/catalogue-review/${held.json().data.id}/remove`, admin.token, { prohibitedClass: 'WEAPONS' }, { 'x-swift-reason': 'Sells a firearm' });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(await app.prisma.item.findUniqueOrThrow({ where: { id: held.json().data.id }, select: { prohibitedClass: true } })).toEqual({ prohibitedClass: 'WEAPONS' });
+  });
+
   // [Opus S3-1] The item editor never switches on an item still banned by its own words: the item AFTER the edit is
   // judged, in the same transaction. Renamed out of the ban in the same request, it may be switched on; a restock
   // never switches a banned item back on, and its stock count is still saved.

@@ -10,9 +10,20 @@ const mocks = vi.hoisted(() => ({
   setChannel: vi.fn(async () => undefined),
   platform: { OS: 'ios' as 'ios' | 'android' },
   hasJobRing: vi.fn(() => false),
+  openSettings: vi.fn(async () => undefined),
+  appStateListeners: [] as Array<(state: string) => void>,
 }));
 
-vi.mock('react-native', () => ({ Platform: mocks.platform }));
+vi.mock('react-native', () => ({
+  Platform: mocks.platform,
+  Linking: { openSettings: mocks.openSettings },
+  AppState: {
+    addEventListener: (_event: string, listener: (state: string) => void) => {
+      mocks.appStateListeners.push(listener);
+      return { remove: () => { mocks.appStateListeners = mocks.appStateListeners.filter((l) => l !== listener); } };
+    },
+  },
+}));
 // [RINGER] Whether this binary has the job ring (build 12) is a native fact.
 vi.mock('./jobRingCapability', () => ({
   JOB_OFFERS_CHANNEL: 'job_offers',
@@ -72,6 +83,7 @@ beforeEach(() => {
   mocks.hasJobRing.mockReturnValue(false);
   mocks.getPermissions.mockResolvedValue({ status: 'granted' });
   mocks.getPushToken.mockResolvedValue({ data: 'ExponentPushToken[shared-device]' });
+  mocks.appStateListeners = [];
 });
 
 describe('push registration ownership', () => {
@@ -147,5 +159,66 @@ describe('[RINGER] job alerts: the channel and what the server is told', () => {
     await push.registerIfGranted();
     expect(mocks.setChannel).not.toHaveBeenCalled();
     expect(mocks.post.mock.calls[0]?.[1]).toEqual({ token: 'ExponentPushToken[shared-device]', platform: 'ios', alertsVersion: 1 });
+  });
+});
+
+// [STORE-ALERT 18 Oct 2026] A store iPhone was never asked for notifications:
+// iOS starts undetermined, the session start only registers when permission
+// is ALREADY granted, and nothing in the store app could ask or open Settings.
+describe('[STORE-ALERT] an earner can turn push on, and coming back from Settings registers', () => {
+  it('reads what turning push on takes: nothing, the OS prompt, or Settings', async () => {
+    const push = await import('./push');
+    mocks.getPermissions.mockResolvedValueOnce({ status: 'granted', canAskAgain: true } as never);
+    await expect(push.pushPermission()).resolves.toBe('granted');
+    mocks.getPermissions.mockResolvedValueOnce({ status: 'undetermined', canAskAgain: true } as never);
+    await expect(push.pushPermission()).resolves.toBe('ask');
+    mocks.getPermissions.mockResolvedValueOnce({ status: 'denied', canAskAgain: false } as never);
+    await expect(push.pushPermission()).resolves.toBe('settings');
+    // Android 13+ may ask again after one refusal.
+    mocks.getPermissions.mockResolvedValueOnce({ status: 'denied', canAskAgain: true } as never);
+    await expect(push.pushPermission()).resolves.toBe('ask');
+  });
+
+  it('"Turn on" while the OS can still ask shows the prompt and registers on a yes', async () => {
+    mocks.post.mockResolvedValue({ data: { success: true } });
+    mocks.getPermissions
+      .mockResolvedValueOnce({ status: 'undetermined', canAskAgain: true } as never) // turnOnPush reads
+      .mockResolvedValueOnce({ status: 'undetermined', canAskAgain: true } as never) // register reads
+      .mockResolvedValue({ status: 'granted', canAskAgain: true } as never);
+    const push = await import('./push');
+    await expect(push.turnOnPush()).resolves.toBe('granted');
+    expect(mocks.requestPermissions).toHaveBeenCalledTimes(1);
+    expect(mocks.post).toHaveBeenCalledWith(
+      'https://api.test/api/v1/customer/notifications/devices',
+      { token: 'ExponentPushToken[shared-device]', platform: 'ios' },
+      expect.anything(),
+    );
+    expect(mocks.openSettings).not.toHaveBeenCalled();
+  });
+
+  it('"Turn on" after iOS was refused opens Settings (the prompt cannot show again)', async () => {
+    mocks.getPermissions.mockResolvedValue({ status: 'denied', canAskAgain: false } as never);
+    const push = await import('./push');
+    await expect(push.turnOnPush()).resolves.toBe('settings');
+    expect(mocks.openSettings).toHaveBeenCalledTimes(1);
+    expect(mocks.requestPermissions).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it('returning to the foreground registers a phone that was turned on in Settings meanwhile', async () => {
+    mocks.post.mockResolvedValue({ data: { success: true } });
+    mocks.getPermissions.mockResolvedValueOnce({ status: 'denied', canAskAgain: false } as never);
+    const push = await import('./push');
+    await push.registerIfGranted();
+    expect(mocks.post).not.toHaveBeenCalled();
+
+    const uninstall = push.installPushForegroundRetry();
+    mocks.getPermissions.mockResolvedValue({ status: 'granted', canAskAgain: true } as never);
+    for (const listener of mocks.appStateListeners) listener('background');
+    expect(mocks.post).not.toHaveBeenCalled();
+    for (const listener of mocks.appStateListeners) listener('active');
+    await vi.waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+    uninstall();
+    expect(mocks.appStateListeners).toHaveLength(0);
   });
 });
