@@ -40,9 +40,9 @@ const RUN = randomUUID().replace(/-/g, '').slice(0, 10);
 const PHONE = `+592264${String(Number.parseInt(RUN.slice(0, 6), 16) % 100000).padStart(5, '0')}`;
 const STATUSES = Object.values(OrderStatus) as OrderStatus[];
 const MIGRATIONS = path.resolve(__dirname, '../../prisma/migrations');
-const NAME = '20261015051000_order_status_transition_guard';
-/** The newest migration on main when this was written (15 Oct 04:30Z). */
-const NEWEST_ON_MAIN_AT_WRITE = '20261015010000_mmg_fee_reversals';
+const NAME = '20261018213000_order_status_transition_guard';
+/** The newest migration on main when this was written (15 Oct 04:30Z; renamed 18 Oct to sort after main's newest). */
+const NEWEST_ON_MAIN_AT_WRITE = '20261017230000_verification_decision_outbox';
 const normalise = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 class Rollback extends Error {}
 
