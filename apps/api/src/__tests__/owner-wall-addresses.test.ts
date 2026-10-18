@@ -203,6 +203,14 @@ describe('[item 20] every owner path in the census still returns its rows', () =
     expect(await asPerson(ids.alice, () => app.prisma.address.count({ where: { userId: ids.alice } }))).toBe(2);
   });
 
+  it('places (the local provider) suggests and resolves the person\'s own saved addresses', async () => {
+    const { getPlacesProvider } = await import('../providers/places/places-provider');
+    const places = getPlacesProvider(app.prisma);
+    const suggestions = await asPerson(ids.alice, () => places.autocomplete(`Home ${RUN}`, { userId: ids.alice }));
+    expect(suggestions.map((s) => s.placeId)).toContain(`addr:${ids.aliceHome}`);
+    expect((await asPerson(ids.alice, () => places.details(`addr:${ids.aliceHome}`, { userId: ids.alice })))?.placeId).toBe(`addr:${ids.aliceHome}`);
+  });
+
   it('system work reads through the bypass login, and the erasure deletes the person\'s addresses for whoever runs it', async () => {
     expect(await tenant.runAsSystem('test:owner-wall-system-read', () => app.prisma.address.count({ where: { userId: ids.bob } }))).toBe(1);
     // The erasure's own step, as the retry job runs it (a tenant bound, no person): a named capability, never a silent zero.
