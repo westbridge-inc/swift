@@ -1202,6 +1202,27 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
   });
 
+  // [Row 243 / #1840, REVIEW-M S2-1 — probe written by the independent reviewer, adopted as is] A document whose image
+  // R24 already purged (fileUrl '') never enters the fence; the erasure's close must still re-check the hold under the
+  // person's lock, or a hold that lands after the census loses the record and its extracted values.
+  it('an image-purged document held after the erasure census keeps its record and values', async () => {
+    const h = erasureRaceHarness();
+    Object.assign(h.doc, { fileUrl: '', imagePurgedAt: new Date(0) });
+    const census = h.db.verificationDocument.findMany.getMockImplementation()!;
+    let held = false;
+    h.db.verificationDocument.findMany.mockImplementation(async (query: any) => {
+      const rows = await census(query);
+      const w = query?.where ?? {};
+      if (!held && w.userId === A && w.purgedAt === null && w.legalHoldId === null) { held = true; Object.assign(h.doc, { legalHoldId: 'synthetic-hold' }); }
+      return rows;
+    });
+    await h.account.deleteAccount(A).catch(() => undefined);
+    expect(held).toBe(true);
+    expect({ hold: h.doc.legalHoldId, purgedAt: h.doc.purgedAt, runDek: h.run.wrappedDek === null ? 'SHREDDED' : 'KEPT', fieldCt: h.field.valueCt === null ? 'SHREDDED' : 'KEPT' })
+      .toEqual({ hold: 'synthetic-hold', purgedAt: null, runDek: 'KEPT', fieldCt: 'KEPT' });
+    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
+
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
     const h = accountHarness(); const doc = h.poison();
     doc.fileUrl = fault === 'legacy' ? `/uploads/verification/${A}/legacy.jpg` : key(A);
@@ -1280,7 +1301,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
     expect(doc).toMatchObject({ purgedAt: null, fileUrl: key(A) });
     expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({ verificationProbeResult: 'FAILED' }) }));
-    expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
+    // TRANSFORMED (row 243 / #1840, REVIEW-G S2-1): was `not.toHaveBeenCalled()`. The key is now shredded under the
+    // person's row lock BEFORE any storage call (no storage I/O under a lock, so a held document can never be destroyed
+    // late); an unreachable store leaves only unreadable bytes and the document still due, and the next run finishes
+    // the purge (legal-hold-purge-fence.test.ts). Still: exactly one shred, of this person's own object, and nothing else.
+    expect(h.db.encryptedObject.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { fileKey: key(A), createdBy: A }, data: { wrappedDek: null, shreddedAt: expect.any(Date) },
+    });
     expect(h.db.session.deleteMany).toHaveBeenCalledOnce();
     expect(h.db.user.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ phone: `deleted:${A}` }) }));
   });
@@ -1316,7 +1343,7 @@ describe('generated declaration envelope contract', () => {
     const routes = await handlers(h, vendorRoutes);
     const reply = { code: vi.fn() };
     const invoke = () => routes.get('post /onboarding/declaration')!({ user: { userId: A }, headers: { 'x-vendor-id': vendor.id }, ip: '127.0.0.1', body: {
-      tradingName: 'Synthetic store', activityClass: 'home_cook', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
+      tradingName: 'Synthetic store', activityClass: 'snackette', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
     } }, reply);
     return { ...h, vendor, published, signed, render, plaintext, invoke, reply };
   }

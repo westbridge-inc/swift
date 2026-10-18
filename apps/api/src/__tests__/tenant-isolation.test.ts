@@ -8,6 +8,7 @@ import { getTenantId, prismaPlugin, runWithTenant, runWithoutTenant } from '../p
 import { IdentityService } from '../modules/integrity/identity.service';
 import { runIdentityBackfill } from '../modules/integrity/backfill';
 import { ensureSan, releaseSan } from '../modules/billing/san.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Tenant isolation (multi-tenancy stage 2 / launch-readiness §1.2): with a
@@ -37,7 +38,7 @@ beforeAll(async () => {
     });
     const uB = await prisma.user.create({
       data: {
-        phone: `+59265${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Bee', lastName: 'Tenant',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true, tenantId: TENANT_B,
@@ -86,7 +87,7 @@ describe('tenant isolation (stage 2)', () => {
     const created = await runWithTenant(TENANT_B, () =>
       prisma.user.create({
         data: {
-          phone: `+59266${String(Math.floor(Math.random() * 90000) + 10000)}`,
+          phone: testPhone(),
           firstName: 'Auto', lastName: 'Stamp',
           roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
           isPhoneVerified: true,
@@ -136,7 +137,7 @@ describe('tenant isolation (stage 2)', () => {
     const victim = await runWithoutTenant(() =>
       prisma.user.create({
         data: {
-          phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`,
+          phone: testPhone(),
           firstName: 'Mutation', lastName: 'Victim',
           roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
           isPhoneVerified: true, tenantId: TENANT_B,
@@ -166,7 +167,7 @@ describe('tenant isolation (stage 2)', () => {
     const owned = await runWithTenant(TENANT_B, () =>
       prisma.user.create({
         data: {
-          phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`,
+          phone: testPhone(),
           firstName: 'Stay', lastName: 'Owned',
           roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
           isPhoneVerified: true,
@@ -187,8 +188,8 @@ describe('tenant isolation (stage 2)', () => {
 
   it('bulk creates and updates cannot override the active tenant', async () => {
     const phones = [
-      `+59271${String(Math.floor(Math.random() * 90000) + 10000)}`,
-      `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      testPhone(),
+      testPhone(),
     ];
     await runWithTenant(TENANT_B, () => prisma.user.createMany({
       data: phones.map((phone, index) => ({
@@ -223,7 +224,7 @@ describe('tenant isolation (stage 2)', () => {
       where: { id: victim.id },
       create: {
         id: victim.id,
-        phone: `+59273${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'MustNotCreate', lastName: 'Collision',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true, tenantId: TENANT_B,
@@ -239,7 +240,7 @@ describe('tenant isolation (stage 2)', () => {
     expect(untouched.firstName).not.toBe('MustNotUpdate');
     expect(untouched.tenantId).toBe(TENANT_B);
 
-    const localPhone = `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const localPhone = testPhone();
     const created = await runWithTenant(TENANT_B, () => prisma.user.upsert({
       where: { phone: localPhone },
       create: {
@@ -272,14 +273,14 @@ describe('tenant isolation (stage 2)', () => {
     const [defaultUser, tenantBUser] = await runWithoutTenant(() => prisma.$transaction([
       prisma.user.create({
         data: {
-          phone: `+59275${String(Math.floor(Math.random() * 90000) + 10000)}`,
+          phone: testPhone(),
           firstName: 'Global', lastName: 'Default', roles: ['CUSTOMER'] as never[],
           activeRole: 'CUSTOMER' as never, isPhoneVerified: true, tenantId: 'swift-default',
         },
       }),
       prisma.user.create({
         data: {
-          phone: `+59276${String(Math.floor(Math.random() * 90000) + 10000)}`,
+          phone: testPhone(),
           firstName: 'Global', lastName: 'TenantB', roles: ['CUSTOMER'] as never[],
           activeRole: 'CUSTOMER' as never, isPhoneVerified: true, tenantId: TENANT_B,
         },
@@ -384,7 +385,7 @@ describe('tenant isolation (stage 2)', () => {
     const suffix = nanoid(8).toLowerCase();
     const ownerUser = await runWithoutTenant(() => prisma.user.create({
       data: {
-        phone: `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'San', lastName: 'TenantB', roles: ['VENDOR_OWNER'] as never[],
         activeRole: 'VENDOR_OWNER' as never, isPhoneVerified: true, tenantId: TENANT_B,
       },
@@ -394,7 +395,7 @@ describe('tenant isolation (stage 2)', () => {
     const vendor = await runWithoutTenant(() => prisma.vendor.create({
       data: {
         ownerId: owner.id, tenantId: TENANT_B, name: `SAN Tenant B ${suffix}`, slug: `san-tenant-b-${suffix}`,
-        vendorType: 'RESTAURANT', phone: `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        vendorType: 'RESTAURANT', phone: testPhone(),
         addressLine1: '1 Global Registry Road', city: 'Georgetown', region: 'Demerara-Mahaica',
         latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
       },

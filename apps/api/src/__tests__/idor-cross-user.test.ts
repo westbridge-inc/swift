@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // IDOR sweep (launch-readiness spec §1.2): user A must NEVER reach user B's
@@ -27,7 +28,7 @@ let vendorId: string;
 async function makeCustomer() {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59263${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Id', lastName: 'Or',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(),

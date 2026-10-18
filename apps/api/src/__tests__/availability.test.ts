@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Availability (spec §1/§2.1): the read derives from the SAME candidate query
@@ -28,7 +29,7 @@ const orderIds: string[] = [];
 async function makeDriver(latOffset: number) {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59259${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Avail', lastName: 'Driver',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,
@@ -79,7 +80,7 @@ beforeAll(async () => {
 
   const me = await app.prisma.user.create({
     data: {
-      phone: `+59258${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Ava', lastName: 'Rider',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2' as never,

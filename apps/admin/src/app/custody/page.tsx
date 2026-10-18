@@ -13,6 +13,7 @@ import {
 } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006] CUSTODY CASES — deliveries that went wrong AFTER pickup.
@@ -38,7 +39,7 @@ const gyd = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
 
 function CaseDetail({ id }: { id: string }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
+  const caseQ = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['custody-case', id] });
     void qc.invalidateQueries({ queryKey: ['custody-cases'] });
@@ -57,8 +58,11 @@ function CaseDetail({ id }: { id: string }) {
   const back = useMutation({ mutationFn: (reason: string) => confirmCustodyReturn(id, reason), onSuccess: refresh, onError });
   const busy = claim.isPending || direct.isPending || relay.isPending || back.isPending;
 
-  if (isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
-  const k = data?.data;
+  if (caseQ.isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
+  if (caseQ.isError) {
+    return <QueryFailed error={caseQ.error} what="this custody case" onRetry={() => void caseQ.refetch()} retrying={caseQ.isFetching} className="mt-4" />;
+  }
+  const k = caseQ.data?.data;
   if (!k) return null;
   // The server's own marker: a case is open exactly while it has no resolvedAt.
   const open = k.resolvedAt == null;
@@ -153,7 +157,7 @@ function CaseDetail({ id }: { id: string }) {
 export default function CustodyCasesPage() {
   const [showOpen, setShowOpen] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
   const rows: any[] = data?.data ?? [];
 
   return (
@@ -179,6 +183,8 @@ export default function CustodyCasesPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : isError ? (
+          <QueryFailed error={error} what="the custody cases" onRetry={() => void refetch()} retrying={isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             {showOpen ? 'No open custody cases.' : 'No custody cases.'}

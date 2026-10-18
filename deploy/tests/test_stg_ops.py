@@ -352,9 +352,9 @@ class SeedProductionScript(unittest.TestCase):
 
     def test_refuses_a_phone_inside_the_demo_purge_range(self):
         # [D1] +592600 is DEMO_PHONE_PREFIX: every demo seed mints numbers in
-        # it and the demo purge classifies on it. A real SUPER_ADMIN inside it
-        # would be entangled with the demo classification, so the ceremony
-        # refuses it before anything runs.
+        # it. The demo purge selects by the synthetic marker only, but a real
+        # SUPER_ADMIN inside the range would be confusable with the demo
+        # accounts, so the ceremony refuses it before anything runs.
         result = self.run_script(SEED_ADMIN_PHONE="+5926000000")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("592600", result.stderr)
@@ -733,6 +733,9 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
+        # [WEB-TILES] The MapTiler browser key (public, domain-restricted) reaches the
+        # build from deploy/.env's WEB_MAPTILER_KEY; unset, the site draws no map tiles.
+        self.assertIn("NEXT_PUBLIC_MAPTILER_KEY: ${WEB_MAPTILER_KEY:-}", web)
 
     def test_the_website_has_a_memory_ceiling_that_v8_collects_below(self):
         web = self.web()
@@ -793,6 +796,8 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
         self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_ALLOW_SITE_TOKENS"], "1")
+        # [WEB-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so no tiles (never OpenStreetMap's).
+        self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_MAPTILER_KEY"], "")
         self.assertEqual(model["services"]["caddy"]["environment"]["WEB_HOST"], "staging.example.invalid")
         # pilot-up's isolation check passes with the website in the model.
         check = subprocess.run(
@@ -1072,7 +1077,7 @@ class Q11WebsiteDockerfile(unittest.TestCase):
 
     def test_the_api_origin_and_channel_are_build_args_of_the_building_stage(self):
         build_step = self.build.index("RUN pnpm run build")
-        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS"):
+        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS", "NEXT_PUBLIC_MAPTILER_KEY"):
             declared = re.search(rf"(?m)^ARG {arg}$", self.build)
             self.assertIsNotNone(declared, f"{arg} must be a build ARG with no baked-in default")
             self.assertLess(declared.start(), build_step, arg)

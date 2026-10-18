@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchLiveOps } from '@/lib/api';
 import { statusClass } from '@/lib/status';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // Leaflet touches `window` — client-only.
 const OpsMap = dynamic(() => import('@/components/ops/OpsMap'), {
@@ -21,13 +22,15 @@ const LEGEND = [
 ];
 
 export default function OpsPage() {
-  const { data, isLoading, dataUpdatedAt } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['live-ops'],
     queryFn: fetchLiveOps,
     refetchInterval: 15_000,
   });
 
-  const ops = data?.data;
+  // A failed poll never shows the last picture as live: no counts, no stale pins.
+  const ops = isError ? undefined : data?.data;
+  const unknown = isLoading || isError;
   const online = ops?.movers.length ?? 0;
   const busy = ops?.movers.filter((m) => m.busy).length ?? 0;
   const inFlight = ops?.activeOrders.length ?? 0;
@@ -37,16 +40,16 @@ export default function OpsPage() {
       <div className="flex items-center gap-6 px-6 py-3 border-b border-[var(--border)] bg-[var(--panel)]">
         <h1 className="text-lg font-bold">Live ops</h1>
         <span className="text-sm text-[var(--muted)]">
-          <span className="text-white font-semibold">{isLoading ? '—' : online}</span> movers online
+          <span className="text-white font-semibold">{unknown ? '—' : online}</span> movers online
         </span>
         <span className="text-sm text-[var(--muted)]">
-          <span className="text-white font-semibold">{isLoading ? '—' : busy}</span> on jobs
+          <span className="text-white font-semibold">{unknown ? '—' : busy}</span> on jobs
         </span>
         <span className="text-sm text-[var(--muted)]">
-          <span className="text-white font-semibold">{isLoading ? '—' : inFlight}</span> orders in flight
+          <span className="text-white font-semibold">{unknown ? '—' : inFlight}</span> orders in flight
         </span>
         <span className="text-xs text-[var(--muted)] ml-auto">
-          refreshes every 15s{dataUpdatedAt ? ` · updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ''}
+          refreshes every 15s{dataUpdatedAt && !isError ? ` · updated ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ''}
         </span>
       </div>
 
@@ -65,9 +68,15 @@ export default function OpsPage() {
 
         <aside className="w-80 border-l border-[var(--border)] bg-[var(--panel)] overflow-y-auto">
           <p className="px-4 pt-4 pb-2 text-[10px] font-semibold tracking-widest text-[var(--muted)]">
-            IN FLIGHT ({inFlight})
+            IN FLIGHT ({unknown ? '—' : inFlight})
           </p>
-          {(ops?.activeOrders ?? []).length === 0 ? (
+          {isLoading ? (
+            <p className="px-4 text-sm text-[var(--muted)]">Loading…</p>
+          ) : isError ? (
+            <div className="px-4 pb-4">
+              <QueryFailed error={error} what="live ops" onRetry={() => void refetch()} retrying={isFetching} />
+            </div>
+          ) : (ops?.activeOrders ?? []).length === 0 ? (
             <p className="px-4 text-sm text-[var(--muted)]">Nothing moving right now.</p>
           ) : (
             <div className="px-2 pb-4 space-y-1">

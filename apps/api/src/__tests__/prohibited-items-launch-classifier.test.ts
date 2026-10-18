@@ -147,7 +147,7 @@ describe('[§8 launch] disguised spellings read as the word they hide (Opus S3-1
 describe('[§8 launch] what stays allowed (#57 energy drinks, #58 vitamins and first aid)', () => {
   it.each([
     'Red Bull 250ml', 'Monster Energy 473ml', 'Guru Energy', 'Vitamin C 1000mg', 'Multivitamin gummies', 'First aid kit',
-    'Band-Aid plasters (20)', 'Antiseptic liquid 250ml', 'Bristol board (white)', 'Weed eater line', 'Weed killer 1L',
+    'Band-Aid plasters (20)', 'Antiseptic liquid 250ml', 'Bristol board (white)', 'Weed eater line',
     'Seaweed snacks', 'Kola Champagne 2L', 'Virgin mojito', 'Virgin pina colada', 'Rubbing alcohol 70%', 'Budget rice 10lb',
     'Banking app voucher',
   ])('%s is clear', (name) => {

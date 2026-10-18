@@ -14,6 +14,7 @@ import {
   ADMIN_ACTION_CLASSES, ADMIN_CAPABILITIES, ADMIN_ROUTE_AUTHORITY, SUPPORT_OPERATOR_CAPABILITIES,
   authorityFor, capabilitiesOf, capabilityMatches, capabilityMode, decideCapability, holdsCapability, routeTemplateOf,
 } from '../modules/admin/admin-authority';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-001] ONE BOOLEAN GOVERNED EVERY ADMIN ACTION.
@@ -48,7 +49,7 @@ function registeredRoutes(): string[] {
 }
 
 async function makeAdmin(permissions: string[] | null, role: 'ADMIN' | 'SUPER_ADMIN' = 'ADMIN'): Promise<string> {
-  const phone = `+59276${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Cap', lastName: `Test${RUN}`, roles: [role, 'CUSTOMER'], activeRole: role,

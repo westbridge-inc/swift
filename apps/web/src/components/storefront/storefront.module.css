@@ -254,6 +254,50 @@
   scroll-margin-block-start: calc(var(--swift-touch) + var(--swift-space-2xl));
 }
 
+/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule. */
+.seller {
+  margin: var(--swift-space-3xl) 0 0;
+  padding: var(--swift-space-lg);
+  border: thin solid var(--swift-border);
+  border-radius: var(--swift-radius-md);
+}
+
+.sellerTitle {
+  margin: 0 0 var(--swift-space-md);
+  font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
+  font-size: var(--swift-type-title);
+  line-height: var(--swift-leading-title);
+}
+
+.sellerFacts {
+  display: grid;
+  gap: var(--swift-space-md);
+  margin: 0;
+}
+
+.sellerFact {
+  display: grid;
+  gap: var(--swift-space-xs);
+}
+
+.sellerLabel {
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
+.sellerValue {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.sellerRights {
+  margin: var(--swift-space-sm) 0 0;
+  color: var(--swift-muted);
+  font-size: var(--swift-type-micro);
+  line-height: var(--swift-leading-micro);
+}
+
 .sectionTitle {
   margin: 0 0 var(--swift-space-md);
   font-family: var(--swift-font-display-semibold), system-ui, sans-serif;
@@ -274,7 +318,7 @@
   align-items: start;
   gap: var(--swift-space-md);
   padding: var(--swift-space-md);
-  border-radius: var(--swift-radius-lg);
+  border-radius: var(--swift-radius-md);
   background: var(--swift-card);
   box-shadow: var(--swift-elevation-card);
 }
@@ -469,7 +513,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.addButton,
 .chooseButton {
   padding-inline: var(--swift-space-lg);
   font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
@@ -477,12 +520,15 @@
   line-height: var(--swift-leading-label);
 }
 
+/* [Triage row 113] The Add button is the shared maroon "+" circle (components/add-plus); the button keeps the
+   touch-size hit area around it. */
 .addButton {
+  padding: 0;
   color: var(--swift-white);
-  background: var(--swift-red);
+  background: transparent;
 }
 
-.addButton:hover {
+.addButton:hover > [data-add-plus] {
   background: var(--swift-red-600);
 }
 

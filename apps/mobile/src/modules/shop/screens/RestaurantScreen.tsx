@@ -15,8 +15,10 @@ import { forgivingFilter } from '../../../lib/forgivingSearch';
 import { itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
+import { SellerInfo } from '../../../components/SellerInfo';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
   CartBar,
@@ -666,10 +668,10 @@ export function RestaurantScreen() {
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}
@@ -778,6 +780,9 @@ export function RestaurantScreen() {
               This store hasn’t published a menu yet.
             </T>
           ) : null}
+
+          {/* [R3 · CAA s.70] Who sells, how payment works and the store's refund rule (the server's block; none from an older API). */}
+          {v.seller ? <SellerInfo seller={v.seller} gutter={GUTTER} /> : null}
         </View>
       </ScrollView>
 
