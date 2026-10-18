@@ -104,6 +104,22 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     note: 'Infrastructure provider for every self-hosted component (owner decision: production on DigitalOcean in Atlanta, staging in New York). Holds the database, which stores account fields; documents at rest are ciphertext. Swift sends it nothing over an API, so it has no provider directory or outbound host; the Privacy Policy names it ("Our servers are with DigitalOcean in Atlanta").',
   },
   {
+    ref: 'CLOUDFLARE', party: 'Cloudflare, Inc.', service: 'DNS for Swift\'s web addresses',
+    modelBacked: false,
+    providerDirs: [], hosts: [],
+    payload: ['NON_PERSONAL'], lawfulBasis: 'CONTRACT',
+    country: 'US', leavesCountry: true, transferBasis: 'NOT_APPLICABLE', contractEnv: null,
+    note: 'DNS only: it answers which server a Swift address points to. The app\'s and the website\'s traffic goes to Swift\'s servers, not through Cloudflare, and Swift sends it nothing about a person. The Privacy Policy names it.',
+  },
+  {
+    ref: 'MAPTILER', party: 'MapTiler', service: 'Map images (tiles) for the website\'s maps',
+    modelBacked: false,
+    providerDirs: [], hosts: ['api.maptiler.com', 'maptiler.com'],
+    payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
+    country: 'vendor-hosted', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
+    note: 'Requested by the viewer\'s browser, never by Swift\'s servers: the viewer\'s network address, the site\'s address (never the page\'s path) and which map squares are shown; a shared trip or tracking location is rounded first. Swift sends it no name, phone number, account or order details. The Privacy Policy names it.',
+  },
+  {
     ref: 'ERROR_TRACKING', party: 'Swift (self-hosted GlitchTip, Sentry-SDK compatible)', service: 'Error and performance telemetry',
     modelBacked: false,
     providerDirs: [], hosts: [],
@@ -136,12 +152,20 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     note: 'SMTP_HOST-configured; email address + message body.',
   },
   {
-    ref: 'GOOGLE_MAPS', party: 'Google LLC (Maps Platform)', service: 'Places autocomplete, geocoding, distance matrix',
+    ref: 'GOOGLE_PLACES', party: 'Google LLC (Places API (New))', service: 'Address search from Swift\'s servers: autocomplete, place details, and the address for a map pin',
     modelBacked: false,
-    providerDirs: ['maps', 'places'], hosts: ['maps.googleapis.com', 'googleapis.com'],
+    providerDirs: ['places'], hosts: ['places.googleapis.com', 'maps.googleapis.com'],
     payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
     country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
-    note: 'DORMANT BY FOUNDER DECISION (2026-09-07: maps self-hosted, all engines). Adapter kept behind MAPS_PROVIDER=google / PLACES_PROVIDER=google; no key is provisioned. Coordinates and typed addresses, no identity.',
+    note: 'USED AT LAUNCH: PLACES_PROVIDER=google, called only from Swift\'s servers (checked live on production before launch). Google receives the text typed, an approximate area to rank results, and a map pin for a reverse lookup; never the person\'s network address, name or account. The Privacy Policy names it ("Google Places ... from our servers").',
+  },
+  {
+    ref: 'GOOGLE_MAPS', party: 'Google LLC (Maps Platform: Distance Matrix)', service: 'Road distances and travel times (adapter only)',
+    modelBacked: false,
+    providerDirs: ['maps'], hosts: ['maps.googleapis.com', 'googleapis.com'],
+    payload: ['LOCATION'], lawfulBasis: 'CONTRACT',
+    country: 'US', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES', contractEnv: null,
+    note: 'NOT USED AT LAUNCH: routes and travel estimates run on Swift\'s own servers (OSRM row), as the Privacy Policy says. The adapter stays behind MAPS_PROVIDER=google. Coordinates only, no identity.',
   },
   {
     ref: 'OSRM', party: 'Swift (self-hosted OSRM)', service: 'Routing and ETAs',
@@ -204,11 +228,21 @@ export const NON_PROCESSOR_HOSTS: Readonly<Record<string, string>> = {
   'officialgazette.gov.gy': 'public read (commencement watch fetches public notices; sends nothing)',
   'www.parliament.gov.gy': 'public read (commencement watch)',
   'play.google.com': 'link rendered to users; no server call',
-  'wa.me': 'link rendered to users; no server call',
+  'wa.me': 'link rendered to users; no server call (a support chat a person starts on WhatsApp reaches Swift\'s public support line through Meta; see POLICY_NAMED_WITHOUT_EGRESS)',
   'maps.google.com': 'map link inside SOS messages to emergency contacts; no server call',
   // The MMG checkout SANDBOX's placeholder page (providers/mmg/mmg-checkout.ts). A .invalid name never
   // resolves (RFC 2606): nothing is sent anywhere; the live page is MMG's own, under mmgtest.net / mmg.gy.
   'mmg-checkout.sandbox.invalid': 'sandbox placeholder page; a .invalid name never resolves, no server call',
+};
+
+/**
+ * Parties the Privacy Policy names that Swift's code sends nothing to, with the reason. They are disclosed
+ * because a person's data can reach them through Swift, but no register row applies: there is no outbound
+ * call to grade. `doc1-processor-register.test.ts` holds every party the policy names to a row or to this list.
+ */
+export const POLICY_NAMED_WITHOUT_EGRESS: Readonly<Record<string, string>> = {
+  WhatsApp: 'support chats a person starts from the app\'s wa.me link go to Swift\'s public support line (owner ruling 11 Oct: it answers WhatsApp); the code renders the link only',
+  'the map built into your phone': 'the phone\'s own map (Google Maps on Android, Apple Maps on iPhone) draws the map on the device; Swift\'s servers call neither',
 };
 
 export function processorByRef(ref: string | undefined | null): ProcessorEntry | null {
