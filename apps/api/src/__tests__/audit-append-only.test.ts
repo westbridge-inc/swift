@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { appRoleDdl } from '../lib/tenant-rls';
 import { AUDIT_PURGE_SETTING, purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
@@ -23,7 +23,7 @@ import { AUDIT_PURGE_SETTING, purgeAuditLogs, purgeSensitiveReadLogs } from '../
 // helper, so it cannot spread into the application by copy.
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const RUN = nanoid(8);
 const ids: string[] = [];
 const readIds: string[] = [];

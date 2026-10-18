@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 /** Service-free suite for the direct-MMG claim/disagreement authority. The
  * default API config opens PostgreSQL and Redis through the R048-001 target
@@ -18,6 +19,7 @@ export default defineConfig({
     testTimeout: 10_000,
     fileParallelism: false,
     env: {
+      ...sideConfigTestEnv(),
       NODE_ENV: 'test',
       DEV_OTP_BYPASS: '0',
     },

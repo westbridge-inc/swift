@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { ALGO_DEFAULTS, algoConfig, algoValue, invalidateAlgoConfig } from '../modules/algo/algo-config';
 
@@ -41,7 +42,7 @@ async function put(key: string, value: unknown, version: number, tenantId = TENA
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
-  prisma = new PrismaClient();
+  prisma = testPrismaClient();
   await prisma.$connect();
 });
 
