@@ -107,6 +107,8 @@ beforeAll(async () => {
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
   // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
   process.env['STORE_MMG_PAY_LINK'] = '1';
+  // [PAYMENT-SIMPLIFY] These cases cover the driver link's ON path, kept dormant behind DRIVER_MMG_PAY_LINK.
+  process.env['DRIVER_MMG_PAY_LINK'] = '1';
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);

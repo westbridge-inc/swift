@@ -144,6 +144,18 @@ export const DARK_FEATURES: DarkFeature[] = [
       'A rider or driver whose phone has no push registration (notifications never granted, a new or reinstalled phone, an account ops created) still goes online, and learns of an offer or a cancellation only while the app is open. This is the deliberate launch posture: build 9 cannot ask for notifications or open Settings, so requiring push is an owner decision once a build that can is live in both stores.',
     impact: 'ops',
   },
+  {
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Deliberately OFF: the owner removed the
+    // driver's in-app MMG pay link. Listed so the switch is never a silent mystery.
+    key: 'driver_mmg_pay_link',
+    setting: 'DRIVER_MMG_PAY_LINK',
+    source: 'env',
+    enabledWhen: '1',
+    title: "The taxi driver's MMG pay link",
+    whileOff:
+      "A passenger pays the driver directly at drop-off, in cash or by MMG, with no in-app pay link: the trip-end screen shows no 'Pay with MMG' button, the driver's Account screen shows no MMG pay link card, and a new link is refused. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
+    impact: 'money',
+  },
   // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in
   // normal running; set to 1 it switches its capability off. The census in
   // dark-features.test.ts fails on any *_KILL the API reads that is not here.

@@ -427,9 +427,33 @@ async function resolveVendorDestination(tap: Tap): Promise<boolean> {
     && now.storeGeneration === selected.storeGeneration;
 }
 
+/** [STORE-ALERT 18 Oct 2026] A "New Order!" push tapped while another app of
+ *  Swift is open (one account is often a customer AND a store owner): the
+ *  store screens are not mounted, so the route used to land nowhere. The
+ *  global StoreAlertElsewhere layer registers here, asks to open the store,
+ *  switches apps through the server's switch-role, then routes the same data
+ *  again (routeNotificationData). */
+type BusinessTapElsewhere = (data: Record<string, unknown>) => void;
+let businessTapElsewhere: BusinessTapElsewhere | null = null;
+
+export function setBusinessTapElsewhereHandler(handler: BusinessTapElsewhere | null): () => void {
+  businessTapElsewhere = handler;
+  return () => { if (businessTapElsewhere === handler) businessTapElsewhere = null; };
+}
+
+/** Route notification data exactly as a tap would (the same attempt fencing). */
+export function routeNotificationData(data: Record<string, unknown>): void {
+  routeTap(data);
+}
+
 async function go(tap: Tap) {
   if (tap.attempt !== routing) return;
   if (!navigationRef.isReady()) { pending = tap; return; }
+  if (tap.data['kind'] === 'vendor_order_alert' && isVendorDestination(tap) && businessTapElsewhere
+    && useAuthStore.getState().intent !== 'vendor') {
+    businessTapElsewhere(tap.data);
+    return;
+  }
   let dest = tap.dest;
   if (isVendorDestination(tap)) {
     if (!await resolveVendorDestination(tap)) return;

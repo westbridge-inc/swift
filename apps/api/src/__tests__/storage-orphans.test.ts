@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { recordStorageOrphan, retryStorageOrphans } from '../lib/storage-orphans';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
@@ -10,7 +11,7 @@ import { runWithTenant } from '../plugins/tenant-context';
 process.env['DATABASE_URL'] = process.env['DATABASE_URL']
   || 'postgresql://swift:swift@localhost:5434/swift_test2';
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const scopedPrisma = prisma.$extends(tenantScopeExtensionFor(prisma)) as unknown as PrismaClient;
 const log = { error: () => undefined };
 const marker = nanoid(8).toLowerCase();

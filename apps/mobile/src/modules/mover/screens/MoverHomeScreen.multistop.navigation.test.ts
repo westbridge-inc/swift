@@ -25,6 +25,8 @@ vi.mock('react-native', async () => {
   return { View, Pressable, Text: View, StyleSheet: { create: (s: unknown) => s, flatten: (s: unknown) => s, hairlineWidth: 1 }, Platform: { OS: 'ios' } };
 });
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
+// [STORE-ALERT] The push-off strip reads the OS permission; this suite grades the board only.
+vi.mock('../../../components/PushOffStrip', () => ({ PushOffStrip: () => null }));
 vi.mock('react-native-maps', async () => {
   const R = await import('react');
   return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: () => null, PROVIDER_DEFAULT: 'default' };

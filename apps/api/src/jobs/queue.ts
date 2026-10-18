@@ -877,7 +877,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await opsPageOnce(ctx, `sos-active-without-page:${stuck.sosAlertId}`, 600, () =>
           notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
             tenantId: stuck.tenantId,
-            title: '🚨 SOS ACTIVE with no ops page delivered',
+            title: 'URGENT: SOS ACTIVE with no ops page delivered',
             body: `Alert ${stuck.sosAlertId} has been ACTIVE for ${stuck.ageSeconds}s and its ops page is still undelivered. Open the war room and respond now; the worker keeps retrying.`,
             data: { kind: 'sos_active', sosAlertId: stuck.sosAlertId, watchdog: true },
           }),
@@ -897,7 +897,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
       // [GUARDRAILS §3] the platform is paged about real alerts only, never the store-review fiction's
       for (const id of esc.platformPage) {
         await opsPageOnce(ctx, `ops-alert-unacked:${id}`, 900, () =>
-          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: '⏰ An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
+          pageOps(ctx.prisma, opsNotifications, { tenantId: null, title: 'OVERDUE: An ops alert has NO acknowledgement past its deadline', body: `Ops alert ${id} was escalated: nobody acknowledged the page. Open the alert list and acknowledge it.`, data: { kind: 'ops_alert_escalated', opsAlertId: id, platform: true } }),
         ).catch(() => {});
       }
       await scanOpsAlerts(ctx.prisma).catch(() => null);
@@ -1164,7 +1164,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'settlement-imports-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📄 Settlement imports need a person',
+                title: 'Settlement imports need a person',
                 body: `${imports.unbalanced.length} published import(s) do not add up, ${imports.rejectedButCredited.length} rejected file(s) have a credited row, and ${imports.stuck.length} publication(s) stopped part-way and are not finished. Reconcile against the MMG statement; nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'settlement-imports-review', ...imports },
               }),
@@ -1193,7 +1193,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'agent-cash-duplicate-credits', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💵 MMG transactions credited more than once',
+                title: 'MMG transactions credited more than once',
                 body: `${duplicates.length} MMG transaction(s) hold more than one credited agent-cash record. Freeze them, reconcile against the MMG statement, and reverse only by hand — nothing is reversed automatically.`,
                 data: { kind: 'billing_invariants', alert: 'agent-cash-duplicate-credits', count: duplicates.length },
               }),
@@ -1209,7 +1209,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'promo-funding-invariants', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🏷️ Promo funding invariants broken',
+                title: 'Promo funding invariants broken',
                 body: `${promoScan.invalidTerms} active promo(s) with invalid terms; ${promoScan.discountWithoutFunder.sinceEnforced} discounted order(s) since enforcement with no named funder; ${promoScan.tipFundingGap.sinceEnforced} order(s) since enforcement whose tip was discounted. Freeze the promo, then reconcile the orders.`,
                 data: { kind: 'billing_invariants', alert: 'promo-funding-invariants', invalidTerms: promoScan.invalidTerms, discountWithoutFunder: promoScan.discountWithoutFunder.sinceEnforced, tipFundingGap: promoScan.tipFundingGap.sinceEnforced },
               }),
@@ -1225,7 +1225,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'refunds-awaiting-review', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '↩️ Returns with an inferred refund await review',
+                title: 'Returns with an inferred refund await review',
                 body: `${refundReview.inferredOpen} open return(s) were computed by inference (no order snapshot) and ${refundReview.legacyOpen} legacy return(s) sit on discounted orders. Recompute each from the order's items and contact the store and customer before anything settles.`,
                 data: { kind: 'billing_invariants', alert: 'refunds-awaiting-review', inferredOpen: refundReview.inferredOpen, legacyOpen: refundReview.legacyOpen },
               }),
@@ -1241,7 +1241,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'fare-zone-ambiguity', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '🗺️ Fare zones overlap at the same priority',
+                title: 'Fare zones overlap at the same priority',
                 body: `${zoneScan.ambiguousPairs.length} pair(s) of active fare zones overlap at equal priority in one market. Trips there price by the smallest zone until you give one of each pair a different priority or redraw it.`,
                 data: { kind: 'billing_invariants', alert: 'fare-zone-ambiguity', pairs: zoneScan.ambiguousPairs.slice(0, 10) },
               }),
@@ -1257,7 +1257,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'pricing-config-invalid', 24 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '💲 Pricing config is invalid',
+                title: 'Pricing config is invalid',
                 body: `${pricingScan.invalid.length} pricing column(s) fail the schema: ${pricingScan.invalid.map((i) => `${i.countryCode} ${i.kind}`).join(', ')}. Quotes there price from the last known good version until the column is fixed.`,
                 data: { kind: 'billing_invariants', alert: 'pricing-config-invalid', invalid: pricingScan.invalid.slice(0, 10) },
               }),
@@ -1278,7 +1278,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-refund-obligations', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad refund obligations need a person',
+                title: 'Ad refund obligations need a person',
                 body: `${adRefunds.failed} refund intent(s) FAILED after every retry and ${adRefunds.terminalWithoutIntent.length} cancelled or killed paid campaign(s) have no refund intent (run the backfill). ${adRefunds.awaitingPayout.count} executed intent(s) await a payout reference.`,
                 data: { kind: 'billing_invariants', alert: 'ad-refund-obligations', failed: adRefunds.failed, terminalWithoutIntent: adRefunds.terminalWithoutIntent.slice(0, 10), awaitingPayout: adRefunds.awaitingPayout.count },
               }),
@@ -1293,7 +1293,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
             await opsPageOnce(ctx, 'ad-checkout-invariants', 6 * 3600, () =>
               notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
                 tenantId: null,
-                title: '📣 Ad checkout invariants broken',
+                title: 'Ad checkout invariants broken',
                 body: `${adCheckout.paidWithoutInventory.length} paid campaign(s) have no confirmed inventory (stop serving and refund or re-book) and ${adCheckout.duplicateActiveInvoices.length} campaign(s) hold more than one active invoice (freeze and reconcile).`,
                 data: { kind: 'billing_invariants', alert: 'ad-checkout-invariants', paidWithoutInventory: adCheckout.paidWithoutInventory.slice(0, 10), duplicateActiveInvoices: adCheckout.duplicateActiveInvoices.slice(0, 10) },
               }),
@@ -1681,7 +1681,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           // Platform-wide ops page: an aggregate scan or infra alarm, not one
           // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
           tenantId: null,
-          title: '🛡️ Weekly safety digest',
+          title: 'Weekly safety digest',
           body: digest.lines.join(' · '),
           data: { kind: 'incident_weekly_digest', open: digest.open, breaches: digest.breaches, patterns: digest.patternsThisWeek },
         }).catch(() => {});
@@ -1998,7 +1998,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ Ad creative review SLA at risk — ${cr.campaign.name}`,
+                title: `Ad creative review SLA at risk — ${cr.campaign.name}`,
                 body: 'A creative has been waiting for review for over 75% of the SLA window. Review it now.',
                 data: { kind: 'ad_review_sla_risk', creativeId: cr.id, campaignId: cr.campaignId },
               }),
@@ -2380,7 +2380,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
                 // Platform-wide ops page: an aggregate scan or infra alarm, not one
                 // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
                 tenantId: null,
-                title: `⏰ SLA breached — case ${b.caseNumber} (${b.severity})`,
+                title: `SLA breached — case ${b.caseNumber} (${b.severity})`,
                 body: `The ${b.kind === 'ACK' ? 'acknowledge' : 'decide'} clock has blown. Work the case now.`,
                 data: { kind: 'incident_sla_breach', caseId: b.id, breach: b.kind, severity: b.severity },
               }),
@@ -2473,7 +2473,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           await opsPageOnce(ctx, 'taxi-unpaid-earning', 6 * 3600, () =>
             notifyAdmins(ctx.prisma, new NS(ctx.prisma, ctx.io), {
               tenantId: null,
-              title: '🚕 Cash jobs completed without a recorded payment',
+              title: 'Cash jobs completed without a recorded payment',
               body: `${taxiUnpaidDelivered.sinceEnforced} ride(s) and ${courierUnpaidDelivered.sinceEnforced} courier job(s) are delivered with no collected cash since the cash outcome became mandatory. A completion path is bypassing the cash step — review before a mover is paid for money nobody recorded.`,
               data: { kind: 'earnings_missing', variant: 'cash_unpaid_completion', taxi: taxiUnpaidDelivered.sinceEnforced, courier: courierUnpaidDelivered.sinceEnforced },
             }),
@@ -2487,7 +2487,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // Platform-wide ops page: an aggregate scan or infra alarm, not one
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
-              title: '💸 Movers were paid late by the reconciler',
+              title: 'Movers were paid late by the reconciler',
               body: `${healed.length} delivered order(s) had no earnings row and were healed. A completion path is losing the earnings write — investigate before a mover notices first.`,
               data: { kind: 'earnings_missing', count: healed.length },
             }),

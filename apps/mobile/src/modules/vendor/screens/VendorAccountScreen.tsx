@@ -781,7 +781,7 @@ function StaffSection() {
           onPress={submit}
         />
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-          Tap a role pill to switch Manager ↔ Staff.
+          Tap a role to switch between Manager and Staff.
         </T>
         <WithdrawStaffInvites />
       </Card>
