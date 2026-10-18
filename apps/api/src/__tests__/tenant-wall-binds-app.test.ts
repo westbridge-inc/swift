@@ -6,6 +6,7 @@ import { tenantContext, runAsSystem, runWithTenant, runWithoutTenant, getTenantC
 import { tenantUnscopedAccessCounter, tenantBindCounter } from '../plugins/observability';
 import { TENANT_TABLES, forceRlsStatements } from '../lib/tenant-rls';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] this suite creates the NOLOGIN probe role and GRANTs it table access by raw DDL to prove the RLS wall from outside the app — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -36,7 +37,7 @@ beforeAll(async () => {
   await runAsSystem('test-setup', async () => {
     for (const t of [A, B]) await prisma.tenant.create({ data: { id: t, name: `Wall ${t}`, slug: t } });
     for (const t of [A, B]) {
-      const u = await prisma.user.create({ data: { phone: `+5927${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Wall', lastName: t, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: t } });
+      const u = await prisma.user.create({ data: { phone: testPhone(), firstName: 'Wall', lastName: t, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: t } });
       userIds.push(u.id);
     }
   });

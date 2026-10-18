@@ -111,6 +111,10 @@ model User {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   lastActiveAt DateTime?
+  /// [R23 · research C10] When this person was told their account closes after 12 months
+  /// without use (user/inactivity.ts). Any use after it cancels the notice (back to null);
+  /// 30 days after it, with no use, the ordinary account-deletion pipeline runs.
+  inactivityNoticeAt DateTime?
 
   customer               Customer?
   rider                  Rider?
@@ -242,6 +246,11 @@ model OrderOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(20)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -336,6 +345,11 @@ model MoverRevocationOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(20)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -2668,6 +2682,12 @@ model OrderItem {
   substituteItemId String?
   substituteName   String?
   substitutePrice  Decimal?           @db.Decimal(10, 2)
+  /// [SUBSTITUTION 17 Oct] When an open swap question stops waiting for the
+  /// customer. Set with the proposal, cleared when the question closes. Past
+  /// it, the line is REMOVED (never silently swapped) — or, on MMG where the
+  /// total can't change in-app, the question is withdrawn. NULL = no open
+  /// question (or one proposed before this column: the sweep starts its clock).
+  substituteDecideBy DateTime?
 
   @@map("order_items")
 }
@@ -7307,6 +7327,11 @@ model RatingOutbox {
   claimedAt   DateTime?
   processedAt DateTime?
   lastError   String?
+  /// [row 267 · AUD-L4-021] A row is retried at most this many times; then it is a
+  /// dead letter: never claimed again, paged (ops_dlq_non_empty) and listed on the
+  /// admin Background jobs page, until an operator requeues it.
+  maxAttempts    Int       @default(25)
+  deadLetteredAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 

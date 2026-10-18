@@ -576,7 +576,7 @@ export class SosService {
     const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
     const sms = getChannels().sms;
     const who = authority.who || 'the person you were alerted about';
-    const body = `✅ Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
+    const body = `Update from Swift: the emergency alert involving ${who} has been closed by our safety team. If you're still concerned, please reach out to them directly.`;
     const notice: Array<{ id: string; ok: boolean }> = [];
     for (const c of contacts) {
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.

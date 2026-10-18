@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { CSAE_PAGE_TITLE } from '../modules/moderation/csae-page';
+import { testPhone } from './helpers/fixture-ids';
 
 // [REVIEW-F S3-1 on e53c15fe] a page that fails to open must not silence the next one: one switch makes the next page fail.
 const fx = vi.hoisted(() => ({ failNextPage: false }));
@@ -40,7 +41,7 @@ const since = new Date();
 
 async function mkUser(roles: UserRole[], activeRole: UserRole) {
   const u = await app.prisma.user.create({
-    data: { phone: `+59200${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Csae', lastName: `Page${RUN}`, roles, activeRole, isPhoneVerified: true, ...(activeRole === 'ADMIN' ? { admin: { create: { permissions: ['*'] } } } : {}) },
+    data: { phone: testPhone(), firstName: 'Csae', lastName: `Page${RUN}`, roles, activeRole, isPhoneVerified: true, ...(activeRole === 'ADMIN' ? { admin: { create: { permissions: ['*'] } } } : {}) },
   });
   userIds.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: activeRole, jti: nanoid(8) });

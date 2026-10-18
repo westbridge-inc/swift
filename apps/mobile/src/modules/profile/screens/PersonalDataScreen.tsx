@@ -21,7 +21,8 @@ import { toast } from '../../../kit/toast';
 const GUTTER = space['2xl'];
 
 // Kit Personal Data (50): avatar, labeled fields, save. Phone is the account
-// key (read-only); the avatar comes from the mandatory signup selfie.
+// key (read-only); a partner's avatar comes from the mandatory signup selfie
+// (a customer takes no photos, owner 16 Oct, so most customers have none).
 export function PersonalDataScreen({ route, navigation }: any = {}) {
   const qc = useQueryClient();
   const stepUp = useStepUp();
@@ -169,9 +170,14 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
                 <Feather name="user" size={44} color={color.brand[600]} />
               </View>
             )}
-            <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
-              Profile photo comes from your signup selfie.
-            </T>
+            {/* [Owner 16 Oct: customers take no photos] Only a person who HAS a
+                picture (a partner's signup selfie) is told where it came from;
+                a customer without one is never shown a line about a selfie. */}
+            {p.avatar ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Profile photo comes from your signup selfie.
+              </T>
+            ) : null}
           </View>
 
           <View style={{ gap: space.xl, marginTop: space['2xl'] }}>

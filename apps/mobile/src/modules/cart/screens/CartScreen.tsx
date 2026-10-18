@@ -775,7 +775,7 @@ export function CartScreen() {
               // server already sends `lineTotal` (unitPrice × quantity) and it
               // is what sums into "Items (n)". If a response ever omits it we
               // fall back to exactly what shipped before rather than printing a
-              // confident $0 — money() has no missing-value face.
+              // confident $0 (money() now prints a dash for a missing amount).
               // `Number(null)` is 0 and `Number.isFinite(0)` is TRUE, so the
               // obvious guard passes for a MISSING line total and prints a
               // confident $0 — the exact thing the comment above says it is

@@ -6,6 +6,7 @@ import { nanoid } from 'nanoid';
 import { QrService } from '../modules/qr/qr.service';
 import { AttributionService } from '../modules/qr/attribution.service';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 // The shortCode generator is controllable so a retired code can be offered
 // again (contract §5.6); every other call is the real CSPRNG.
@@ -78,7 +79,7 @@ beforeAll(async () => {
   ]) await prisma.$executeRawUnsafe(sql);
   tenantA = `${run}-a`; tenantB = `${run}-b`;
   for (const id of [tenantA, tenantB]) await prisma.tenant.create({ data: { id, name: 'Synthetic QR tenant', slug: id, kind: 'PRODUCTION' } });
-  const user = await prisma.user.create({ data: { tenantId: tenantA, phone: `+592041${Date.now()}`, firstName: 'Synthetic', lastName: 'Test', roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER', customer: { create: {} } } });
+  const user = await prisma.user.create({ data: { tenantId: tenantA, phone: testPhone(), firstName: 'Synthetic', lastName: 'Test', roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER', customer: { create: {} } } });
   userId = user.id;
   ownerId = (await prisma.vendorOwner.create({ data: { userId } })).id;
 });

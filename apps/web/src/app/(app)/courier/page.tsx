@@ -3,7 +3,8 @@
 import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
-import { courierEstimate, requestCourier, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { courierEstimate, requestCourier } from '@/lib/customer-courier';
 import { currentFix } from '@/lib/geolocate';
 import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place';
 // [W-18] The field moved to components/location-field.tsx and the TAXI form
