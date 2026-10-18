@@ -45,11 +45,45 @@ export interface LedgerPosting {
 
 const cents = (n: number) => Math.round(n * 100);
 
+/** One posting's entries as a comparable multiset: account, subledger, and
+ *  each side in integer cents (the description is free text, never compared). */
+function entryKeys(entries: ReadonlyArray<{ account: string; subledgerId?: string | null; debit?: unknown; credit?: unknown }>): string {
+  return entries
+    .map((e) => `${e.account}|${e.subledgerId ?? ''}|${cents(Number(e.debit ?? 0))}|${cents(Number(e.credit ?? 0))}`)
+    .sort()
+    .join('\n');
+}
+
+/** [row 163 · DB-04] A posting already stored under this key: the same
+ *  entries are a replay (null, metered); anything else is a different money
+ *  event under a used key and is refused, never swallowed. */
+async function replayOf(db: Db, input: { idempotencyKey: string; entries: LedgerPosting[] }): Promise<null | 'ABSENT'> {
+  const stored = await db.ledgerTransaction.findUnique({
+    where: { idempotencyKey: input.idempotencyKey },
+    select: { entries: { select: { accountCode: true, subledgerId: true, debit: true, credit: true } } },
+  });
+  if (!stored) return 'ABSENT';
+  const storedKeys = entryKeys(stored.entries.map((e) => ({ account: e.accountCode, subledgerId: e.subledgerId, debit: e.debit, credit: e.credit })));
+  if (storedKeys !== entryKeys(input.entries)) {
+    throw new Error(`LEDGER_REPLAY_MISMATCH: ${input.idempotencyKey} is already posted with different entries`);
+  }
+  log().info({ idempotencyKey: input.idempotencyKey }, 'ledger: duplicate posting is a replay (no-op)');
+  return null;
+}
+
 /**
  * Post one balanced transaction. Call INSIDE the same database transaction as
  * the money mutation it describes — atomicity is the whole point. Returns null
- * on idempotency replay (already posted — swallowed, metered). Throws on an
- * unbalanced or malformed posting: that is a code bug and must never ship.
+ * on idempotency replay (the same entries already posted under the key —
+ * metered no-op). Throws on an unbalanced or malformed posting (a code bug
+ * that must never ship) and on a different posting under a used key.
+ *
+ * [row 163 · DB-04] The replay is decided by READING the stored posting
+ * first, never by catching the unique violation: in PostgreSQL that error
+ * aborts the caller's transaction, so swallowing it broke the rest of the
+ * money mutation. A violation can still happen when two writers race for one
+ * key; inside a transaction it is rethrown (that transaction is dead and must
+ * fail and retry), outside one the stored posting is compared.
  */
 export async function postLedger(
   db: Db,
@@ -76,6 +110,7 @@ export async function postLedger(
     throw new Error(`LEDGER_UNBALANCED: ${debits} vs ${credits} cents (${input.idempotencyKey})`);
   }
 
+  if ((await replayOf(db, input)) === null) return null;
   try {
     return await db.ledgerTransaction.create({
       data: {
@@ -94,9 +129,9 @@ export async function postLedger(
       select: { id: true },
     });
   } catch (error) {
-    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002') {
-      log().info({ idempotencyKey: input.idempotencyKey }, 'ledger: duplicate posting swallowed');
-      return null;
+    // A root client is no transaction: the racing writer's posting is stored, compare it.
+    if ((error as Prisma.PrismaClientKnownRequestError).code === 'P2002' && '$transaction' in db) {
+      if ((await replayOf(db, input)) === null) return null;
     }
     throw error;
   }

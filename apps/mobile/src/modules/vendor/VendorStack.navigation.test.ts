@@ -102,6 +102,7 @@ vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: () => 
 vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({}), WentLivePopup: () => null }));
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: () => null }));
 vi.mock('../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: () => null }));
+vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }));
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
 vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));

@@ -140,8 +140,24 @@ describe('[R3] every store page carries the seller block', () => {
     expect((await webView(slug)).seller).toEqual(bare);
   });
 
-  it('MMG is named only while the store has a working MMG link of its own', async () => {
+  it('[PAYMENT-SIMPLIFY] switch off (default): MMG is named for a store with a valid MMG NUMBER, never for a pay link alone', async () => {
     vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '');
+    const { vendorId, slug } = await store(3001); // own index: main's row-248 receipt test uses 9
+    await setStore(vendorId, { mmgPayUrl: LINK });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+    await setStore(vendorId, { mmgNumber: '+5926001234' });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });
+    const web = await webView(slug);
+    expect(web.seller.payment).toEqual({ cash: true, storeMmg: true });
+    expect(JSON.stringify(web)).not.toContain('6001234'); // the number is never on the storefront
+    await setStore(vendorId, { mmgNumber: '+5922251234' }); // a landline row: re-checked on read
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+  });
+
+  it('MMG is named only while the store has a working MMG link of its own (the dormant link, STORE_MMG_PAY_LINK=1)', async () => {
+    vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '1');
     const { vendorId, slug } = await store(3);
     await setStore(vendorId, { mmgPayUrl: LINK });
     expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });
@@ -194,13 +210,17 @@ describe('[R3] the refund rule is the store owner\'s own words, checked on write
     expect((await appView(vendorId)).seller.refundRule).toBeNull();
   });
 
-  it.each([
+  // Each case has its own fixed store index (REFUSAL_BASE + its row), clear of every other
+  // store index in this file; storefront-seller-block-indexes.test.ts keeps them unique.
+  const REFUSAL_BASE = 4001;
+  const REFUSALS = [
     ['a link', 'Refunds: see https://example.com/refunds', 'REFUND_RULE_INVALID'],
     ['a web address without a scheme', 'Read www.example.com first', 'REFUND_RULE_INVALID'],
     ['more than 300 characters', `Refunds ${'x'.repeat(300)}`, 'REFUND_RULE_INVALID'],
     ['goods Swift never carries', 'No refunds on rum or cigarettes once opened.', 'REFUND_RULE_INVALID'],
-  ])('refuses %s, and keeps the rule on file as it was', async (_what, text, code) => {
-    const { userId, vendorId } = await store(8 + Math.floor(Math.random() * 1000));
+  ] as const;
+  it.each(REFUSALS.map(([what, text, code], row) => [what, text, code, REFUSAL_BASE + row] as const))('refuses %s, and keeps the rule on file as it was', async (_what, text, code, n) => {
+    const { userId, vendorId } = await store(n);
     await setStore(vendorId, { refundRule: 'Exchanges only.' });
     const res = await saveRefundRule(await tokenFor(userId), vendorId, text);
     expect(res.statusCode).toBe(400);

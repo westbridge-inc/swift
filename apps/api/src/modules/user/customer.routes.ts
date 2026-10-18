@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -64,7 +65,11 @@ import { SupportService } from '../support/support.service';
 import { AccountService, closesByRequest } from './account.service';
 import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
-import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgAcceptedPayBy, mmgAcceptExpiryNotice, mmgOrderNoun, mmgPayByCustomerLine } from '../order/mmg-accept-expiry';
+import { displayMmgNumber, safeMmgNumber } from '../../utils/mmg-number';
+import { formatMoney } from '../../utils/currency-amount';
+import { validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
 import { currentConsentDetailed } from '../legal/consent.service';
 import { LEGAL_VERSION } from '../legal/legal.routes';
@@ -177,6 +182,8 @@ const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
 
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY to the store's MMG number (build 12+, web).
+  mmgPayTo: z.enum(['STORE_NUMBER']).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
@@ -297,6 +304,12 @@ const notificationPrefsSchema = z.object({
 const deviceTokenSchema = z.object({
   token: z.string().min(8).max(512),
   platform: z.enum(['ios', 'android']),
+  /** [RINGER · continues #1367] What the installed app can ring with
+   *  (DeviceToken.alertsVersion): builds 9-11 send none, so absent = 0. A
+   *  malformed value also reads 0 rather than refusing the registration: a
+   *  refused registration is a phone that silently gets no pushes at all,
+   *  and 0 is exactly what every build can show. */
+  alertsVersion: z.number().int().min(0).max(1000).optional().catch(undefined),
 });
 
 const switchRoleSchema = z.object({
@@ -411,23 +424,35 @@ async function buildCartResponse(
   const paymentVendorIds = [...new Set(cart.items.map((item) => item.item.vendorId))].sort();
   const paymentVendors = await app.prisma.vendor.findMany({
     where: { id: { in: paymentVendorIds } },
-    select: { id: true, mmgPayUrl: true },
+    select: { id: true, mmgPayUrl: true, mmgNumber: true },
     orderBy: { id: 'asc' },
   });
   const singlePaymentVendor = paymentVendorIds.length === 1 && paymentVendors.length === 1
     ? paymentVendors[0]!
     : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] `mmg` is the OLD pay-LINK rail (the only one
+  // builds 9-11 know): offered only while STORE_MMG_PAY_LINK is on, so those builds show
+  // cash only. `mmgStoreNumber` is the rail build 12 and the web read: the customer pays
+  // the store's MMG NUMBER directly, shown on the order once the store accepts.
   const mmgValidation = singlePaymentVendor
-    ? validateMmgPayUrl(singlePaymentVendor.mmgPayUrl)
+    ? validateOfferedStoreMmgPayUrl(singlePaymentVendor.mmgPayUrl)
     : null;
   const mmgAvailable = mmgValidation?.valid === true;
   const mmgUnavailableReason = paymentVendorIds.length !== 1
     ? 'MULTI_VENDOR_UNSUPPORTED' as const
-    : !singlePaymentVendor?.mmgPayUrl
-      ? 'VENDOR_NOT_CONFIGURED' as const
-      : mmgAvailable
-        ? null
-        : 'VENDOR_LINK_INVALID' as const;
+    : mmgValidation && !mmgValidation.valid && mmgValidation.reason === 'PAY_LINKS_OFF'
+      ? 'PAY_LINKS_OFF' as const
+      : !singlePaymentVendor?.mmgPayUrl
+        ? 'VENDOR_NOT_CONFIGURED' as const
+        : mmgAvailable
+          ? null
+          : 'VENDOR_LINK_INVALID' as const;
+  const storeNumber = singlePaymentVendor ? safeMmgNumber(singlePaymentVendor.mmgNumber) : null;
+  const mmgNumberUnavailableReason = paymentVendorIds.length !== 1
+    ? 'MULTI_VENDOR_UNSUPPORTED' as const
+    : storeNumber
+      ? null
+      : 'VENDOR_NOT_CONFIGURED' as const;
   // Opaque, non-secret scope: a method selection is valid only for this exact
   // vendor set + destination state. A previous cart's MMG choice cannot revive
   // when another MMG-capable vendor appears.
@@ -435,8 +460,9 @@ async function buildCartResponse(
     .update(JSON.stringify({
       cartId: cart.id,
       vendors: paymentVendors.map((vendor) => {
-        const checked = validateMmgPayUrl(vendor.mmgPayUrl);
-        return [vendor.id, checked.valid ? checked.url : checked.reason];
+        const checked = validateOfferedStoreMmgPayUrl(vendor.mmgPayUrl);
+        // The number is part of the scope too: a choice made for one number never survives a change.
+        return [vendor.id, checked.valid ? checked.url : checked.reason, safeMmgNumber(vendor.mmgNumber) ?? 'NO_NUMBER'];
       }),
       expectedVendorIds: paymentVendorIds,
     }))
@@ -666,6 +692,15 @@ async function buildCartResponse(
         fundsFlow: 'DIRECT_TO_VENDOR' as const,
         unavailableReason: mmgUnavailableReason,
       },
+      // The number itself is never in the cart: it is shown only on the accepted order.
+      mmgStoreNumber: {
+        available: storeNumber !== null,
+        provider: 'MMG' as const,
+        fundsFlow: 'DIRECT_TO_VENDOR' as const,
+        payTo: 'STORE_NUMBER' as const,
+        shownWhen: 'STORE_ACCEPTS' as const,
+        unavailableReason: mmgNumberUnavailableReason,
+      },
     },
   };
 }
@@ -857,8 +892,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  and riders rate them too; respect runs both ways). Aggregate only —
    *  never per-rating rows, never who said what. */
   app.get('/rating', async (request: AuthRequest) => {
-    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
-    return { success: true, data: surface };
+    // [COORD 18 Oct, option S] A customer's own star is shown from whole groups of 5 only (rating-groups.ts).
+    const { displayRating, ratingBucket, ratingCount, topRated } = await shownRatingFor(app.prisma, 'CUSTOMER', request.user.userId);
+    return { success: true, data: { displayRating, ratingBucket, ratingCount, topRated } };
   });
 
   app.get('/profile', async (request: AuthRequest) => {
@@ -933,7 +969,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** GET /account/export — DPA right of access + portability: the customer's own
    *  data as portable JSON. Documents' contents are never exported. */
-  app.get('/account/export', async (request: AuthRequest) => {
+  // [Row 331 · REVIEW-G S3-1] ~60 reads per export: a few an hour is plenty for a person, and keeps it from being a load lever.
+  app.get('/account/export', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async (request: AuthRequest) => {
     const data = await account.exportData(request.user.userId);
     return { success: true, data };
   });
@@ -989,6 +1026,13 @@ export async function customerRoutes(app: FastifyInstance) {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
               pendingAvatarObjects: result.pendingAvatarObjects,
+              pendingUploads: result.pendingUploads,
+            }),
+            // [Row 331] What a legal hold keeps is recorded as kept, never silently skipped.
+            ...(result.status === 'PENDING_LEGAL_HOLD' && {
+              heldDocuments: result.heldDocuments,
+              heldMoverObjects: result.heldMoverObjects,
+              heldUploads: result.heldUploads,
             }),
           },
         },
@@ -2368,6 +2412,7 @@ export async function customerRoutes(app: FastifyInstance) {
       result = await orderService.checkout({
         userId,
         paymentMethod,
+        ...(body.mmgPayTo && paymentMethod === 'MOBILE_MONEY' ? { mmgPayTo: body.mmgPayTo } : {}),
         deliveryInstructions: body.deliveryInstructions,
         tipAmount: body.tipAmount,
         scheduledFor: scheduledForCanonical,
@@ -2691,10 +2736,43 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
-    // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
-    const riderSurface = order.rider?.userId
-      ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Pay-to-number. The store's MMG number and the exact
+    // order total (goods + delivery fee) are shown ONLY to this order's customer (the query is
+    // scoped to customerId) and ONLY once the store has ACCEPTED, while the payment still waits
+    // for the store's "Paid by MMG". Never before acceptance, never after the store confirms,
+    // never on a closed order or a rejected attempt, and never the store's live profile number:
+    // only the number committed under the vendor row lock at checkout.
+    const shownMmgNumber = order.paymentMethod === 'MOBILE_MONEY'
+      && order.paymentStatus === 'PENDING'
+      && order.acceptedAt != null
+      && !(TERMINAL_ORDER_STATUSES as readonly string[]).includes(order.status)
+      && !isRejectedMmgAttempt(order)
+      ? safeMmgNumber(order.mmgNumberSnapshot)
       : null;
+    const payBy = mmgAcceptedPayBy(order);
+    const mmgPayment = shownMmgNumber
+      ? (() => {
+          const recipientName = order.mmgRecipientNameSnapshot ?? order.vendor?.name ?? 'the store';
+          const amount = Number(order.totalAmount);
+          const numberDisplay = displayMmgNumber(shownMmgNumber);
+          return {
+            payTo: 'STORE_NUMBER' as const,
+            provider: 'MMG' as const,
+            fundsFlow: 'DIRECT_TO_VENDOR' as const,
+            recipientName,
+            number: shownMmgNumber,
+            numberDisplay,
+            amount,
+            currencyCode: order.currencyCode,
+            instruction: `Pay ${formatMoney(amount, order.currencyCode, { whole: true })} by MMG to ${recipientName}'s MMG number ${numberDisplay}.`,
+            // [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled.
+            ...(payBy ? { payBy: payBy.toISOString(), deadline: mmgPayByCustomerLine(payBy, order.vendor?.name ?? 'the store', mmgOrderNoun(order.fulfillment)) } : {}),
+          };
+        })()
+      : null;
+
+    // R8.4: the live-order card shows "{Rider} · {display}★" — [COORD 18 Oct, option S] from whole groups of 5 only.
+    const riderSurface = order.rider?.userId ? shownSurface(await shownRatingFor(app.prisma, 'RIDER', order.rider.userId)) : null;
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
@@ -2811,6 +2889,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        mmgPayment,
         // [S1-6] What each party said about a direct-MMG payment, whether the
         // order is held on a disagreement, and whether a claim may be made now.
         mmgClaim: mmgClaimView(order),
@@ -2892,6 +2971,8 @@ export async function customerRoutes(app: FastifyInstance) {
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
         cancellationReason: order.cancellationReason,
+        // [owner 18 Oct 2026] Why an unpaid MMG order closed, in the customer's words (null otherwise).
+        cancellationNotice: mmgAcceptExpiryNotice(order, order.vendor?.name ?? 'The store'),
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
@@ -3483,13 +3564,16 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** POST /notifications/devices — register this device for push. Upsert on
    *  the token: re-registering reassigns it to the CURRENT user (one phone,
-   *  new login) and reactivates it. */
+   *  new login) and reactivates it. [RINGER] It also records what the
+   *  installed app can ring with (alertsVersion, absent = 0), rewritten on
+   *  every registration: an app that reports nothing is sent only what
+   *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
-    const { token, platform } = deviceTokenSchema.parse(request.body);
+    const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
     await app.prisma.deviceToken.upsert({
       where: { token },
-      create: { userId: request.user.userId, token, platform, isActive: true },
-      update: { userId: request.user.userId, platform, isActive: true },
+      create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
+      update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
     });
     return { success: true, data: { message: 'Device registered' } };
   });

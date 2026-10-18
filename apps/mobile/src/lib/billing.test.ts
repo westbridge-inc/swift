@@ -255,6 +255,32 @@ describe('payScreenState — the four bands', () => {
     expect(s.extra).toContain('Orders already in the kitchen still go out');
   });
 
+  it('[BILLING-REANCHOR] paused: the paused days are not charged, and no paid-through date already past is shown', () => {
+    for (const status of ['SUSPENDED', 'CHURNED']) {
+      const s = payScreenState(
+        { status, weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: iso(-12), nextBillingDate: iso(-12) },
+        NOW,
+      );
+      // No pause moment sent: no date is guessed, and the week is not overstated.
+      expect(s.covers).toBe('Covers 1 week, counting the days you traded before the pause · the days orders were paused are not charged');
+      expect(s.covers).not.toMatch(/through|Jul|Aug/);
+    }
+  });
+
+  it('[REVIEW-M #1832 S3-3] paused: names the next bill date paying now gives (due date + time paused + 7 days)', () => {
+    // Due 12 days ago, paused 2 days after that (the grace they traded in), paying now.
+    const due = new Date(NOW.getTime() - 12 * 86_400_000);
+    const paused = new Date(due.getTime() + 2 * 86_400_000);
+    const s = payScreenState(
+      { status: 'SUSPENDED', weeklyFeeGyd: 10_000, amountDueGyd: 10_000, currentPeriodEnd: due.toISOString(), nextBillingDate: due.toISOString(), suspendedAt: paused.toISOString() },
+      NOW,
+    );
+    // The week bought starts 2 days before now: the next bill is 5 days from now, not 7.
+    const next = shortDate(new Date(NOW.getTime() + 5 * 86_400_000).toISOString());
+    expect(s.covers).toBe(`Covers 1 week · next bill ${next} · the days orders were paused are not charged`);
+    expect(shortDate(new Date(NOW.getTime() + 7 * 86_400_000).toISOString())).not.toBe(next);
+  });
+
   it('never prints a paid-through date the server did not send', () => {
     const s = payScreenState({ status: 'ACTIVE', weeklyFeeGyd: 10_000, amountDueGyd: 0 }, NOW);
     expect(s.covers).toBe('');

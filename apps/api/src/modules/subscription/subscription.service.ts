@@ -230,14 +230,21 @@ export class SubscriptionService {
         const tariff = await moverFeeTariffSubject(tx, authority);
         const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
         const priced = partnerRateFor(tiers, tariff.subject);
-        if (!sub.weeklyRate.equals(priced.rate)) {
-          const from = Number(sub.weeklyRate);
-          sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: priced.rate } });
+        // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A fee the
+        // mover has already paid a week at is never raised at once: a higher taxi card rate waits
+        // for the 14-day fee-change notice (F2), as the weekly re-tier does. Before any paid week
+        // (a trial) the role they activate prices the first fee, in either activation order.
+        const from = Number(sub.weeklyRate);
+        const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
+          where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
+        const nextRate = paidAtRate ? from : priced.rate;
+        if (nextRate !== from) {
+          sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: nextRate } });
           const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
           await tx.billingEvent.create({ data: {
-            subscriptionId: sub.id, type: 'TIER_CHANGE', amount: priced.rate, currencyCode: sub.currencyCode,
-            idempotencyKey: `tier:${sub.id}:${seq}:${from}->${priced.rate}`,
-            note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${priced.rate}; issued charges and periods retained.`,
+            subscriptionId: sub.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: sub.currencyCode,
+            idempotencyKey: `tier:${sub.id}:${seq}:${from}->${nextRate}`,
+            note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${nextRate}; issued charges and periods retained.`,
           } });
         }
       }

@@ -24,6 +24,7 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
@@ -42,6 +43,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -1243,6 +1245,8 @@ export class VerificationService {
    * is refused. A case another reviewer holds is not taken over (compare-and-set).
    */
   async claimReviewCase(caseId: string, reviewerId: string) {
+    // An id that is not a UUID names no case (review_cases.id is a uuid column): 404, not a failed query.
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     const kase = await this.prisma.reviewCase.findUnique({ where: { id: caseId }, select: { id: true, submissionId: true, closedAt: true } });
     if (!kase) throw new NotFoundError('ReviewCase', caseId);
     if (kase.closedAt) throw new AppError(409, 'CASE_CLOSED', 'This case is already decided');
@@ -1264,12 +1268,17 @@ export class VerificationService {
 
   /** Only the reviewer holding a case may hand it back to the queue. */
   async releaseReviewCase(caseId: string, reviewerId: string) {
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     return this.projectionTransaction(async (tx) => {
       const won = await tx.reviewCase.updateMany({
         where: { id: caseId, closedAt: null, assignedTo: reviewerId },
         data: { assignedTo: null, assignedAt: null },
       });
-      if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      if (won.count !== 1) {
+        // A case that does not exist is not a case someone else holds.
+        if (!(await tx.reviewCase.findUnique({ where: { id: caseId }, select: { id: true } }))) throw new NotFoundError('ReviewCase', caseId);
+        throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      }
       // [DOC-1 P5-1] X-RELEASE: handing the case back is IN_REVIEW → REVIEW_QUEUED.
       const kase = await tx.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
       await hopDocState(tx, { id: kase.submissionId }, 'IN_REVIEW', 'REVIEW_QUEUED');
@@ -2602,11 +2611,10 @@ export class VerificationService {
     result: T,
   ): Promise<T & { collided?: boolean }> {
     const mine = await resolveVerificationObject(this.prisma, { fileKey, userId });
-    const other = await this.prisma.encryptedObject.findFirst({
-      where: { sha256: mine.sha256, createdBy: { not: userId } },
-      select: { createdBy: true },
-    });
-    if (!other) return result;
+    // [Row 331 (c)] The other holder is a LIVE account: an erased one is never linked again.
+    const [otherId] = await liveDuplicateHolders(this.prisma, mine.sha256, userId);
+    if (!otherId) return result;
+    const other = { createdBy: otherId };
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(this.prisma);
     const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';

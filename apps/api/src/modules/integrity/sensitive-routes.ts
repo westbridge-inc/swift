@@ -23,6 +23,8 @@ export const SENSITIVE_MONEY_ROUTES: SensitiveRoute[] = [
   })),
   { file: 'modules/vendor/vendor.routes.ts', route: "app.put('/profile'", surface: 'mmg-link', controls: ['requireStepUp(app, request)', "assertVelocity(app, request, 'money.mmg-link')", 'stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
   { file: 'modules/vendor/vendor.routes.ts', route: "app.delete('/profile/mmg-pay-url/pending'", surface: 'mmg-link', controls: ["assertVelocity(app, request, 'money.mmg-link.cancel')", 'cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
+  // [PAYMENT-SIMPLIFY · ALG-34 parity] the store's MMG number has the same cancel door as the link.
+  { file: 'modules/vendor/vendor.routes.ts', route: "app.delete('/profile/mmg-number/pending'", surface: 'mmg-link', controls: ["assertVelocity(app, request, 'money.mmg-link.cancel')", 'cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
   { file: 'modules/driver/driver.routes.ts', route: "app.put('/profile'", surface: 'mmg-link', controls: ['requireStepUp(app, request)', "assertVelocity(app, request, 'money.mmg-link')", 'stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
   { file: 'modules/driver/driver.routes.ts', route: "app.delete('/profile/mmg-pay-url/pending'", surface: 'mmg-link', controls: ["assertVelocity(app, request, 'money.mmg-link.cancel')", 'cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }'] },
 ];

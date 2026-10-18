@@ -100,6 +100,7 @@ export const uploadVerificationFile = (file: File) => {
 export const submitVerificationDocument = (docType: string, fileUrl: string) =>
   apiFetch('/api/v1/verification/documents', {
     method: 'POST',
-    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
+    // tick in the consent ledger, anchored to the box's exact words (document_v1)
+    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });
