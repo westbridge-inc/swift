@@ -168,6 +168,67 @@ export function safetyWorkerConcurrency(env: Record<string, string | undefined> 
   return Number.isSafeInteger(value) && value >= 2 && value <= 20 ? value : 4;
 }
 
+/** [row 331 · #1794 S3-1] Where each safety tick stamps its last COMPLETED
+ *  run (epoch ms). Read by checkSafetyLane, which runs on another lane. */
+export const safetyTickCompletedKey = (name: string): string => `safety:tick-completed:${name}`;
+
+/** [row 331 · #1794 S3-1] How long a safety tick may go without completing
+ *  before the platform is paged. Default 60 s: the SOS tick runs every 10 s,
+ *  the guardian every 15 s, and the lane has several slots, so a minute with no
+ *  completion means every slot is stuck or the lane stopped. 30 s .. 10 min;
+ *  anything else falls back to the default. */
+export function safetyTickStaleMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['SAFETY_TICK_STALE_MS']?.trim();
+  if (raw === undefined || !/^\d+$/.test(raw)) return 60_000;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 30_000 && value <= 600_000 ? value : 60_000;
+}
+
+/** The OpsAlert title of the stalled-lane page (one open page at a time; closed when ticks complete again). */
+export const SAFETY_LANE_STALLED_TITLE = 'SOS safety lane stalled';
+
+/**
+ * [row 331 · #1794 review S3-1] Watch the safety lane from OUTSIDE it. Every
+ * SOS watchdog runs inside the safety ticks, so a lane whose slots are all held
+ * by calls that never settle, or whose worker stopped consuming, would page
+ * nobody (the DLQ alarm only sees FAILED jobs). The scheduler heartbeat, a
+ * dispatch-queue job, calls this every minute: a tick that has not completed
+ * within the window opens a platform page (an OpsAlert: SUPER_ADMIN push and an
+ * on-call text, delivered here, outside the lane); ticks completing again close
+ * it. Inside the boot grace nothing is judged: the first ticks have not run.
+ */
+export async function checkSafetyLane(
+  ctx: JobContext,
+  bootedAtMs: number,
+  nowMs: number = Date.now(),
+  staleMs: number = safetyTickStaleMs(),
+): Promise<{ stalled: string[] }> {
+  if (nowMs - bootedAtMs < staleMs) return { stalled: [] };
+  const stalled: Array<{ name: string; ageSeconds: number | null }> = [];
+  for (const name of SAFETY_TIMER_JOBS) {
+    const raw = await ctx.redis.get(safetyTickCompletedKey(name));
+    const at = raw !== null && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (!Number.isFinite(at) || nowMs - at > staleMs) {
+      stalled.push({ name, ageSeconds: Number.isFinite(at) ? Math.round((nowMs - at) / 1000) : null });
+    }
+  }
+  const { pageOps, resolveOpsPage } = await import('../modules/ops/ops-page');
+  if (stalled.length === 0) {
+    await resolveOpsPage(ctx.prisma, SAFETY_LANE_STALLED_TITLE, 'safety-lane-completing');
+    return { stalled: [] };
+  }
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const oldest = stalled.reduce<number | null>((max, s) => (s.ageSeconds === null ? max : Math.max(max ?? 0, s.ageSeconds)), null);
+  await pageOps({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) }, {
+    key: 'ops_page:safety-lane-stalled',
+    windowSeconds: 600,
+    title: SAFETY_LANE_STALLED_TITLE,
+    body: `${stalled.map((s) => `${s.name} ${s.ageSeconds === null ? 'has not completed since the worker started' : `last completed ${s.ageSeconds}s ago`}`).join('; ')}. The SOS backstop, its escalation retries and the SOS watchdogs run in this lane: an SOS may not be escalated. Restart the worker and check the SMS provider.`,
+    data: { kind: 'safety_sweep_slo', workType: 'safety-lane', stalled: true, ticks: stalled.map((s) => s.name), passAgeSeconds: oldest },
+  });
+  return { stalled: stalled.map((s) => s.name) };
+}
+
 export const DEFAULT_JOB_OPTIONS = {
   attempts: Math.max(1, Number(process.env['JOB_MAX_ATTEMPTS'] ?? 3)),
   backoff: { type: 'exponential' as const, delay: Math.max(100, Number(process.env['JOB_BACKOFF_MS'] ?? 5_000)) },
@@ -566,6 +627,8 @@ export async function inTenantOf<T>(
 
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
+  // [#1794 S3-1] The boot grace of checkSafetyLane starts here.
+  const lanesBootedAt = Date.now();
   const constructedWorkers: Worker[] = [];
   const buildWorker = (
     name: string,
@@ -1219,6 +1282,10 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         );
         const { retryAccountErasures } = await import('../modules/user/account-erasure-retry');
         await retryAccountErasures(ctx);
+        // [R23 · research C10] Customer accounts unused for 12 months: a notice, then (30 days
+        // on, still unused) the ordinary deletion pipeline. Its own retention receipt.
+        const { inactivitySweep } = await import('../modules/user/inactivity');
+        await inactivitySweep({ prisma: ctx.prisma, io: ctx.io, log: ctx.log });
         return;
       }
       if (job.name === 'handover-claims-reconcile') {
@@ -1640,6 +1707,12 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // settlements stop — silently. The heartbeat key's AGE (exposed as a
         // Prometheus gauge) makes that stall detectable and alertable.
         await ctx.redis.set('scheduler:heartbeat', String(Date.now()));
+        // [row 331 · #1794 S3-1] The safety lane, watched from this lane.
+        try {
+          await checkSafetyLane(ctx, lanesBootedAt);
+        } catch (err) {
+          ctx.log.error({ err }, '[row 331] the safety-lane watchdog could not run this beat — a stalled SOS lane is not being paged');
+        }
         // SWIFT-AUD-D7-02: pool saturation pages (dedup'd). Queries queueing
         // for a connection is the "API is about to brown-out" signal, and the
         // 60s heartbeat is the natural in-process sampling point.
@@ -2360,7 +2433,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         await sosGraceTick();
       } else if (job.name === 'guardian-sweep') {
         await guardianTick();
+      } else {
+        // [#1794 S4] Never "done" for a job this lane does not run: it fails,
+        // dead-letters, and the DLQ alarm pages.
+        throw new UnrecoverableError(`The safety lane runs only ${SAFETY_TIMER_JOBS.join(' and ')}; "${job.name}" was put on it by mistake`);
       }
+      // [#1794 S3-1] Completed: stamp it for checkSafetyLane (another lane reads it).
+      // A failed stamp is logged, never a failed tick.
+      await ctx.redis.set(safetyTickCompletedKey(job.name), String(Date.now()))
+        .catch((err: unknown) => ctx.log.warn({ err, tick: job.name }, '[row 331] could not stamp a completed safety tick'));
     },
     { connection, concurrency: safetyWorkerConcurrency() },
   );
