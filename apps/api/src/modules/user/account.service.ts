@@ -1,4 +1,5 @@
 import { eraseMoverObjects } from './mover-object-erasure';
+import { exportPersonalData } from './data-export';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
@@ -55,64 +56,10 @@ export async function closesByRequest(
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
-  /** DPA right of access + portability: a copy of the person's own data. */
+  /** DPA right of access + portability: a copy of the person's own data.
+   *  [Row 331 (b)] Every category of the export register, paged, never cut silently (data-export.ts). */
   async exportData(userId: string) {
-    const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        phone: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roles: true,
-        activeRole: true,
-        lastMoverRole: true,
-        countryCode: true,
-        trustLevel: true,
-        isPhoneVerified: true,
-        createdAt: true,
-        lastActiveAt: true,
-      },
-    });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
-
-    const [addresses, orders, ratingsGiven, serviceJobs] = await Promise.all([
-      prisma.address.findMany({
-        where: { userId },
-        select: { label: true, addressLine1: true, addressLine2: true, city: true, latitude: true, longitude: true, createdAt: true },
-      }),
-      prisma.order.findMany({
-        where: { customerId: userId },
-        select: { orderNumber: true, orderType: true, status: true, totalAmount: true, createdAt: true, deliveredAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.rating.findMany({
-        where: { raterId: userId },
-        select: { score: true, comment: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.serviceJob.findMany({
-        where: { customerId: userId },
-        select: { status: true, scheduledFor: true, quoteAmount: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-    ]);
-
-    return {
-      exportedAt: new Date().toISOString(),
-      notice:
-        'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
-      account: user,
-      addresses,
-      orders,
-      ratingsGiven,
-      serviceJobs,
-    };
+    return exportPersonalData(this.app.prisma, userId);
   }
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
