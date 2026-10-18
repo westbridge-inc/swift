@@ -9,6 +9,7 @@ import { errorMessage } from '../../../lib/apiError';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
+import { licenceLabel } from '../licenceLabel';
 import { useServiceCatalog } from '../useServiceCatalog';
 import { customerServiceCategories, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 
@@ -33,6 +34,8 @@ type ServiceProvider = {
   selfSkilled: boolean;
   certified: boolean;
   badges: string[];
+  /** [R7] The day a person on our team checked this provider's licence (null = none checked). */
+  licenceCheckedOn?: string | null;
 };
 
 type ProviderBrowse = {
@@ -235,8 +238,8 @@ export function ServicesScreen({ navigation }: any) {
                         />
                       </View>
                       <View style={{ marginTop: space.sm }}>
-                        {p.certified ? (
-                          <TonePill label="Certified qualification" tone="neutral" />
+                        {licenceLabel(p.licenceCheckedOn) ? (
+                          <TonePill label={licenceLabel(p.licenceCheckedOn)!} tone="neutral" />
                         ) : (
                           <T variant="caption" tone="muted">
                             {p.selfSkilled ? 'Self-skilled' : 'No trade credential shown'}

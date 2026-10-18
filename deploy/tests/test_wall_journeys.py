@@ -125,6 +125,10 @@ if argv[:1] == ['compose'] and 'run' in argv:
 if argv[:1] == ['compose'] and 'exec' in argv and 'node' in argv:
     if argv[argv.index('node') - 1] != 'api-journeys':
         sys.exit(9)
+    if 'connection_limit' in argv[argv.index('-e') + 1]:
+        # The instance's pool connection limit, computed in its container by its own sizing code.
+        print(env('FAKE_POOL_LIMIT_OUT', 'pool-limit ' + env('FAKE_POOL_LIMIT', '40')))
+        sys.exit(int(env('FAKE_POOL_LIMIT_RC', '0')))
     if '/metrics' in argv[argv.index('-e') + 1]:
         # The instance's own metrics; FAKE_WAITING_ONCE = the first read only (a sample mid-window).
         counter = os.environ['CALL_LOG'] + '.metrics'
@@ -246,7 +250,7 @@ class JourneysOnCopy(unittest.TestCase):
         # through the window, the binding counters (system work never inside a caller's transaction).
         self.assertIn('journeys-on-copy: latency: p95 <= 0.5 s over 120 requests (budget 1 s)', result.stdout)
         self.assertIn('journeys-on-copy: latency: slowest POST /api/v1/auth/verify-otp p95 <= 0.5 s (20 requests)', result.stdout)
-        self.assertRegex(result.stdout, r'journeys-on-copy: pool: [1-9][0-9]* samples, open max 5, busy max 1, waiting max 0')
+        self.assertRegex(result.stdout, r'journeys-on-copy: pool: [1-9][0-9]* samples, open max 5 of limit 40, busy max 1, waiting max 0')
         self.assertIn('journeys-on-copy: binding: nontenant=12, nontenant_system=3, tenant=40', result.stdout)
         up = index(calls, lambda c: c['tool'] == 'rehearsal.sh' and c['argv'] == ['up', SHA])
         stop = index(calls, lambda c: c['tool'] == 'docker' and 'stop' in c['argv'])
@@ -294,6 +298,80 @@ class JourneysOnCopy(unittest.TestCase):
         runner = index(calls, lambda c: c['tool'] == 'docker' and 'run' in c['argv'])
         reads = [i for i, c in enumerate(calls) if c['tool'] == 'docker' and 'node' in c['argv'] and '/metrics' in ' '.join(c['argv'])]
         self.assertTrue(reads and instance < reads[0] < runner, (instance, reads, runner))
+
+    def test_a_query_in_flight_below_the_pool_limit_is_not_saturation(self):
+        """17 Oct staging: 'waiting max 2' with at most 5 of the instance's 40 connections
+        open failed the run. The gauge (prisma_client_queries_wait) counts checkouts in
+        flight at the moment of a sample, so a busy moment is not a saturated pool. The
+        pool is judged against its connection limit instead (ruled by the coordinator)."""
+        result, _ = self.host.run(extra_env={'FAKE_WAITING_ONCE': '2'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'journeys-on-copy: pool: [1-9][0-9]* samples, open max 5 of limit 40, busy max 1, waiting max 2')
+        self.assertIn('JOURNEYS PASSED', result.stdout)
+
+    def test_the_pool_limit_is_the_instances_own_read_in_its_container_before_the_journeys(self):
+        """The limit the gate judges against is what the instance's own sizing code makes of
+        its own environment: the same secret-file loader first, then resolveDatabaseUrl with
+        the same role. Only the number leaves the container, never the URL."""
+        result, calls = self.host.run()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("journeys-on-copy: pool limit: 40 connections (the instance's own sizing, read in its container)", result.stdout)
+        limit = index(calls, lambda c: c['tool'] == 'docker' and 'node' in c['argv'] and 'connection_limit' in ' '.join(c['argv']))
+        instance = index(calls, lambda c: c['tool'] == 'docker' and 'up' in c['argv'] and 'api-journeys' in c['argv'])
+        runner = index(calls, lambda c: c['tool'] == 'docker' and 'run' in c['argv'])
+        self.assertTrue(-1 < instance < limit < runner, (instance, limit, runner))
+        argv = calls[limit]['argv']
+        self.assertEqual(argv[argv.index('exec'):argv.index('node')], ['exec', '-T', 'api-journeys'])
+        js = argv[argv.index('-e') + 1]
+        self.assertEqual(argv[argv.index('-e') + 2:], [])
+        self.assertLess(js.index('require("/app/apps/api/dist/boot/secret-files")'), js.index('require("/app/apps/api/dist/utils/db-pool")'))
+        self.assertIn('resolveDatabaseUrl(process.env.DATABASE_URL, poolRoleForApiProcess())', js)
+        self.assertNotIn('console.error', js)
+        # The one line it prints: the number, or 'unknown'.
+        self.assertEqual(re.findall(r'console\.log\((.*)\);', js), ['/^[1-9][0-9]*$/.test(limit) ? `pool-limit ${limit}` : "pool-limit unknown"'])
+        self.assertNotRegex(js, r'process\.(stdout|stderr)')
+
+    def test_the_pool_limit_read_matches_the_api_build(self):
+        """The in-container read names compiled modules: they must exist under those names
+        (dist = src compiled, CommonJS) and export what the read calls."""
+        tsconfig = (REPO / 'apps' / 'api' / 'tsconfig.json').read_text()
+        self.assertIn('"outDir": "./dist"', tsconfig)
+        self.assertIn('"rootDir": "./src"', tsconfig)
+        self.assertIn('"module": "CommonJS"', tsconfig)
+        self.assertIn('COPY --from=build /app/apps/api/dist ./apps/api/dist', (REPO / 'apps' / 'api' / 'Dockerfile').read_text())
+        loader = (REPO / 'apps' / 'api' / 'src' / 'boot' / 'secret-files.ts').read_text()
+        self.assertIn('applySecretFiles(process.env);', loader)
+        pool = (REPO / 'apps' / 'api' / 'src' / 'utils' / 'db-pool.ts').read_text()
+        self.assertIn('export function resolveDatabaseUrl(', pool)
+        self.assertIn('export function poolRoleForApiProcess(', pool)
+        # The API process sizes its pool exactly this way (so the read and the process agree).
+        prisma = (REPO / 'apps' / 'api' / 'src' / 'plugins' / 'prisma.ts').read_text()
+        self.assertIn("resolveDatabaseUrl(process.env['DATABASE_URL'], poolRoleForApiProcess())", prisma)
+        self.assertLess((REPO / 'apps' / 'api' / 'src' / 'server.ts').read_text().index("import './boot/secret-files';"),
+                        (REPO / 'apps' / 'api' / 'src' / 'server.ts').read_text().index("import { buildApp } from './app';"))
+
+    def test_the_metrics_samples_are_kept_redacted_beside_the_results(self):
+        """17 Oct: the pool samples went with the copy, so a FAIL could not be re-read.
+        Every end that sampled keeps them (metrics lines only, redacted) in metrics/."""
+        leaky = metrics() + '\nmetrics: note postgresql://swift_app_login:pw-fixture-9@postgres/swift'
+        for env, rc in (({'FAKE_METRICS': leaky}, 0), ({'FAKE_METRICS': leaky, 'FAKE_JOBS_RC': '1'}, 1)):
+            with self.subTest(env=sorted(env)):
+                shutil.rmtree(self.host.results, ignore_errors=True)
+                result, _ = self.host.run(extra_env=env)
+                self.assertEqual(result.returncode != 0, bool(rc), result.stdout + result.stderr)
+                run = next(self.host.results.glob('copy-*'))
+                kept = run / 'metrics'
+                self.assertEqual(oct(kept.stat().st_mode & 0o777), '0o700')
+                samples = (kept / 'samples.prom').read_text()
+                self.assertIn('swift_db_pool{state="open"} 5', samples)
+                self.assertIn('swift_tenant_bind_total{kind="tenant"} 40', samples)
+                self.assertNotIn('pw-fixture-9', samples)
+                if rc == 0:
+                    self.assertIn('swift_db_pool{state="open"} 5', (kept / 'final.prom').read_text())
+                for f in kept.iterdir():
+                    self.assertEqual(oct(f.stat().st_mode & 0o777), '0o600', f)
+                    self.assertNotIn('pw-fixture-9', f.read_text())
+                self.assertIn(f'journeys-on-copy: metrics: the pool and request samples (redacted) are in {kept}', result.stderr)
 
     def test_the_copys_logs_are_kept_redacted_before_the_copy_is_removed(self):
         """15 Oct: the copy failed at boot (FATAL=24) and its logs went with it.
@@ -527,9 +605,16 @@ class JourneysOnCopy(unittest.TestCase):
             ({'FAKE_METRICS': metrics(http=histogram('/api/v1/cart', (5, 5, 5, 5, 5, 5, 5, 5, 5)))}, 'measure',
              'only 5 requests measured (at least 20)'),
             ({'FAKE_METRICS': metrics(http=[])}, 'measure', 'only 0 requests measured'),
-            ({'FAKE_METRICS': metrics(pool=(5, 5, 0, 3))}, 'measure', 'queries waited for a pool connection (max 3)'),
-            # A wait seen by a sample mid-window only (the last read is calm again).
-            ({'FAKE_WAITING_ONCE': '2'}, 'measure', 'queries waited for a pool connection (max 2)'),
+            # Saturation = the pool at the instance's own connection limit, with or without a
+            # query in flight at the sample (17 Oct ruling; see the test of waiting below the limit).
+            ({'FAKE_METRICS': metrics(pool=(40, 40, 0, 3))}, 'measure', 'the pool reached its connection limit (40 open)'),
+            ({'FAKE_METRICS': metrics(pool=(40, 39, 1, 0))}, 'measure', 'the pool reached its connection limit (40 open)'),
+            ({'FAKE_POOL_LIMIT': '5'}, 'measure', 'the pool reached its connection limit (5 open)'),
+            # No limit, no judgement: the run holds before the journeys start.
+            ({'FAKE_POOL_LIMIT_RC': '1'}, 'instance', "could not read the journeys instance's pool connection limit"),
+            ({'FAKE_POOL_LIMIT_OUT': 'pool-limit unknown'}, 'instance', "could not read the journeys instance's pool connection limit"),
+            ({'FAKE_POOL_LIMIT_OUT': 'pool-limit 0'}, 'instance', "could not read the journeys instance's pool connection limit"),
+            ({'FAKE_POOL_LIMIT_OUT': ''}, 'instance', "could not read the journeys instance's pool connection limit"),
             ({'FAKE_METRICS': metrics(pool=None)}, 'measure', 'the pool was never measured'),
             ({'FAKE_METRICS': metrics(kinds={'tenant': 40, 'nontenant': 12, 'nontenant_system_in_tx': 1})}, 'measure',
              "system work ran inside a caller's transaction (nontenant_system_in_tx=1)"),

@@ -73,7 +73,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
     country: 'vendor-hosted (EU/US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
     contractEnv: 'PROCESSOR_CONTRACT_DIDIT',
-    note: 'KYC_PROVIDER=didit. Biometric operations additionally need FD-D5 (FEATURE_BIOMETRIC_FACE_MATCH).',
+    note: 'NOT USED at launch: identity checks are done by a person (owner ruling). getKycProvider() refuses KYC_PROVIDER=didit in every mode, and the production boot guard accepts only KYC_PROVIDER=manual and refuses FEATURE_BIOMETRIC_FACE_MATCH=1. The adapter stays in source, unreachable; a contract reference here does not make it reachable.',
   },
   {
     ref: 'ID_ANALYZER', party: 'ID Analyzer', service: 'Document OCR + biometric match',
@@ -82,7 +82,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     payload: ['PERSONAL_DOC_IMAGE', 'BIOMETRIC', 'IDENTITY_FIELDS'], lawfulBasis: 'LEGAL_OBLIGATION',
     country: 'vendor-hosted (US)', leavesCountry: true, transferBasis: 'CONTRACT_CLAUSES',
     contractEnv: 'PROCESSOR_CONTRACT_ID_ANALYZER',
-    note: 'KYC_PROVIDER=id-analyzer. Same gate as Didit.',
+    note: 'NOT USED at launch: the same refusal as Didit (getKycProvider() refuses KYC_PROVIDER=idanalyzer in every mode; production boots only on KYC_PROVIDER=manual).',
   },
   {
     ref: 'OBJECT_STORE', party: 'Cloudflare R2 / AWS S3 (S3-compatible endpoint)', service: 'Object storage for uploaded documents',

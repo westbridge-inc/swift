@@ -61,10 +61,10 @@ async function makeItem(opts: { name: string; price?: number; stock?: number | n
 }
 
 /** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
- *  customer's to cancel only when it is very late (30 minutes past its
+ *  customer's to cancel only when it is very late (60 minutes (owner 17 Oct; was 30) past its
  *  promise); the customer-cancel cases below make it so before cancelling. */
 async function pastPromise(orderId: string) {
-  await app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } });
+  await app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 61 * 60_000) } });
 }
 
 async function makeOrderWithLines(

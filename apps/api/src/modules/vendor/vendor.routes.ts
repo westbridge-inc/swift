@@ -665,7 +665,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     include: {
       items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
-      customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
@@ -1737,7 +1738,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       where['OR'] = [
         { orderNumber: { contains: search, mode: 'insensitive' } },
         { customer: { firstName: { contains: search, mode: 'insensitive' } } },
-        { customer: { lastName: { contains: search, mode: 'insensitive' } } },
+        // [COORD 17 Oct] No search by a customer's last name: the store is no longer shown it, and a
+        // search would reveal it one guess at a time.
       ];
     }
 
@@ -1748,7 +1750,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
           items: VENDOR_ORDER_ITEMS,
-          customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
+          customer: { select: { id: true, firstName: true } }, // [COORD 17 Oct] never the last name
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
@@ -3504,7 +3506,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Booking.customerId is a User id with no relation — resolve names in one hit.
     const custIds = [...new Set(bookings.map((b) => b.customerId))];
     const users = custIds.length
-      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true, lastName: true } })
+      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true } }) // only the first name is served
       : [];
     const byId = new Map(users.map((u) => [u.id, u]));
     return {

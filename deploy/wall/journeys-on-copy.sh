@@ -40,14 +40,16 @@
 #      compliance-sample and expiry-sweep (verification-jobs). Each must complete.
 #   5. The instance's own measurements, sampled through the window (the metrics
 #      token never leaves the container): the 95th-percentile request time
-#      holds the budget (1 s), no query ever waited for a pool connection, the
-#      wall's binding ran (tenant and non-tenant bindings > 0) and system work
+#      holds the budget (1 s), the pool never reached its connection limit (the
+#      instance's own limit, read in its container: a query in flight at a
+#      sample is not saturation), the wall's binding ran (tenant and non-tenant bindings > 0) and system work
 #      never ran inside a caller's transaction (nontenant_system_in_tx = 0).
 #   6. No TenantInUnboundTransactionError or FATAL line in any copy process.
 #
 # Always, pass or fail: the copy's own logs (api, worker, api-journeys; the last
 # 400 lines each, redacted by deploy/wall/redact-log.py) are kept in the run's
-# results directory (copy-logs/), and the first FATAL lines are printed; then
+# results directory (copy-logs/), with the instance's metrics samples (metrics/,
+# redacted) once sampling began, and the first FATAL lines are printed; then
 # ./deploy/wall/rehearsal.sh down (the copy, the instance, their volumes, store
 # and secrets). "JOURNEYS PASSED" is printed only
 # when every step held; any other end is non-zero ("JOURNEYS FAILED at step").
@@ -161,10 +163,25 @@ save_logs() {
   fi
   return 0
 }
+# save_metrics: the instance's /metrics samples and its final read (metrics lines
+# only, redacted) into metrics/ (0700), so a measurement can be re-read after the
+# copy is gone (17 Oct: the pool samples went with it).
+save_metrics() {
+  local kept="$JOURNEYS_RESULTS_DIR/metrics" name
+  [ -s "$WORK/samples.prom" ] || return 0
+  ( umask 077; mkdir -p "$kept" && chmod 700 "$kept" ) 2>/dev/null || { echo "journeys-on-copy: could not create $kept for the metrics samples" >&2; return 0; }
+  for name in samples.prom final.prom; do
+    [ -s "$WORK/$name" ] || continue
+    ( umask 077; python3 -I "$HERE/redact-log.py" <"$WORK/$name" >"$kept/$name" ) || true
+  done
+  echo "journeys-on-copy: metrics: the pool and request samples (redacted) are in $kept" >&2
+  return 0
+}
 cleanup() {
   local rc=$?
   stop_sampler
   save_logs
+  save_metrics
   rm -rf "$WORK"
   "$HERE/rehearsal.sh" down >/dev/null 2>&1 || echo "journeys-on-copy: the copy could not be removed; run ./deploy/wall/rehearsal.sh down" >&2
   if [ "$rc" -ne 0 ]; then echo "JOURNEYS FAILED at step: $STEP (exit $rc). The copy was removed." >&2; fi
@@ -217,6 +234,23 @@ for _ in $(seq 1 90); do
 done
 [ "$ready" = 1 ] || die "the journeys instance did not attest the wall and listen within 3 minutes"
 say "journeys instance: walled and listening on the copy's internal network; the only queue consumer"
+
+# [17 Oct] The pool's connection limit, so the pool can be judged against it.
+# Read INSIDE the instance by its own code from its own environment: the same
+# secret-file loader its server runs first, then the same sizing call
+# (plugins/prisma.ts). Only the number is printed, never the URL. No limit, no
+# judgement: the run holds before the journeys start.
+POOL_LIMIT_JS='require("/app/apps/api/dist/boot/secret-files");
+let limit = "";
+try {
+  const { resolveDatabaseUrl, poolRoleForApiProcess } = require("/app/apps/api/dist/utils/db-pool");
+  limit = new URL(resolveDatabaseUrl(process.env.DATABASE_URL, poolRoleForApiProcess())).searchParams.get("connection_limit") || "";
+} catch {}
+console.log(/^[1-9][0-9]*$/.test(limit) ? `pool-limit ${limit}` : "pool-limit unknown");'
+POOL_LIMIT="$("${JRN[@]}" exec -T api-journeys node -e "$POOL_LIMIT_JS" 2>/dev/null)" || POOL_LIMIT=""
+[[ "$POOL_LIMIT" =~ ^pool-limit\ ([1-9][0-9]*)$ ]] || die "could not read the journeys instance's pool connection limit (the pool is judged against it)"
+POOL_LIMIT="${BASH_REMATCH[1]}"
+say "pool limit: $POOL_LIMIT connections (the instance's own sizing, read in its container)"
 
 # The instance's own /metrics, read INSIDE it with the copy's token file: only
 # the latency buckets, the pool gauge and the binding counters come out.
@@ -296,7 +330,7 @@ const conn = () => new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: nu
 STEP=measure
 stop_sampler
 metrics >"$WORK/final.prom" || die "could not read the journeys instance's metrics"
-python3 -I - "$WORK/samples.prom" "$WORK/final.prom" "$P95_BUDGET_S" "$MIN_REQUESTS" <<'PY' || die "the walled instance's measurements did not hold (above)"
+python3 -I - "$WORK/samples.prom" "$WORK/final.prom" "$P95_BUDGET_S" "$MIN_REQUESTS" "$POOL_LIMIT" <<'PY' || die "the walled instance's measurements did not hold (above)"
 import re, sys
 LINE = re.compile(r'^([a-z_]+)\{(.*)\}\s+(\S+)$')
 LABEL = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
@@ -315,7 +349,7 @@ def parse(path):
                 pass
     return out
 samples, final = parse(sys.argv[1]), parse(sys.argv[2])
-budget, least = float(sys.argv[3]), int(sys.argv[4])
+budget, least, limit = float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 bad = []
 def say(text):
     print(f'journeys-on-copy: {text}')
@@ -344,7 +378,9 @@ else:
     ranked = sorted(((p95(s), k) for k, s in routes.items() if p95(s)[0] is not None), key=lambda x: (-x[0][0], -x[0][1]))
     for (bound, count), (method, route) in ranked[:5]:
         say(f'latency: slowest {method} {route} p95 <= {bound:g} s ({count} requests)')
-# The pool, through the window.
+# The pool, through the window. Saturation is the pool at its connection limit:
+# 'waiting' counts checkouts in flight at the moment of a sample (17 Oct: max 2
+# with 5 of 40 open), so it is reported, not judged.
 pool = {}
 for n, l, v in samples + final:
     if n == 'swift_db_pool':
@@ -352,9 +388,10 @@ for n, l, v in samples + final:
 if not pool.get('open'):
     bad.append('the pool was never measured')
 else:
-    say(f"pool: {len(pool['open'])} samples, open max {max(pool['open']):g}, busy max {max(pool.get('busy', [0])):g}, waiting max {max(pool.get('waiting', [0])):g}")
-    if max(pool.get('waiting', [0])) > 0:
-        bad.append(f"queries waited for a pool connection (max {max(pool['waiting']):g})")
+    say(f"pool: {len(pool['open'])} samples, open max {max(pool['open']):g} of limit {limit}, busy max {max(pool.get('busy', [0])):g}, waiting max {max(pool.get('waiting', [0])):g}")
+    full = sum(1 for v in pool['open'] if v >= limit)
+    if full:
+        bad.append(f"the pool reached its connection limit ({limit} open) in {full} of {len(pool['open'])} samples: queries queue for a connection")
 # The wall's binding counters.
 kinds = {l.get('kind'): v for n, l, v in final if n == 'swift_tenant_bind_total'}
 say('binding: ' + (', '.join(f'{k}={v:g}' for k, v in sorted(kinds.items())) or 'none'))

@@ -113,8 +113,8 @@ async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: Payment
 }
 
 /** [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
- *  cancel only when it is very late — 30 minutes past its promise. */
-const PAST_PROMISE = () => new Date(Date.now() - 31 * 60_000);
+ *  cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise. */
+const PAST_PROMISE = () => new Date(Date.now() - 61 * 60_000);
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payload?: unknown, vendor?: string) {
   return app.inject({
