@@ -220,6 +220,37 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(await app.prisma.verificationDecisionOutbox.count({ where: { documentId } })).toBe(0);
   });
 
+  it('[#1879] an erasure between the drain claim and the approval tail: the tail writes nothing for the person', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const tenantId = (await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { tenantId: true } })).tenantId;
+    const documentId = `doc-${nanoid(8)}`;
+    await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId, userId: u.userId, command: APPROVAL_TAIL } });
+    const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    const svcAny = svc as unknown as Record<string, unknown> & { subscriptions: Record<string, unknown> };
+    type Spy = { mock: { calls: unknown[][] }; mockRestore(): void };
+    const tail = [
+      vi.spyOn(svcAny as never, 'projectVendorActivation' as never),
+      vi.spyOn(svcAny.subscriptions as never, 'startTrialForVendor' as never),
+      vi.spyOn(svcAny.subscriptions as never, 'startTrialForDriver' as never),
+      vi.spyOn(svcAny.subscriptions as never, 'startTrialForRider' as never),
+    ] as unknown as Spy[];
+    const notificationsBefore = await app.prisma.notification.count({ where: { userId: u.userId } });
+    // The claim has committed; the person erases the account before the tail reads the decision.
+    const spy = vi.spyOn(app.prisma.verificationDocument, 'findUnique').mockImplementationOnce((async () => {
+      const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+      expect(res.statusCode).toBe(200);
+      return { state: 'COMMITTED' };
+    }) as never);
+    try {
+      await expect(svc.processDecisionOutbox({ documentId, now: new Date(Date.now() + 1000) })).resolves.toEqual({ processed: 1, failed: 0 });
+    } finally { spy.mockRestore(); }
+    // Call counts, not the calls: their arguments hold the database client.
+    expect(tail.map((s) => s.mock.calls.length)).toEqual([0, 0, 0, 0]);
+    for (const s of tail) s.mockRestore();
+    expect(await app.prisma.notification.count({ where: { userId: u.userId } })).toBe(notificationsBefore);
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(0);
+  });
+
   it('[NR-3 gap 3] the deletion write barrier: a deactivated account cannot grow identity data back', async () => {
     const u = await makeUser(['CUSTOMER']);
     const res = await inject('DELETE', '/api/v1/customer/account', u.token);

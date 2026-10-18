@@ -2844,12 +2844,14 @@ export class VerificationService {
       try {
         if (row.command !== APPROVAL_TAIL) throw new Error(`unknown verification decision command ${row.command}`);
         const standing = await this.prisma.verificationDocument.findUnique({ where: { id: row.documentId }, select: { state: true } });
-        if (standing?.state === 'COMMITTED') await this.afterApproval(row.userId);
+        // [#1879] afterApproval honours the deletion write barrier: an account erased (or being erased) since
+        // the claim gets nothing, and the row closes as owed to no one.
+        const ran = standing?.state === 'COMMITTED' ? await this.afterApproval(row.userId) : false;
         // updateMany: an account erasure deletes the person's rows (account.service), so a row this drain
         // claimed may be gone by now; there is then nothing left to close.
         await this.prisma.verificationDecisionOutbox.updateMany({
           where: { id: row.id },
-          data: { processedAt: new Date(), claimedAt: null, lastError: standing?.state === 'COMMITTED' ? null : 'approval no longer stands' },
+          data: { processedAt: new Date(), claimedAt: null, lastError: ran ? null : standing?.state === 'COMMITTED' ? 'account closed' : 'approval no longer stands' },
         });
         processed += 1;
       } catch (err) {
@@ -2876,7 +2878,29 @@ export class VerificationService {
    * subscription. Vendors additionally get their display flag, and a store
    * suspended by a lapsed document re-opens when verification is restored.
    */
-  private async afterApproval(userId: string) {
+  /**
+   * [GUARDRAILS §2 · #1879] The deletion write barrier for work owed after an approval, the one account
+   * erasure honours (the deletion-terminal statuses submitDocument refuses, or the erasure marker). Read
+   * under the person's row lock (FOR SHARE): an erasure holding FOR UPDATE commits first, so an account
+   * erased or being erased is seen closed here. The erasure deletes the outbox rows in that same transaction.
+   * Not covered: an erasure that begins after this read and commits while the tail runs (the tail's writes are
+   * their own transactions; holding this lock across them would deadlock with their own person locks).
+   */
+  private async openForOwedWork(userId: string): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const rows = await tx.$queryRaw<Array<{ status: string; phone: string }>>`
+        SELECT "status"::text AS "status", "phone" FROM "users" WHERE "id" = ${userId}
+        FOR SHARE /* approval-tail-deletion-barrier */
+      `;
+      const person = rows[0];
+      return Boolean(person) && person!.phone !== `deleted:${userId}` && !['DEACTIVATED', 'BANNED', 'SUSPENDED'].includes(person!.status);
+    });
+  }
+
+  /** Returns false (and writes nothing) when the deletion write barrier closes the account. */
+  private async afterApproval(userId: string): Promise<boolean> {
+    if (!await this.openForOwedWork(userId)) return false;
     // [STRAND-1] One projection owns vendor activation truth (flags + the
     // PENDING_APPROVAL→ACTIVE promotion). Manual review already ran it inside
     // the decision transaction; the auto-approval path reaches it here. It is
@@ -2918,7 +2942,7 @@ export class VerificationService {
       if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-
+    return true;
   }
 
   /**
