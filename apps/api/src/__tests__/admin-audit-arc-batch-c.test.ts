@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { ensureSan } from '../modules/billing/san.service';
 import { settlementFileHash } from '../modules/billing/settlement-import';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
@@ -114,8 +114,7 @@ afterAll(async () => {
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } }).catch(() => {});
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }).catch(() => {});
     await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } }).catch(() => {});
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'arcc').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'arcc').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-arc-batch-c');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
