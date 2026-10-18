@@ -15,6 +15,7 @@ import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { REAL_PNG } from './helpers/real-image';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [E17] Courier return-to-sender after custody is no longer "call support only"
@@ -282,7 +283,7 @@ describe('[E17] courier return-to-sender after custody', () => {
     expect(early.json().error.code).toBe('NOT_IN_CUSTODY');
 
     // In custody but no return started yet: the proof must be refused.
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'ARRIVED' } });
+    await walkOrderStatus(app.prisma, order.id, 'ARRIVED');
     const before = await postReturnProof(`/api/v1/courier/order/${order.id}/return-proof`, moverUser.token);
     expect(before.statusCode).toBe(409);
     expect(before.json().error.code).toBe('NOT_RETURNING');

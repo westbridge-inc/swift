@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { TERMINAL_ORDER_STATUSES } from '../modules/order/order.service';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // A FILTER CANNOT FIND WHAT PAGINATION NEVER FETCHED.
@@ -312,7 +313,7 @@ describe('a closed order does not hand out the rider\'s phone', () => {
       expect(inFlight.statusCode).toBe(200);
       expect(inFlight.json().data.rider.phone).toBe(riderUser.phone);
 
-      await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
+      await walkOrderStatus(app.prisma, order.id, 'DELIVERED');
 
       const closed = await read();
       expect(closed.statusCode).toBe(200);

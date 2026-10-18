@@ -8,6 +8,7 @@ import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { reopenPreCustodyLeg } from '../modules/dispatch/delivery-watchdog';
 import { lockTaxiOrderForCustodyDecision } from '../modules/rides/passenger-custody';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // Real HTTP routes and PostgreSQL transitions. Authentication is supplied by
 // the harness; sockets, push and Redis are recorded, with no provider calls.
@@ -110,7 +111,7 @@ describe('rider pickup binds the locked assignment and route state', () => {
     await pause.waiting;
     try {
       await release(order.id, mover.id);
-      await app.prisma.order.update({ where: { id: order.id }, data: { riderId: replacement.rider!.id, status: 'RIDER_ARRIVED_PICKUP' } });
+      await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: replacement.rider!.id });
     } finally { pause.resume(); }
     const response = await pending;
     expect(response.statusCode, response.body).toBe(409);
@@ -124,7 +125,7 @@ describe('rider pickup binds the locked assignment and route state', () => {
     await pause.waiting;
     try {
       await release(order.id, mover.id);
-      await app.prisma.order.update({ where: { id: order.id }, data: { riderId: mover.rider!.id, status: 'RIDER_ARRIVED_PICKUP' } });
+      await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: mover.rider!.id });
     } finally { pause.resume(); }
     const response = await pending;
     expect(response.statusCode, response.body).toBe(409);
@@ -136,7 +137,8 @@ describe('rider pickup binds the locked assignment and route state', () => {
     const pause = pauseTransition();
     const pending = request(order.id, mover.id).then((r) => r);
     await pause.waiting;
-    try { await app.prisma.order.update({ where: { id: order.id }, data: { status: 'RIDER_ASSIGNED' } }); }
+    // [row 264] Back to RIDER_ASSIGNED the only way the machine allows: released, then assigned again.
+    try { await walkOrderStatus(app.prisma, order.id, 'RIDER_ASSIGNED'); }
     finally { pause.resume(); }
     const response = await pending;
     expect(response.statusCode, response.body).toBe(409);
