@@ -1,4 +1,5 @@
 import { emitToChatRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
@@ -183,6 +184,7 @@ export async function chatRoutes(app: FastifyInstance) {
       chatGuardCounter.labels('media', 'media_rejected').inc();
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
+    await scanUpload(buffer, { surface: 'chat', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: chatMediaFolder(roomId) });
     if (!isServerIssuedMediaId(url, roomId)) throw new AppError(500, 'MEDIA_ID_UNEXPECTED', 'The storage provider returned an id outside the room folder');
     return { success: true, data: { mediaId: url } };

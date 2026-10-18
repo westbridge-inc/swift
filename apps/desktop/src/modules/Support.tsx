@@ -71,7 +71,7 @@ export default function Support() {
   return (
     <div className="max-w-3xl space-y-3">
       <p className="text-sm text-neutral-500">{tickets.length} open ticket{tickets.length === 1 ? '' : 's'}.</p>
-      {tickets.length === 0 && <p className="text-sm text-neutral-400">Inbox zero. 🎉</p>}
+      {tickets.length === 0 && <p className="text-sm text-neutral-400">Inbox zero.</p>}
       {tickets.map((t) => <Ticket key={t.id} t={t} onDone={onDone} />)}
     </div>
   );

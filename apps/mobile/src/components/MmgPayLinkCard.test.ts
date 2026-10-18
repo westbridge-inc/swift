@@ -70,7 +70,8 @@ describe('who pays a taxi driver (owner, 11 Oct)', () => {
     // Only a taxi driver sees this card (MoverAccountScreen renders it under
     // isDriver). A driver's customers are passengers; in Swift "riders" are
     // delivery partners, so "Riders can pay you" told a driver the wrong thing.
-    expect(mover).toMatch(/\{isDriver \? \(\s*<MmgPayLinkCard\s+who="rides"/);
+    // [PAYMENT-SIMPLIFY 17 Oct] ...and only while the server's DRIVER_MMG_PAY_LINK switch is on.
+    expect(mover).toMatch(/\{isDriver && [^\n]*mmgPayLinkEnabled === true \? \(\s*<MmgPayLinkCard\s+who="rides"/);
     expect(card).toContain("const payer = who === 'store' ? 'Customers' : 'Passengers';");
     expect(card).toContain("const payerLower = who === 'store' ? 'customers' : 'passengers';");
     expect(card).not.toMatch(/'Riders'|'riders'/);

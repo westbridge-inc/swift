@@ -1389,7 +1389,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, paymentId, reported: { amountMinor: reported.amountMinor, currencyCode: reported.currencyCode }, intended }, '[PT-1] card provider reported a different amount or currency — held, nothing booked');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge held — the amount does not match',
+      title: 'Card charge held — the amount does not match',
       body: `The card provider reports ${reported.amountMinor} ${reported.currencyCode} (minor units) for payment ${paymentId}, but Swift asked for ${intended.amountMinor} ${intended.currencyCode}. Nothing was booked and the partner was not penalised. Reconcile against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-charge-amount-mismatch', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-amount-mismatch:${paymentId}`,
@@ -1408,7 +1408,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, instrumentId: instrument.id, bound: describeBinding(bound), configured: describeBinding(configured) }, '[PT-1 C2] card instrument bound to another provider setup — refused, nothing charged');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge refused — the card belongs to another provider setup',
+      title: 'Card charge refused — the card belongs to another provider setup',
       body: `The saved card for subscription ${sub.id} was issued by ${describeBinding(bound)}, but this server is set up for ${describeBinding(configured)}. Nothing was charged and the partner was not penalised. Restore the configuration, or ask the partner to add their card again.`,
       data: { kind: 'billing_invariants', alert: 'card-instrument-binding-mismatch', subscriptionId: sub.id, instrumentId: instrument.id },
       dedupeKey: `card-binding:${instrument.id}:${describeBinding(configured)}`,
@@ -1615,7 +1615,7 @@ export class BillingService {
         log().error({ paymentId: row.id, subscriptionId: sub.id, providerRef: found.providerRef }, '[M-01] card charge captured by the processor with no local payment — settled by reconciliation');
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
-          title: '💳 A card charge was captured with no local payment — repaired',
+          title: 'A card charge was captured with no local payment — repaired',
           body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or money kept for the next weekly fee; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
@@ -2069,7 +2069,7 @@ export class BillingService {
     if (payment.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card payment held — its currency cannot be confirmed',
+      title: 'Card payment held — its currency cannot be confirmed',
       body: `A weekly card payment for subscription ${sub.id} was captured by the card provider (payment ${paymentId}, ${Number(payment.amount).toLocaleString()} in its issued currency), but its charge-attempt record is missing, so the currency it was issued in cannot be confirmed. Nothing was booked and the partner was not penalised. Reconcile it against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-capture-currency-unpinned', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-unpinned:${paymentId}`,

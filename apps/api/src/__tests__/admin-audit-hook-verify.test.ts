@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { adminAuditCounter } from '../plugins/observability';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -90,8 +90,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'hv').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'hv').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-hook-verify');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});

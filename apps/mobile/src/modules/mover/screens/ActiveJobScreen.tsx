@@ -1360,7 +1360,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Trip complete
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Cash collected — 100% yours.'} How was {ratePopup?.name}?
+          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Fare collected — 100% yours.'} How was {ratePopup?.name}?
         </T>
         <View style={{ marginTop: space.lg }}>
           <Stars value={stars} size={34} gap={6} onRate={setStars} />
