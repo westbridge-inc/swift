@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
 import { readFileSync, readdirSync } from 'fs';
 import { join } from 'path';
+import { testPrismaClient } from './helpers/test-prisma-client';
 
 // ---------------------------------------------------------------------------
 // [Row 310] Chat polling reads one room's newest messages:
@@ -53,7 +54,7 @@ describe('[Row 310] on the migrated database the polling queries use the index',
 
   beforeAll(async () => {
     process.env['NODE_ENV'] = 'development';
-    prisma = new PrismaClient();
+    prisma = testPrismaClient();
     await prisma.$connect();
   });
 
