@@ -14,6 +14,10 @@ import { BOARD_STOPS } from '../../../lib/taxiContract.fixtures';
 // ---------------------------------------------------------------------------
 
 const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any }));
+// [RINGER] The ring itself (audio, vibration, AppState) is unit-tested in
+// hooks/useJobRing + services/jobRinger; here, only WHEN the card asks for it.
+const ring = vi.hoisted(() => ({ useJobRing: vi.fn() }));
+vi.mock('../../../hooks/useJobRing', () => ring);
 
 vi.mock('react-native', async () => {
   const R = await import('react');
@@ -184,3 +188,19 @@ describe('[owner ruling 8 Oct] the offer card has no fare slider', () => {
     expect(onAccept.mock.calls[0]).toEqual([]);
   });
 });
+
+describe('[RINGER] the offer rings until it is answered', () => {
+  it('rings from the moment the card shows, until the offer clock; stops the moment Accept is tapped', async () => {
+    const before = Date.now();
+    await draw(offerCard(baseOffer));
+    const [active, deadline] = ring.useJobRing.mock.lastCall as [boolean, number];
+    expect(active).toBe(true);
+    // A 30 s offer: the ring may last no longer than the offer does.
+    expect(deadline).toBeGreaterThanOrEqual(before + 30_000);
+    expect(deadline).toBeLessThanOrEqual(Date.now() + 30_000);
+
+    await draw(React.createElement(DispatchOfferCard, { offer: baseOffer as never, job: null, kind: 'DRIVER', accepting: true, onAccept: vi.fn(), onDecline: vi.fn() }));
+    expect(ring.useJobRing).toHaveBeenLastCalledWith(false, deadline);
+  });
+});
+

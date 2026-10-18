@@ -12,11 +12,12 @@ import { join } from 'node:path';
 import {
   PROCESSOR_REGISTER, NON_PROCESSOR_DIRS, CONTRACT_GATED_PAYLOADS, assertExternalProcessingPermitted,
   coverageOfHost, coverageOfProviderDir, outboundHostLiterals, processorByRef, processorStatus, needsContract,
-  processorRegisterView,
+  processorRegisterView, POLICY_NAMED_WITHOUT_EGRESS,
 } from '../modules/legal/processor-register';
 import { DiditKycProvider } from '../providers/kyc/didit-provider';
 import { IdAnalyzerKycProvider } from '../providers/kyc/id-analyzer-provider';
 import { UNKNOWN_ENGINE } from '../modules/verification/extraction-ledger';
+import { PRIVACY } from '../modules/legal/legal.routes';
 
 const SRC = join(__dirname, '..');
 const EXTERNAL_DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' } as const;
@@ -73,6 +74,70 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     const boot = readFileSync(join(SRC, 'utils/boot-config.ts'), 'utf8');
     expect(boot).toMatch(/MASTER_KEK is required in production/);
     expect(processorByRef('OBJECT_STORE')!.payload).toEqual(['PERSONAL_DOC_CIPHERTEXT']);
+  });
+
+  // [#1452 follow-up] The Privacy Policy tells people Swift's servers, databases and encrypted document
+  // storage are with DigitalOcean. The register is the internal record of the same fact, so it names the
+  // same company for both, and the host holds the database (account fields) as well as the ciphertext.
+  it('the hosting and document-storage rows name the company the Privacy Policy names (DigitalOcean)', () => {
+    expect(PRIVACY).toMatch(/DigitalOcean \(hosts Swift's servers and databases, and the encrypted storage for verification documents/);
+    expect(PRIVACY).toMatch(/Our servers are with DigitalOcean/);
+    const hosting = processorByRef('HOSTING');
+    expect(hosting, 'HOSTING row').not.toBeNull();
+    expect(hosting!.party).toMatch(/^DigitalOcean\b/);
+    expect(hosting!.payload).toEqual(expect.arrayContaining(['IDENTITY_FIELDS', 'CONTACT', 'LOCATION', 'PERSONAL_DOC_CIPHERTEXT']));
+    expect(hosting!.payload).not.toContain('PERSONAL_DOC_IMAGE');
+    expect(hosting!.leavesCountry).toBe(true);
+    expect(hosting!.contractEnv).toBe('PROCESSOR_CONTRACT_HOSTING');
+    const store = processorByRef('OBJECT_STORE')!;
+    expect(store.party).toMatch(/^DigitalOcean Spaces\b/);
+    expect(store.hosts).toContain('digitaloceanspaces.com');
+  });
+
+  // [COORD 18 Oct, item 3] Every party the Privacy Policy's processor paragraph names resolves to a register
+  // row, or to a declared reason why Swift's code sends it nothing. A row named here as used at launch is never
+  // marked dormant, and the policy never names a row the register says is not used at launch.
+  const processorsParagraph = /<p><b>Technical service providers \(processors\):<\/b>[\s\S]*?<\/p>/.exec(PRIVACY)?.[0] ?? '';
+  const POLICY_TO_REGISTER: ReadonlyArray<readonly [string, string, RegExp]> = [
+    ['DigitalOcean', 'HOSTING', /^DigitalOcean\b/], ['DigitalOcean', 'OBJECT_STORE', /^DigitalOcean Spaces\b/],
+    ['Cloudflare', 'CLOUDFLARE', /^Cloudflare\b/], ['Twilio', 'TWILIO', /^Twilio\b/], ['Expo', 'EXPO_PUSH', /^Expo\b/],
+    ['GoDaddy', 'SMTP_EMAIL', /^GoDaddy\b/], ['MMG', 'MMG', /^Mobile Money Guyana\b/],
+    ['Google Places', 'GOOGLE_PLACES', /^Google LLC \(Places API/], ['MapTiler', 'MAPTILER', /^MapTiler\b/],
+  ];
+  it('every processor the Privacy Policy names has a register row or a declared no-egress reason', () => {
+    expect(processorsParagraph.length).toBeGreaterThan(200);
+    for (const [name, ref, party] of POLICY_TO_REGISTER) {
+      expect(processorsParagraph, `the policy names ${name}`).toContain(name);
+      const row = processorByRef(ref);
+      expect(row, `${name} -> register row ${ref}`).not.toBeNull();
+      expect(row!.party, `${ref} party`).toMatch(party);
+      expect(row!.note, `${ref} is used at launch`).not.toMatch(/NOT USED|DORMANT/);
+    }
+    for (const name of Object.keys(POLICY_NAMED_WITHOUT_EGRESS)) {
+      expect(processorsParagraph, `declared ${name} is still named`).toContain(name);
+    }
+    for (const p of PROCESSOR_REGISTER.filter((r) => /NOT USED|DORMANT/.test(r.note))) {
+      expect(processorsParagraph, `${p.ref} is not used at launch but the policy names it`).not.toContain(p.party);
+    }
+    expect(processorsParagraph).not.toMatch(/Distance Matrix/);
+  });
+
+  it('Google: address search from Swift\'s servers is the live row; the routing adapter is not used at launch', () => {
+    expect(coverageOfProviderDir('places')).toEqual({ kind: 'PROCESSOR', refs: ['GOOGLE_PLACES', 'OSM_PLACES'] });
+    expect(coverageOfHost('places.googleapis.com')).toEqual({ kind: 'PROCESSOR', ref: 'GOOGLE_PLACES' });
+    expect(processorByRef('GOOGLE_MAPS')!.providerDirs).toEqual(['maps']);
+    expect(processorByRef('GOOGLE_MAPS')!.note).toMatch(/^NOT USED AT LAUNCH/);
+    expect(PRIVACY).toMatch(/Routes and travel estimates run on Swift's own servers/);
+  });
+
+  // [REVIEW-MMGLOAD G2] Production MMG is reached under *.mymmg.gy (merchant API ecommerce.mymmg.gy, checkout page
+  // mmgpg.mymmg.gy), which does not end in '.mmg.gy'. The production URLs are env-configured, so the source census never
+  // sees them: the register itself must cover them, or the register under-declares the live payment egress.
+  it('MMG: the production hosts (*.mymmg.gy) and the UAT hosts resolve to the MMG row; a look-alike does not', () => {
+    for (const host of ['ecommerce.mymmg.gy', 'mmgpg.mymmg.gy', 'mymmg.gy', 'api.mmg.gy', 'mwallet.mmgtest.net', 'mmgpg.mmgtest.net']) {
+      expect(coverageOfHost(host), host).toEqual({ kind: 'PROCESSOR', ref: 'MMG' });
+    }
+    expect(coverageOfHost('notmymmg.gy')).toBeNull();
   });
 
   it('the live verification path calls the gate at both send sites (doc submission and the L1→L2 identity check)', () => {

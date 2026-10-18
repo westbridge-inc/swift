@@ -231,15 +231,18 @@ describe('[W-18 / W-19] the shared location field enforces it', () => {
     expect(field.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
   });
 
-  it('[W-18] courier uses the shared field and disabled taxi has no second box', () => {
-    for (const page of ['src/app/(app)/courier/page.tsx']) {
+  // [Row 117 · owner 16 Oct 2026] The taxi page now prices a route (a fare
+  // estimate, never a booking): its two boxes are the shared field too.
+  it('[W-18] courier and the taxi fare form use the shared field; taxi has no second box and no booking', () => {
+    for (const page of ['src/app/(app)/courier/page.tsx', 'src/app/(app)/taxi/taxi-fare-estimate.tsx']) {
       const t = readFileSync(join(process.cwd(), page), 'utf8');
       expect(t, `${page} must use the shared field`).toMatch(/from '@\/components\/location-field'/);
       expect(stripComments(t), `${page} must not re-declare the box`).not.toMatch(/placesAutocomplete\(/);
     }
-    const taxi = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
-    expect(taxi).not.toMatch(/LocationField|<input|placesAutocomplete|requestRide/);
-    expect(taxi).toContain('Taxi booking is unavailable on the web.');
+    const page = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
+    const form = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/taxi-fare-estimate.tsx'), 'utf8'));
+    expect(page + form).not.toMatch(/<input|placesAutocomplete|requestRide|createRideRequest|\/rides\/(?:request|queue)/);
+    expect(page).toContain('Taxi booking is unavailable on the web.');
   });
 });
 

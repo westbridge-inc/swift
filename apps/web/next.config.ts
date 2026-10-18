@@ -60,8 +60,13 @@ export default function createNextConfig(phase: string): NextConfig {
 
   return {
     poweredByHeader: false,
-    // MMG return queries are private, including in the development request log.
-    logging: { incomingRequests: { ignore: [/^\/pay\/mmg\//] } },
+    // [M013] Request targets and upstream fetch URLs carry private grants:
+    // share and tracking tokens in the path (/trip/<token>, /track/<token>),
+    // MMG replies (/pay/mmg/...) and signed upstream URLs. `false` turns off
+    // Next's whole development request and fetch logger, not a list of paths
+    // that a new private route could miss. (Next prints no request log in
+    // production; the API keeps its own redacted diagnostics.)
+    logging: false,
     ...imageBuildConfig,
     // @swift/types ships TypeScript source; Next must transpile it (the admin
     // console declares the same). The site reads the market zone from it.

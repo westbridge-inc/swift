@@ -35,6 +35,19 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
   },
 ];
 
+/**
+ * Versions deliberately classed NOT material: no fresh tick, nobody is asked again. Each says why. Listing a version
+ * here changes nothing at run time (a version absent from MATERIAL_CHANGES already needs no tick); it records the
+ * decision, and `legal-reaccept.test.ts` requires every served LEGAL_VERSION to be classed exactly once.
+ */
+export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string }> = [
+  {
+    // [COORD 18 Oct ruling: non-material; pre-launch] Privacy s.6 states what already happens to a customer's own ID.
+    version: '2026-10-18',
+    why: 'Privacy section 6 now says a customer\u2019s own ID is kept while the account is open and deleted with the account, which is what already happens; it takes nothing from anyone.',
+  },
+];
+
 /** The newest material version that is already being served, or null. */
 export function materialVersion(current: string = LEGAL_VERSION): string | null {
   const live = MATERIAL_CHANGES.filter((c) => c.version <= current);

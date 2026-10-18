@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { View, ScrollView, ActivityIndicator } from 'react-native';
+import { View, ScrollView, ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { Card, PillButton, T } from '../../../kit';
+import { BrandCheckbox, Card, PillButton, T } from '../../../kit';
+import { CUSTOMER_ID_CONSENT_TEXT } from '../../../lib/uploadConsentCopy';
 import { Badge } from '../../../kit/badge';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
@@ -50,6 +51,8 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const [idUrl, setIdUrl] = useState<string | undefined>(undefined);
   const [picking, setPicking] = useState<'id' | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  // [R17 · in-app ¶15] starts unticked; Send stays off until the person agrees
+  const [agreed, setAgreed] = useState(false);
   const [lastUploadKind, setLastUploadKind] = useState<'id' | null>(null);
   const [outcome, setOutcome] = useState<CustomerIdCheck | null>(null);
   const [permErr, setPermErr] = useState<string | null>(null);
@@ -127,18 +130,30 @@ export function IdentityVerificationScreen({ navigation }: any) {
         {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the same card to retry the saved photo.</T> : null}
         {submit.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T> : null}
 
+        {/* [R17 · in-app ¶15] the customer agrees to Swift keeping the ID photo — an unticked tick, recorded */}
+        <Pressable
+          onPress={() => setAgreed((a) => !a)}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: agreed }}
+          accessibilityLabel={CUSTOMER_ID_CONSENT_TEXT}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg }}
+        >
+          <BrandCheckbox checked={agreed} onToggle={() => setAgreed((a) => !a)} />
+          <T variant="label" tone="muted" style={{ flex: 1 }}>{CUSTOMER_ID_CONSENT_TEXT}</T>
+        </Pressable>
+
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label={!idUrl ? 'Upload your ID first' : 'Send my ID'}
+          label={!idUrl ? 'Upload your ID first' : !agreed ? 'Tick the box to send' : 'Send my ID'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
-          disabled={!idUrl}
+          disabled={!idUrl || !agreed}
           onPress={() =>
             submit.mutate({ idDocumentUrl: idUrl as string }, { onSuccess: (result) => { setOutcome(idCheckOf(result as never)); setSubmitted(true); } })
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>
-          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it (DPA 2023).
+          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it.
         </T>
       </ScrollView>
     </SafeAreaView>

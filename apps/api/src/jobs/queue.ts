@@ -465,6 +465,145 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An MMG order the store ACCEPTED but
+ *  never marked "Paid by MMG" cancels 30 minutes after acceptance. ONE
+ *  canonical locked transition ACCEPTED → CANCELLED re-decides the rule on the
+ *  locked row (requireUnpaidMmgAcceptanceExpired): the store's "Paid by MMG"
+ *  takes the same row lock, so a tap that committed first keeps the order and
+ *  this is a clean no-op; a cancel that committed first makes the tap refuse.
+ *  Idempotent: a second run (or a second worker) finds the order no longer
+ *  ACCEPTED and does nothing — no second status log, no second notice. A
+ *  system cancellation (cancelledBy unset): it never counts against the
+ *  customer. Exported so tests drive it directly. */
+export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string): Promise<boolean> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const { MMG_ACCEPT_EXPIRY_REASON, closeStoreSilentMmgCase, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  let order: { vendorId: string | null; customerId: string; orderNumber: string; fulfillment: string | null };
+  try {
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
+      orderId,
+      target: 'CANCELLED',
+      allowedFrom: ['ACCEPTED'],
+      changedBy: null,
+      note: MMG_ACCEPT_EXPIRY_REASON,
+      cancellation: { by: null, reason: MMG_ACCEPT_EXPIRY_REASON },
+      requireUnpaidMmgAcceptanceExpired: true,
+      releaseStaleMoverPointer: true,
+      // A store-silent case (the customer had said "I paid", then took it back) closes with the cancel.
+      withinTransaction: async (tx) => { await closeStoreSilentMmgCase(tx, orderId, 'CANCELLED'); },
+      invalidStatus: () => new AppError(409, 'MMG_ACCEPT_EXPIRY_NOT_ELIGIBLE', 'Order is paid, no longer accepted, or still within its MMG payment window'),
+    }));
+  } catch (error) {
+    // Paid by MMG first, already cancelled, moved on, still inside its 30
+    // minutes, or gone — a clean no-op, never a BullMQ retry loop.
+    if (error instanceof AppError && (error.code === 'MMG_ACCEPT_EXPIRY_NOT_ELIGIBLE' || error.code === 'NOT_FOUND' || error.code === 'MMG_CANCEL_UNAVAILABLE')) {
+      return false;
+    }
+    throw error;
+  }
+
+  await emitToOrderRoom(ctx.prisma, ctx.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
+  if (order.vendorId) await emitToStoreRoom(ctx.prisma, ctx.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
+
+  const storeName = order.vendorId
+    ? (await ctx.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true } }).catch(() => null))?.name ?? 'The store'
+    : 'The store';
+  const noun = mmgOrderNoun(order.fulfillment);
+  const copy = mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName, noun);
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { publishUnattestedMmgCancellation } = await import('../modules/order/order.service');
+  await publishUnattestedMmgCancellation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+    orderId,
+    orderNumber: order.orderNumber,
+    vendorId: order.vendorId,
+    storeBody: mmgAcceptExpiryStoreBody(order.orderNumber, noun),
+    customer: { userId: order.customerId, title: copy.title, body: copy.body, data: { reason: 'MMG_NOT_PAID_IN_TIME' } },
+  });
+  ctx.log.info({ orderId }, 'Order auto-cancelled (MMG not marked paid within 30 minutes of acceptance)');
+  return true;
+}
+
+/** [owner 18 Oct 2026] The customer recorded "I paid" and the store stayed
+ *  silent 30 minutes after accepting: the order is NOT cancelled. Instead the
+ *  store is asked once to check its MMG ("The customer says they paid $X to
+ *  your MMG number. Check your MMG and tap Paid by MMG.") and one support case
+ *  opens for the order (category PAYMENT, admins paged). Decided and written
+ *  under the orders row lock, so two sweeps open one case; PREPARING and
+ *  dispatch stay locked until "Paid by MMG", exactly as before. The case is a
+ *  support ticket, not the claim-dispute latch: that latch would keep holding
+ *  the order after the store's tap, which the owner's flow does not want. */
+export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: string): Promise<boolean> {
+  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  const { bindTenantTransaction } = await import('../plugins/prisma');
+  const opened = await ctx.prisma.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
+    const order = await tx.order.findUnique({ where: { id: orderId } });
+    if (!order || !isStoreSilentOnClaimedMmgPayment(order, new Date())) return null;
+    const existing = await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
+    if (existing) return null;
+    const ticket = await tx.supportTicket.create({
+      data: { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) },
+    });
+    return { ticketId: ticket.id, order };
+  });
+  if (!opened) return false;
+
+  const { order, ticketId } = opened;
+  const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const owner = order.vendorId
+    ? (await ctx.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }).catch(() => null))?.owner?.userId ?? null
+    : null;
+  if (owner) {
+    const push = mmgStoreSilentStorePush(order.orderNumber, Number(order.totalAmount), order.currencyCode, mmgOrderNoun(order.fulfillment));
+    await notifications.send({
+      userId: owner, type: 'ORDER_UPDATE', audience: 'business', title: push.title, body: push.body,
+      data: { orderId, kind: 'mmg_customer_says_paid' }, dedupeKey: `mmg-store-silent:${orderId}`,
+    }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'store MMG check push failed after the case opened'));
+  }
+  await notifyAdmins(ctx.prisma, notifications, {
+    tenantId: order.tenantId ?? null,
+    title: 'MMG payment not confirmed by the store',
+    body: `Order ${order.orderNumber}: the customer says they paid; the store has not confirmed 30 minutes after accepting.`,
+    data: { kind: 'support_ticket', ticketId, orderId },
+  }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'admin page for the MMG case failed; the ticket is open'));
+  ctx.log.info({ orderId, ticketId }, 'MMG store-silent case opened (customer says paid; not cancelled)');
+  return true;
+}
+
+/** The sweep behind it: every accepted, unpaid MMG order whose 30 minutes ran
+ *  out, each through expireUnpaidMmgAcceptance in its own order's tenant — and
+ *  every one the customer says they paid, through escalateStoreSilentMmgClaim.
+ *  A sweep (not a per-order delayed job) so a lost Redis job can never leave an
+ *  order waiting forever; the locked check re-decides every row it reads. */
+export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100): Promise<string[]> {
+  const { expiredUnpaidMmgAcceptanceWhere, storeSilentOnClaimedMmgWhere } = await import('../modules/order/mmg-accept-expiry');
+  const claimed = await ctx.prisma.order.findMany({
+    where: storeSilentOnClaimedMmgWhere(new Date()),
+    select: { id: true },
+    orderBy: { acceptedAt: 'asc' },
+    take: batch,
+  });
+  for (const { id } of claimed) {
+    await inTenantOf(ctx.prisma, { order: id }, () => escalateStoreSilentMmgClaim(ctx, id))
+      .catch((err: unknown) => { ctx.log.error({ err, orderId: id }, 'MMG store-silent case failed — the next sweep retries'); return false; });
+  }
+  const due = await ctx.prisma.order.findMany({
+    where: expiredUnpaidMmgAcceptanceWhere(new Date()),
+    select: { id: true },
+    orderBy: { acceptedAt: 'asc' },
+    take: batch,
+  });
+  const cancelled: string[] = [];
+  for (const { id } of due) {
+    const done = await inTenantOf(ctx.prisma, { order: id }, () => expireUnpaidMmgAcceptance(ctx, id))
+      .catch((err: unknown) => { ctx.log.error({ err, orderId: id }, 'MMG acceptance expiry failed — the next sweep retries'); return false; });
+    if (done) cancelled.push(id);
+  }
+  return cancelled;
+}
+
 /**
  * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
  * visible to the vendor + dispatchable. No-op while every order is unheld
@@ -625,6 +764,23 @@ export async function inTenantOf<T>(
   return tenantId ? runWithTenant(tenantId, fn) : fn();
 }
 
+/** [M013] What a failed-job log line may say about the job's payload: the
+ *  top-level record ids (orderId, userId, checkoutId …) and nothing else.
+ *  Payloads carry message bodies, sign-in codes, links and provider grants;
+ *  the ids are enough to find the record. */
+const LOGGABLE_ID_KEY = /^[a-z][A-Za-z0-9]{0,40}Id$/;
+const LOGGABLE_ID_VALUE = /^[A-Za-z0-9_:-]{1,64}$/;
+function failedJobIds(data: unknown): Record<string, string | number> | undefined {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const ids: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    // [#1795 S4-1] payerId carries the MMG payer's phone number (billing): a key that can name a person's number is never logged.
+    if (!LOGGABLE_ID_KEY.test(key) || /token|secret|key|code|pin|password|otp|payer|msisdn|phone/i.test(key)) continue;
+    if ((typeof value === 'string' && LOGGABLE_ID_VALUE.test(value)) || (typeof value === 'number' && Number.isSafeInteger(value))) ids[key] = value;
+  }
+  return Object.keys(ids).length > 0 ? ids : undefined;
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   // [#1794 S3-1] The boot grace of checkSafetyLane starts here.
@@ -641,7 +797,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
     worker.on('failed', (job, err) => {
-      ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+      // [M013] Never the raw payload (message bodies, codes, links, grants):
+      // the job's identity, its attempt count and the record ids it names.
+      ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, ids: failedJobIds(job?.data), err }, 'BullMQ job failed');
       try {
         captureError(err, { queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
       } catch (captureFailure) {
@@ -1340,6 +1498,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         docImagePolicyCounter.inc({ outcome: 'probe_failed' }, run.probeFailed);
         docImagePolicyCounter.inc({ outcome: 'skipped' }, run.skipped);
         ctx.log.info(`Image-policy sweep: ${run.candidates} candidates, ${run.purged} purged, ${run.probeFailed} probe failures, ${run.skipped} skipped`);
+        return;
+      }
+
+      if (job.name === 'verification-decision-outbox') {
+        // [S2-29 · KYC-DECISION-ATOMIC] Finish what committed approvals still owe — the trial
+        // decision — when the request that approved them did not: a lease-claimed, idempotent drain.
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+        const drained = await new VerificationService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), getKycProvider()).processDecisionOutbox();
+        if (drained.processed > 0 || drained.failed > 0) {
+          ctx.log.info(`Verification decision outbox: ${drained.processed} processed / ${drained.failed} retried`);
+        }
         return;
       }
 
@@ -2362,6 +2533,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'mmg-accept-expiry') {
+        await expireUnpaidMmgAcceptancesJob(ctx);
+        return;
+      }
+
       const dispatch = new DispatchService(ctx.prisma, ctx.redis, ctx.io, getMapsProvider(), scheduleOfferTimeout, scheduleRedispatch);
 
       if (job.name === 'dispatch-order') {
@@ -2639,6 +2815,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [S2-29 · KYC-DECISION-ATOMIC] Every 5 minutes: the trial decision of any approval whose request
+  // did not finish it (a failed or interrupted tail). Most rows are drained by the request itself.
+  await queues.verificationQueue.add('verification-decision-outbox', {}, {
+    repeat: { pattern: '*/5 * * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });
@@ -2936,6 +3120,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // (The precise fix — a per-order delayed job at holdExpiresAt — is noted in
   // the Total Audit; the sweep stays either way as the crash-proof backstop.)
   await queues.dispatchQueue.add('release-held-orders', {}, {
+    repeat: { every: 10_000 },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order not marked
+  // "Paid by MMG" within 30 minutes cancels. Every 10 s, so it cancels within
+  // seconds of 30:00; a sweep, so a Redis loss can never strand one.
+  await queues.dispatchQueue.add('mmg-accept-expiry', {}, {
     repeat: { every: 10_000 },
     removeOnComplete: 20,
     removeOnFail: 20,

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingTotals } from '../rating/rating-groups';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
@@ -28,7 +29,7 @@ import {
   disconnectSessionSockets as disconnectAuthorizationSessionSockets,
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
-import { isDevelopment, isProduction } from '../../utils/runtime-mode';
+import { isProduction } from '../../utils/runtime-mode';
 import {
   armDevelopmentSignupGeneration,
   consumePasswordResetOtpGeneration,
@@ -203,10 +204,9 @@ export class AuthService {
     if (purpose === 'password-reset') await storePasswordResetOtp(this.app.redis, phone, otp);
     else await storeSignupOtp(this.app.redis, phone, otp);
 
-    if (isDevelopment()) {
-      this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
-    }
-
+    // [M013] The code goes to the SMS channel only, never to a log line, in
+    // development too (local sign-in uses DEV_OTP_BYPASS; the dev adapter keeps
+    // what it "sent" in memory for tests).
     // Delivery rides the swappable SMS channel (Twilio-class adapter later).
     // Do NOT claim success when the send fails — the user would wait forever
     // for a code that never left the building. send-otp runs before any
@@ -312,6 +312,10 @@ export class AuthService {
       include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
+    // rider or driver row (they move with each single rating): the whole-groups figure instead.
+    if (user.rider) Object.assign(user.rider, await shownRatingTotals(this.app.prisma, 'RIDER', user.id));
+    if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));
 
     // [L04 · AUTH-2] The code proves the phone, not that the account may sign
     // in. Status is read under the User lock (the order ban/suspend and

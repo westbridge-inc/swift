@@ -97,6 +97,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  process.env['STORE_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);

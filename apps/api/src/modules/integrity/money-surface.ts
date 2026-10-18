@@ -49,10 +49,49 @@ export interface MoneySurfaceDeps {
   failpoint?: (boundary: string) => Promise<void>;
 }
 
-export type CommandKind = 'MMG_LINK_STAGE' | 'MMG_LINK_CANCEL' | 'MMG_LINK_CLEAR' | 'MMG_LINK_APPLY';
+export type CommandKind =
+  | 'MMG_LINK_STAGE' | 'MMG_LINK_CANCEL' | 'MMG_LINK_CLEAR' | 'MMG_LINK_APPLY'
+  | 'MMG_NUMBER_STAGE' | 'MMG_NUMBER_CANCEL' | 'MMG_NUMBER_CLEAR' | 'MMG_NUMBER_APPLY';
 export type CommandState = 'DECIDED' | 'APPLIED' | 'CANCELLED' | 'SUPERSEDED';
 
-const CLEAR_PENDING = { mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null } as const;
+/**
+ * [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · ALG-34 parity] The money surface has
+ * TWO destinations, governed by ONE set of transitions: the MMG pay LINK (stores
+ * and drivers; dormant behind its switches) and the store's MMG NUMBER (stores
+ * only). Each field has its own live/pending/cool-off columns and its own command
+ * kinds; the entity lock, the audit generation, the step-up re-check, the owner
+ * notice outbox and the executor are shared, so the number gets every protection
+ * the link has and no transition forks. Every caller that names no field means LINK.
+ */
+export type MoneySurfaceField = 'LINK' | 'NUMBER';
+
+interface FieldSpec {
+  live: 'mmgPayUrl' | 'mmgNumber';
+  pending: 'mmgPayUrlPending' | 'mmgNumberPending';
+  pendingAt: 'mmgPayUrlPendingAt' | 'mmgNumberPendingAt';
+  applyAt: 'mmgPayUrlApplyAt' | 'mmgNumberApplyAt';
+  stage: CommandKind; cancel: CommandKind; clear: CommandKind; apply: CommandKind;
+  /** How the owner reads it: "MMG pay link" / "MMG number". */
+  noun: string;
+  /** Notice kind prefix and dedupe-key prefix. */
+  key: 'mmg_link' | 'mmg_number';
+  dedupe: 'mmg-link' | 'mmg-number';
+}
+
+const FIELDS: Record<MoneySurfaceField, FieldSpec> = {
+  LINK: {
+    live: 'mmgPayUrl', pending: 'mmgPayUrlPending', pendingAt: 'mmgPayUrlPendingAt', applyAt: 'mmgPayUrlApplyAt',
+    stage: 'MMG_LINK_STAGE', cancel: 'MMG_LINK_CANCEL', clear: 'MMG_LINK_CLEAR', apply: 'MMG_LINK_APPLY',
+    noun: 'MMG pay link', key: 'mmg_link', dedupe: 'mmg-link',
+  },
+  NUMBER: {
+    live: 'mmgNumber', pending: 'mmgNumberPending', pendingAt: 'mmgNumberPendingAt', applyAt: 'mmgNumberApplyAt',
+    stage: 'MMG_NUMBER_STAGE', cancel: 'MMG_NUMBER_CANCEL', clear: 'MMG_NUMBER_CLEAR', apply: 'MMG_NUMBER_APPLY',
+    noun: 'MMG number', key: 'mmg_number', dedupe: 'mmg-number',
+  },
+};
+
+const clearPending = (spec: FieldSpec): Record<string, null> => ({ [spec.pending]: null, [spec.pendingAt]: null, [spec.applyAt]: null });
 
 export const digestOf = (value: string | null | undefined): string => (value ? createHash('sha256').update(value).digest('hex') : 'none');
 /** The step-up binding: which session's step-up authorised which change to which surface. A binding, not a secret. */
@@ -126,7 +165,8 @@ async function entityIsFiction(prisma: PrismaClient, actor: LinkActor, entityId:
   return kind === 'REVIEW';
 }
 
-type LinkState = { mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null; userId: string; fiction: boolean };
+/** The one field's authority, read under the entity lock: the live destination, the staged one and when it applies. */
+type LinkState = { live: string | null; pending: string | null; applyAt: Date | null; userId: string; fiction: boolean };
 
 /**
  * The authority read every transition makes first, under the entity lock.
@@ -136,16 +176,27 @@ type LinkState = { mmgPayUrl: string | null; mmgPayUrlPending: string | null; mm
  * owner notice (whose SMS would reach a fictional number) — and the executor
  * skips it. One check, at the one place every MMG-link change passes.
  */
-async function readLink(tx: Tx, actor: LinkActor, entityId: string, onFiction: 'refuse' | 'report' = 'refuse'): Promise<LinkState> {
+async function readLink(tx: Tx, actor: LinkActor, entityId: string, onFiction: 'refuse' | 'report' = 'refuse', field: MoneySurfaceField = 'LINK'): Promise<LinkState> {
   let state: LinkState;
   if (actor === 'VENDOR') {
-    const v = await tx.vendor.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, tenant: { select: { kind: true } }, owner: { select: { userId: true } } } });
+    const v = await tx.vendor.findUnique({
+      where: { id: entityId },
+      select: {
+        mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true,
+        mmgNumber: true, mmgNumberPending: true, mmgNumberApplyAt: true,
+        tenant: { select: { kind: true } }, owner: { select: { userId: true } },
+      },
+    });
     if (!v) throw new AppError(404, 'NOT_FOUND', 'Store not found');
-    state = { mmgPayUrl: v.mmgPayUrl, mmgPayUrlPending: v.mmgPayUrlPending, mmgPayUrlApplyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId, fiction: v.tenant.kind === 'REVIEW' };
+    state = field === 'NUMBER'
+      ? { live: v.mmgNumber, pending: v.mmgNumberPending, applyAt: v.mmgNumberApplyAt, userId: v.owner.userId, fiction: v.tenant.kind === 'REVIEW' }
+      : { live: v.mmgPayUrl, pending: v.mmgPayUrlPending, applyAt: v.mmgPayUrlApplyAt, userId: v.owner.userId, fiction: v.tenant.kind === 'REVIEW' };
   } else {
+    // A driver has a pay link only: there is no driver MMG number.
+    if (field !== 'LINK') throw new AppError(400, 'NOT_SUPPORTED', 'Only a store has an MMG number on Swift.');
     const d = await tx.driver.findUnique({ where: { id: entityId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, userId: true, user: { select: { tenant: { select: { kind: true } } } } } });
     if (!d) throw new AppError(404, 'NOT_FOUND', 'Driver not found');
-    state = { mmgPayUrl: d.mmgPayUrl, mmgPayUrlPending: d.mmgPayUrlPending, mmgPayUrlApplyAt: d.mmgPayUrlApplyAt, userId: d.userId, fiction: d.user.tenant.kind === 'REVIEW' };
+    state = { live: d.mmgPayUrl, pending: d.mmgPayUrlPending, applyAt: d.mmgPayUrlApplyAt, userId: d.userId, fiction: d.user.tenant.kind === 'REVIEW' };
   }
   if (state.fiction && onFiction === 'refuse') {
     moneySurfaceCounter.labels('refused_review_fiction').inc();
@@ -156,15 +207,17 @@ async function readLink(tx: Tx, actor: LinkActor, entityId: string, onFiction: '
 
 /** A compare-and-set write on the entity: the authority moves only from the state this transition read. */
 async function writeLink(
-  tx: Tx, actor: LinkActor, entityId: string,
-  expect: { mmgPayUrl: string | null },
+  tx: Tx, actor: LinkActor, entityId: string, spec: FieldSpec,
+  expect: { live: string | null },
   data: Record<string, unknown>,
 ): Promise<void> {
-  const where = { id: entityId, mmgPayUrl: expect.mmgPayUrl };
-  const r = actor === 'VENDOR' ? await tx.vendor.updateMany({ where, data }) : await tx.driver.updateMany({ where, data });
+  const where = { id: entityId, [spec.live]: expect.live };
+  const r = actor === 'VENDOR'
+    ? await tx.vendor.updateMany({ where: where as Prisma.VendorWhereInput, data })
+    : await tx.driver.updateMany({ where: where as Prisma.DriverWhereInput, data });
   if (r.count !== 1) {
     moneySurfaceCounter.labels('refused_authority_moved').inc();
-    throw new AppError(409, 'AUTHORITY_MOVED', 'The pay link changed under this request; read it again.');
+    throw new AppError(409, 'AUTHORITY_MOVED', spec.key === 'mmg_link' ? 'The pay link changed under this request; read it again.' : `The ${spec.noun} changed under this request; read it again.`);
   }
 }
 
@@ -178,8 +231,8 @@ async function decide(tx: Tx, d: Parameters<typeof recordDecision>[1]): Promise<
   return id;
 }
 
-async function supersedeOpenStage(tx: Tx, entityId: string): Promise<void> {
-  await tx.moneySurfaceCommand.updateMany({ where: { entityId, kind: 'MMG_LINK_STAGE', state: 'DECIDED' }, data: { state: 'SUPERSEDED' } });
+async function supersedeOpenStage(tx: Tx, entityId: string, spec: FieldSpec = FIELDS.LINK): Promise<void> {
+  await tx.moneySurfaceCommand.updateMany({ where: { entityId, kind: spec.stage, state: 'DECIDED' }, data: { state: 'SUPERSEDED' } });
 }
 
 interface CommandDraft {
@@ -273,58 +326,83 @@ export interface StageInput {
   /** The account that owns the surface — the OLD contact point is theirs. */
   userId: string;
   sessionId: string | null;
-  /** Already validated by utils/mmg-pay-url. */
-  newUrl: string;
+  /** LINK (default): the new pay link, already validated by utils/mmg-pay-url. */
+  newUrl?: string;
+  /** NUMBER: the store's new MMG number, already validated by utils/mmg-number. */
+  newNumber?: string;
+  field?: MoneySurfaceField;
   now?: Date;
+}
+
+/** What the owner is told, per field: the same three moments, in the field's own words. */
+function stagedNotice(spec: FieldSpec, actor: LinkActor, entityId: string, applyAt: Date): OwnerNotice {
+  if (spec.key === 'mmg_number') {
+    return {
+      title: 'Your MMG number is changing',
+      body: `The new number takes effect ${whenSentence(applyAt)}. Until then customers pay your current number. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`,
+      kind: 'mmg_number_change_staged',
+      sms: `Swift: the MMG number on your store account changes ${whenSentence(applyAt)}. If this wasn't you, open Swift > Account and cancel it now.`,
+      dedupeKey: `mmg-number-staged:${entityId}:${applyAt.toISOString()}`,
+    };
+  }
+  return {
+    title: 'Your MMG pay link is changing',
+    body: `The new link takes effect ${whenSentence(applyAt)}. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`,
+    kind: 'mmg_link_change_staged',
+    sms: `Swift: the MMG pay link on your ${actor === 'VENDOR' ? 'store' : 'driver'} account changes ${whenSentence(applyAt)}. If this wasn't you, open Swift > Account and cancel it now.`,
+    dedupeKey: `mmg-link-staged:${entityId}:${applyAt.toISOString()}`,
+  };
 }
 
 export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInput): Promise<{ applyAt: Date; cooloffHours: number; signals: LinkSignal[]; commandId: string; replay: boolean }> {
   const now = input.now ?? new Date();
+  const spec = FIELDS[input.field ?? 'LINK'];
+  const newValue = spec.key === 'mmg_number' ? input.newNumber : input.newUrl;
+  if (!newValue) throw new AppError(400, 'VALIDATION_ERROR', `No new ${spec.noun} was given.`);
   // [R048-007] default-deny: when the control is reachable it is re-verified here; when it is not, the money surface refuses
   if (deps.redis) {
     let ok = false;
-    try { ok = !!input.sessionId && (await hasStepUp(deps.redis, input.sessionId)); } catch { moneySurfaceCounter.labels('refused_control_unavailable').inc(); throw new AppError(503, 'CONTROL_UNAVAILABLE', 'The step-up check is unavailable right now; the pay link was not changed.'); }
+    try { ok = !!input.sessionId && (await hasStepUp(deps.redis, input.sessionId)); } catch { moneySurfaceCounter.labels('refused_control_unavailable').inc(); throw new AppError(503, 'CONTROL_UNAVAILABLE', spec.key === 'mmg_link' ? 'The step-up check is unavailable right now; the pay link was not changed.' : `The step-up check is unavailable right now; the ${spec.noun} was not changed.`); }
     if (!ok) { moneySurfaceCounter.labels('refused_step_up').inc(); throw new AppError(403, 'STEP_UP_REQUIRED', 'Confirm it’s you first — we’ll text a code to the phone on this account.'); }
   }
   const cfg = await algoConfig(deps.prisma, 'money.linkCooloffHours');
   const cooloffHours = Math.min(72, Math.max(1, Number(cfg.value) || DEFAULT_LINK_COOLOFF_HOURS));
   const applyAt = new Date(now.getTime() + cooloffHours * 3_600_000);
   const sig = await sessionSignals(deps.prisma, input.userId, input.sessionId);
-  const newDigest = digestOf(input.newUrl);
-  const notice: OwnerNotice = {
-    title: 'Your MMG pay link is changing',
-    body: `The new link takes effect ${whenSentence(applyAt)}. If this wasn’t you, open Account and cancel it now — that also signs out every other device.`,
-    kind: 'mmg_link_change_staged',
-    sms: `Swift: the MMG pay link on your ${input.actor === 'VENDOR' ? 'store' : 'driver'} account changes ${whenSentence(applyAt)}. If this wasn't you, open Swift > Account and cancel it now.`,
-    dedupeKey: `mmg-link-staged:${input.entityId}:${applyAt.toISOString()}`,
-  };
+  const newDigest = digestOf(newValue);
+  const notice = stagedNotice(spec, input.actor, input.entityId, applyAt);
   const result = await deps.prisma.$transaction(async (tx) => {
     await lockEntity(tx, input.entityId);
-    const current = await readLink(tx, input.actor, input.entityId);
+    const current = await readLink(tx, input.actor, input.entityId, 'refuse', input.field ?? 'LINK');
     await deps.failpoint?.('tx:after-read');
-    const open = await tx.moneySurfaceCommand.findFirst({ where: { entityId: input.entityId, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
+    const open = await tx.moneySurfaceCommand.findFirst({ where: { entityId: input.entityId, kind: spec.stage, state: 'DECIDED' } });
     // replay convergence: the same change staged again is the same command, not a second one
     if (open && open.newDigest === newDigest && open.applyAt) {
       moneySurfaceCounter.labels('stage_replay').inc();
       return { command: open, replay: true, applyAt: open.applyAt };
     }
-    if (open) await supersedeOpenStage(tx, input.entityId);
+    if (open) await supersedeOpenStage(tx, input.entityId, spec);
     const generation = await nextGeneration(tx, input.entityId);
-    await writeLink(tx, input.actor, input.entityId, { mmgPayUrl: current.mmgPayUrl }, { mmgPayUrlPending: input.newUrl, mmgPayUrlPendingAt: now, mmgPayUrlApplyAt: applyAt });
+    await writeLink(tx, input.actor, input.entityId, spec, { live: current.live }, { [spec.pending]: newValue, [spec.pendingAt]: now, [spec.applyAt]: applyAt });
     await deps.failpoint?.('tx:after-entity');
     const decisionId = await decide(tx, {
       algo: ALGO_ID, subjectType: input.actor, subjectId: input.entityId, outcome: 'STAGED',
-      sentence: `MMG pay link change staged ${fromClause(sig.signals)}; the old link stays live until ${whenSentence(applyAt)} unless the owner cancels.`,
-      inputs: {
-        signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId,
-        hadLink: current.mmgPayUrl != null, newHost: hostOf(input.newUrl), cooloffHours, applyAt: applyAt.toISOString(), generation,
-      },
+      sentence: spec.key === 'mmg_number'
+        ? `MMG number change staged ${fromClause(sig.signals)}; the old number stays live until ${whenSentence(applyAt)} unless the owner cancels.`
+        : `MMG pay link change staged ${fromClause(sig.signals)}; the old link stays live until ${whenSentence(applyAt)} unless the owner cancels.`,
+      // The number itself never enters the decision record: its digest is on the command.
+      inputs: spec.key === 'mmg_number'
+        ? { field: 'NUMBER', signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId, hadNumber: current.live != null, cooloffHours, applyAt: applyAt.toISOString(), generation }
+        : {
+            signals: sig.signals, sessionAgeMin: sig.sessionAgeMin, deviceId: sig.deviceId,
+            hadLink: current.live != null, newHost: hostOf(newValue), cooloffHours, applyAt: applyAt.toISOString(), generation,
+          },
       configVersion: cfg.version,
     });
     await deps.failpoint?.('tx:after-decision');
     const command = await writeCommand(tx, generation, {
-      actor: input.actor, entityId: input.entityId, userId: input.userId, kind: 'MMG_LINK_STAGE', state: 'DECIDED',
-      oldDigest: digestOf(current.mmgPayUrl), newDigest, decisionId, stepUpSessionId: input.sessionId, signals: sig.signals, applyAt, notice,
+      actor: input.actor, entityId: input.entityId, userId: input.userId, kind: spec.stage, state: 'DECIDED',
+      oldDigest: digestOf(current.live), newDigest, decisionId, stepUpSessionId: input.sessionId, signals: sig.signals, applyAt, notice,
     });
     await deps.failpoint?.('tx:after-command');
     return { command, replay: false, applyAt };
@@ -337,36 +415,43 @@ export async function stageMmgLinkChange(deps: MoneySurfaceDeps, input: StageInp
 
 export async function cancelMmgLinkChange(
   deps: MoneySurfaceDeps,
-  input: { actor: LinkActor; entityId: string; userId: string; keepSessionId: string | null },
+  input: { actor: LinkActor; entityId: string; userId: string; keepSessionId: string | null; field?: MoneySurfaceField },
 ): Promise<{ cancelled: boolean; revokedSessions: number }> {
+  const spec = FIELDS[input.field ?? 'LINK'];
   const result = await deps.prisma.$transaction(async (tx) => {
     await lockEntity(tx, input.entityId);
-    const current = await readLink(tx, input.actor, input.entityId);
+    const current = await readLink(tx, input.actor, input.entityId, 'refuse', input.field ?? 'LINK');
     await deps.failpoint?.('tx:after-read');
-    if (current.mmgPayUrlPending == null) return null;
+    if (current.pending == null) return null;
     const generation = await nextGeneration(tx, input.entityId);
-    await writeLink(tx, input.actor, input.entityId, { mmgPayUrl: current.mmgPayUrl }, CLEAR_PENDING);
+    await writeLink(tx, input.actor, input.entityId, spec, { live: current.live }, clearPending(spec));
     await deps.failpoint?.('tx:after-entity');
     // the revocation consequence is part of the same authority transition
     const revoked = await tx.session.deleteMany({
       where: { userId: input.userId, ...(input.keepSessionId ? { id: { not: input.keepSessionId } } : {}) },
     });
-    await supersedeOpenStage(tx, input.entityId);
-    await tx.moneySurfaceCommand.updateMany({ where: { entityId: input.entityId, kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED', newDigest: digestOf(current.mmgPayUrlPending) }, data: { state: 'CANCELLED' } });
+    await supersedeOpenStage(tx, input.entityId, spec);
+    await tx.moneySurfaceCommand.updateMany({ where: { entityId: input.entityId, kind: spec.stage, state: 'SUPERSEDED', newDigest: digestOf(current.pending) }, data: { state: 'CANCELLED' } });
     const decisionId = await decide(tx, {
       algo: ALGO_ID, subjectType: input.actor, subjectId: input.entityId, outcome: 'CANCELLED_BY_OWNER',
-      sentence: `The owner cancelled the pending MMG pay link change and ${revoked.count} other session${revoked.count === 1 ? ' was' : 's were'} signed out.`,
-      inputs: { revokedSessions: revoked.count, generation },
+      sentence: `The owner cancelled the pending ${spec.noun} change and ${revoked.count} other session${revoked.count === 1 ? ' was' : 's were'} signed out.`,
+      inputs: spec.key === 'mmg_number' ? { field: 'NUMBER', revokedSessions: revoked.count, generation } : { revokedSessions: revoked.count, generation },
     });
     await deps.failpoint?.('tx:after-decision');
     const command = await writeCommand(tx, generation, {
-      actor: input.actor, entityId: input.entityId, userId: input.userId, kind: 'MMG_LINK_CANCEL', state: 'APPLIED',
-      oldDigest: digestOf(current.mmgPayUrlPending), newDigest: digestOf(current.mmgPayUrl), decisionId, stepUpSessionId: input.keepSessionId,
-      notice: {
-        title: 'MMG pay link change cancelled',
-        body: `The pending change was cancelled and ${revoked.count} other device${revoked.count === 1 ? ' was' : 's were'} signed out. Your current link stays as it was.`,
-        kind: 'mmg_link_change_cancelled',
-      },
+      actor: input.actor, entityId: input.entityId, userId: input.userId, kind: spec.cancel, state: 'APPLIED',
+      oldDigest: digestOf(current.pending), newDigest: digestOf(current.live), decisionId, stepUpSessionId: input.keepSessionId,
+      notice: spec.key === 'mmg_number'
+        ? {
+            title: 'MMG number change cancelled',
+            body: `The pending change was cancelled and ${revoked.count} other device${revoked.count === 1 ? ' was' : 's were'} signed out. Your current number stays as it was.`,
+            kind: 'mmg_number_change_cancelled',
+          }
+        : {
+            title: 'MMG pay link change cancelled',
+            body: `The pending change was cancelled and ${revoked.count} other device${revoked.count === 1 ? ' was' : 's were'} signed out. Your current link stays as it was.`,
+            kind: 'mmg_link_change_cancelled',
+          },
     });
     await deps.failpoint?.('tx:after-command');
     return { command, revoked: revoked.count };
@@ -378,24 +463,27 @@ export async function cancelMmgLinkChange(
   return { cancelled: true, revokedSessions: result.revoked };
 }
 
-export async function clearMmgLink(deps: MoneySurfaceDeps, input: { actor: LinkActor; entityId: string; userId?: string }): Promise<void> {
+export async function clearMmgLink(deps: MoneySurfaceDeps, input: { actor: LinkActor; entityId: string; userId?: string; field?: MoneySurfaceField }): Promise<void> {
+  const spec = FIELDS[input.field ?? 'LINK'];
   await deps.prisma.$transaction(async (tx) => {
     await lockEntity(tx, input.entityId);
-    const current = await readLink(tx, input.actor, input.entityId);
+    const current = await readLink(tx, input.actor, input.entityId, 'refuse', input.field ?? 'LINK');
     await deps.failpoint?.('tx:after-read');
     const generation = await nextGeneration(tx, input.entityId);
-    await writeLink(tx, input.actor, input.entityId, { mmgPayUrl: current.mmgPayUrl }, { mmgPayUrl: null, ...CLEAR_PENDING });
+    await writeLink(tx, input.actor, input.entityId, spec, { live: current.live }, { [spec.live]: null, ...clearPending(spec) });
     await deps.failpoint?.('tx:after-entity');
-    await supersedeOpenStage(tx, input.entityId);
+    await supersedeOpenStage(tx, input.entityId, spec);
     const decisionId = await decide(tx, {
       algo: ALGO_ID, subjectType: input.actor, subjectId: input.entityId, outcome: 'CLEARED',
-      sentence: 'The MMG pay link was removed; the account is cash-only until a new link clears its cool-off.',
-      inputs: { generation },
+      sentence: spec.key === 'mmg_number'
+        ? 'The MMG number was removed; customers cannot choose MMG for this store until a new number clears its cool-off.'
+        : 'The MMG pay link was removed; the account is cash-only until a new link clears its cool-off.',
+      inputs: spec.key === 'mmg_number' ? { field: 'NUMBER', generation } : { generation },
     });
     await deps.failpoint?.('tx:after-decision');
     await writeCommand(tx, generation, {
-      actor: input.actor, entityId: input.entityId, userId: input.userId ?? current.userId, kind: 'MMG_LINK_CLEAR', state: 'APPLIED',
-      oldDigest: digestOf(current.mmgPayUrl), newDigest: 'none', decisionId,
+      actor: input.actor, entityId: input.entityId, userId: input.userId ?? current.userId, kind: spec.clear, state: 'APPLIED',
+      oldDigest: digestOf(current.live), newDigest: 'none', decisionId,
     });
     await deps.failpoint?.('tx:after-command');
   });
@@ -410,15 +498,22 @@ export async function clearMmgLink(deps: MoneySurfaceDeps, input: { actor: LinkA
  */
 export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new Date()): Promise<{ applied: number }> {
   let applied = 0;
-  const due: Array<{ actor: LinkActor; id: string }> = [];
+  const due: Array<{ actor: LinkActor; id: string; field: MoneySurfaceField }> = [];
   const vendors = await deps.prisma.vendor.findMany({ where: { mmgPayUrlApplyAt: { lte: now }, mmgPayUrlPending: { not: null } }, select: { id: true }, take: 200 });
   const drivers = await deps.prisma.driver.findMany({ where: { mmgPayUrlApplyAt: { lte: now }, mmgPayUrlPending: { not: null } }, select: { id: true }, take: 200 });
-  due.push(...vendors.map((v) => ({ actor: 'VENDOR' as const, id: v.id })), ...drivers.map((d) => ({ actor: 'DRIVER' as const, id: d.id })));
+  // [PAYMENT-SIMPLIFY] A store's staged MMG NUMBER goes live by the same executor, lease and record.
+  const numbers = await deps.prisma.vendor.findMany({ where: { mmgNumberApplyAt: { lte: now }, mmgNumberPending: { not: null } }, select: { id: true }, take: 200 });
+  due.push(
+    ...vendors.map((v) => ({ actor: 'VENDOR' as const, id: v.id, field: 'LINK' as const })),
+    ...drivers.map((d) => ({ actor: 'DRIVER' as const, id: d.id, field: 'LINK' as const })),
+    ...numbers.map((v) => ({ actor: 'VENDOR' as const, id: v.id, field: 'NUMBER' as const })),
+  );
   for (const item of due) {
+    const spec = FIELDS[item.field];
     // [REVIEW-PARTNER · DL-5] The fiction's links never go live: skipped before ANY write (no lease).
     if (await entityIsFiction(deps.prisma, item.actor, item.id)) { moneySurfaceCounter.labels('apply_review_skipped').inc(); continue; }
     // lease the command (when there is one) so two executors never apply the same change
-    const open = await deps.prisma.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
+    const open = await deps.prisma.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: spec.stage, state: 'DECIDED' } });
     if (open) {
       const leased = await deps.prisma.moneySurfaceCommand.updateMany({
         where: { id: open.id, state: 'DECIDED', OR: [{ leasedUntil: null }, { leasedUntil: { lt: now } }] },
@@ -428,31 +523,40 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
     }
     const done = await deps.prisma.$transaction(async (tx) => {
       await lockEntity(tx, item.id);
-      const current = await readLink(tx, item.actor, item.id, 'report');
+      const current = await readLink(tx, item.actor, item.id, 'report', item.field);
       await deps.failpoint?.('tx:after-read');
       if (current.fiction) return false; // [REVIEW-PARTNER] the fiction's links never go live (and are never staged)
-      if (!current.mmgPayUrlPending || !current.mmgPayUrlApplyAt || current.mmgPayUrlApplyAt > now) return false;
-      const stage = await tx.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: 'MMG_LINK_STAGE', state: 'DECIDED' } });
+      if (!current.pending || !current.applyAt || current.applyAt > now) return false;
+      const stage = await tx.moneySurfaceCommand.findFirst({ where: { entityId: item.id, kind: spec.stage, state: 'DECIDED' } });
       if (open && (!stage || stage.id !== open.id)) return false; // moved under us: cancelled or superseded
       const generation = await nextGeneration(tx, item.id);
-      await writeLink(tx, item.actor, item.id, { mmgPayUrl: current.mmgPayUrl }, { mmgPayUrl: current.mmgPayUrlPending, ...CLEAR_PENDING });
+      await writeLink(tx, item.actor, item.id, spec, { live: current.live }, { [spec.live]: current.pending, ...clearPending(spec) });
       await deps.failpoint?.('tx:after-entity');
       if (stage) await tx.moneySurfaceCommand.update({ where: { id: stage.id }, data: { state: 'APPLIED', appliedAt: now, leasedUntil: null } });
       const decisionId = await decide(tx, {
         algo: ALGO_ID, subjectType: item.actor, subjectId: item.id, outcome: 'APPLIED',
-        sentence: 'The staged MMG pay link went live after its cool-off passed without a cancellation.',
-        inputs: { applyAt: current.mmgPayUrlApplyAt.toISOString(), newHost: hostOf(current.mmgPayUrlPending), generation, legacy: !stage },
+        sentence: `The staged ${spec.noun} went live after its cool-off passed without a cancellation.`,
+        inputs: item.field === 'NUMBER'
+          ? { field: 'NUMBER', applyAt: current.applyAt.toISOString(), generation, legacy: !stage }
+          : { applyAt: current.applyAt.toISOString(), newHost: hostOf(current.pending), generation, legacy: !stage },
       });
       await deps.failpoint?.('tx:after-decision');
       const command = await writeCommand(tx, generation, {
-        actor: item.actor, entityId: item.id, userId: current.userId, kind: 'MMG_LINK_APPLY', state: 'APPLIED',
-        oldDigest: digestOf(current.mmgPayUrl), newDigest: digestOf(current.mmgPayUrlPending), decisionId, stepUpSessionId: stage?.stepUpSessionId ?? null,
-        notice: {
-          title: 'Your new MMG pay link is live',
-          body: item.actor === 'VENDOR' ? 'Customers paying by MMG now pay to the link you set.' : 'Riders paying by MMG now pay to the link you set.',
-          kind: 'mmg_link_change_applied',
-          dedupeKey: `mmg-link-applied:${item.id}:${current.mmgPayUrlApplyAt.toISOString()}`,
-        },
+        actor: item.actor, entityId: item.id, userId: current.userId, kind: spec.apply, state: 'APPLIED',
+        oldDigest: digestOf(current.live), newDigest: digestOf(current.pending), decisionId, stepUpSessionId: stage?.stepUpSessionId ?? null,
+        notice: item.field === 'NUMBER'
+          ? {
+              title: 'Your new MMG number is live',
+              body: 'Customers paying by MMG now pay to the number you set.',
+              kind: 'mmg_number_change_applied',
+              dedupeKey: `mmg-number-applied:${item.id}:${current.applyAt.toISOString()}`,
+            }
+          : {
+              title: 'Your new MMG pay link is live',
+              body: item.actor === 'VENDOR' ? 'Customers paying by MMG now pay to the link you set.' : 'Riders paying by MMG now pay to the link you set.',
+              kind: 'mmg_link_change_applied',
+              dedupeKey: `mmg-link-applied:${item.id}:${current.applyAt.toISOString()}`,
+            },
       });
       await deps.failpoint?.('tx:after-command');
       return command;
@@ -469,7 +573,7 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
 /** Read-only: the authority inventory the rollout census reads — open commands and live destinations. */
 export async function moneySurfaceInventory(prisma: PrismaClient): Promise<{ openStages: number; unsentNotices: number; appliedWithoutDecision: number }> {
   const [openStages, unsentNotices, appliedWithoutDecision] = await Promise.all([
-    prisma.moneySurfaceCommand.count({ where: { kind: 'MMG_LINK_STAGE', state: 'DECIDED' } }),
+    prisma.moneySurfaceCommand.count({ where: { kind: { in: ['MMG_LINK_STAGE', 'MMG_NUMBER_STAGE'] }, state: 'DECIDED' } }),
     prisma.moneySurfaceCommand.count({ where: { noticeKind: { not: null }, noticeSentAt: null } }),
     prisma.moneySurfaceCommand.count({ where: { state: 'APPLIED', decisionId: null } }),
   ]);
