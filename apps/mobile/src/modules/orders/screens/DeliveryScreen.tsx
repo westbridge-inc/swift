@@ -26,7 +26,7 @@ import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
 import { copyText } from '../../../lib/clipboard';
-import { mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
 import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
@@ -1215,6 +1215,8 @@ export function DeliveryScreen() {
                   {failed
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
+                      // [owner 18 Oct 2026] The server says why an unpaid MMG order closed by itself.
+                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null)
                       ?? (mmgCancellationAmbiguous
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
@@ -1438,6 +1440,12 @@ export function DeliveryScreen() {
               <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                 {mmgStorePaymentNote(mmgStorePayment)}
               </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {mmgStorePaymentDeadline(mmgStorePayment) ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {mmgStorePaymentDeadline(mmgStorePayment)}
+                </T>
+              ) : null}
               <PillButton
                 label="Copy MMG number"
                 icon="copy"

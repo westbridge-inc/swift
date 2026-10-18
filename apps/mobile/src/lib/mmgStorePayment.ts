@@ -36,3 +36,12 @@ export function parseMmgStorePayment(value: unknown): MmgStoreNumberPayment | nu
 export function mmgStorePaymentNote(payment: MmgStoreNumberPayment): string {
   return `Send it in your MMG app. ${payment.recipientName} marks your order paid when the money arrives. Swift never holds this money.`;
 }
+
+/** [owner 18 Oct 2026] The server's pay-by sentence: an accepted MMG order not marked "Paid by MMG" within 30 minutes
+ *  is cancelled automatically. Shown only as the server wrote it, and only with its time (an older server sends none). */
+export function mmgStorePaymentDeadline(payment: MmgStoreNumberPayment): string | null {
+  const { deadline, payBy } = payment;
+  if (typeof deadline !== 'string' || deadline.trim().length === 0) return null;
+  if (typeof payBy !== 'string' || !Number.isFinite(Date.parse(payBy))) return null;
+  return deadline;
+}

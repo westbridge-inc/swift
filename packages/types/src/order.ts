@@ -84,6 +84,10 @@ export interface MmgStoreNumberPayment {
   currencyCode: string;
   /** The server's own sentence: "Pay $X by MMG to <store>'s MMG number <number>." */
   instruction: string;
+  /** [owner 18 Oct 2026] When the order cancels if the store has not marked it "Paid by MMG" (ISO). */
+  payBy?: string;
+  /** The server's sentence for it: "If <store> hasn't marked it paid by 3:45 PM, the order is cancelled automatically." */
+  deadline?: string;
 }
 
 export interface OrderCheckoutResult<TOrder = unknown> {

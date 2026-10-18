@@ -246,6 +246,12 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
                 Tap when {money(order.totalAmount ?? order.total)} is in your MMG account.
               </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {typeof order.mmgPayByLine === 'string' && order.mmgPayByLine.trim() ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {order.mmgPayByLine}
+                </T>
+              ) : null}
               <PillButton
                 label="Paid by MMG"
                 size="md"

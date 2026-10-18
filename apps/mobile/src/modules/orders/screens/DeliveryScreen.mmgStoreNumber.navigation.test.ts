@@ -179,4 +179,17 @@ describe('[PAYMENT-SIMPLIFY] the accepted MMG order shows the store number', () 
     await show({ ...ORDER, status: 'CANCELLED', canCancel: false, mmgPayment: PAYMENT });
     expect(card()).toBeNull();
   });
+
+  // [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled automatically.
+  it("says when the order cancels if it isn't marked paid (the server's sentence)", async () => {
+    const deadline = "If Number Diner hasn't marked it paid by 3:45 PM, the order is cancelled automatically.";
+    await show({ ...ORDER, mmgPayment: { ...PAYMENT, payBy: '2026-10-17T19:45:00.000Z', deadline } });
+    expect(card()!.textContent).toContain(deadline);
+  });
+
+  it('an order that cancelled because it was not marked paid in time says why', async () => {
+    const notice = "Number Diner didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Number Diner refunds you directly.";
+    await show({ ...ORDER, status: 'CANCELLED', canCancel: false, mmgPayment: null, cancellationNotice: notice });
+    expect(host.textContent).toContain(notice);
+  });
 });

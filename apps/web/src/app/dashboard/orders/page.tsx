@@ -547,6 +547,10 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         {showConfirmPay && (
           <p className="w-full text-sm text-[var(--swift-muted)]">Tap when {money(o.totalAmount)} is in your MMG account.</p>
         )}
+        {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+        {showConfirmPay && typeof o.mmgPayByLine === 'string' && o.mmgPayByLine.trim() !== '' && (
+          <p className="w-full text-sm font-semibold">{o.mmgPayByLine}</p>
+        )}
         {showConfirmPay && (
           <button
             onClick={() => act.mutate('confirm-payment')}

@@ -121,6 +121,10 @@ export interface VendorOrder {
   /** Row 52: true when the caller's role at THIS order's store (owner or
    *  manager) may confirm an MMG payment. Both routes send it. */
   canConfirmPayment?: boolean;
+  /** [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes of
+   *  acceptance cancels: when (ISO) and the server's line for it. Null on every other order. */
+  mmgPayBy?: string | null;
+  mmgPayByLine?: string | null;
 
   // ── Never sent — kept as tombstones so the lie cannot come back ──────────
   /** PHANTOM. There is no `total` column; the order total is `totalAmount`. */

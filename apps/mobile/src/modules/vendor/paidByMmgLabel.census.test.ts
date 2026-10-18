@@ -11,4 +11,11 @@ describe('[PAYMENT-SIMPLIFY] the store confirm button says "Paid by MMG"', () =>
     expect(src).toMatch(/label="Paid by MMG"[\s\S]{0,400}onAction\('confirm-payment'/);
     expect(src).not.toMatch(/received in my MMG/);
   });
+
+  // [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes cancels: the
+  // card shows the server's line ("Cancels automatically at 3:45 PM unless you mark it ...") above the button.
+  it("VendorOps shows the server's cancel-at line on the Paid by MMG card", () => {
+    const src = readFileSync(join(__dirname, 'screens/VendorOps.tsx'), 'utf8');
+    expect(src).toMatch(/typeof order\.mmgPayByLine === 'string'[\s\S]{0,300}\{order\.mmgPayByLine\}[\s\S]{0,600}label="Paid by MMG"/);
+  });
 });

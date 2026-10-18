@@ -333,6 +333,19 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
   });
 
+  // [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes cancels: the store sees when.
+  it("shows the server's cancel-at line beside the Paid by MMG button", async () => {
+    const line = 'Cancels automatically at 3:45 PM unless you mark it "Paid by MMG".';
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', mmgPayBy: '2026-10-18T19:45:00.000Z', mmgPayByLine: line };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await screen.findByRole('button', { name: /^Paid by MMG$/i });
+    expect(screen.getByText(line)).toBeTruthy();
+  });
+
   it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
     const { user, fetchMock } = await openMmgDetail('PENDING');
     const button = await screen.findByRole('button', { name: /^Paid by MMG$/i });
