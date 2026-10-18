@@ -1,7 +1,7 @@
 'use client';
 
 // [PERF · web shared bundle] Ride calls, moved verbatim from lib/customer.ts;
-// only the order page (a ride's own status) uses them.
+// the order page (a ride's own status) and the Taxi page's fare estimate use them.
 import { apiFetch } from './auth';
 
 export async function rideAvailability(lat: number, lng: number): Promise<{ level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes?: number | null; gate?: boolean }> {

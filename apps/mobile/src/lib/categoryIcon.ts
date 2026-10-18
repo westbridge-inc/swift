@@ -1,5 +1,6 @@
 import type { ComponentProps } from 'react';
 import type { MaterialCommunityIcons } from '@expo/vector-icons';
+import { CATEGORY_ICON_KEYS, isCategoryIconKey } from '@swift/types';
 
 /**
  * Discovery category -> the app's own icon (MaterialCommunityIcons, already
@@ -59,6 +60,17 @@ export const CATEGORY_ICON: Readonly<Record<string, CategoryIconName>> = {
   pets: 'paw',
 };
 
-export function categoryIcon(slug: string | null | undefined): CategoryIconName {
+/**
+ * The icon to draw: the category's own `iconKey` when it is one of the app's
+ * icons (an admin chooses it from CATEGORY_ICON_OPTIONS for a new category),
+ * else the slug map above, else the storefront default. An unknown key from
+ * the server is ignored, never drawn.
+ */
+export function categoryIcon(slug: string | null | undefined, iconKey?: string | null): CategoryIconName {
+  if (isCategoryIconKey(iconKey)) return iconKey;
   return (slug && Object.prototype.hasOwnProperty.call(CATEGORY_ICON, slug) ? CATEGORY_ICON[slug] : undefined) ?? CATEGORY_ICON_DEFAULT;
 }
+
+// Compile-time: every key the admin can choose is a real glyph name.
+const _everyKeyIsAGlyph: readonly CategoryIconName[] = CATEGORY_ICON_KEYS;
+void _everyKeyIsAGlyph;

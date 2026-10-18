@@ -33,7 +33,7 @@ export class DiscoveryGovernanceService {
   /** Approve → a new ACTIVE category is born (curated by the founder). */
   async approveRequest(
     requestId: string,
-    input: { name?: string; emoji: string; kind: 'CUISINE' | 'DISH' | 'DIETARY' | 'AISLE' | 'RETAIL'; vertical: 'FOOD' | 'GROCERY' | 'RETAIL'; resolvedBy: string },
+    input: { name?: string; iconKey: string; kind: 'CUISINE' | 'DISH' | 'DIETARY' | 'AISLE' | 'RETAIL'; vertical: 'FOOD' | 'GROCERY' | 'RETAIL'; resolvedBy: string },
   ) {
     const req = await this.request(requestId);
     const name = (input.name ?? req.proposedName).trim();
@@ -44,7 +44,8 @@ export class DiscoveryGovernanceService {
       where: { tenantId_slug: { tenantId: req.tenantId, slug } },
       create: {
         tenantId: req.tenantId, slug, name, kind: input.kind, vertical: input.vertical,
-        emoji: input.emoji, aliases: [name.toLowerCase()], status: 'ACTIVE',
+        // No emoji (owner 17 Oct): the column stays for older builds, empty.
+        emoji: '', iconKey: input.iconKey, aliases: [name.toLowerCase()], status: 'ACTIVE',
       },
       update: { status: 'ACTIVE' },
     });

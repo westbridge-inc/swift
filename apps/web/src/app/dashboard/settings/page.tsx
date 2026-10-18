@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { selectedProfileStore, storeCheckLabel, type ProfileData } from './store-check';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
@@ -239,7 +240,7 @@ function SettlementsCard() {
 export default function SettingsPage() {
   const storeId = useStoreId();
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
-  const p = profile.data;
+  const p = selectedProfileStore(profile.data as ProfileData | undefined, storeId);
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -250,7 +251,7 @@ export default function SettingsPage() {
           <h2 className="font-bold">{p.name}</h2>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             {p.vendorType === 'SUPERMARKET' ? 'Grocery' : p.vendorType === 'STORE' ? 'Shop' : p.vendorType === 'SERVICE' ? 'Services' : 'Restaurant'}
-            {p.city ? ` · ${p.city}` : ''} {p.isVerified ? ' · Verified ✓' : ' · Verification pending'}
+            {p.city ? ` · ${p.city}` : ''} · {storeCheckLabel(p)}
           </p>
           {p.description && <p className="mt-2 text-sm">{p.description}</p>}
           <p className="mt-3 text-xs text-[var(--swift-muted)]">

@@ -51,6 +51,7 @@ import {
   type StoreField,
   type StoreWordHit,
   type StoreWords,
+  storeWordsNotHousehold,
 } from './prohibited-items';
 import { prefilterCandidateIds } from './prohibited-scan.service';
 import { trackBackgroundRead } from '../../lib/background-reads';
@@ -243,6 +244,8 @@ export async function catalogueChecksFor(db: Db, itemIds: readonly string[]): Pr
       prohibitedReason: item.prohibitedReason,
       reviewApprovedHash: item.reviewApprovedHash,
       store: stores.get(item.vendorId),
+      // [#1805 S3-1] an agro, farm or garden supply store: its items' household words are held for a person
+      storeNotHousehold: storeWordsNotHousehold(item.vendor),
     }));
   }
   return out;
