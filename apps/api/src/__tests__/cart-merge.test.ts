@@ -9,6 +9,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { withSuiteCapability } from '../lib/test-target-lock';
 import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-context';
+import { testPhone } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 const people: string[] = [];
@@ -20,7 +21,7 @@ let soldOutId: string;
 let optionItemId: string;
 let groupId: string;
 let optionId: string;
-const phone = () => `+592${Math.floor(100000000 + Math.random() * 899999999)}`;
+const phone = () => testPhone();
 async function customer(tenantId = 'swift-default') {
   return runAsSystem('cart-merge-fixture', async () => {
   if (tenantId !== 'swift-default') { await app.prisma.tenant.create({ data: { id: tenantId, name: 'Fixture tenant', slug: tenantId } }); tenants.push(tenantId); }

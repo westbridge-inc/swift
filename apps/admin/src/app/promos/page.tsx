@@ -4,6 +4,7 @@ import { useState, useId, cloneElement } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/lib/api';
 import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const EMPTY: CreatePromoInput = {
   code: '',
@@ -16,7 +17,7 @@ const EMPTY: CreatePromoInput = {
 
 export default function PromosPage() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
+  const { data, isLoading, isError, error: readError, refetch, isFetching } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<CreatePromoInput>(EMPTY);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +69,10 @@ export default function PromosPage() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">Loading...</td></tr>
+            ) : isError ? (
+              <tr><td colSpan={6} className="p-4">
+                <QueryFailed error={readError} what="the promo codes" onRetry={() => void refetch()} retrying={isFetching} />
+              </td></tr>
             ) : data?.data?.length === 0 ? (
               <tr><td colSpan={6} className="p-8 text-center text-[var(--muted)]">No promo codes yet</td></tr>
             ) : (

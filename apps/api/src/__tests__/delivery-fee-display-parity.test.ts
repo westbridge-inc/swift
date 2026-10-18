@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { calculateDeliveryFee, deliveryFeeFromRates, mergeDeliveryRates } from '../utils/markup';
 import { estimateDrivingDistance } from '../utils/distance';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [FUL-003b completion] The fee a customer READS must be the fee they are
@@ -72,7 +73,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200793${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Fee', lastName: 'Parity',
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
       isPhoneVerified: true, selfieCapturedAt: new Date(),
@@ -108,7 +109,7 @@ beforeAll(async () => {
       name: `feeparity ${nanoid(5)}`,
       slug: `feeparity-${nanoid(6).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `+59200794${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       addressLine1: '1 Fee Row', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: VENDOR.lat, longitude: VENDOR.lng,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,

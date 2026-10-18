@@ -11,6 +11,7 @@ import {
   resolveConfiguredBrowserApiOrigin,
   resolveConfiguredReleaseChannel,
 } from './src/lib/browser-api-origin';
+import { mapTilesBuildCheck } from './src/lib/map-tiles';
 
 // The public face of Swift — marketing + (coming) customer web + operator
 // dashboards. Same hardening posture as the admin console.
@@ -37,6 +38,11 @@ export default function createNextConfig(phase: string): NextConfig {
   // the client bundle are exactly what they were, and the card page opens in the same tab.
   const cardFrame = process.env['SWIFT_WEB_CARD_FRAME'] === '1';
   const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame });
+  // [WEB-TILES] The MapTiler browser key (lib/map-tiles.ts): a malformed value
+  // refuses the build; a production build without one says, in its log, that
+  // the site it builds draws no map tiles. Next inlines the key into the bundle.
+  const mapTiles = mapTilesBuildCheck(browserApiMode, process.env['NEXT_PUBLIC_MAPTILER_KEY']);
+  if (mapTiles.warning) console.warn(`[web build] ${mapTiles.warning}`);
 
   // [Q11] apps/web/Dockerfile sets SWIFT_WEB_IMAGE_BUILD=1, and nothing else
   // does: Vercel and CI get exactly the config they had. The image runs Next's

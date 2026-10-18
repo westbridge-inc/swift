@@ -1,5 +1,5 @@
 import { normalizeDocNumber } from '../integrity/normalize';
-import { IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES } from './doc-registry';
+import { CERTIFICATE_YEAR_DOC_TYPES, IDENTITY_DOC_TYPES, ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES, REGISTRATION_DOC_TYPES } from './doc-registry';
 
 // The two type lists live in the registry's own text (DOC-INV-2); re-exported for this module's callers.
 export { ISSUE_DATE_DOC_TYPES, LICENCE_NUMBER_DOC_TYPES };
@@ -73,11 +73,15 @@ export function reviewerTypedDocumentSignal(docType: string, raw: unknown): stri
   return LICENCE_NUMBER_DOC_TYPES.has(docType) ? `DL:${normalized}` : normalized;
 }
 
-export type ReviewerTypedField = 'documentNumber' | 'issuedOn';
+export type ReviewerTypedField = 'documentNumber' | 'issuedOn' | 'certificateYear' | 'registrationKind';
 
 /** What the console must ask the reviewer for, for this document type. */
 export function reviewerTypedFields(docType: string): ReviewerTypedField[] {
   if (REVIEWER_TYPED_NUMBER_DOC_TYPES.has(docType)) return ['documentNumber'];
   if (ISSUE_DATE_DOC_TYPES.has(docType)) return ['issuedOn'];
+  // [R15] a licence or food certificate checked again every January: the year printed on it
+  if (CERTIFICATE_YEAR_DOC_TYPES.has(docType)) return ['certificateYear'];
+  // [R16] a business registration: which kind it is, and for a business name the year it is registered for
+  if (REGISTRATION_DOC_TYPES.includes(docType)) return ['registrationKind', 'certificateYear'];
   return [];
 }

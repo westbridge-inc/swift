@@ -3,6 +3,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { Star, Clock } from 'lucide-react';
 import { Section } from '@/components/site';
+import { CatalogueSearchBar } from '@/components/catalogue-search-bar';
 import { fetchStorefronts } from '@/lib/api';
 import { photo } from '@/lib/media';
 import styles from './stores.module.css';
@@ -10,7 +11,7 @@ import styles from './stores.module.css';
 export const metadata: Metadata = {
   title: 'Stores on Swift',
   description:
-    'Browse restaurants, supermarkets, shops and services on Swift — verified local businesses across the Caribbean, delivered by Swift.',
+    'Browse restaurants, supermarkets, shops and services on Swift — local businesses in Guyana, each checked by a person on our team before going live.',
 };
 
 const TYPES = [
@@ -29,8 +30,12 @@ export default async function StoresPage({ searchParams }: { searchParams: Promi
     <Section>
       <h1 className={styles.title}>Stores on Swift</h1>
       <p className={styles.intro}>
-        Every business here is document-verified and keeps 100% of what you pay them.
+        A person on our team checked every business here before it went live, and each keeps 100% of what you pay them.
       </p>
+
+      {/* [row 110] Search stores AND the dishes and products inside them,
+          narrowed to the kind of store this page is showing. */}
+      <CatalogueSearchBar type={type} className="mt-6" />
 
       <nav className={styles.filters} aria-label="Store type">
         {TYPES.map((t) => (

@@ -17,7 +17,10 @@ import {
   Truck,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { activeRide, getRide } from '@/lib/customer-rides';
+import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
+import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
 import styles from './tracking.module.css';
 
@@ -29,6 +32,11 @@ type OrderLine = {
   quantity: number;
   lineTotal?: number;
   customerPrice?: number;
+  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v1). */
+  subStatus?: string | null;
+  substituteName?: string | null;
+  substitutePrice?: number | null;
+  substitution?: SwapView | null;
 };
 
 type TimelineEvent = {
@@ -66,6 +74,8 @@ type OrderDetail = {
   pickupCode?: string | null;
   /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
   ridePin?: string | null;
+  /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
+  ownRiderNotice?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -232,6 +242,8 @@ export default function OrderDetailPage() {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
+  const [swapBusy, setSwapBusy] = useState<string | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const expiredHold = useRef<string | null>(null);
   const loadSequence = useRef(0);
@@ -280,6 +292,21 @@ export default function OrderDetailPage() {
       if (loadInFlight.current === request) loadInFlight.current = null;
     }
   }, [id]);
+
+  // [SUBSTITUTION · owner 17 Oct 2026] The customer answers the store's swap
+  // question here too; the page then reloads the server's truth either way.
+  const decideSwap = useCallback(async (lineId: string, approve: boolean) => {
+    setSwapBusy(lineId);
+    setSwapError(null);
+    try {
+      await decideSubstitution(id, lineId, approve);
+    } catch (decideError) {
+      setSwapError(decideError instanceof Error ? decideError.message : 'That did not go through. Try again.');
+    } finally {
+      setSwapBusy(null);
+      await load();
+    }
+  }, [id, load]);
 
   useEffect(() => {
     setOrder(null);
@@ -486,6 +513,11 @@ export default function OrderDetailPage() {
         </section>
       ) : null}
 
+      {/* [R14 · legal research D12] The server's words, shown while the store delivers with its own rider. */}
+      {order.ownRiderNotice ? (
+        <div className={styles.moneyNotice} role="note">{order.ownRiderNotice}</div>
+      ) : null}
+
       {trackingError ? (
         <div className={styles.trackingNotice} role="alert">
           <span>
@@ -525,6 +557,40 @@ export default function OrderDetailPage() {
           </div>
         </section>
       ) : null}
+
+      {/* [SUBSTITUTION · owner 17 Oct 2026] The store's swap question: the
+          customer is always told, and answers from the server's own permitted
+          decisions, price change and deadline. */}
+      {!stopped ? (order.items ?? []).filter((item) => item.subStatus === 'PENDING' && item.id).map((item) => {
+        const view = item.substitution;
+        const allowed = swapPermissions(view);
+        const change = swapChangeText(view);
+        const deadline = swapDeadlineText(view);
+        const lineId = item.id as string;
+        return (
+          <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
+            <div>
+              <p className={styles.eyebrow}>The store asks</p>
+              <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>Swap {item.name} for {item.substituteName ?? 'another item'}?</h2>
+              <p className={styles.mutedCopy}>
+                {item.name} is out of stock. {vendorName} suggests {item.substituteName ?? 'another item'} ({money(Number(item.substitutePrice ?? 0))}{item.quantity > 1 ? ` × ${item.quantity}` : ''}) instead.{allowed.reject ? ' Declining removes the item and lowers your total.' : ''}
+              </p>
+              {change ? <p className={styles.mutedCopy}><strong>{change}</strong></p> : null}
+              {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
+              {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
+              {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
+              <div className={styles.confirmActions}>
+                <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                  Approve swap
+                </button>
+                <button type="button" className={styles.secondaryButton} disabled={swapBusy !== null || !allowed.reject} onClick={() => void decideSwap(lineId, false)}>
+                  Decline
+                </button>
+              </div>
+            </div>
+          </section>
+        );
+      }) : null}
 
       {!stopped ? (
         <section className={styles.progressCard} aria-labelledby="progress-title">
@@ -637,8 +703,8 @@ export default function OrderDetailPage() {
           <div className={styles.orderLines}>
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
-                <span>{item.quantity}× {item.name}</span>
-                <strong>{money(lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
+                <span>{item.quantity}× {item.name}{lineRemoved(item) ? ' (removed, not charged)' : ''}</span>
+                <strong>{money(lineRemoved(item) ? 0 : lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
