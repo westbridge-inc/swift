@@ -25,4 +25,16 @@ describe('[PAYMENT-SIMPLIFY] taxi fare lines say cash or MMG at drop-off', () =>
     expect(read('TaxiStops.tsx')).toContain('pay the driver cash or MMG at drop-off');
     expect(read('RidePostTripSheet.tsx')).toContain('cash or MMG · paid to');
   });
+
+  // [REVIEW-F #1825 S3-1] The DRIVER is told the same thing as the passenger,
+  // so neither side can refuse a payment the app told the other was fine. The
+  // driver is paid directly; Swift holds nothing.
+  it("the driver's own trip lines say cash or MMG too", () => {
+    const itinerary = read('../mover/TaxiItinerary.tsx');
+    expect(itinerary, 'TaxiItinerary.tsx: "Collect in cash"').not.toMatch(/Collect in cash/);
+    expect(itinerary).toContain('Collect cash or MMG: trip fare');
+    const active = read('../mover/screens/ActiveJobScreen.tsx');
+    expect(active, 'ActiveJobScreen.tsx: "Cash collected —"').not.toMatch(/Cash collected —/);
+    expect(active).toContain("'Fare collected — 100% yours.'");
+  });
 });
