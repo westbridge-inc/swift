@@ -531,4 +531,46 @@ describe('[Row 231] the migration hashes live rows in place (nobody is signed ou
     const statements = text.split('\n').filter((line) => !line.trim().startsWith('--')).join('\n');
     expect(statements).not.toMatch(/DROP|RENAME|ADD COLUMN|DELETE/i);
   });
+
+  it('rollback.sql (a sign-out-everywhere): drops the three constraints, empties the table and its migration row, so the previous code can write again', async () => {
+    const text = readFileSync(join(process.cwd(), MIGRATION.replace('migration.sql', 'rollback.sql')), 'utf8');
+    // Statements end with ';' at the end of a line; the DO $ledger$ block is one statement. BEGIN/COMMIT are
+    // left to the test's own transaction, which runs against TEMP copies and always rolls back.
+    const statements: string[] = []; let current = '';
+    for (const line of text.split('\n').filter((l) => !l.trim().startsWith('--'))) {
+      current += `${line}\n`;
+      const inBlock = (current.match(/\$ledger\$/g) ?? []).length % 2 === 1;
+      if (!inBlock && line.trim().endsWith(';')) { statements.push(current.trim().replace(/;$/, '')); current = ''; }
+    }
+    expect(statements[0]).toBe('BEGIN');
+    expect(statements.at(-1)).toBe('COMMIT');
+    const outcome = await app.prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('CREATE TEMP TABLE "sessions" (LIKE public."sessions" INCLUDING DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP');
+      await tx.$executeRawUnsafe('CREATE TEMP TABLE "_prisma_migrations" ("migration_name" text) ON COMMIT DROP');
+      await tx.$executeRawUnsafe(`INSERT INTO pg_temp."_prisma_migrations" VALUES ('20261018190000_session_credential_digests'), ('20261017230000_other')`);
+      // a refused insert would abort the whole transaction: each attempt runs inside its own savepoint
+      const plain = async () => {
+        await tx.$executeRawUnsafe('SAVEPOINT plain_attempt');
+        return tx.$executeRawUnsafe(`INSERT INTO pg_temp."sessions" ("id", "userId", "token", "refreshToken", "authMethod", "deviceId", "deviceType", "expiresAt", "createdAt")
+          VALUES ('${nanoid(12)}', '${ids.A}', 'eyJ.plain.sig', '${nanoid(64)}', 'OTP', 'd', 't', now() + interval '1 day', now())`)
+          .then(async () => { await tx.$executeRawUnsafe('RELEASE SAVEPOINT plain_attempt'); return 'accepted'; },
+            async (error: Error) => { await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT plain_attempt'); return error.message; });
+      };
+      const before = await plain();
+      await tx.$executeRawUnsafe(`INSERT INTO pg_temp."sessions" ("id", "userId", "token", "refreshToken", "authMethod", "deviceId", "deviceType", "expiresAt", "createdAt")
+        VALUES ('r-digest', '${ids.A}', '${sessionCredentialDigest('a')}', '${sessionCredentialDigest('r')}', 'OTP', 'd', 't', now() + interval '1 day', now())`);
+      for (const statement of statements.slice(1, -1)) await tx.$executeRawUnsafe(statement);
+      const left = await tx.$queryRaw<Array<{ n: number }>>`SELECT count(*)::int AS n FROM pg_temp."sessions"`;
+      const ledger = await tx.$queryRaw<Array<{ migration_name: string }>>`SELECT "migration_name" FROM pg_temp."_prisma_migrations"`;
+      const after = await plain();
+      throw Object.assign(new Error('rollback'), { before, left: left[0]!.n, ledger: ledger.map((r) => r.migration_name), after });
+    }).catch((error: Error & { before?: string; left?: number; ledger?: string[]; after?: string }) => {
+      if (error.message !== 'rollback') throw error;
+      return error;
+    });
+    expect(outcome.before).toMatch(/digest_check|check constraint/);
+    expect(outcome.left).toBe(0);
+    expect(outcome.ledger).toEqual(['20261017230000_other']);
+    expect(outcome.after).toBe('accepted');
+  });
 });
