@@ -16,11 +16,12 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 /** Legal research D12, verbatim (owner 15 Oct 2026). */
 const NOTICE = "This order is delivered by the store's own rider, not a Swift rider.";
 const DAY = 86_400_000;
-const PHONE_PREFIX = `+592614${String(Date.now()).slice(-3)}`;
+const PHONE_PREFIX = testPhone();
 const RUN = nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, '0');
 
 let app: FastifyInstance;

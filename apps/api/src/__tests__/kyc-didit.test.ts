@@ -89,9 +89,9 @@ describe('DiditKycProvider (standalone v3 API)', () => {
     expect(() => new DiditKycProvider()).toThrow(/DIDIT_API_KEY/);
   });
 
-  it('the factory selects Didit for KYC_PROVIDER=didit', () => {
+  it('the launch factory refuses Didit even when its standalone adapter has credentials', () => {
     process.env['KYC_PROVIDER'] = 'didit';
-    expect(getKycProvider()).toBeInstanceOf(DiditKycProvider);
+    expect(() => getKycProvider()).toThrow(/human review|manual/i);
   });
 
   it('the factory never permits sandbox KYC in production', () => {
@@ -99,7 +99,7 @@ describe('DiditKycProvider (standalone v3 API)', () => {
     process.env['NODE_ENV'] = 'production';
     delete process.env['KYC_PROVIDER'];
     try {
-      expect(() => getKycProvider()).toThrow(/sandbox.*forbidden/i);
+      expect(() => getKycProvider()).toThrow(/KYC_PROVIDER.*manual/i);
     } finally {
       if (previous === undefined) delete process.env['NODE_ENV'];
       else process.env['NODE_ENV'] = previous;

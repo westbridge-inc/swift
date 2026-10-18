@@ -6,12 +6,13 @@
  *   pnpm review:status    -- --slug review-apple-2026-09
  *   pnpm review:rotate    -- --slug review-apple-2026-09
  *   pnpm review:expire    -- <sessionId>
+ *   pnpm review:extend    -- <sessionId> --until 2026-12-15T05:00:00Z   (a LIVE session only; later, never shorter; at most 60 days from now; login and code unchanged)
  *
  * Codes are printed ONCE, here, for the store review notes. Nothing else ever
  * shows them: the database holds a salted hash.
  */
 import { PrismaClient } from '@prisma/client';
-import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, reviewStatus } from '../src/modules/review/provision';
+import { provisionReviewTenant, rotateReviewCredentials, expireReviewSession, extendReviewSession, reviewStatus, MAX_REVIEW_EXTENSION_DAYS } from '../src/modules/review/provision';
 import { seedReviewContentPack, partnersComplete, PACK_IMAGE_LICENCE } from '../src/modules/review/content-pack';
 
 const prisma = new PrismaClient();
@@ -56,8 +57,32 @@ async function main(): Promise<number> {
       console.log(`${id}: ${verdict}`);
       return verdict === 'EXPIRED' ? 0 : 1;
     }
+    case 'extend': {
+      const id = rest[0];
+      const raw = flag('until');
+      const until = raw ? new Date(raw) : null;
+      if (!id || id.startsWith('--') || !until || !Number.isFinite(until.getTime())) {
+        console.error('usage: extend <sessionId> --until <ISO date-time, e.g. 2026-12-15T05:00:00Z>');
+        return 2;
+      }
+      const r = await extendReviewSession(prisma, id, until);
+      if (r.verdict === 'EXTENDED') {
+        console.log(`${id}: EXTENDED ${r.from.toISOString()} -> ${r.to.toISOString()} (login and code unchanged; update "valid until" in the store review notes)`);
+        return 0;
+      }
+      const why: Record<typeof r.verdict, string> = {
+        NOT_FOUND: 'no such session',
+        ALREADY_CLOSED: 'the session is closed (EXPIRED or REVOKED): provision a new one',
+        LAPSED: 'its time already ran out: provision a new session',
+        NOT_LATER: 'the new date is not later than the current expiry (to end it early, use expire)',
+        TOO_FAR: `the new date is more than ${MAX_REVIEW_EXTENSION_DAYS} days from now`,
+        RACED: 'the session changed while this ran: read status and try again',
+      };
+      console.log(`${id}: ${r.verdict} — ${why[r.verdict]}; nothing changed`);
+      return 1;
+    }
     default:
-      console.error('usage: review-provision.ts provision|seed|status|rotate|expire …');
+      console.error('usage: review-provision.ts provision|seed|status|rotate|expire|extend …');
       return 2;
   }
 }

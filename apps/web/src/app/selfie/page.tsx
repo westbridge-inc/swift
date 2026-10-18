@@ -6,7 +6,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { sessionProbe } from '@/lib/auth';
-import { uploadSelfie } from '@/lib/customer';
+import { uploadSelfie } from '@/lib/customer-account';
 import { safeInternalPath } from '@/lib/safe-return-path';
 import styles from './selfie.module.css';
 
