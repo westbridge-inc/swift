@@ -155,37 +155,24 @@ describe('the account export', () => {
     await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: a, message: `from a ${MARK}` } });
     await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: b, message: `from b ${MARK}` } });
     const data = await service().exportData(a) as unknown as Record<string, Array<Record<string, unknown>>>;
-    // No `type`: RIDER_TO_CUSTOMER would tell the person a rider (not a driver or a store) rated them.
-    expect(data['ratingsReceived']).toEqual([{ rateeId: a, score: 4, comment: `kind and quick ${MARK}`, tags: [], createdAt: expect.stringMatching(/^\d{4}-\d{2}$/) }]);
+    // A customer's app shows no single rating, so neither does the file (COORD 18 Oct): no words, no rater role,
+    // and the rating only inside its month's figures once that month is settled (this one is not yet).
+    expect(data['ratingsReceived']).toEqual([]);
+    expect(data['ratingsReceivedByMonth']).toEqual([]);
     // As the file carries it (JSON): Decimals and dates become strings.
     expect(JSON.parse(JSON.stringify(data['ratingSummary']))).toEqual([{ subjectRole: 'CUSTOMER', subjectId: a, displayRating: '4', standing: 'NEW', actorVisibleAt: expect.any(String) }]);
     expect(data['chatMessagesSent']).toEqual([expect.objectContaining({ message: `from a ${MARK}` })]);
     const text = JSON.stringify(data);
-    for (const leak of [b, rider.id, `still hidden ${MARK}`, `from b ${MARK}`, `not folded yet ${MARK}`, '"lifetimeCount"', '"rollingSum"', '"topNegativeTags"']) expect(text).not.toContain(leak);
-    // The order a rating was for is not named on the rating (it would point at the rater).
-    expect(data['ratingsReceived']![0]).not.toHaveProperty('orderId');
+    for (const leak of [b, rider.id, `kind and quick ${MARK}`, `still hidden ${MARK}`, `from b ${MARK}`, `not folded yet ${MARK}`, 'RIDER_TO_CUSTOMER', '"lifetimeCount"', '"rollingSum"', '"topNegativeTags"']) expect(text).not.toContain(leak);
   });
 
-  it('lists ratings received in no order that follows the trips (never creation order)', async () => {
-    const a = await person();
-    const b = await person();
-    const owner = await person();
-    const v = await store(owner);
-    const rider = await app.prisma.rider.create({ data: { userId: b, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
-    const when = new Date(Date.now() - 3 * 86_400_000);
-    for (const [i, score] of [5, 1, 4].entries()) {
-      const o = await app.prisma.order.create({ data: order(a, v.id, 7_100 + i, { riderId: rider.id }) });
-      await app.prisma.rating.create({ data: { orderId: o.id, raterId: b, rateeId: a, type: 'RIDER_TO_CUSTOMER', score, visibleAt: new Date(), createdAt: new Date(when.getTime() + i * 1_000) } });
-    }
-    const data = await service().exportData(a) as unknown as Record<string, Array<{ score: number }>>;
-    expect(data['ratingsReceived']!.map((r) => r.score)).toEqual([1, 4, 5]); // created 5, 1, 4
-  });
-
-  // COORD ruling 17 Oct 23:38Z: a mover's own app shows only folded weekly figures, so the export never gives a
-  // mover one rating's words or tags, and a month with fewer than 5 ratings only as its count and average.
+  // COORD rulings 17 Oct 23:38Z + 18 Oct: only a store's reviews are listed one by one. Every other rating a person
+  // received is given by SETTLED month only (no rating can still be given, edited or released for it), so two
+  // exports never differ by one rating: { month, count, scoreAverage }, or { month, fewerThan: 5 } alone.
   const monthStart = (back: number) => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth() - back, 10)); };
-  type MoverRating = { type: 'CUSTOMER_TO_RIDER' | 'CUSTOMER_TO_DRIVER'; score: number; at: Date; extra?: Record<string, unknown> };
-  async function moverRatings(rateeId: string, ratings: MoverRating[]) {
+  const monthOf = (back: number) => monthStart(back).toISOString().slice(0, 7);
+  type Received = { type: 'CUSTOMER_TO_RIDER' | 'CUSTOMER_TO_DRIVER' | 'CUSTOMER_TO_PROVIDER' | 'RIDER_TO_CUSTOMER'; score: number; at: Date; extra?: Record<string, unknown> };
+  async function received(rateeId: string, ratings: Received[]) {
     const rater = await person();
     const owner = await person();
     const v = await store(owner);
@@ -198,43 +185,55 @@ describe('the account export', () => {
     }
     return rater;
   }
+  const leaks = (text: string, rater: string) => {
+    for (let i = 0; i < 6; i++) for (const leak of [`words ${i} ${MARK}`, `tag${i}-${MARK}`]) expect(text).not.toContain(leak);
+    for (const leak of ['CUSTOMER_TO_RIDER', 'CUSTOMER_TO_DRIVER', 'CUSTOMER_TO_PROVIDER', 'RIDER_TO_CUSTOMER', rater]) expect(text).not.toContain(leak);
+  };
 
-  it('gives a mover a thin month (< 5 ratings) only as its count and average: no words, tags or rater role', async () => {
-    const mover = await person();
-    await app.prisma.rider.create({ data: { userId: mover, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
-    const rater = await moverRatings(mover, [
-      { type: 'CUSTOMER_TO_RIDER', score: 2, at: monthStart(2) },
-      { type: 'CUSTOMER_TO_DRIVER', score: 5, at: monthStart(2) },
+  it('gives a settled month of 5 or more as its count and average only, whatever role the person was rated in', async () => {
+    const ratee = await person();
+    const rater = await received(ratee, [
+      { type: 'CUSTOMER_TO_RIDER', score: 5, at: monthStart(2) },
+      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2) },
+      { type: 'CUSTOMER_TO_DRIVER', score: 4, at: monthStart(2) },
+      { type: 'RIDER_TO_CUSTOMER', score: 2, at: monthStart(2) },
+      // Still double-blind (the release sweep is late): a settled month counts it, so the month never changes later.
+      { type: 'CUSTOMER_TO_PROVIDER', score: 3, at: monthStart(2), extra: { visibleAt: null } },
     ]);
-    // Never counted: excluded as fake, still double-blind, or given after the last daily fold.
-    await moverRatings(mover, [
-      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2), extra: { state: 'EXCLUDED' } },
-      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2), extra: { visibleAt: null } },
-      { type: 'CUSTOMER_TO_RIDER', score: 1, at: new Date() },
-    ]);
-    const data = await service().exportData(mover) as unknown as Record<string, unknown> & { notice: string };
-    expect(data['ratingsReceivedAsMover']).toEqual([{ rateeId: mover, createdAt: monthStart(2).toISOString().slice(0, 7), count: 2, scoreAverage: 3.5 }]);
+    const data = await service().exportData(ratee) as unknown as Record<string, unknown>;
+    expect(data['ratingsReceivedByMonth']).toEqual([{ month: monthOf(2), count: 5, scoreAverage: 3 }]);
     expect(data['ratingsReceived']).toEqual([]);
-    const text = JSON.stringify(data);
-    for (const leak of [`words 0 ${MARK}`, `words 1 ${MARK}`, `tag0-${MARK}`, `tag1-${MARK}`, 'CUSTOMER_TO_RIDER', 'CUSTOMER_TO_DRIVER', rater]) expect(text).not.toContain(leak);
-    expect(data.notice).toContain('As a rider or driver you get the score and month only');
+    leaks(JSON.stringify(data), rater);
   });
 
-  it('gives a mover a full month (>= 5) as score + month rows, sorted, never words or tags', async () => {
-    const mover = await person();
-    await app.prisma.rider.create({ data: { userId: mover, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
-    const full = monthStart(1);
-    await moverRatings(mover, [5, 1, 4, 2, 3].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: full })));
-    await moverRatings(mover, [{ type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(3) }]);
-    const data = await service().exportData(mover) as unknown as Record<string, unknown>;
-    const month = full.toISOString().slice(0, 7);
-    expect(data['ratingsReceivedAsMover']).toEqual([
-      { rateeId: mover, createdAt: monthStart(3).toISOString().slice(0, 7), count: 1, scoreAverage: 1 },
-      ...[1, 2, 3, 4, 5].map((score) => ({ rateeId: mover, score, createdAt: month })),
+  it('gives a settled month of fewer than 5 as "fewer than 5" only: no count, no average; an open month not at all', async () => {
+    const ratee = await person();
+    const rater = await received(ratee, [
+      { type: 'CUSTOMER_TO_RIDER', score: 2, at: monthStart(3) },
+      { type: 'CUSTOMER_TO_DRIVER', score: 5, at: monthStart(3) },
+      { type: 'RIDER_TO_CUSTOMER', score: 4, at: monthStart(3) },
+      { type: 'CUSTOMER_TO_PROVIDER', score: 1, at: monthStart(3) },
+      // Never counted: excluded as fake (it would make the month 5).
+      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(3), extra: { state: 'EXCLUDED' } },
+      // The month still open (or just ended): nothing yet, so the next export cannot differ by this one rating.
+      ...[5, 5, 5, 5, 5].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: new Date(Date.now() - 86_400_000) })),
     ]);
-    const text = JSON.stringify(data);
-    for (let i = 0; i < 5; i++) for (const leak of [`words ${i} ${MARK}`, `tag${i}-${MARK}`]) expect(text).not.toContain(leak);
-    expect(data['ratingsReceived']).toEqual([]);
+    const data = await service().exportData(ratee) as unknown as Record<string, unknown> & { notice: string };
+    expect(data['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }]);
+    leaks(JSON.stringify(data), rater);
+    expect(data.notice).toContain('Ratings you received as a customer, rider, driver or provider are given by month, never one by one: for each month, once '
+      + 'it is over and no rating can still be given or edited for it (about a week later), how many you received and their average score, or only '
+      + 'that there were fewer than 5. Never the words, the tags, who gave them or for which trip.');
+  });
+
+  it('a file cut short at the ceiling drops the last, possibly partial, month (never a month that later changes)', async () => {
+    const ratee = await person();
+    await received(ratee, [5, 5, 5, 5, 5, 4].map((score, i) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: monthStart(i < 3 ? 3 : 2) })));
+    const cut = await exportPersonalData(app.prisma, ratee, { ceiling: 5 }) as unknown as Record<string, unknown> & { coverage: Record<string, unknown> };
+    expect(cut.coverage['ratingsReceivedByMonth']).toEqual({ rows: 1, complete: false });
+    expect(cut['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }]); // month 2 had only 2 of its 3 rows
+    const whole = await exportPersonalData(app.prisma, ratee) as unknown as Record<string, unknown>;
+    expect(whole['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }, { month: monthOf(2), fewerThan: 5 }]);
   });
 
   it('never carries security internals or the fraud signals that fired', async () => {

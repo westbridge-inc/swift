@@ -1,7 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import {
-  ACCOUNT_FIELDS, EXPORT_REGISTER, MOVER_RATING_MONTH_FLOOR, OMIT_REASON_TEXT, OMIT_RULES, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
+  ACCOUNT_FIELDS, EXPORT_REGISTER, OMIT_REASON_TEXT, OMIT_RULES, RATING_MONTH_FLOOR, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
   type ExportEntry, type OmitReason, type WithheldReason,
 } from './data-export-register';
 
@@ -41,7 +41,11 @@ function portable(row: Row): Row {
 async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[], ceiling: number, fold: Date) {
   // Bounded to the person: the register's own columns, equal to the person's own ids, only.
   const person = { OR: entry.by.flatMap((column) => ids.map((id) => ({ [column]: id }))) };
-  const fixed = [entry.where, entry.foldedBefore && { [entry.foldedBefore]: { lt: fold } }].filter(Boolean);
+  const fixed = [
+    entry.where,
+    entry.foldedBefore && { [entry.foldedBefore]: { lt: fold } },
+    entry.byMonth && { [entry.month![0]!]: { lt: settledBefore(fold, entry.byMonth.settleDays) } },
+  ].filter(Boolean);
   const match = fixed.length ? { AND: [person, ...fixed] } : person;
   const select = Object.fromEntries([...entry.fields, entry.key].map((f) => [f, true]));
   const rows: Row[] = [];
@@ -63,26 +67,30 @@ async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[],
     return portable(r);
   });
   if (entry.sortBy) kept.sort((a, b) => compareBy(a, b, entry.sortBy!));
-  return { rows: entry.monthFloor ? floorThinMonths(kept, entry) : kept, complete };
+  return { rows: entry.byMonth ? settledMonths(kept, entry, complete) : kept, complete };
+}
+
+/** The start of the latest month that ended at least `days` before the fold: every month before it is settled. */
+function settledBefore(fold: Date, days: number): Date {
+  const edge = new Date(fold.getTime() - days * 86_400_000);
+  return new Date(Date.UTC(edge.getUTCFullYear(), edge.getUTCMonth(), 1));
 }
 
 /**
- * A month with fewer rows than the floor becomes ONE row: the month, how many, and their average
- * (rounded as the app rounds, rating-standing.ts). Rows of fuller months stay as they are (already
- * sorted, so never in trip order). A month is the first `month` column.
+ * One row per settled month, oldest first: how many and their average (rounded as the app rounds,
+ * rating-standing.ts), or only `fewerThan` when the month had fewer than the floor. A file cut short at
+ * the ceiling drops its last month, which may be partial (the file is marked incomplete anyway).
  */
-function floorThinMonths(rows: Row[], entry: ExportEntry): Row[] {
-  const { below, average } = entry.monthFloor!;
+function settledMonths(rows: Row[], entry: ExportEntry, complete: boolean): Row[] {
+  const { floor, average } = entry.byMonth!;
   const monthOf = entry.month![0]!;
-  const byMonth = new Map<unknown, Row[]>();
-  for (const r of rows) byMonth.set(r[monthOf], [...(byMonth.get(r[monthOf]) ?? []), r]);
-  return [...byMonth.values()].flatMap((group): Row[] => {
-    if (group.length >= below) return group;
-    const sum = group.reduce((s, r) => s + Number(r[average]), 0);
-    const kept: Row = { [monthOf]: group[0]![monthOf], count: group.length, [`${average}Average`]: Math.round((sum / group.length) * 100) / 100 };
-    for (const column of entry.by) if (group.every((r) => r[column] === group[0]![column])) kept[column] = group[0]![column];
-    return [kept];
-  });
+  const months = new Map<string, number[]>();
+  for (const r of rows) months.set(String(r[monthOf]), [...(months.get(String(r[monthOf])) ?? []), Number(r[average])]);
+  const ordered = [...months.entries()].sort(([x], [y]) => x.localeCompare(y));
+  if (!complete) ordered.pop();
+  return ordered.map(([month, scores]): Row => (scores.length < floor
+    ? { month, fewerThan: floor }
+    : { month, count: scores.length, [`${average}Average`]: Math.round((scores.reduce((t, x) => t + x, 0) / scores.length) * 100) / 100 }));
 }
 
 /** Plain value order on the given columns (numbers as numbers, anything else as its JSON text). */
@@ -108,8 +116,9 @@ export const OMIT_REASONS_IN_USE: readonly OmitReason[] = (() => {
 export const EXPORT_NOTICE =
   'This file is a copy of the personal data Swift holds about you, by category ("coverage" lists them all). '
   + 'Chat messages you sent are included; messages other people sent you are not. '
-  + 'Ratings you received are included with their score, words and month, but never who gave them, and only once they count in your rating. '
-  + `As a rider or driver you get the score and month only, and a month with fewer than ${MOVER_RATING_MONTH_FLOOR} ratings as its count and average, so no rating can be matched to one trip. `
+  + 'Ratings you received as a customer, rider, driver or provider are given by month, never one by one: for each month, once it is over and '
+  + `no rating can still be given or edited for it (about a week later), how many you received and their average score, or only that there were fewer than ${RATING_MONTH_FLOOR}. `
+  + 'Never the words, the tags, who gave them or for which trip. '
   + `Left out on purpose: ${OMIT_REASONS_IN_USE.map((r) => OMIT_REASON_TEXT[r]).join('; ')}. `
   + '"withheld" lists the kinds of records that are not in this file.';
 

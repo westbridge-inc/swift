@@ -9,6 +9,7 @@
  * account-export-register.test.ts red, so the export can never quietly fall
  * behind the data, and nothing new leaks into it unreviewed.
  */
+import { RATING_WINDOW_DAYS } from '../rating/rating-math';
 import { TYPES_FOR_ROLE } from '../rating/rating-stats.service';
 
 /** Why a column of an exported table is left out. */
@@ -91,20 +92,25 @@ export interface ExportEntry {
   /** The file's row order (after `month`): never creation order, which would pair the k-th row with the k-th trip. */
   readonly sortBy?: readonly string[];
   /**
-   * Applied after `month`: a month with fewer than `below` rows is given as ONE row (its count and the average
-   * of `average`), never row by row, so a person with few jobs that month cannot pair a rating with a trip.
+   * The rows are given only as one row per SETTLED month (the first `month` column), never row by row:
+   * `{ month, count, <average>Average }`, or `{ month, fewerThan: floor }` (no count, no average) when the
+   * month had fewer than `floor`. A month is settled once it ended at least `settleDays` before the fold,
+   * so nothing in it can still be given, edited or released: a month's row never changes from one export
+   * to the next, and no two exports differ by one rating.
    */
-  readonly monthFloor?: { readonly below: number; readonly average: string };
+  readonly byMonth?: { readonly floor: number; readonly average: string; readonly settleDays: number };
 }
 
 /**
- * Ratings a MOVER (rider or driver) received. Their app shows only folded weekly figures, never one rating,
- * so the export gives the score and month only (COORD ruling 17 Oct 23:38Z, owner decisions 23:40Z): no words,
- * no tags, and a month with fewer than 5 is given as its count and average.
+ * Only a STORE's reviews are listed one by one with their words and tags: the store's reviews page already
+ * shows each one. Every other rating a person received (as a customer, rider, driver or provider), whose app
+ * shows no single rating, is given by settled month only (COORD rulings 17 Oct 23:38Z and 18 Oct).
  */
-export const MOVER_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.RIDER, ...TYPES_FOR_ROLE.DRIVER];
-/** Fewer ratings than this in a month are given only as the month's count and average. */
-export const MOVER_RATING_MONTH_FLOOR = 5;
+export const STORE_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.VENDOR];
+/** A settled month with fewer ratings than this is given only as "fewer than" this. */
+export const RATING_MONTH_FLOOR = 5;
+/** A month is given once it has been over this many days: past the rating, edit and double-blind windows. */
+export const RATING_MONTH_SETTLE_DAYS = RATING_WINDOW_DAYS;
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
@@ -128,19 +134,20 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
   },
   {
-    // Ratings about you (not as a rider or driver): score, tags, words and the month. Never who gave it, for
-    // which order, or the rater's role (`type` says rider, driver or customer); only once the double-blind
-    // window has shown it (rating.service.ts) and the daily fold has counted it (rating-standing.ts).
+    // A store review that names you: score, tags, words and the month, as the store's reviews page lists it.
+    // (Store reviews carry the store, not a person, so this is usually empty.) Never who gave it or for which
+    // order; only once the double-blind window has shown it and the daily fold has counted it.
     category: 'ratingsReceived', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
-    where: { visibleAt: { not: null }, state: 'ACTIVE', type: { notIn: MOVER_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
+    where: { visibleAt: { not: null }, state: 'ACTIVE', type: { in: STORE_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
     sortBy: ['createdAt', 'score', 'comment', 'tags'],
     fields: ['rateeId', 'score', 'comment', 'tags', 'createdAt'],
   },
   {
-    // Ratings about you as a rider or driver: the score and month only, a thin month as its count and average.
-    category: 'ratingsReceivedAsMover', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
-    where: { visibleAt: { not: null }, state: 'ACTIVE', type: { in: MOVER_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
-    sortBy: ['createdAt', 'score'], monthFloor: { below: MOVER_RATING_MONTH_FLOOR, average: 'score' },
+    // Every other rating about you (as a customer, rider, driver or provider): by settled month only, how many
+    // and their average, or only "fewer than 5". No words, tags, rater role, order or single score.
+    category: 'ratingsReceivedByMonth', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
+    where: { state: 'ACTIVE', type: { notIn: STORE_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
+    byMonth: { floor: RATING_MONTH_FLOOR, average: 'score', settleDays: RATING_MONTH_SETTLE_DAYS },
     fields: ['rateeId', 'score', 'createdAt'],
   },
   {
