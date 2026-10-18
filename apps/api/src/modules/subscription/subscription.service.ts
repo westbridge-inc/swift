@@ -239,6 +239,12 @@ export class SubscriptionService {
         const from = Number(sub.weeklyRate);
         const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
           where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
+        // [REVIEW-M #1844 S4-1] A paid weekly rate of 0 or less is legacy or hand-made data: never kept
+        // as the floor, nor raised at once to the taxi rate. The activation is refused (loudly: the approval
+        // outbox retries it with backoff, then dead-letters it to the admin page) until finance corrects it.
+        if (paidAtRate && !(from > 0)) {
+          throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'This mover\'s weekly fee on record is 0 or less; finance must correct it before the taxi role is added.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+        }
         const nextRate = paidAtRate ? from : priced.rate;
         if (paidAtRate) {
           await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: priced.rate, currencyCode: sub.currencyCode, source: 'TAXI_ACTIVATION', now: new Date() });

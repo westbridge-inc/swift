@@ -141,9 +141,11 @@ export function feeRiseCopy(kind: 'RISE' | 'CANCELLED', p: { from: number; to: n
   if (kind === 'RISE') {
     return {
       title: 'Your weekly fee is changing',
-      body: `From your weekly fee due ${p.date ? feeRiseDay(p.date) : 'after the notice period'}, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
+      // [REVIEW-F #1884 S4-1/S4-2] Name the phone's own control, and a dateless notice (never sent:
+      // the run always dates it) still promises only what F2 does.
+      body: `From your ${p.date ? `weekly fee due ${feeRiseDay(p.date)}` : `first weekly fee due at least ${FEE_RISE_NOTICE_DAYS} days from today`}, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). `
         + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
-        + 'If you do not want the new fee, stop your plan in Swift before then and you will not pay it.',
+        + 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.',
     };
   }
   return {
