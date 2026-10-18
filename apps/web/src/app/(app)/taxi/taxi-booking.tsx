@@ -34,8 +34,10 @@ export function TaxiBooking({ estimate, pickup, dropoff, activeRideId, onFareCha
   onBookingOff: (_message: string) => void;
 }) {
   const router = useRouter();
-  const [chosen, setChosen] = useState<TaxiRideClass>(estimate.tiers[0].rideClass);
-  const tier = estimate.tiers.find((t) => t.rideClass === chosen) ?? estimate.tiers[0];
+  // readTaxiEstimate never yields an estimate without a tier (taxi-fare.ts).
+  const first = estimate.tiers[0]!;
+  const [chosen, setChosen] = useState<TaxiRideClass>(first.rideClass);
+  const tier = estimate.tiers.find((t) => t.rideClass === chosen) ?? first;
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<BookingProblem | null>(null);
   const attempt = useRef<{ intent: string; key: string } | null>(null);
@@ -96,7 +98,7 @@ export function TaxiBooking({ estimate, pickup, dropoff, activeRideId, onFareCha
         Fare estimate · pay the driver cash or MMG at drop-off{estimate.durationMin != null ? ` · ~${estimate.durationMin} min trip` : ''}.
       </p>
       {estimate.waitingText && <p className="sw-caption">{estimate.waitingText}</p>}
-      <p className="sw-caption">Your driver asks for the six-digit ride code on your trip page before the ride starts. SOS is on the trip page too.</p>
+      <p className="sw-caption">Your trip page shows a six-digit start code: your driver types it to start the ride. SOS is on the trip page too.</p>
 
       {problem && (
         <div role="alert" className="sw-note sw-note-error flex-col items-start gap-1">

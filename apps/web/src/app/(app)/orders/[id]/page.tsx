@@ -298,6 +298,7 @@ export default function OrderDetailPage() {
           ridePin: typeof ride?.ridePin === 'string' && ride.ridePin ? ride.ridePin : null,
           ridePinVerified: ride?.ridePinVerified === true,
           driverAt: validPoint(activeDriver?.currentLat, activeDriver?.currentLng),
+          driverName: typeof driver?.user?.firstName === 'string' ? driver.user.firstName : null,
         };
         if (driver) {
           // Customer order detail omits taxi drivers; normalize the dedicated

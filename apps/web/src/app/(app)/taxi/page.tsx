@@ -12,7 +12,7 @@ export default function TaxiPage() {
       <span className="sw-eyebrow">Taxi</span>
       <h1 className="sw-title mt-1">See your taxi fare</h1>
       <p className="mt-2 max-w-[720px] text-[15px] leading-[22px] text-[var(--swift-muted)]">
-        Choose your pickup and destination for a fare estimate, worked out by road the same way the Swift app does.
+        Choose your pickup and destination for a fare estimate, worked out the same way the Swift app does.
       </p>
       <div className="mt-5"><TaxiFareEstimate /></div>
     </div>

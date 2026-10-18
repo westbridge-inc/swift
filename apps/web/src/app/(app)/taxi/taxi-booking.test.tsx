@@ -94,14 +94,14 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
 
     await waitFor(() => expect(push).toHaveBeenCalledWith('/orders/ride-1'));
     expect(rides.requestRide).toHaveBeenCalledTimes(1);
-    const [body, key] = vi.mocked(rides.requestRide).mock.calls[0];
+    const [body, key] = vi.mocked(rides.requestRide).mock.calls[0]!;
     expect(body).toEqual({
       pickup: { lat: STABROEK.lat, lng: STABROEK.lng }, dropoff: { lat: SHERIFF.lat, lng: SHERIFF.lng },
       pickupAddress: 'Stabroek Market', dropoffAddress: 'Sheriff Street',
       passengerCount: 1, rideClass: 'COMFORT', expectedFare: 1600,
     });
     expect(key).toMatch(/^web-taxi-[0-9a-f-]{16,}$/);
-    expect(screen.getByText(/six-digit ride code on your trip page/)).toBeTruthy();
+    expect(screen.getByText(/Your trip page shows a six-digit start code: your driver types it to start the ride\./)).toBeTruthy();
   });
 
   it('a press that may have landed is retried under the SAME key; a new choice gets a new key', async () => {
@@ -121,7 +121,7 @@ describe('[Row 117] with web booking on, the customer books at the fare on the b
     await user.click(screen.getByRole('radio', { name: /Estate/ }));
     await user.click(requestButton()!);
     await waitFor(() => expect(rides.requestRide).toHaveBeenCalledTimes(3));
-    expect(vi.mocked(rides.requestRide).mock.calls[2][1]).not.toBe(keys[0]);
+    expect(vi.mocked(rides.requestRide).mock.calls[2]![1]).not.toBe(keys[0]);
     expect((await screen.findByRole('alert')).textContent).toMatch('Too many strikes');
     expect(push).not.toHaveBeenCalled();
   });

@@ -141,7 +141,7 @@ describe('switch ON: a browser books through the phone’s own core, only at the
     expect(res.statusCode).toBe(201);
     expect(res.json().data.order.id).toBe('ride-test');
     expect(fakes.createRide).toHaveBeenCalledTimes(1);
-    const [, , , userId, ride, , , options] = fakes.createRide.mock.calls[0];
+    const [, , , userId, ride, , , options] = fakes.createRide.mock.calls[0]!;
     expect(userId).toBe('customer-test');
     expect(ride).toEqual({
       pickup: trip.pickup, dropoff: trip.dropoff, pickupAddress: trip.pickupAddress, dropoffAddress: trip.dropoffAddress,

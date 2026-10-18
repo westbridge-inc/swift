@@ -202,7 +202,7 @@ function FareForm({ booking, onBookingOff }: { booking: Booking; onBookingOff: (
       </div>
 
       <aside className="flex flex-col gap-3 split:sticky split:top-4" aria-live="polite">
-        <span className="sw-eyebrow">Fare estimate</span>
+        <span className="sw-eyebrow">Your fare</span>
         {notice && <p role="status" className="sw-note sw-note-info">{notice}</p>}
         {!current ? (
           <p className="sw-caption text-[15px] leading-[22px]">Set your pickup and destination to see the fare.</p>

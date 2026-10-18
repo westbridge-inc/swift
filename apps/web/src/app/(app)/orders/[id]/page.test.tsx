@@ -212,6 +212,8 @@ describe('[Row 117] with web taxi booking on, the trip page carries the ride’s
   it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText('482913')).toBeTruthy();
+    // The driver's first name from the ride read, as the phone says it.
+    expect(screen.getByText(/It proves this is your ride — Dev types it to start\./)).toBeTruthy();
     expect(screen.getByRole('heading', { name: 'Ride safety' })).toBeTruthy();
     expect(screen.getByRole('img', { name: 'Your driver’s position' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Emergency — get help now' })).toBeTruthy();
@@ -223,7 +225,7 @@ describe('[Row 117] with web taxi booking on, the trip page carries the ride’s
     const user = userEvent.setup();
     render(<OrderDetailPage />);
     await user.click(await screen.findByRole('button', { name: 'Emergency — get help now' }));
-    await user.click(screen.getByRole('button', { name: 'Alert Swift’s safety team' }));
+    await user.click(screen.getByRole('button', { name: 'Alert Swift now' }));
     await waitFor(() => expect(rides.rideSos).toHaveBeenCalledWith('order-1', null));
   });
 
