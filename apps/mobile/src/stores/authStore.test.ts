@@ -524,10 +524,14 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
     const src = readFileSync(new URL('../navigation/RootNavigator.tsx', import.meta.url), 'utf8');
     expect(src).toContain('const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;');
     expect(src).not.toContain('isAuthenticated && !!user && !user.selfieCapturedAt');
-    // an authenticated state with no user can only reach 'selfie', never 'main'
-    // ([E27] customers skip the selfie only when a user is actually present)
+    // an authenticated state with no user can only reach a hold, never 'main':
+    // an earner the selfie screen, a customer the sign-out hold ([owner 16 Oct]
+    // customers take no photos, so a customer is never sent to the camera)
     expect(src).toContain('hasUser: !!user');
-    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('selfie');
+    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('hold');
+    for (const intent of ['customer', 'mover', 'vendor', 'advertiser'] as const) {
+      expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent, countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).not.toBe('main');
+    }
   });
 });
 

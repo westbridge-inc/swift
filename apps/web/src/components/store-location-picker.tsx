@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { MapPin } from 'lucide-react';
-import { placesAutocomplete, placeDetails, type Place } from '@/lib/customer';
+import { placesAutocomplete, placeDetails, type Place } from '@/lib/customer-places';
 import { currentCoords } from '@/lib/geolocate';
 import {
   STORE_MAP_START, STORE_PIN_OUTSIDE, mapPixel, pixelPoint, pinLookup,

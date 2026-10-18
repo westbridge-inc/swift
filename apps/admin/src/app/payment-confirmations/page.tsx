@@ -151,7 +151,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
     <p>{decision === 'UNPAID'
       ? `Close as NOT PAID: ${mmg ? 'the checkout becomes NOT_PAID' : 'the payment becomes failed'}; nothing is credited. ${NOT_PAID_CLOCK}`
       : mmg ? "Mark PAID: only with MMG's transaction id; credits once" : 'Mark PAID: only with recorded settlement evidence; credits once.'}</p>
-    {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing settlement record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
+    {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing confirmation record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
     {decision === 'PAID' && mmg && <label className="block text-sm">MMG transaction ID<select className={inputClass} value={paymentId} onChange={(e) => setPaymentId(e.target.value)} disabled={busy || stale}>
       <option value="">Select a recorded MMG transaction</option>{row.settlementPayments?.map((payment) => <option key={payment.providerPaymentId} value={payment.providerPaymentId}>{payment.mmgTransactionId}</option>)}
     </select></label>}

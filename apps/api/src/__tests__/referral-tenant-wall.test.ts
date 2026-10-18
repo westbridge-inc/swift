@@ -18,12 +18,13 @@ import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-context';
+import { testPhone } from './helpers/fixture-ids';
 
 const DAY = 86_400_000;
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toUpperCase();
 const PRODUCTION = 'swift-default';
 const REVIEW = `b1-review-${RUN.toLowerCase()}`;
-const phone = () => `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+const phone = () => testPhone();
 const system = <T>(fn: () => Promise<T>) => runAsSystem('test-b1-referral', fn);
 
 let app: FastifyInstance;

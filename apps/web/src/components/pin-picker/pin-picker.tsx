@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent } from 'react';
 import { LocateFixed, MapPin, Minus, Plus, Search } from 'lucide-react';
-import { placeDetails, placesAutocomplete, type Place } from '@/lib/customer';
+import { placeDetails, placesAutocomplete, type Place } from '@/lib/customer-places';
 import { currentFix } from '@/lib/geolocate';
 import { MAX_ACCURACY_M } from '@/lib/place';
 import {

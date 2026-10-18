@@ -111,7 +111,7 @@ export function ProfileScreen() {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [ratingInfo, setRatingInfo] = useState(false);
   const [avatarBroken, setAvatarBroken] = useState(false);
-  // [F-022-18] a failure latch must clear when the URL changes (new selfie).
+  // [F-022-18] a failure latch must clear when the URL changes (a new picture).
   const avatarKey = (profile.data as { avatar?: string } | undefined)?.avatar ?? user?.avatar ?? '';
   React.useEffect(() => { setAvatarBroken(false); }, [avatarKey]);
 
@@ -187,9 +187,13 @@ export function ProfileScreen() {
   // THE TRUST HALO's facts — every segment is real, unlit = the honest to-do.
   // [ref 05] `next` speaks the reference's imperative ("place your first
   // order"), not the fact's past-tense label read backwards.
+  // [Owner 16 Oct: customers take no photos] A customer is never asked for a
+  // picture of themselves, so no fact here is about one. The ID on file is not
+  // a fact either: an ID only on file is never called verified (owner 8 Oct),
+  // and the caption below counts facts as "Verified n of m". The "Your ID" row
+  // further down says where the customer's ID stands.
   const facts: { on: boolean; label: string; next: string }[] = [
     { on: true, label: 'Phone verified', next: 'verify your phone' },
-    { on: !!p?.selfieCapturedAt, label: 'Selfie on file', next: 'add a selfie' },
     { on: orders > 0, label: 'First order placed', next: 'place your first order' },
   ];
   const nextFact = facts.find((f) => !f.on);
@@ -223,14 +227,15 @@ export function ProfileScreen() {
           {/* [ref 05] The page names itself before it names the person. */}
           <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>ACCOUNT</T>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
-            {/* The camera chip is a REAL action (>=44 hit target with hitSlop)
+            {/* The edit chip is a REAL action (>=44 hit target with hitSlop)
                 — it opens Personal data. It loses its maroon fill: on paper a
                 control is white with a hairline edge, and maroon is spent on
-                the one brand moment further down. */}
+                the one brand moment further down. A pencil, not a camera:
+                Personal data has no picture action for a customer. */}
             <TrustHalo size={80} stroke={4} facts={facts.map((f) => f.on)}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Edit your photo and personal data"
+                accessibilityLabel="Edit your personal data"
                 hitSlop={12}
                 onPress={() => navigation.navigate('PersonalData')}
               >
@@ -246,7 +251,7 @@ export function ProfileScreen() {
                   </View>
                 )}
                 <View style={{ position: 'absolute', right: -2, bottom: -2, width: 26, height: 26, borderRadius: radius.full, backgroundColor: color.surface.base, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: color.border.subtle }}>
-                  <Feather name="camera" size={13} color={color.text.primary} />
+                  <Feather name="edit-2" size={13} color={color.text.primary} />
                 </View>
               </Pressable>
             </TrustHalo>
@@ -262,15 +267,16 @@ export function ProfileScreen() {
               ) : null}
             </View>
           </View>
-          {/* [ref 05] "✓ Verified 2 of 3 — next: place your first order" —
+          {/* [ref 05] "✓ 2 of 3 done — next: place your first order" —
               the check is drawn, the count is real, the next step is an
-              imperative the person can act on. */}
+              imperative the person can act on. [R7] Never "Verified": a selfie
+              and a first order are not anything a person on our team checked. */}
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: space.md }}>
             <Feather name="check-circle" size={12} color={color.success} />
             <T variant="caption" tone="muted">
               {nextFact
-                ? `Verified ${facts.filter((f) => f.on).length} of ${facts.length} — next: ${nextFact.next}`
-                : 'Verified — account complete'}
+                ? `${facts.filter((f) => f.on).length} of ${facts.length} done — next: ${nextFact.next}`
+                : 'Account complete'}
             </T>
           </View>
 

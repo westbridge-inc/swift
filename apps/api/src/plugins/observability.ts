@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import fp from 'fastify-plugin';
 import client from 'prom-client';
 import * as Sentry from '@sentry/node';
 import { AppError } from '../utils/errors';
@@ -6,7 +7,9 @@ import { runtimeMode } from '../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Observability — both halves are env-gated and cost nothing when unset:
-//   SENTRY_DSN     → error tracking (5xx + worker failures)
+//   SENTRY_DSN     → error tracking (5xx + worker failures). An HTTP 5xx is
+//                    captured ONCE, by the app's error handler, on the status
+//                    it actually sent (middleware/error-handler.ts) [OBS-1].
 //   METRICS_TOKEN  → GET /metrics (Prometheus) behind a bearer token; without
 //                    the env the endpoint 404s, so the public API never
 //                    exposes internals by default.
@@ -1105,7 +1108,7 @@ export const tenantBindCounter = new client.Counter({
   registers: [registry],
 });
 
-export async function observabilityPlugin(app: FastifyInstance) {
+async function observability(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
     client.collectDefaultMetrics({ register: registry });
@@ -1173,7 +1176,8 @@ export async function observabilityPlugin(app: FastifyInstance) {
   }
 
   app.addHook('onResponse', (request, reply, done) => {
-    // routeOptions.url keeps cardinality bounded (":id", not real ids).
+    // routeOptions.url keeps cardinality bounded (":id", not real ids); a path
+    // no route matched (the 404 handler) has no template and is ONE series.
     const route = request.routeOptions?.url ?? 'unmatched';
     httpDuration.observe(
       { method: request.method, route, status: String(reply.statusCode) },
@@ -1182,16 +1186,10 @@ export async function observabilityPlugin(app: FastifyInstance) {
     done();
   });
 
-  // 5xx = our fault → Sentry. 4xx is the caller's problem and stays out.
-  app.addHook('onError', (request, _reply, error, done) => {
-    const status = (error as AppError).statusCode ?? 500;
-    if (status >= 500) {
-      // Route TEMPLATE, never the raw URL — /track/:token must not leak its
-      // token into the tracker [REPORT-013 F-013-04].
-      captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
-    }
-    done();
-  });
+  // [OBS-1] No onError hook here: an onError hook sees the THROWN error, not
+  // the status the error handler then sends (a ZodError → 400 or a Prisma
+  // not-found → 404 carry no statusCode and read as 500). The 5xx capture
+  // lives in the error handler, on the status it sent — one site, once.
 
   app.get('/metrics', async (request, reply) => {
     const token = process.env['METRICS_TOKEN'];
@@ -1203,3 +1201,11 @@ export async function observabilityPlugin(app: FastifyInstance) {
     return registry.metrics();
   });
 }
+
+/** [OBS-1] fastify-plugin (skip-override): the onResponse hook above must bind
+ *  to EVERY route of the instance it is registered on. A plain async plugin is
+ *  encapsulated — its hooks reached only the routes it declared itself, so the
+ *  latency/status histogram only ever recorded /metrics. Register it on the
+ *  root, BEFORE the route modules (app.ts does). /metrics is unchanged: same
+ *  path, same METRICS_TOKEN gate. */
+export const observabilityPlugin = fp(observability, { name: 'swift-observability' });
