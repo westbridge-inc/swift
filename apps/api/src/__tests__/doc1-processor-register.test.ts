@@ -17,6 +17,7 @@ import {
 import { DiditKycProvider } from '../providers/kyc/didit-provider';
 import { IdAnalyzerKycProvider } from '../providers/kyc/id-analyzer-provider';
 import { UNKNOWN_ENGINE } from '../modules/verification/extraction-ledger';
+import { PRIVACY } from '../modules/legal/legal.routes';
 
 const SRC = join(__dirname, '..');
 const EXTERNAL_DIDIT = { name: 'didit', version: 'v3', external: true, processorRef: 'DIDIT' } as const;
@@ -73,6 +74,24 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     const boot = readFileSync(join(SRC, 'utils/boot-config.ts'), 'utf8');
     expect(boot).toMatch(/MASTER_KEK is required in production/);
     expect(processorByRef('OBJECT_STORE')!.payload).toEqual(['PERSONAL_DOC_CIPHERTEXT']);
+  });
+
+  // [#1452 follow-up] The Privacy Policy tells people Swift's servers, databases and encrypted document
+  // storage are with DigitalOcean. The register is the internal record of the same fact, so it names the
+  // same company for both, and the host holds the database (account fields) as well as the ciphertext.
+  it('the hosting and document-storage rows name the company the Privacy Policy names (DigitalOcean)', () => {
+    expect(PRIVACY).toMatch(/DigitalOcean \(hosts Swift's servers and databases, and the encrypted storage for verification documents/);
+    expect(PRIVACY).toMatch(/Our servers are with DigitalOcean/);
+    const hosting = processorByRef('HOSTING');
+    expect(hosting, 'HOSTING row').not.toBeNull();
+    expect(hosting!.party).toMatch(/^DigitalOcean\b/);
+    expect(hosting!.payload).toEqual(expect.arrayContaining(['IDENTITY_FIELDS', 'CONTACT', 'LOCATION', 'PERSONAL_DOC_CIPHERTEXT']));
+    expect(hosting!.payload).not.toContain('PERSONAL_DOC_IMAGE');
+    expect(hosting!.leavesCountry).toBe(true);
+    expect(hosting!.contractEnv).toBe('PROCESSOR_CONTRACT_HOSTING');
+    const store = processorByRef('OBJECT_STORE')!;
+    expect(store.party).toMatch(/^DigitalOcean Spaces\b/);
+    expect(store.hosts).toContain('digitaloceanspaces.com');
   });
 
   it('the live verification path calls the gate at both send sites (doc submission and the L1→L2 identity check)', () => {
