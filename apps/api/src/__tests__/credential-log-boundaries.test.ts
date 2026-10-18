@@ -111,10 +111,13 @@ describe('[M013] a failed background job is logged by identity, never by payload
             text: 'Your Swift verification code is: 918273',
             delivery: { resetToken: 'synthetic-private-reset' },
             phone: '+5920000000',
+            // [S4-1] an id-named key that carries a phone number, and an id-named key whose value is not an id
+            payerId: '5920000001', msisdnId: '5920000002', phoneId: '5920000003',
+            linkId: 'https://example.invalid/synthetic-private-link-id',
           },
         }, new Error('Upstream refused synthetic-private-error'));
       }
-      for (const marker of ['synthetic-private-link', '918273', 'synthetic-private-reset', 'synthetic-private-error', '+5920000000']) {
+      for (const marker of ['synthetic-private-link', '918273', 'synthetic-private-reset', 'synthetic-private-error', '+5920000000', '5920000001', '5920000002', '5920000003', 'synthetic-private-link-id']) {
         expect(sink.text, `${marker} reached the log`).not.toContain(marker);
       }
       for (const worker of bullWorkers) {

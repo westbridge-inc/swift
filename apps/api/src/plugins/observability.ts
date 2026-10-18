@@ -32,7 +32,10 @@ const TOKENISH_PATH = /\/(track|(?:public\/)?trip|render)\/[A-Za-z0-9_.-]+/g;
 // [M013] Fields that ARE credentials, whatever their value looks like: a
 // token, an OTP or PIN, a password, a sign-in link, raw headers or cookies,
 // a provider key. Matched on the key with '-' and '_' removed, any case.
-const CREDENTIAL_KEY = /^(?:.*token.*|.*secret.*|.*password.*|passwordhash|otp|otpcode|pin|ridepin|pickupcode|deliverypin|signinurl|magiclink|authorization|cookies?|setcookie|headers|apikey|mkey|msecret|cardnumber|cvc|cvv)$/;
+const CREDENTIAL_KEY = /^(?:.*token.*|.*secret.*|.*password.*|passwordhash|otp|otpcode|pin|ridepin|pickupcode|deliverypin|signinurl|magiclink|authorization|cookies?|setcookie|headers|apikey|mkey|msecret|cardnumber|cvc|cvv|.*privatekey.*|.*signingkey.*|.*kek|pem)$/;
+// [#1795 S4-2] A PEM private-key block quoted in any text (a key-loading error) is withheld whole; a block cut short
+// is withheld to the end of the text.
+const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g;
 // [M013] Free text: an error, delivery or log message can quote a bare code
 // with no URL or key around it ("your code is 123456"), which no pattern can
 // find. The error report keeps its type, stack and context, never the text,
@@ -51,7 +54,7 @@ function scrubbedByKey(key: string, value: unknown): boolean {
   return false;
 }
 function scrubSentryText(value: string): string {
-  let out = value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+  let out = value.replace(PEM_PRIVATE_KEY, SCRUBBED).replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
   // [REPORT-016 F-016-02] Any URL's query string can carry arbitrary user
   // input (a raw search term, an address) that the named-param rule above
   // won't catch — and the Sentry SDK's default RequestData integration

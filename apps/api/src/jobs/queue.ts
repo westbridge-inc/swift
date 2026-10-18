@@ -635,7 +635,8 @@ function failedJobIds(data: unknown): Record<string, string | number> | undefine
   if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
   const ids: Record<string, string | number> = {};
   for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
-    if (!LOGGABLE_ID_KEY.test(key) || /token|secret|key|code|pin|password|otp/i.test(key)) continue;
+    // [#1795 S4-1] payerId carries the MMG payer's phone number (billing): a key that can name a person's number is never logged.
+    if (!LOGGABLE_ID_KEY.test(key) || /token|secret|key|code|pin|password|otp|payer|msisdn|phone/i.test(key)) continue;
     if ((typeof value === 'string' && LOGGABLE_ID_VALUE.test(value)) || (typeof value === 'number' && Number.isSafeInteger(value))) ids[key] = value;
   }
   return Object.keys(ids).length > 0 ? ids : undefined;

@@ -40,6 +40,30 @@ describe('[M013] error reports: nested credentials, by field name', () => {
     }
   });
 
+  it('[S4-2] a private key is removed by its field name, and a PEM private-key block is withheld from any text', () => {
+    // Built at run time, so the source holds no key-shaped block.
+    const dashes = '-'.repeat(5);
+    const pemBlock = (kind: string, body: string, closed = true) =>
+      `${dashes}BEGIN ${kind}PRIVATE KEY${dashes}\n${body}` + (closed ? `\n${dashes}END ${kind}PRIVATE KEY${dashes}` : ' (truncated');
+    const pem = pemBlock('', 'syntheticPemBody01');
+    const out = scrub({
+      request: {},
+      extra: {
+        requestId: 'safe-correlation',
+        privateKey: 'synthetic-private-key', signingKey: 'synthetic-signing-key', merchant_private_key: 'synthetic-merchant-key',
+        kek: 'synthetic-kek', masterKek: 'synthetic-master-kek', pem: 'synthetic-pem-field',
+        upstream: { detail: `could not load ${pem} from the store` },
+        rsa: pemBlock('RSA ', 'syntheticPemBody02'),
+        cut: `key: ${pemBlock('EC ', 'syntheticPemBody03', false)}`,
+      },
+    });
+    for (const marker of [
+      'synthetic-private-key', 'synthetic-signing-key', 'synthetic-merchant-key', 'synthetic-kek', 'synthetic-master-kek',
+      'synthetic-pem-field', 'syntheticPemBody01', 'syntheticPemBody02', 'syntheticPemBody03',
+    ]) expect(out, `${marker} reached the error report`).not.toContain(marker);
+    for (const kept of ['safe-correlation', 'could not load', 'from the store']) expect(out, `${kept} must stay`).toContain(kept);
+  });
+
   it('a share link without the /public prefix loses its token, like /track and /public/trip', () => {
     const out = scrub({ request: {}, extra: { link: 'https://swiftgy.com/trip/synthetic-trip-grant', path: '/trip/synthetic-trip-grant-2' } });
     expect(out).not.toContain('synthetic-trip-grant');
