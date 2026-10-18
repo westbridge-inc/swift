@@ -61,10 +61,13 @@ describe('[option S] no person rating is displayed from a live figure', () => {
   });
 
   it('no whole rider/driver/provider row is pulled in by a relation outside staff views, unless its live totals are omitted or replaced', () => {
-    const whole = /\b(driver|rider|serviceProvider)\s*:\s*(\{\s*(include|omit)\b|true\b)/g;
-    const found = sources.filter(({ file }) => !file.startsWith('admin/')).flatMap(({ file, text }) => [...text.matchAll(whole)].map((m) => {
-      const at = text.slice(m.index, m.index + 160);
-      return { file, ok: /omit: \{ averageRating: true, totalRatings: true \}/.test(at) || file === 'auth/auth.service.ts' };
+    const whole = /\b(driver|rider|riders|serviceProvider|provider)\s*:\s*(\{\s*(include|omit)\b|true\b)/g;
+    // A payment-provider column, not a service provider (card rail selects its own `provider` field).
+    const notPeople = new Set(['billing/card-rail.routes.ts']);
+    const found = sources.filter(({ file }) => !file.startsWith('admin/') && !notPeople.has(file)).flatMap(({ file, text }) => [...text.matchAll(whole)].map((m) => {
+      // The omit must belong to THIS relation (its first key), not to a sibling's object.
+      const ok = /^\w+\s*:\s*\{\s*omit: \{ averageRating: true, totalRatings: true \}/.test(text.slice(m.index)) || file === 'auth/auth.service.ts';
+      return { file, at: text.slice(m.index, m.index + 60), ok };
     }));
     expect(found.length).toBeGreaterThanOrEqual(3); // the scan is not blind (sign-in rider + driver, the accept reply)
     expect(found.filter((f) => !f.ok)).toEqual([]);
