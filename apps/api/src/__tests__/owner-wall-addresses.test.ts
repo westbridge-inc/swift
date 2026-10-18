@@ -19,7 +19,8 @@
  *    OWNER_RLS_BIND unset, sees every row as before.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
@@ -64,7 +65,7 @@ const address = (userId: string, label: string) => owner.address.create({ data: 
 
 beforeAll(async () => {
   for (const k of ENV_KEYS) priorEnv[k] = process.env[k];
-  owner = new PrismaClient({ datasourceUrl: TEST_URL });
+  owner = testPrismaClient(TEST_URL);
   logins = await createTenantProbeLogins(owner, TEST_URL);
   requestRole = decodeURIComponent(new URL(logins.requestUrl).username);
   // The switch, ON for this suite's request login only.
@@ -144,7 +145,7 @@ const asPerson = <T>(userId: string, fn: () => PromiseLike<T>): Promise<T> =>
 describe('[item 20] the owner wall fails closed', () => {
   it('an unbound app connection, a job bound to a tenant only, and another person see none of a person\'s addresses', async () => {
     // Unbound: the walled login with no person bound (raw, and through the app's own client).
-    const raw = new PrismaClient({ datasourceUrl: logins!.requestUrl });
+    const raw = testPrismaClient(logins!.requestUrl);
     try {
       expect(await raw.address.count({ where: { userId: ids.alice } })).toBe(0);
     } finally { await raw.$disconnect(); }
@@ -252,7 +253,7 @@ describe('[item 20] the wall is inert while switched off', () => {
     await owner.$executeRawUnsafe(`REVOKE swift_owner_wall FROM ${requestRole}`);
     const prior = process.env['OWNER_RLS_BIND'];
     delete process.env['OWNER_RLS_BIND'];
-    const raw = new PrismaClient({ datasourceUrl: logins!.requestUrl });
+    const raw = testPrismaClient(logins!.requestUrl);
     try {
       expect(await raw.address.count({ where: { userId: { in: [ids.alice, ids.bob] } } })).toBe(3);
       expect(await asPerson(ids.bob, () => app.prisma.address.count({ where: { userId: ids.alice } }))).toBe(2);
@@ -283,6 +284,7 @@ describe('[item 20 · S4-1] the person binding is transaction-local', () => {
       expect(await asPerson(ids.alice, () => one.$transaction((tx) => tx.address.count({ where: { userId: ids.alice } })))).toBe(2);
       expect(await one.address.count({ where: { userId: ids.alice } })).toBe(0);
       expect(await asPerson(ids.alice, () => one.$transaction([one.address.count({ where: { userId: ids.alice } })]))).toEqual([2]);
+      expect(await one.address.count({ where: { userId: ids.alice } })).toBe(0);
       expect(await tenant.runWithTenant(PRODUCTION, () => one.address.count({ where: { userId: ids.alice } }))).toBe(0);
     } finally { await one.$disconnect(); }
   });
