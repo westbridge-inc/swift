@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { Search } from 'lucide-react';
-import { placesAutocomplete, placeDetails, type Place } from '@/lib/customer';
+import { placesAutocomplete, placeDetails, type Place } from '@/lib/customer-places';
 import { createSequence } from '@/lib/live-tracking';
 import { pickedPlaceMatches, type PickedPlace } from '@/lib/place';
 

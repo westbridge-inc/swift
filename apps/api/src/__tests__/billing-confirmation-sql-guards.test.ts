@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { PrismaClient, type Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { beginConfirmationInTx, currentDunningClock, resolveConfirmationInTx } from '../modules/billing/dunning-clock';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Three database guards of the shared confirmation migration (20260930180000),
@@ -47,7 +48,7 @@ async function answer(tx: Prisma.TransactionClient, write: () => Promise<unknown
 }
 
 async function vendorFee(tx: Prisma.TransactionClient) {
-  const user = await tx.user.create({ data: { phone: `+592${Math.floor(1e10 + Math.random() * 9e10)}`, firstName: 'Guard', lastName: 'Fixture',
+  const user = await tx.user.create({ data: { phone: testPhone(), firstName: 'Guard', lastName: 'Fixture',
     roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
   const owner = await tx.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await tx.vendor.create({ data: { ownerId: owner.id, name: 'SQL guard fixture', slug: `sql-guard-${randomUUID()}`,

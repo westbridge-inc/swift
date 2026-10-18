@@ -34,9 +34,13 @@ describe('the words stay truthful', () => {
   it('nothing says "verified"', () => {
     for (const line of [...all, ...rows]) expect(line).not.toMatch(/verif/i);
   });
-  it('on file says unlocked (taxi rides also need the profile photo); waiting says a person looks first and promises no time', () => {
-    expect(submittedCopy('ON_FILE')).toMatchObject({ title: 'Your ID is on file' });
-    expect(submittedCopy('ON_FILE').body).toMatch(/Taxi rides also need your profile photo/);
+  // [Owner ruling 16 Oct 2026 — customers take no photos] The ID on file unlocks bigger orders AND taxi
+  // rides (the server's ride gate is the ID alone); no line asks a customer for a photo.
+  it('on file says bigger orders and taxi rides are unlocked, with no photo; waiting says a person looks first and promises no time', () => {
+    expect(submittedCopy('ON_FILE')).toEqual({ title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' });
+    expect(submittedCopy('CHECKED')).toEqual({ title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' });
+    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders and taxi rides unlocked');
+    for (const line of [...all, ...rows]) expect(line).not.toMatch(/profile photo|selfie/i);
     expect(submittedCopy('WAITING').title).toMatch(/person/);
     expect(submittedCopy('WAITING').body).not.toMatch(/\d+\s*hours?/);
   });
@@ -49,9 +53,11 @@ describe('the words stay truthful', () => {
     expect(profileIdRowSub('NONE')).toBe('For bigger orders and taxi rides');
     for (const line of rows) expect(line).not.toMatch(/needed|you need/i);
   });
-  it('no short line says the ID alone unlocks taxi rides (they also need the profile photo)', () => {
-    for (const line of rows) expect(line).not.toMatch(/unlock[^.]*rides|rides[^.]*unlock/i);
-    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders unlocked');
+  // [Owner ruling 16 Oct 2026] The ID on file is now the whole ride gate (no photo), so the short line
+  // says it unlocks taxi rides too — and only the ON_FILE line claims an unlock.
+  it('the short line says the ID on file unlocks bigger orders and taxi rides; no other row claims an unlock', () => {
+    expect(profileIdRowSub('ON_FILE')).toBe('On file — bigger orders and taxi rides unlocked');
+    for (const c of ['CHECKED', 'WAITING', 'NOT_ACCEPTED', 'NONE', undefined]) expect(profileIdRowSub(c)).not.toMatch(/unlocked/i);
   });
 });
 
@@ -76,5 +82,7 @@ describe('the screens ask for the ID alone and repeat the server', () => {
     expect(taxi.match(/label="Add your ID — takes a minute"/g)?.length).toBe(2);
     expect(taxi).not.toMatch(/Verify your ID/);
     expect(src('modules/profile/screens/FaqScreen.tsx')).not.toMatch(/verified ID|plus a selfie/);
+    // [Owner 16 Oct] The FAQ asks a customer for no photo, taxi included.
+    expect(src('modules/profile/screens/FaqScreen.tsx')).not.toMatch(/profile photo/);
   });
 });

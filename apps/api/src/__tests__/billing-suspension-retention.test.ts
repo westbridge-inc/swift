@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // PINV-8 [PAY-1 §10.2] — WHAT SUSPENSION MUST NEVER TAKE AWAY.
 //
@@ -59,7 +60,7 @@ beforeAll(async () => {
   // Unique phone prefix per file — shared ranges collide across parallel files.
   const owner = await app.prisma.user.create({
     data: {
-      phone: `+59200941${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Retention', lastName: 'Owner',
       roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true,
     },

@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
 import { signingKeyFor, storageSigningKeys, type SigningKeyring } from '../../utils/signing-keys';
+import { emergencyPolicySigner, signEmergencyEnvelope, type EmergencyEnvelope, type EmergencyPolicySigner } from './emergency-policy-signature';
 
 /**
  * [MOB-018] The market emergency policy.
@@ -110,20 +111,39 @@ export function verifyEmergencyPolicy(signed: SignedEmergencyPolicy, keyring: Si
 }
 
 export type ServedEmergencyPolicy =
-  | { status: 'served'; signed: SignedEmergencyPolicy }
+  // [AUD-G7-023] `envelope` is the Ed25519-signed policy the phone verifies
+  // (build 12+); null when this process has no signing key (never in
+  // production) or signing failed (`envelopeProblem`, logged by the route).
+  | { status: 'served'; signed: SignedEmergencyPolicy; envelope: EmergencyEnvelope | null; envelopeProblem?: string }
   | { status: 'no-policy'; country: string }
   | { status: 'invalid'; country: string; problem: string }
   | { status: 'unknown-market'; country: string };
 
-/** What the public route answers: a signed policy, an honest "none", an invalid stored policy (never served), or an unknown market. */
-export async function serveEmergencyPolicy(prisma: PrismaClient, country: string, keyring: SigningKeyring = storageSigningKeys(), now = new Date()): Promise<ServedEmergencyPolicy> {
+/**
+ * What the public route answers: a signed policy, an honest "none", an invalid stored policy (never served), or an unknown market.
+ * `signer` is resolved lazily so a signing misconfiguration can never fail the emergency route: the v1 body is still served and
+ * the phone keeps its last verified policy or its bundled numbers.
+ */
+export async function serveEmergencyPolicy(
+  prisma: PrismaClient,
+  country: string,
+  keyring: SigningKeyring = storageSigningKeys(),
+  now = new Date(),
+  signer: () => EmergencyPolicySigner | null = () => emergencyPolicySigner(),
+): Promise<ServedEmergencyPolicy> {
   const code = country.toUpperCase();
   const row = await prisma.countryConfig.findUnique({ where: { code }, select: { code: true, emergency: true } });
   if (!row) return { status: 'unknown-market', country: code };
   const { policy, problem } = parseEmergencyPolicy(code, row.emergency);
   if (problem) return { status: 'invalid', country: code, problem };
   if (!policy) return { status: 'no-policy', country: code };
-  return { status: 'served', signed: signEmergencyPolicy(policy, keyring, now) };
+  const signed = signEmergencyPolicy(policy, keyring, now);
+  try {
+    const key = signer();
+    return { status: 'served', signed, envelope: key ? signEmergencyEnvelope(policy, key, now) : null };
+  } catch (error) {
+    return { status: 'served', signed, envelope: null, envelopeProblem: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /**

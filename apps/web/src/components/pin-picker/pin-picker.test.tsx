@@ -1,8 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import { STORE_MAP_START } from '@/lib/store-pin';
 import { PinPicker, PIN_CITY_CENTRE, type ChosenPin } from './pin-picker';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
+import { TEST_MAPTILER_KEY } from '@/test/map-tiles-fixture';
 
 // ---------------------------------------------------------------------------
 // [WEB-PIN] The shared customer pin picker, on its own: what it hands its
@@ -24,6 +26,8 @@ let fetchMock: ReturnType<typeof mockApi>;
 const calls = (pathname: string) => fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === pathname);
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
 const last = (onChange: ReturnType<typeof vi.fn>) => onChange.mock.calls.at(-1)?.[0] as ChosenPin | null | undefined;
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 beforeEach(async () => {
   (await import('@/lib/auth')).clearSession();
@@ -57,10 +61,22 @@ describe('[WEB-PIN] the pin picker', () => {
     // The autocomplete was biased to where the map is, through Swift's API only.
     const asked = new URL(String(calls('/api/v1/places/autocomplete')[0]![0]));
     expect(Number(asked.searchParams.get('lat'))).toBeCloseTo(STORE_MAP_START.latitude, 6);
+    // The details request having been SENT is not the map having moved: wait
+    // until the map sits on the chosen result, so the tiles loaded below are
+    // the ones around that point (loading the town-centre tiles that are
+    // about to be replaced leaves the new map unseen, and no pin is handed over).
+    await waitFor(() => expect(screen.getByText('Latitude 6.80650, Longitude -58.16020')).toBeTruthy());
+    expect(last(onChange)).toBeNull();
     loadMap();
     await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8065, longitude: -58.1602, address: 'Sample Market, Georgetown', named: true }));
     // The chosen result already names this exact point: no second guess from the reverse lookup.
-    expect(calls('/api/v1/places/reverse')).toHaveLength(0);
+    // (On a slow runner the town centre the map opened on may settle — 350 ms —
+    // before the search answers, and naming THAT point is right; so every
+    // reverse lookup must be for the opening point, none for the chosen one.)
+    for (const [url] of calls('/api/v1/places/reverse')) {
+      const at = new URL(String(url)).searchParams;
+      expect([Number(at.get('lat')), Number(at.get('lng'))]).toEqual([STORE_MAP_START.latitude, STORE_MAP_START.longitude]);
+    }
   });
 
   it('typing a new search outdates a place still being looked up: the map does not jump to it', async () => {
@@ -145,14 +161,28 @@ describe('[WEB-PIN] the pin picker', () => {
     await waitFor(() => expect(last(onChange)).toMatchObject({ latitude: 6.8, longitude: -58.15, address: null, named: true }));
   });
 
-  it('map tiles tell OpenStreetMap the site, never the page (its tile policy requires a Referer)', () => {
+  it('map tiles come from MapTiler, credited to MapTiler and OpenStreetMap, and tell MapTiler the site, never the page', () => {
     render(<PinPicker mapLabel="Test pin map" onChange={vi.fn()} />);
     const tiles = [...screen.getByRole('application').querySelectorAll('img')];
     expect(tiles.length).toBeGreaterThan(0);
     for (const tile of tiles) {
-      expect(tile.getAttribute('src')).toMatch(/^https:\/\/tile\.openstreetmap\.org\/\d+\/\d+\/\d+\.png$/);
+      expect(tile.getAttribute('src')).toMatch(new RegExp(`^https://api\\.maptiler\\.com/maps/streets-v2/256/\\d+/\\d+/\\d+\\.png\\?key=${TEST_MAPTILER_KEY}$`));
+      // The key is restricted to the site's origins: the Referer carries the origin, never the page's path.
       expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
     }
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === '© MapTiler © OpenStreetMap contributors')).toBeTruthy();
+  });
+
+  it('a built site without the MapTiler key draws no tiles, says so, and never hands over a pin', async () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    const onChange = vi.fn();
+    render(<PinPicker mapLabel="Test pin map" start={{ latitude: 6.8, longitude: -58.15 }} onChange={onChange} />);
+    expect(screen.getByRole('application').querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+    expect(screen.queryByText('Loading map…')).toBeNull();
+    expect(screen.queryByText(/OpenStreetMap contributors/)).toBeNull();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+    expect(onChange.mock.calls.every(([pin]) => pin === null)).toBe(true);
   });
 
   it('a map that failed to load gives no pin until it is retried and seen', async () => {

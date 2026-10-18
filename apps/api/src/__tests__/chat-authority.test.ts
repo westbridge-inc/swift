@@ -191,6 +191,34 @@ describe('[R048-004] every read surface scrubs a legacy raw row', () => {
   });
 });
 
+describe('[Owner ruling 16 Oct 2026] customers take no photos: a customer photo never reaches the mover', () => {
+  it('room list and room open show the driver a customer with NO photo, while the driver keeps theirs', async () => {
+    // An account that holds a photo from before the ruling: it is still never served to the other side.
+    // (system work: the async context still carries the last request's tenant — see the stranger fixture above)
+    await runWithoutTenant(async () => {
+      await app.prisma.user.update({ where: { id: customerId }, data: { avatar: `/uploads/avatars/${customerId}.jpg` } });
+      await app.prisma.user.update({ where: { id: driverUserId }, data: { avatar: `/uploads/avatars/${driverUserId}.jpg` } });
+    }, 'test-fixture:chat-authority');
+    try {
+      const listed = await inject('GET', '/rooms?as=driver', driverToken);
+      expect(listed.statusCode).toBe(200);
+      const room = (listed.json().data as Array<{ id: string; participants: Array<{ userId: string; avatar: string | null; role: string }> }>).find((r) => r.id === roomId)!;
+      expect(room.participants.find((p) => p.userId === customerId)?.avatar ?? null).toBeNull();
+      expect(room.participants.find((p) => p.userId === driverUserId)?.avatar).toBe(`/uploads/avatars/${driverUserId}.jpg`);
+
+      const opened = await inject('POST', '/rooms', driverToken, { orderId });
+      expect(opened.statusCode, opened.body).toBe(200);
+      const people = opened.json().data.participants as Array<{ userId: string; user: { avatar?: string | null } }>;
+      expect(people.find((p) => p.userId === customerId)?.user.avatar ?? null).toBeNull();
+      expect(people.find((p) => p.userId === driverUserId)?.user.avatar).toBe(`/uploads/avatars/${driverUserId}.jpg`);
+      expect(opened.body).not.toContain(`/uploads/avatars/${customerId}.jpg`);
+      expect(listed.body).not.toContain(`/uploads/avatars/${customerId}.jpg`);
+    } finally {
+      await runWithoutTenant(() => app.prisma.user.updateMany({ where: { id: { in: [customerId, driverUserId] } }, data: { avatar: null } }), 'test-cleanup:chat-authority');
+    }
+  });
+});
+
 describe('[R048-004] media is server-issued', () => {
   it('a client-supplied mediaUrl is refused at ingress, a foreign media id is refused, and nothing is stored', async () => {
     const before = await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } });

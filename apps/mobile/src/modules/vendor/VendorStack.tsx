@@ -77,6 +77,16 @@ function VendorRoot() {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // [STORE-ALERT] A live store's phone must ring: ask while the OS still can
+  // (once per app session). Never in a preview: nothing real rings there.
+  const storeLive = store?.status === 'ACTIVE' && !previewType;
+  useEffect(() => {
+    if (!storeLive) return;
+    void Promise.all([import('../../services/notification-priming'), import('../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('store_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [storeLive]);
+
   if (isLoading || (stores.length > 0 && !validSelection)) {
     return (
       <Screen>
