@@ -4852,6 +4852,9 @@ model ChatMessage {
   createdAt       DateTime @default(now())
 
   @@index([offPlatformFlag])
+  /// [Row 310] Chat polling: one room's newest messages (and a sender's recent
+  /// ones in that room). Built online by its own migration.
+  @@index([chatRoomId, createdAt])
   @@map("chat_messages")
 }
 
