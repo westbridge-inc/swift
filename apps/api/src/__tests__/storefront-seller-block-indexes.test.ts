@@ -26,6 +26,8 @@ describe('the seller-block test file never gives two stores the same index', () 
   it('every store() index is fixed: no random draw, no expression the guard cannot read', () => {
     expect(source).not.toMatch(/Math\.random/);
     expect(storeIndexes(source).unexplained).toEqual([]);
+    // The refusal rows' index really is base + row (the guard counts them that way).
+    expect(source).toContain('[what, text, code, REFUSAL_BASE + row] as const');
   });
 
   it('every index is unique, the refusal rows included', () => {
