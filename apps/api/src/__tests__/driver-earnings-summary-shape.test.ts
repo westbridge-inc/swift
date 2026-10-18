@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // SWIFT-080 (contract drift, realized). /driver/earnings/summary must return
@@ -40,7 +41,7 @@ beforeAll(async () => {
 
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59200803${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Earn', lastName: 'Shape',
       roles: ['DRIVER', 'CUSTOMER'] as UserRole[], activeRole: 'DRIVER',
       isPhoneVerified: true,

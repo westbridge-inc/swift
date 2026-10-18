@@ -19,6 +19,7 @@ import { devChannelLog } from '../providers/notifications/channels';
 import {
   SOLO_COOLOFF_CONFIG_KEY, SOLO_COOLOFF_DEFAULT_HOURS, clampCoolOffHours, decideSoloApproval, soloCoolOffHours,
 } from '../modules/admin/solo-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [OWNER #13 · 13 Oct] SOLO MODE — the owner is the only admin.
@@ -54,7 +55,7 @@ async function makeAdmin(tenantId: string, opts: { role?: 'SUPER_ADMIN' | 'ADMIN
   return runWithoutTenant(async () => {
     const user = await app.prisma.user.create({
       data: {
-        phone: `+59275${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Solo', lastName: `Owner${RUN}${userIds.length}`, roles: role === 'CUSTOMER' ? ['CUSTOMER'] : [role, 'CUSTOMER'], activeRole: role,
         status: 'ACTIVE', isPhoneVerified: true, tenantId, ...(email ? { email } : {}),
         ...(role === 'CUSTOMER' ? {} : { admin: { create: { permissions: opts.permissions ?? ['*'] } } }),

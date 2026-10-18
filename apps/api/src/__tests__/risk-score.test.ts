@@ -5,6 +5,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { riskScoreFor } from '../modules/cash/risk-score.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Risk scoring (marketplace §10): existing signals → one deterministic number.
@@ -18,7 +19,7 @@ const cleanupOrders: string[] = [];
 async function makeUser() {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59257${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Risk', lastName: `T${nanoid(4)}`,
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true,

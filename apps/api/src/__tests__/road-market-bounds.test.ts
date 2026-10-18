@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { testPhone } from './helpers/fixture-ids';
 
 const PICKUP = { lat: 6.8013, lng: -58.1551 };
 const DROPOFF = { lat: 6.8149, lng: -58.1631 };
@@ -36,7 +37,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   road();
   const user = await app.prisma.user.create({ data: {
-    phone: `+592${String(Math.floor(Math.random() * 9000000) + 1000000)}`,
+    phone: testPhone(),
     firstName: 'Market', lastName: 'Fixture', syntheticRunId: 'l08-market-test',
     roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
     trustLevel: 'L2', selfieCapturedAt: new Date(), customer: { create: {} },
