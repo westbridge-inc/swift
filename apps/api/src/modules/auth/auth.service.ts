@@ -42,6 +42,7 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
+import { sessionCredentialMatches } from '../../lib/session-credential';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import {
   PUBLIC_SIGNUP_TENANT_ID,
@@ -994,10 +995,13 @@ export class AuthService {
       const user = users[0];
       if (!user) return { kind: 'invalid' as const };
 
+      // [Row 231] Raw SQL bypasses the prisma digest extension: the row holds
+      // digests, and the presented credential is checked against them in
+      // constant time. The access token is not read back at all — a stored
+      // digest is never something to hand out.
       const sessions = await tx.$queryRaw<Array<{
         id: string;
         userId: string;
-        token: string;
         refreshToken: string;
         previousRefreshToken: string | null;
         rotatedAt: Date | null;
@@ -1006,7 +1010,7 @@ export class AuthService {
         deviceType: string;
         authMethod: SessionAuthMethod;
       }>>`
-        SELECT "id", "userId", "token", "refreshToken", "previousRefreshToken",
+        SELECT "id", "userId", "refreshToken", "previousRefreshToken",
                "rotatedAt", "expiresAt", "deviceId", "deviceType",
                "authMethod"::text AS "authMethod"
         FROM "sessions"
@@ -1021,9 +1025,9 @@ export class AuthService {
       }
       // Match the credential and retire reused rotations before any account
       // status answer. Even a blocked account must invalidate this family.
-      const previous = session.refreshToken !== refreshToken;
+      const previous = !sessionCredentialMatches(session.refreshToken, refreshToken);
       if (previous) {
-        if (session.previousRefreshToken !== refreshToken) return { kind: 'invalid' as const };
+        if (!sessionCredentialMatches(session.previousRefreshToken, refreshToken)) return { kind: 'invalid' as const };
         const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
         const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
         if (!(age <= graceMs)) {
@@ -1054,28 +1058,28 @@ export class AuthService {
         };
       }
 
-      // A legitimate double-fire receives the current pair only AFTER the
-      // same account-status and assurance checks as a current credential.
-      if (previous) {
-        return {
-          kind: 'success' as const,
-          tokens: { accessToken: session.token, refreshToken: session.refreshToken, expiresIn: 900 },
-        };
-      }
-
+      // A legitimate double-fire — a retry whose first answer was lost — is
+      // answered only AFTER the same account-status and assurance checks as a
+      // current credential. [Row 231] Only digests are stored, so the pair that
+      // answered the first call cannot be handed out again: the replay is
+      // answered with a FRESH pair below and the first answer's pair is
+      // superseded (401 on use), never revoked. The chain (previousRefreshToken,
+      // rotatedAt) stays where the first rotation put it, so a replay cannot
+      // extend its own grace, and the same credential after the window is
+      // still theft evidence that revokes the family above.
       const newAccessToken = this.app.jwt.sign({
         userId: user.id,
         role: user.activeRole,
         jti: nanoid(8),
       });
       const newRefreshToken = nanoid(64);
+      // Plaintext in, digest at rest: the prisma session extension digests these.
       await tx.session.update({
         where: { id: session.id },
         data: {
           token: newAccessToken,
           refreshToken: newRefreshToken,
-          previousRefreshToken: refreshToken,
-          rotatedAt: new Date(),
+          ...(previous ? {} : { previousRefreshToken: refreshToken, rotatedAt: new Date() }),
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         },
       });
@@ -1232,7 +1236,9 @@ export class AuthService {
       const session = sessions[0];
       if (
         !session
-        || (session.refreshToken !== refreshToken && session.previousRefreshToken !== refreshToken)
+        // [Row 231] the row holds digests: the presented credential is checked against them in constant time
+        || (!sessionCredentialMatches(session.refreshToken, refreshToken)
+          && !sessionCredentialMatches(session.previousRefreshToken, refreshToken))
       ) {
         return null;
       }
