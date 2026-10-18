@@ -87,6 +87,16 @@ describe('partner copy: no commission on orders, never a forever promise', () =>
     expect(found).toEqual([]);
   });
 
+  it('the reader sees JSX text, template pieces and strings, never comments', () => {
+    const got = words('probe.tsx', [
+      '// a comment: no commission, ever',
+      "const a = 'string, never commission';",
+      'const b = `head ${x} tail, commission forever`;',
+      'const c = <T>jsx no commission, ever</T>;',
+    ].join('\n')).map((w) => w.text.trim());
+    expect(got).toEqual(['string, never commission', 'head', 'tail, commission forever', 'jsx no commission, ever']);
+  });
+
   it('the census catches each form of the promise (and leaves the Terms wording alone)', () => {
     for (const promise of [
       'no commission, ever', 'Zero commission — ever.', 'no commission on any fare, ever', 'Swift never takes a commission.',
