@@ -63,6 +63,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mover_job_cancelled',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
+    // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
+    'mmg_customer_says_paid',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
@@ -84,6 +86,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
+    // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
+    'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
     'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',

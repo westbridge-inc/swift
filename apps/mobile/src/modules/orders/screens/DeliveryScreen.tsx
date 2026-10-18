@@ -1222,8 +1222,7 @@ export function DeliveryScreen() {
                   {failed
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
-                      // [owner 18 Oct 2026] The server says why an unpaid MMG order closed by itself.
-                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null)
+                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null) /* [owner 18 Oct 2026] why an unpaid MMG order closed by itself */
                       ?? (mmgCancellationAmbiguous
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
