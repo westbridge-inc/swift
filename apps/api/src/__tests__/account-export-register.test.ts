@@ -56,7 +56,7 @@ describe('the export register', () => {
         const exported = e.fields.includes(f.name);
         const reason = e.omit?.[f.name] ?? (f.type === 'Bytes' ? 'SECRET' : ruleReason(f.name)) ?? e.rest;
         if (!exported && !reason) problems.push(`${e.category}: column ${f.name} is neither exported nor left out for a reason`);
-        if (exported && !e.by.includes(f.name) && (f.type === 'Bytes' || ['SECRET', 'STORED_FILE', 'FRAUD_SAFETY'].includes(ruleReason(f.name) ?? ''))) {
+        if (exported && !e.by.includes(f.name) && (f.type === 'Bytes' || ['SECRET', 'STORED_FILE', 'FRAUD_SAFETY', 'RATING_TOTAL'].includes(ruleReason(f.name) ?? ''))) {
           problems.push(`${e.category}: exports ${f.name}, which the rules keep out`);
         }
       }
@@ -69,7 +69,7 @@ describe('the export register', () => {
     const problems = user.fields.filter((f) => f.kind !== 'object').filter((f) => {
       const exported = (ACCOUNT_FIELDS as readonly string[]).includes(f.name);
       const reason = ruleReason(f.name);
-      return exported ? ['SECRET', 'STORED_FILE', 'FRAUD_SAFETY'].includes(reason ?? '') : !reason;
+      return exported ? ['SECRET', 'STORED_FILE', 'FRAUD_SAFETY', 'RATING_TOTAL'].includes(reason ?? '') : !reason;
     }).map((f) => f.name);
     expect(problems).toEqual([]);
     for (const f of ACCOUNT_FIELDS) expect(user.fields.some((c) => c.name === f), f).toBe(true);

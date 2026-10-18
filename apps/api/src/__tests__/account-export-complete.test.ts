@@ -226,14 +226,25 @@ describe('the account export', () => {
       + 'that there were fewer than 5. Never the words, the tags, who gave them or for which trip.');
   });
 
-  it('a file cut short at the ceiling drops the last, possibly partial, month (never a month that later changes)', async () => {
+  it('a by-month category cut short at the ceiling gives no months at all (any of them could be partial)', async () => {
     const ratee = await person();
     await received(ratee, [5, 5, 5, 5, 5, 4].map((score, i) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: monthStart(i < 3 ? 3 : 2) })));
     const cut = await exportPersonalData(app.prisma, ratee, { ceiling: 5 }) as unknown as Record<string, unknown> & { coverage: Record<string, unknown> };
-    expect(cut.coverage['ratingsReceivedByMonth']).toEqual({ rows: 1, complete: false });
-    expect(cut['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }]); // month 2 had only 2 of its 3 rows
+    expect(cut.coverage['ratingsReceivedByMonth']).toEqual({ rows: 0, complete: false });
+    expect(cut['ratingsReceivedByMonth']).toEqual([]); // month 2 had only 2 of its 3 rows: no month is given from a cut read
     const whole = await exportPersonalData(app.prisma, ratee) as unknown as Record<string, unknown>;
     expect(whole['ratingsReceivedByMonth']).toEqual([{ month: monthOf(3), fewerThan: 5 }, { month: monthOf(2), fewerThan: 5 }]);
+  });
+
+  it('a mover never gets the live rating totals: they move with each single rating', async () => {
+    const userId = await person();
+    await app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', averageRating: 4.3, totalRatings: 41 } });
+    const data = await service().exportData(userId) as unknown as Record<string, Array<Record<string, unknown>>>;
+    expect(data['riderProfile']).toHaveLength(1);
+    expect(data['riderProfile']![0]).not.toHaveProperty('averageRating');
+    expect(data['riderProfile']![0]).not.toHaveProperty('totalRatings');
+    expect(JSON.stringify(data)).not.toMatch(/"(averageRating|totalRatings)"/);
+    expect((data as unknown as { notice: string }).notice).toContain('running rating totals, which change with each single rating (your ratings are given by month instead)');
   });
 
   it('never carries security internals or the fraud signals that fired', async () => {

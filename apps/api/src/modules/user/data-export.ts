@@ -78,16 +78,17 @@ function settledBefore(fold: Date, days: number): Date {
 
 /**
  * One row per settled month, oldest first: how many and their average (rounded as the app rounds,
- * rating-standing.ts), or only `fewerThan` when the month had fewer than the floor. A file cut short at
- * the ceiling drops its last month, which may be partial (the file is marked incomplete anyway).
+ * rating-standing.ts), or only `fewerThan` when the month had fewer than the floor. A category cut short
+ * at the ceiling gives no months at all (it is marked incomplete): rows are read in id order, so any
+ * month could be partial, and a partial month would differ from the next file's.
  */
 function settledMonths(rows: Row[], entry: ExportEntry, complete: boolean): Row[] {
   const { floor, average } = entry.byMonth!;
   const monthOf = entry.month![0]!;
   const months = new Map<string, number[]>();
   for (const r of rows) months.set(String(r[monthOf]), [...(months.get(String(r[monthOf])) ?? []), Number(r[average])]);
+  if (!complete) return [];
   const ordered = [...months.entries()].sort(([x], [y]) => x.localeCompare(y));
-  if (!complete) ordered.pop();
   return ordered.map(([month, scores]): Row => (scores.length < floor
     ? { month, fewerThan: floor }
     : { month, count: scores.length, [`${average}Average`]: Math.round((scores.reduce((t, x) => t + x, 0) / scores.length) * 100) / 100 }));

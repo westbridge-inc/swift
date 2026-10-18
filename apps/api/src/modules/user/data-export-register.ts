@@ -19,6 +19,7 @@ export type OmitReason =
   | 'FRAUD_SAFETY' // fraud-prevention and safety signals
   | 'OTHER_PERSON' // another person's details, or the staff member who acted
   | 'INTERNAL_NOTE' // a private note staff wrote while handling a case
+  | 'RATING_TOTAL' // a running rating total that moves with each single rating (ratings are given by settled month instead)
   | 'SYSTEM'; // bookkeeping with no information about the person (versions, leases, tenant ids)
 
 /** Name rules, in order; the first match decides. A `by` column is always exported (it is the person). */
@@ -34,6 +35,8 @@ export const OMIT_RULES: ReadonlyArray<readonly [OmitReason, RegExp]> = [
   // never be read (no-customer-funds-ingress.test.ts). Written as patterns so the source censuses that
   // guard those names (mover-pointer-census, no-customer-funds-ingress) correctly see no reader here.
   ['SYSTEM', /^current(Order|Ride)Id$|^wallet[A-Z]/],
+  // Live rating totals move with each single rating, so two files a day apart would give one rating back.
+  ['RATING_TOTAL', /^(averageRating|totalRatings)$/],
 ];
 
 /**
@@ -46,6 +49,7 @@ export const OMIT_REASON_TEXT: Readonly<Record<OmitReason, string>> = {
   FRAUD_SAFETY: 'some records kept to prevent fraud and to keep people safe',
   OTHER_PERSON: 'details of other people (contacts you entered yourself, such as emergency contacts, are included)',
   INTERNAL_NOTE: 'private notes staff wrote while handling a case',
+  RATING_TOTAL: 'running rating totals, which change with each single rating (your ratings are given by month instead)',
   SYSTEM: 'system bookkeeping that says nothing more about you',
 };
 
@@ -306,15 +310,15 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'riderProfile', model: 'Rider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'averageRating', 'totalRatings', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'riderType', 'vehicleType', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalDeliveries', 'totalCourierJobs', 'completionRate', 'acceptanceRate', 'floatLimit', 'committedFloat', 'createdAt', 'updatedAt'],
   },
   {
     category: 'driverProfile', model: 'Driver', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'averageRating', 'totalRatings', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'vehicleMake', 'vehicleModel', 'vehicleYear', 'vehicleColor', 'licensePlate', 'vehicleCapacity', 'vehicleType', 'rideClass', 'taxiStopsCapable', 'bodyType', 'colorHex', 'documentsVerified', 'documentsVerifiedAt', 'isOnline', 'isAvailable', 'currentLat', 'currentLng', 'lastLocationUpdate', 'lastLivenessPassAt', 'livenessLockedAt', 'livenessPromptDeadlineAt', 'safetySuspendedAt', 'totalRides', 'acceptanceRate', 'cancellationRate', 'mmgPayUrl', 'mmgPayUrlPending', 'mmgPayUrlPendingAt', 'mmgPayUrlApplyAt', 'createdAt', 'updatedAt'],
   },
   {
     category: 'serviceProviderProfile', model: 'ServiceProvider', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'averageRating', 'totalRatings', 'createdAt', 'updatedAt'],
+    fields: ['id', 'userId', 'trade', 'bio', 'selfSkilled', 'isVerified', 'createdAt', 'updatedAt'],
   },
   {
     category: 'storeOwnership', model: 'VendorOwner', by: ['userId'], key: 'id',
