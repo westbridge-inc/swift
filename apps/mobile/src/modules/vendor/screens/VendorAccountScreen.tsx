@@ -25,6 +25,7 @@ import { BrandSwitch } from '../../../kit/controls';
 import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { MmgNumberCard } from '../../../components/MmgNumberCard';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
@@ -103,6 +104,26 @@ export function VendorAccountScreen() {
     mutationFn: () => vendorApi.cancelPendingMmgLink(),
     onSuccess: () => {
       toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
+  });
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG NUMBER replaces the pay link:
+  // the same step-up, the same staged cool-off with the old number live, the same one-tap cancel.
+  const [mmgNumberError, setMmgNumberError] = useState<string | null>(null);
+  const updateMmgNumber = guardVendorOperation((mmgNumber: string | null) => vendorApi.updateProfile({ mmgNumber }));
+  const saveMmgNumber = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgNumber: string | null) => updateMmgNumber(mmgNumber)),
+    onMutate: () => setMmgNumberError(null),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgNumberError(serverMessage(e, 'That number could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgNumber = useVendorMutation({
+    mutationFn: () => vendorApi.cancelPendingMmgNumber(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current number stays. Other devices were signed out.');
       void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
     },
     onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
@@ -204,6 +225,20 @@ export function VendorAccountScreen() {
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
+          <MmgNumberCard
+            value={store?.mmgNumber}
+            pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            saving={saveMmgNumber.isPending}
+            cancelling={cancelPendingMmgNumber.isPending}
+            error={mmgNumberError}
+            readOnly={!isOwner}
+            onSave={(n) => saveMmgNumber.mutate(n)}
+            onCancelPending={isOwner ? () => cancelPendingMmgNumber.mutate() : undefined}
+          />
+        ) : null}
+
+        {/* [PAYMENT-SIMPLIFY] The old pay link only while the server's STORE_MMG_PAY_LINK switch is on. */}
+        {isManager && store?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="store"
             value={store?.mmgPayUrl}

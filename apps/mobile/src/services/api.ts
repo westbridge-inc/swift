@@ -504,6 +504,8 @@ export const customerApi = {
   // /customer/orders had no backend route.)
   placeOrder: (data: {
     paymentMethod?: string;
+    /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY to the store's MMG number. */
+    mmgPayTo?: 'STORE_NUMBER';
     deliveryInstructions?: string;
     tipAmount?: number;
     scheduledFor?: string;
@@ -1326,10 +1328,12 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
+  // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.
+  cancelPendingMmgNumber: () => api.delete('/vendor/profile/mmg-number/pending'),
   importItems: (
     csv: string,
     session?: AuthSessionSnapshot,

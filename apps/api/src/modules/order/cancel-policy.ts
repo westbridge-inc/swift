@@ -107,6 +107,9 @@ export type CancellationSnapshot = {
    *  store outside Swift, so its words never promise "free". Optional: a
    *  caller without it reads as not-MMG. */
   paymentMethod?: string | null;
+  /** [PAYMENT-SIMPLIFY · COORD Q2] Whether the store has confirmed an MMG payment ('PENDING' = not yet).
+   *  Optional: a caller without it reads as "confirmed or not MMG" (the stricter answer). */
+  paymentStatus?: string | null;
 };
 
 /** [Item 64] What the preview tells the customer when no mover was found. */
@@ -119,6 +122,8 @@ export const STORE_ACCEPTED_CANCEL_MESSAGE = 'The store has accepted your order,
 export const CANCEL_WINDOW_CLOSED_CODE = 'CANCEL_WINDOW_CLOSED';
 /** [owner #46] Why a store order is free right now, in plain words. */
 export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until the store accepts your order.';
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] An accepted MMG order the store has not marked "Paid by MMG". */
+export const MMG_UNCONFIRMED_CANCEL_MESSAGE = 'You can cancel until the store confirms your MMG payment.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
 /** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
  *  promises "free" for it, and the customer is told where any money comes back from. */
@@ -134,7 +139,8 @@ export type FreeCancelReason =
   | 'AWAITING_STORE' // [owner #46] a store order nobody has accepted yet
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
   | 'IN_WINDOW' // [owner #50] inside the five-minute window (or the hold)
-  | 'TOO_LATE'; // [owner #46/#50/#52] very late
+  | 'TOO_LATE' // [owner #46/#50/#52] very late
+  | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
 
 /** What a customer cancel may do right now: free, or refused. Never a fee. */
 export type CancellationVerdict =
@@ -372,6 +378,14 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
   if (freeBecauseNoMoverFound(order)) return { allowed: true, free: true, reason: 'NO_MOVER' };
   if (isStoreOrder(order)) {
     if (notAcceptedYet(order)) return { allowed: true, free: true, reason: 'AWAITING_STORE' };
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] With MMG to the store's number the store
+    // ACCEPTS before the customer pays, and nothing is prepared or dispatched until the store taps
+    // "Paid by MMG". Until then the customer may still cancel in the app — what the published
+    // Refunds page promises ("not confirmed yet: you can cancel in the app"); the store gets the
+    // unattested-MMG cancel notice and refunds directly if money did arrive.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING') {
+      return { allowed: true, free: true, reason: 'MMG_UNCONFIRMED' };
+    }
     if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
       return { allowed: true, free: true, reason: 'TOO_LATE' };
     }
@@ -463,7 +477,9 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
     ? NO_MOVER_FREE_CANCEL_MESSAGE
     : verdict.reason === 'AWAITING_STORE'
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
-      : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
+      : verdict.reason === 'MMG_UNCONFIRMED'
+        ? MMG_UNCONFIRMED_CANCEL_MESSAGE
+        : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,

@@ -1,3 +1,4 @@
+import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
@@ -23,7 +24,7 @@ import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
-import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgDispatchBlocked, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
 import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
@@ -74,6 +75,8 @@ import {
   storeVisibleReview,
 } from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
+import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
@@ -116,6 +119,8 @@ const updateVendorProfileSchema = z.object({
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number (+592 mobile); '' / null = stop taking MMG.
+  mmgNumber: z.string().trim().max(40).nullable().optional(),
   // The number customers may call before ordering. Opt-in; null/'' takes it
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
@@ -685,6 +690,35 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 // Route plugin
 // ---------------------------------------------------------------------------
 
+
+/** [ALG-34 · owner 17 Oct 2026 PAYMENT-SIMPLIFY] The store's own view of where MMG money goes.
+ *  The MMG NUMBER (live + staged, each re-checked on read) is what customers pay now. The pay
+ *  LINK is shown only while STORE_MMG_PAY_LINK is on (`mmgPayLinkEnabled`); off, a stored link
+ *  stays dormant and an older app shows an empty card, never a link Swift does not use. */
+function storeMoneySurfaceView(row: {
+  mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null;
+  mmgNumber: string | null; mmgNumberPending: string | null; mmgNumberApplyAt: Date | null;
+}) {
+  const linkOn = storeMmgPayLinkEnabled();
+  return {
+    mmgPayLinkEnabled: linkOn,
+    mmgPayUrl: linkOn ? safeMmgPayUrl(row.mmgPayUrl) : null,
+    mmgPayUrlPending: linkOn ? safeMmgPayUrl(row.mmgPayUrlPending) : null,
+    mmgPayUrlApplyAt: linkOn ? row.mmgPayUrlApplyAt : null,
+    mmgNumber: safeMmgNumber(row.mmgNumber),
+    mmgNumberPending: safeMmgNumber(row.mmgNumberPending),
+    mmgNumberApplyAt: row.mmgNumberPending ? row.mmgNumberApplyAt : null,
+  };
+}
+
+
+/** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order waiting for "Paid by MMG"
+ *  cancels 30 minutes after acceptance: the store sees when (server clock, the sweep's rule). */
+function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
+  const payBy = mmgAcceptedPayBy(order);
+  return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
@@ -719,7 +753,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   async function startPlatformDeliveryAfterCommit(
     order: { id: string; isExpress: boolean },
     fulfillmentModeVersion: number,
-    reason: 'accept' | 'ready' | 'mode_switch',
+    reason: 'accept' | 'ready' | 'mode_switch' | 'mmg_paid',
   ): Promise<boolean> {
     try {
       const current = await dispatch.prepareForPlatformDelivery(order.id, fulfillmentModeVersion);
@@ -1109,8 +1143,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // invalid stored value back into an app where it could be opened.
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
-      mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
-      mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
+      ...storeMoneySurfaceView(vendor),
       publicPhone: safePublicPhone(vendor.publicPhone),
       // [owner #51] What still stands between a never-live store and going
       // live, besides its documents (additive; older apps ignore it).
@@ -1342,7 +1375,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
-    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    if ((body.mmgPayUrl !== undefined || body.mmgNumber !== undefined) && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the MMG number: while
+    // STORE_MMG_PAY_LINK is off a NEW link is refused before step-up or any money-surface write.
+    if (body.mmgPayUrl !== undefined) assertStoreMmgPayLinkWritable(body.mmgPayUrl);
     // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
     const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
     if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
@@ -1353,7 +1389,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Owner only, step-up first; a new link is STAGED behind a cool-off with
     // the old one still live and the owner told (integrity/money-surface.ts).
     // Clearing it is immediate — it redirects nothing.
-    if (mmgPayUrl !== undefined) {
+    // [PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG number is the same kind of money
+    // destination: owner only, step-up first, the same velocity budget, a new number STAGED
+    // behind the same cool-off with the old one still live and the owner told; clearing is immediate.
+    const mmgNumber = body.mmgNumber === undefined
+      ? undefined
+      : mmgNumberForWrite(body.mmgNumber);
+    if (mmgPayUrl !== undefined || mmgNumber !== undefined) {
       requireRole(access, 'OWNER');
       await requireStepUp(app, request);
       await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
@@ -1420,6 +1462,13 @@ export async function vendorRoutes(app: FastifyInstance) {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
       });
     }
+    if (mmgNumber === null) {
+      await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, field: 'NUMBER' });
+    } else if (mmgNumber !== undefined) {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+        actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newNumber: mmgNumber, field: 'NUMBER',
+      });
+    }
     // [owner #51] A never-live store whose documents are done waits only for
     // its published number: once it has one, the activation projection runs
     // now (not at the next daily belt) and the store goes live. A failure
@@ -1431,7 +1480,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
+      where: { id: vendorId },
+      select: {
+        mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true,
+        mmgNumber: true, mmgNumberPending: true, mmgNumberApplyAt: true,
+        status: true, isVerified: true, acceptingOrders: true,
+      },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1443,8 +1497,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...vendor,
         ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
-        mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
-        mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        ...storeMoneySurfaceView(link),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
         storeCheck: partnerStoreView(storeCheckOf(vendor)),
         nameReviewApprovedHash: undefined,
@@ -1460,6 +1513,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
       actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId,
+    });
+    return { success: true, data };
+  });
+
+  /** DELETE /profile/mmg-number/pending — [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me"
+   *  for the store's MMG number: drop the staged change and sign out every other device.
+   *  Owner only; no step-up — cancelling is always the safe direction. */
+  app.delete('/profile/mmg-number/pending', auth, async (request) => {
+    await assertVelocity(app, request, 'money.mmg-link.cancel'); // [R048-007]
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+      actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId, field: 'NUMBER',
     });
     return { success: true, data };
   });
@@ -1723,6 +1788,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
+      ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
 
@@ -1741,7 +1807,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -1815,7 +1881,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // defers dispatch to the Mark-ready transition below instead.
     if (updated.fulfillmentMode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, updated.fulfillmentModeVersion);
-    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT') {
+    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT' && !mmgDispatchBlocked(updated)) {
+      // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] An MMG order the store accepts BEFORE the money
+      // arrives arms no dispatch here: no rider is sought for an unpaid order. The store's
+      // "Paid by MMG" (confirm-payment) arms it instead.
       await startPlatformDeliveryAfterCommit(order, updated.fulfillmentModeVersion, 'accept');
     }
 
@@ -2297,6 +2366,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [S1-6] The disagreement's evidence and the durable notice obligation
         // commit with the claim; the customer is told what the STORE said.
         ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // [owner 18 Oct 2026 · REVIEW-G S4] A "customer says paid, store silent" case closes with the store's tap.
+        await closeStoreSilentMmgCase(tx, order.id, 'PAID_BY_MMG', now);
         // Answer with the row as it now stands, attestation evidence included.
         const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
         return { won: true, order: claimedRow, notice, outboxId };
@@ -2316,6 +2387,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (capture.notice && capture.outboxId) {
       await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
         .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] The store accepted this MMG order before the money
+    // arrived, so acceptance armed no dispatch. "Paid by MMG" is that moment: arm the platform
+    // delivery now, exactly as acceptance would have (ON_ACCEPT) — never while a claim is disputed,
+    // and never twice (no rider yet; the dispatch arm is versioned and idempotent).
+    if (
+      updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT'
+      && updated.riderId == null && ['ACCEPTED', 'PREPARING'].includes(updated.status)
+      && !mmgDispatchBlocked(updated)
+    ) {
+      await startPlatformDeliveryAfterCommit(updated, updated.fulfillmentModeVersion, 'mmg_paid');
     }
     return { success: true, data: updated };
   });

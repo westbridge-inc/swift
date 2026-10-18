@@ -542,13 +542,22 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             className="rounded-lg border border-[var(--swift-border)] px-3 py-2 text-sm"
           />
         )}
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] One plainly worded button: the store taps it when
+            it sees the money in its own MMG account. Swift never checks the money itself. */}
+        {showConfirmPay && (
+          <p className="w-full text-sm text-[var(--swift-muted)]">Tap when {money(o.totalAmount)} is in your MMG account.</p>
+        )}
+        {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+        {showConfirmPay && typeof o.mmgPayByLine === 'string' && o.mmgPayByLine.trim() !== '' && (
+          <p className="w-full text-sm font-semibold">{o.mmgPayByLine}</p>
+        )}
         {showConfirmPay && (
           <button
             onClick={() => act.mutate('confirm-payment')}
             disabled={act.isPending || mmgRef.trim().length < 4}
             className="rounded-lg border border-green-600/30 px-4 py-2 text-sm font-semibold text-green-700 hover:bg-green-50 disabled:opacity-50"
           >
-            {money(o.totalAmount)} received in my MMG
+            Paid by MMG
           </button>
         )}
         {!paused && s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (

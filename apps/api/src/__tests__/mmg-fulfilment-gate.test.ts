@@ -171,13 +171,18 @@ afterAll(async () => {
 });
 
 describe('the gate — no fulfilment while MMG payment is PENDING', () => {
-  it('vendor cannot ACCEPT an unpaid MMG order (409 MMG_PAYMENT_PENDING)', async () => {
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] The store ACCEPTS first — that is what shows the
+  // customer the store's MMG number — and NOTHING after acceptance moves until the store says the money arrived.
+  it('vendor CAN accept an unpaid MMG order, and the very next step (preparing) is refused (409 MMG_PAYMENT_PENDING)', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
     const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, vendorOwner.token, {}, vendorId);
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error?.code ?? res.json().code).toBe('MMG_PAYMENT_PENDING');
+    expect(res.statusCode, res.body).toBe(200);
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.status).toBe('PENDING');
+    expect([fresh.status, fresh.paymentStatus]).toEqual(['ACCEPTED', 'PENDING']);
+    const prep = await inject('PUT', `/api/v1/vendor/orders/${order.id}/preparing`, vendorOwner.token, {}, vendorId);
+    expect(prep.statusCode).toBe(409);
+    expect(prep.json().error?.code ?? prep.json().code).toBe('MMG_PAYMENT_PENDING');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
   });
 
   it('the store CAN confirm payment while PENDING, and acceptance then works', async () => {
@@ -192,9 +197,9 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
   });
 
-  it('every canonical fulfilment transition refuses while unpaid', async () => {
+  it('every canonical fulfilment transition AFTER acceptance refuses while unpaid', async () => {
+    // [PAYMENT-SIMPLIFY · Q1] PENDING -> ACCEPTED is the one un-gated step (proved above and below).
     const cases: Array<{ from: OrderStatus; to: OrderStatus }> = [
-      { from: 'PENDING', to: 'ACCEPTED' },
       { from: 'ACCEPTED', to: 'PREPARING' },
       { from: 'PREPARING', to: 'READY_FOR_PICKUP' },
       { from: 'ACCEPTED', to: 'RIDER_ASSIGNED' },
@@ -212,6 +217,13 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
       const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(fresh.status).toBe(from);
     }
+    // ...and the seam itself lets ONLY acceptance through, and only while no dispute is open.
+    const toAccept = await makeMmgOrder('PENDING');
+    await expect(orders.updateStatus(toAccept.id, 'ACCEPTED', 'test-system')).resolves.toBeTruthy();
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: toAccept.id } })).status).toBe('ACCEPTED');
+    const disputed = await makeMmgOrder('PENDING');
+    await app.prisma.order.update({ where: { id: disputed.id }, data: { mmgClaimMismatchAt: new Date() } });
+    await expect(orders.updateStatus(disputed.id, 'ACCEPTED', 'test-system')).rejects.toMatchObject({ code: 'MMG_CLAIM_MISMATCH' });
   });
 
   it('rider /delivered refuses an unpaid MMG order; after capture it completes and the settlement owes fee + tip', async () => {

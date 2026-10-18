@@ -259,6 +259,8 @@ describe('discovery publishes the public card, never the account row', () => {
       data: { vendorId: shop.vendorId, categoryId: category.id, name: 'Call-me special', basePrice: 1000, isAvailable: true },
     });
     process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.mmg.gy';
+    // [PAYMENT-SIMPLIFY] The card's pay link is the dormant ON path (STORE_MMG_PAY_LINK=1).
+    process.env['STORE_MMG_PAY_LINK'] = '1';
     try {
       await app.prisma.vendor.update({
         where: { id: shop.vendorId },
@@ -304,6 +306,7 @@ describe('discovery publishes the public card, never the account row', () => {
       expect(own.email).toBe('owner-email@example.test');
     } finally {
       delete process.env['MMG_PAY_URL_ALLOWED_HOSTS'];
+      delete process.env['STORE_MMG_PAY_LINK'];
       await app.prisma.vendor.update({
         where: { id: shop.vendorId },
         data: { email: null, mmgPayUrl: null },
