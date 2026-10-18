@@ -11,9 +11,9 @@ import { useLocationStore } from '../../../stores/locationStore';
 import { useAuthStore } from '../../../stores/authStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { itemPhoto } from '../../../lib/images';
-import { haptic } from '../../../lib/haptics';
 import { toast } from '../../../kit/toast';
 import {
+  AddMorph,
   Chip,
   EmptyState,
   ErrorState,
@@ -162,29 +162,15 @@ const MarketCard = React.memo(function MarketCard({ item, onOpen, onAdd, adding 
                   REGISTERED, not silently resolved: the screenshot is
                   the binding spec for this tab [WS-3.6]. */}
               <Money amount={item.basePrice} tone="brand" />
-              <Pressable
-                onPress={() => onAdd(item)}
-                disabled={adding}
-                accessibilityRole="button"
-                accessibilityLabel={`Add ${item.name} to cart`}
-                hitSlop={10}
-              >
-                {({ pressed: p2 }) => (
-                  <View
-                    style={{
-                      width: 32,
-                      height: 32,
-                      borderRadius: radius.full,
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      backgroundColor: color.brand[500],
-                      opacity: p2 || adding ? 0.7 : 1,
-                    }}
-                  >
-                    <Feather name="plus" size={18} color={color.white} />
-                  </View>
-                )}
-              </Pressable>
+              {/* [Triage row 113] THE shared add "+" (kit/add-morph): the same maroon circle as the menu rows. */}
+              <AddMorph
+                qty={0}
+                onAdd={() => onAdd(item)}
+                onInc={() => onAdd(item)}
+                onDec={() => {}}
+                busy={adding}
+                addLabel={`Add ${item.name} to cart`}
+              />
             </View>
           </View>
         </View>
@@ -226,7 +212,7 @@ export function MarketScreen() {
   const mutateCart = addToCart.mutate;
   const onAdd = useCallback((item: MarketItem) => {
     if (!isAuthenticated) { promptLogin(); return; }
-    haptic.select();
+    // The haptic tick is AddMorph's (one per press).
     mutateCart(
       { vendorId: item.vendorId, itemId: item.id, quantity: 1 },
       {

@@ -352,9 +352,9 @@ class SeedProductionScript(unittest.TestCase):
 
     def test_refuses_a_phone_inside_the_demo_purge_range(self):
         # [D1] +592600 is DEMO_PHONE_PREFIX: every demo seed mints numbers in
-        # it and the demo purge classifies on it. A real SUPER_ADMIN inside it
-        # would be entangled with the demo classification, so the ceremony
-        # refuses it before anything runs.
+        # it. The demo purge selects by the synthetic marker only, but a real
+        # SUPER_ADMIN inside the range would be confusable with the demo
+        # accounts, so the ceremony refuses it before anything runs.
         result = self.run_script(SEED_ADMIN_PHONE="+5926000000")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("592600", result.stderr)
