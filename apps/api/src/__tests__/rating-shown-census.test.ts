@@ -37,6 +37,29 @@ describe('[option S] no person rating is displayed from a live figure', () => {
     expect(uses.length).toBeGreaterThan(3); // the scan is not blind
   });
 
+  it("a person's own row never goes back whole: every spread or return of it carries the whole-groups totals", () => {
+    const own: Array<[string, string]> = [['rider/rider.routes.ts', 'rider'], ['driver/driver.routes.ts', 'driver'], ['services/services.routes.ts', 'provider']];
+    let seen = 0;
+    for (const [file, name] of own) {
+      const lines = read(file).split('\n');
+      lines.forEach((line, i) => {
+        // An internal call that never reaches the person (the vehicle re-review reads the row's vehicle fields).
+        if (/requireFreshVehicleReview\(/.test(line)) return;
+        if (new RegExp(`\\.\\.\\.${name}\\b`).test(line) || /data: updated\b/.test(line)) {
+          seen += 1;
+          expect(/shownRatingTotals\(|withShownTotals\(/.test(lines.slice(i, i + 3).join('\n')), `${file}:${i + 1}`).toBe(true);
+        }
+      });
+    }
+    expect(seen).toBeGreaterThanOrEqual(5); // the scan is not blind (profile reads and the provider upsert)
+    // The rows a mover gets back from an update (profile, vehicle photo, go online/offline) are wrapped.
+    expect([...read('rider/rider.routes.ts').matchAll(/data: await withShownTotals\(app\.prisma, updated, 'RIDER'/g)]).toHaveLength(2);
+    expect([...read('driver/driver.routes.ts').matchAll(/data: await withShownTotals\(app\.prisma, updated, 'DRIVER'/g)]).toHaveLength(3);
+    const auth = read('auth/auth.service.ts');
+    expect(auth).toContain("if (user.rider) Object.assign(user.rider, await shownRatingTotals(this.app.prisma, 'RIDER', user.id));");
+    expect(auth).toContain("if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));");
+  });
+
   it('ranking still reads the true mean: only the DISPLAY of a provider star comes from the groups', () => {
     expect(read('services/services.routes.ts')).toContain('|| rankMean.get(b.id)! - rankMean.get(a.id)!');
   });

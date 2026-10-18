@@ -1,5 +1,5 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
-import { shownRatingFor } from '../rating/rating-groups';
+import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
@@ -181,7 +181,8 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
     };
   });
 
@@ -277,7 +278,7 @@ export async function driverRoutes(app: FastifyInstance) {
       : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
     return {
       success: true,
-      data: { ...driver, ...link, mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending) },
+      data: { ...driver, ...link, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending) },
     };
   });
 
@@ -321,7 +322,7 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   // ─── Online / Offline ──────────────────────────────────────────────────
@@ -461,7 +462,7 @@ export async function driverRoutes(app: FastifyInstance) {
         .catch((error) => request.log.warn({ err: error, riderId: retiredRiderId }, 'driver GO sibling online-hours close failed'));
     }
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   app.post('/go-offline', { preHandler: [app.authenticate] }, async (request) => {
@@ -492,7 +493,7 @@ export async function driverRoutes(app: FastifyInstance) {
       .releaseHeldOffer(driver.id)
       .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-offline offer cleanup failed'));
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   // ─── Location ──────────────────────────────────────────────────────────

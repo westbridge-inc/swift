@@ -1,5 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
-import { shownRatingTotals } from '../rating/rating-groups';
+import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -467,6 +467,8 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
@@ -516,7 +518,7 @@ export async function riderRoutes(app: FastifyInstance) {
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   /** PUT /profile — Update vehicle info, profile photo, rider type. */
@@ -605,7 +607,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return updated;
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   // =========================================================================

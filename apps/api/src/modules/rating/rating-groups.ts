@@ -151,3 +151,8 @@ export async function shownRatingTotals(db: Pick<PrismaClient, 'rating'>, role: 
   const shown = await shownRatingFor(db, role, userId);
   return { averageRating: shown.average, totalRatings: shown.ratingCount };
 }
+
+/** A person's own rider/driver/provider row as they get it back: the live columns replaced by the whole-groups figure. */
+export async function withShownTotals<T extends object>(db: Pick<PrismaClient, 'rating'>, row: T, role: PersonRatingRole, userId: string): Promise<T> {
+  return { ...row, ...(await shownRatingTotals(db, role, userId)) };
+}

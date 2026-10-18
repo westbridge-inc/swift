@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { shownRatingsFor, shownSurface } from '../rating/rating-groups';
+import { shownRatingTotals, shownRatingsFor, shownSurface } from '../rating/rating-groups';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { RatingService } from '../rating/rating.service';
@@ -187,7 +187,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       await projectProviderVerificationLocked(tx, userId);
       return tx.serviceProvider.findUniqueOrThrow({ where: { userId } });
     });
-    return { success: true, data: provider };
+    // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+    return { success: true, data: { ...provider, ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)) } };
   });
 
   app.get('/providers/me', auth, async (request) => {
@@ -208,6 +209,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...provider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)),
         tradeLabel: serviceTradeLabel(provider.trade),
         categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
         selfSkilled: !certified,
