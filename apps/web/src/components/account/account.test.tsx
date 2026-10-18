@@ -661,7 +661,7 @@ describe('[PINS] saved addresses are placed and adjusted on the map', () => {
     expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ instructions: 'Gate code 1234', latitude: 6.8, longitude: -58.1 });
   });
 
-  it('Enter in the map’s search box searches; it never saves the address', async () => {
+  it('Enter or Find in the map’s search searches; nothing inside the map saves the address', async () => {
     api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
     await user.click(screen.getByRole('button', { name: 'Move the pin' }));
@@ -670,6 +670,13 @@ describe('[PINS] saved addresses are placed and adjusted on the map', () => {
     await user.type(screen.getByLabelText('Search for a street or place'), 'Mapped{Enter}');
     expect(await screen.findByRole('button', { name: /Mapped Test Street/ })).toBeTruthy();
     expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    // Nothing inside the map can save either: Find, the results, zoom, retry are plain buttons.
+    await user.click(screen.getByRole('button', { name: 'Find' }));
+    expect(await screen.findByRole('button', { name: /Mapped Test Street/ })).toBeTruthy();
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    const form = saveButton().closest('form')!;
+    const submits = [...form.querySelectorAll('button')].filter((button) => button.type !== 'button');
+    expect(submits).toEqual([saveButton()]);
   });
 
   it('an edit says the words never move the pin, and how to move it', async () => {
