@@ -9,7 +9,9 @@ import { socketPlugin } from '../plugins/socket';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { LEGAL_VERSION } from '../modules/legal/legal.routes';
-import { MATERIAL_CHANGES, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+import { MATERIAL_CHANGES, NON_MATERIAL_CHANGES, acceptanceStatus, materialVersion } from '../modules/legal/reaccept';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -74,6 +76,49 @@ describe('who must accept, and what they are shown', () => {
     expect(acceptanceStatus({ tosVersion: null, roles: ['DRIVER'] as UserRole[] }).agreements).toEqual(['driver_agreement']);
     expect(acceptanceStatus({ tosVersion: null, roles: ['VENDOR_OWNER', 'CUSTOMER'] as UserRole[] }).agreements).toEqual(['vendor_agreement']);
     expect(acceptanceStatus({ tosVersion: null, roles: ['CUSTOMER'] as UserRole[] }).agreements).toEqual([]);
+  });
+});
+
+// [COORD 18 Oct ruling · 2026-10-18 NON-material] The Privacy s.6 sentence describes what already happens, so the
+// bump asks nobody again. Phone builds 9-11 have no re-accept screen; a forced re-accept on staging could lock the
+// shared store-review demo account out. These tests hold the three facts that keep every build working.
+describe('[2026-10-18] a non-material bump asks nobody again', () => {
+  it('every served version is classed exactly once: material (a fresh tick) or not', () => {
+    const material = MATERIAL_CHANGES.some((c) => c.version === LEGAL_VERSION);
+    const plain = NON_MATERIAL_CHANGES.some((c) => c.version === LEGAL_VERSION);
+    expect(material !== plain, `${LEGAL_VERSION} must be listed in exactly one of MATERIAL_CHANGES / NON_MATERIAL_CHANGES`).toBe(true);
+    expect(NON_MATERIAL_CHANGES.map((c) => c.version)).toContain('2026-10-18');
+    expect(MATERIAL_CHANGES.map((c) => c.version)).not.toContain('2026-10-18');
+  });
+
+  it('nobody\'s answer changes: every accepted version and role gets the same answer at 2026-10-18 as at 2026-10-17', () => {
+    expect(materialVersion('2026-10-18')).toBe('2026-10-17');
+    for (const tosVersion of [null, '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17']) {
+      for (const roles of [['CUSTOMER'], ['MOVER', 'CUSTOMER'], ['VENDOR_OWNER', 'CUSTOMER']] as UserRole[][]) {
+        const before = acceptanceStatus({ tosVersion, roles }, '2026-10-17');
+        const after = acceptanceStatus({ tosVersion, roles }, '2026-10-18');
+        expect([before.currentVersion, after.currentVersion]).toEqual(['2026-10-17', '2026-10-18']);
+        // Everything but the served version itself is the same answer.
+        expect({ ...after, currentVersion: before.currentVersion }, `${tosVersion} ${roles.join('+')}`).toEqual(before);
+      }
+    }
+    expect(acceptanceStatus({ tosVersion: '2026-10-17', roles: ['CUSTOMER'] as UserRole[] }, '2026-10-18')).toMatchObject({ needsAcceptance: false, summary: [] });
+  });
+
+  it('builds 9-11 are never asked: only GET/POST /auth/legal-acceptance read acceptance, and sign-up stamps the server\'s version', () => {
+    const SRC = join(__dirname, '..');
+    const files: string[] = [];
+    const walk = (dir: string) => { for (const n of readdirSync(dir)) { const f = join(dir, n); if (statSync(f).isDirectory()) { if (n !== '__tests__' && n !== 'node_modules') walk(f); } else if (/\.ts$/.test(n) && !/\.test\.ts$/.test(n)) files.push(f); } };
+    walk(SRC);
+    const readers = files.filter((f) => /acceptanceStatus\(|needsAcceptance/.test(readFileSync(f, 'utf8'))).map((f) => relative(SRC, f)).sort();
+    expect(readers).toEqual(['modules/auth/auth.routes.ts', 'modules/legal/reaccept.ts']);
+    const routes = readFileSync(join(SRC, 'modules/auth/auth.routes.ts'), 'utf8');
+    expect(routes.match(/acceptanceStatus\(/g)).toHaveLength(2);
+    for (const m of routes.matchAll(/acceptanceStatus\(/g)) {
+      const opener = Math.max(...['app.get(', 'app.post(', 'app.put(', 'app.patch(', 'app.delete('].map((o) => routes.lastIndexOf(o, m.index!)));
+      expect(routes.slice(opener, opener + 40)).toMatch(/^app\.(get|post)\('\/legal-acceptance'/);
+    }
+    expect(readFileSync(join(SRC, 'modules/auth/auth.service.ts'), 'utf8')).toMatch(/tosVersion: LEGAL_VERSION/);
   });
 });
 
@@ -144,6 +189,11 @@ describe('GET/POST /auth/legal-acceptance', () => {
     const unticked = await call('POST', person.token, { version: LEGAL_VERSION, accept: false });
     expect(unticked.statusCode).toBe(400);
     expect(await rows(person.id)).toHaveLength(0);
+  });
+
+  it('[2026-10-18 non-material] a person who accepted 2026-10-17 is not asked again after the bump', async () => {
+    const person = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-17');
+    expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-18', acceptedVersion: '2026-10-17', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

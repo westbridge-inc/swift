@@ -18,6 +18,7 @@ import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
   CartBar,
@@ -667,10 +668,10 @@ export function RestaurantScreen() {
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}

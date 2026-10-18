@@ -140,12 +140,15 @@ describe('the request queue', () => {
 
     // APPROVE
     const r1 = await mk('Fusion Kitchen');
-    const approved = await gov.approveRequest(r1.id, { emoji: '🍱', kind: 'CUISINE', vertical: 'FOOD', resolvedBy: 'admin-1' });
+    const approved = await gov.approveRequest(r1.id, { iconKey: 'bowl-mix', kind: 'CUISINE', vertical: 'FOOD', resolvedBy: 'admin-1' });
     createdCategoryIds.push(approved.category.id);
     expect(approved.category.status).toBe('ACTIVE');
     expect(approved.category.slug).toBe('fusion-kitchen');
+    // Owner 17 Oct: a new category carries the app icon it was given, never an emoji.
+    expect(approved.category.iconKey).toBe('bowl-mix');
+    expect(approved.category.emoji).toBe('');
     expect((await prisma.discoveryCategoryRequest.findUniqueOrThrow({ where: { id: r1.id } })).status).toBe('APPROVED');
-    await expect(gov.approveRequest(r1.id, { emoji: '🍱', kind: 'CUISINE', vertical: 'FOOD', resolvedBy: 'admin-1' }))
+    await expect(gov.approveRequest(r1.id, { iconKey: 'bowl-mix', kind: 'CUISINE', vertical: 'FOOD', resolvedBy: 'admin-1' }))
       .rejects.toMatchObject({ code: 'ALREADY_RESOLVED' });
 
     // MAP → the store gains an ADMIN secondary for the target.

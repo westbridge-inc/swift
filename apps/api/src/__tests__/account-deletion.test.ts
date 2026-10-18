@@ -16,6 +16,8 @@ import { purgeAuditLogs } from '../lib/audit-immutability';
 import { lockMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { RatingService } from '../modules/rating/rating.service';
+import { CUSTOMER_ID_DOC_TYPE } from '../modules/verification/retention-rules';
+import { PRIVACY } from '../modules/legal/legal.routes';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -138,6 +140,26 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(enc?.shreddedAt).not.toBeNull();
     const purged = await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } });
     expect(purged?.purgedAt).not.toBeNull();
+  });
+
+  // [Privacy s.6, LEGAL_VERSION 2026-10-18] "A customer's own ID is not on that schedule: it is kept while the
+  // account is open and deleted when the account is deleted." The first half is graded by
+  // partner-document-retention.test.ts (the purge selectors never schedule identity_l2); this is the second.
+  it("a customer's own ID on file is deleted when the account is deleted", async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const fileKey = await ownedVerificationFixture(app.prisma, u.userId);
+    const doc = await app.prisma.verificationDocument.create({
+      data: { userId: u.userId, role: 'CUSTOMER', docType: CUSTOMER_ID_DOC_TYPE, fileUrl: fileKey, status: 'APPROVED', state: 'COMMITTED' },
+    });
+
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+
+    const enc = await app.prisma.encryptedObject.findUnique({ where: { fileKey } });
+    expect(enc?.wrappedDek).toBeNull();
+    expect(enc?.shreddedAt).not.toBeNull();
+    expect((await app.prisma.verificationDocument.findUnique({ where: { id: doc.id } }))?.purgedAt).not.toBeNull();
+    expect(PRIVACY).toContain("A customer's own ID is not on that schedule: it is kept while the account is open and deleted when the account is deleted.");
   });
 
   it('[NR-3 gap 6] ephemeral high-risk rows go with the account', async () => {
