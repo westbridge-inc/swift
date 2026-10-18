@@ -5,7 +5,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { LocationField } from './location-field';
 import type { PickedPlace } from '@/lib/place';
-import * as customer from '@/lib/customer';
+import * as customer from '@/lib/customer-places';
 
 // ---------------------------------------------------------------------------
 // [W-18 / W-19] THE TEXT IN THE BOX IS THE PLACE, OR THERE IS NO PLACE.

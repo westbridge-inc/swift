@@ -1,4 +1,5 @@
 import type { PrismaClient, AdCreative, AdMediaKind } from '@prisma/client';
+import { scanUpload } from '../../lib/malware-scan';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { looksLikeImage } from '../../utils/images';
@@ -89,6 +90,7 @@ export class CreativeService {
     }
     CreativeService.validateText(campaign.placement.tier, input.text);
 
+    await scanUpload(input.buffer, { surface: 'ads' });
     const { url } = await getStorageProvider().upload({
       buffer: input.buffer,
       filename: input.filename,

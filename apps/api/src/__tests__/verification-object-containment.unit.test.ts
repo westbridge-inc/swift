@@ -1287,7 +1287,7 @@ describe('generated declaration envelope contract', () => {
     const routes = await handlers(h, vendorRoutes);
     const reply = { code: vi.fn() };
     const invoke = () => routes.get('post /onboarding/declaration')!({ user: { userId: A }, headers: { 'x-vendor-id': vendor.id }, ip: '127.0.0.1', body: {
-      tradingName: 'Synthetic store', activityClass: 'home_cook', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
+      tradingName: 'Synthetic store', activityClass: 'snackette', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
     } }, reply);
     return { ...h, vendor, published, signed, render, plaintext, invoke, reply };
   }

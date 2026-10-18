@@ -43,6 +43,8 @@ describe('the allowlist', () => {
       'POSTGRES_PASSWORD', 'DATABASE_URL',
       'JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'MEILISEARCH_KEY',
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS',
+      // [R22] The token Twilio signs inbound STOP requests with (verification only).
+      'TWILIO_WEBHOOK_AUTH_TOKEN',
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',
       // The MMG hosted checkout: the reply-opening private key and the secret
       // key sealed inside every request token.
@@ -164,6 +166,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
     APP_STORE_URL: 'a public store listing',
     PLAY_STORE_URL: 'a public store listing',
     AWS_S3_ENDPOINT: 'object-storage endpoint; the keys travel as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY',
+    TWILIO_INBOUND_SMS_URL: 'this deployment\'s own public inbound-SMS webhook address, exactly as set on the Twilio number; Twilio signs over it with TWILIO_WEBHOOK_AUTH_TOKEN, and no credential rides in it',
   };
   const urlLike = [...reads.keys()].filter((n) => URL_LIKE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
 

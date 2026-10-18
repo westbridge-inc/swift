@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { buildPlan, classify, executePlan, planDigest, signApproval, signBreakGlass, syntheticMarkersPresent, targetFingerprint, type BackupManifest, type PurgePlan } from '../modules/ops/purge-plan';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [SCR-001 / SCR-002] The demo purge as a privileged change workflow.
@@ -28,7 +29,7 @@ const deletedByCanonicalPath: string[] = [];
 const deleteUser = async (id: string) => { deletedByCanonicalPath.push(id); await prisma.user.delete({ where: { id } }); };
 // Eight random digits, not five: a 1e5 space collided with a parallel suite's row in CI (unique phone).
 const phone = () => `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`; // inside this suite's own range; other suites' +5926009998/9999 fixtures are outside it
-const otherPhone = () => `+5927${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+const otherPhone = () => testPhone();
 const mk = (data: Record<string, unknown>) => prisma.user.create({ data: { firstName: 'P', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', ...data } as never }).then((u) => { userIds.push(u.id); return u; });
 const setIdentity = (environment: string) => prisma.deploymentIdentity.upsert({ where: { id: 'singleton' }, create: { id: 'singleton', deploymentId: 'dep-test', environment }, update: { deploymentId: 'dep-test', environment } });
 const goodBackup = async (plan: PurgePlan): Promise<BackupManifest> => ({ targetDigest: plan.target.digest, takenAt: new Date(Date.now() - 60_000).toISOString(), restoreVerifiedAt: new Date().toISOString(), artifactDigest: 'a'.repeat(64) });
@@ -108,7 +109,7 @@ describe('[SCR-002] the selection is positive, never a negative classification',
 describe('[SCR-001] the register’s red proof', () => {
   it('the scope rides the digest — a plan approved for a subset cannot be widened to the rest', async () => {
     const mine = await mk({ phone: phone(), syntheticRunId: RUN });
-    const outside = await mk({ phone: `+5926003${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`, syntheticRunId: RUN }); // demo range, outside this suite's scope
+    const outside = await mk({ phone: testPhone(), syntheticRunId: RUN }); // demo range, outside this suite's scope
     const plan = await buildPlan(prisma, URL_, undefined, scope());
     expect(plan.scope).toEqual({ phonePrefix: SCOPE_PREFIX });
     expect(plan.demoCustomerIds).toContain(mine.id);

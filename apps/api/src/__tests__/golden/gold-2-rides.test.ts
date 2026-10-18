@@ -542,8 +542,8 @@ describe('GOLD-2 · RIDE-04 — [E04] a stale "ready" cannot land on a cancelled
       const pending = call('PUT', `/api/v1/vendor/orders/${orderId}/ready`, owner.token, undefined, vendorHeaders());
       await Promise.race([reached, new Promise((_, reject) => setTimeout(() => reject(new Error('the ready route never reached the pre-write seam')), 10_000))]);
       // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
-      // cancel only when it is very late — 30 minutes past its promise.
-      await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } }));
+      // cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise.
+      await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 61 * 60_000) } }));
       const cancelled = await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, customer.token, { reason: 'Plans changed' });
       expect(cancelled.statusCode, cancelled.body).toBe(200);
       expect(await doorFacts(orderId)).toMatchObject({ status: 'CANCELLED' });

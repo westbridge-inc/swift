@@ -584,7 +584,7 @@ describe('a rejected attempt stays rejected, and the customer is told the truth'
     // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
     // cancel only when it is very late; this one is — so the cancel below
     // grades the MMG gate alone (a rejected attempt never locks the cancel).
-    const order = await mmgOrder({ promisedAt: new Date(Date.now() - 31 * 60_000) });
+    const order = await mmgOrder({ promisedAt: new Date(Date.now() - 61 * 60_000) });
     const attempt = ref('RJ');
     expect((await confirm(order.id, attempt)).statusCode).toBe(200);
     expect((await claim(order.id, { paid: false })).statusCode).toBe(200);
