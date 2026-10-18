@@ -287,6 +287,20 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     } finally { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: vendorId } }); }
   });
 
+  // [#1875 · REVIEW-G S4-1] The driver's staged pay-link change closes at wind-down too.
+  it("winding a driver down closes the driver's staged MMG link change", async () => {
+    const p = await makePartner(['CUSTOMER', 'DRIVER']);
+    const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: `PT${nanoid(5)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    await app.prisma.moneySurfaceCommand.create({ data: { actor: 'DRIVER', entityId: driver.id, userId: p.userId, kind: 'MMG_LINK_STAGE', state: 'DECIDED', generation: 1, oldDigest: 'old', newDigest: 'new' } });
+    try {
+      await windDownPartner(app.prisma, p.userId);
+      expect(await stageStates(driver.id)).toEqual([{ kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED' }]);
+    } finally {
+      await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: driver.id } });
+      await app.prisma.driver.delete({ where: { id: driver.id } }).catch(() => undefined);
+    }
+  });
+
   it('the deletion cutoff itself closes the staged MMG changes', async () => {
     const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
     await stageCommands(vendorId, p.userId);
