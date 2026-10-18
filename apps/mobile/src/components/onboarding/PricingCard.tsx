@@ -38,7 +38,7 @@ export function PricingCard(props: PricingCardProps) {
     const quote = moverQuote(p, props.vehicleType);
     if (!quote) return null;
     rate = quote.rate;
-    detail = `${MOVER_RATE_LABEL[quote.tier]} rate · Keep 100% of every fare, fee and tip — Swift never takes a commission.`;
+    detail = `${MOVER_RATE_LABEL[quote.tier]} rate · Keep 100% of every fare, fee and tip — no commission on orders.`;
   } else {
     const quote = vendorQuote(p, props.vendorType);
     if (!quote) return null;

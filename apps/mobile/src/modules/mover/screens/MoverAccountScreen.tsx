@@ -261,7 +261,7 @@ export function MoverAccountScreen({ navigation }: any) {
             </T>
           </View>
           <T variant="caption" tone="muted" style={{ marginTop: 4 }}>
-            Swift only charges a flat weekly fee — no commission on any fare, ever. You&apos;re paid in cash, on every job.
+            Swift only charges a flat weekly fee — no commission on orders. You&apos;re paid directly by the customer: in cash, or into your own MMG account where you offer it.
           </T>
         </Card>
 
