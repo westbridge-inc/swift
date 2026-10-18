@@ -135,26 +135,57 @@ describe('a hold being placed beats the purge that races it', () => {
 });
 
 describe('a purge already destroying is never claimed by a late hold', () => {
-  it('the hold waits for the shred, then does not claim the destroyed document', async () => {
+  it('the key is shredded under the lock; a hold during the (stalled) storage delete does not wait and does not claim it', async () => {
     const { userId, docId, key } = await personWithDocument({ status: 'REJECTED', retentionExpiresAt: new Date(Date.now() - 60_000) });
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let deleting!: () => void;
     const started = new Promise<void>((r) => { deleting = r; });
     const realDelete = storage.delete.bind(storage);
+    // The store stalls: no lock may be held across it (a stall past a transaction limit would let a hold in).
     vi.spyOn(storage, 'delete').mockImplementation(async (k) => { if (k === key) { deleting(); await gate; } await realDelete(k); });
     const purge = service().purgeDocumentNow(
       { id: docId, userId, fileUrl: key, docType: 'national_id', user: { tenantId: 'swift-default' } }, 'reaper',
       { requireRetentionElapsed: true, shredFields: false },
     );
     await started;
+    const e = await system(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: key } }));
+    expect(e.wrappedDek).toBeNull(); // already unrecoverable before any storage call
     const hold = placeDocLegalHold(app.prisma, holdInput(userId));
-    expect(await settles(hold)).toBe(false); // it waits on the lock the purge holds while destroying
+    expect(await settles(hold)).toBe(true); // nothing holds the person's lock during storage I/O
+    await expect(hold).rejects.toMatchObject({ code: 'NOTHING_TO_HOLD' });
     release();
     expect(await purge).toBe('PURGED');
-    await expect(hold).rejects.toMatchObject({ code: 'NOTHING_TO_HOLD' });
     const d = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: docId } }));
     expect(d.purgedAt).not.toBeNull();
     expect(d.legalHoldId).toBeNull();
+  });
+
+  it('a purge that could not finish is finished on the next run, not stranded', async () => {
+    const { userId, docId, key } = await personWithDocument({ status: 'REJECTED', retentionExpiresAt: new Date(Date.now() - 60_000) });
+    const doc = { id: docId, userId, fileUrl: key, docType: 'national_id', user: { tenantId: 'swift-default' } };
+    const opts = { requireRetentionElapsed: true, shredFields: false };
+    vi.spyOn(storage, 'delete').mockImplementation(async () => undefined); // the store keeps the bytes this time
+    expect(await service().purgeDocumentNow(doc, 'reaper', opts)).toBe('PROBE_FAILED');
+    vi.restoreAllMocks();
+    expect(await service().purgeDocumentNow(doc, 'reaper', opts)).toBe('PURGED');
+    await expect(storage.getObject(key)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('the fence never runs without its lock', () => {
+  it('a person row it cannot see is never a pass: nothing is shredded', async () => {
+    const { shredUnlessHeld } = await import('../modules/verification/purge-receipt');
+    const del = vi.spyOn(storage, 'delete');
+    const updated: unknown[] = [];
+    const fence = {
+      $executeRaw: async () => 0, $queryRaw: async () => [],
+      verificationDocument: { findMany: async () => [{ id: 'doc-1' }] },
+      encryptedObject: { findUnique: async () => null, findMany: async () => [], updateMany: async (a: unknown) => { updated.push(a); return { count: 1 }; } },
+    };
+    const db = { $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(fence), ...fence };
+    expect(await shredUnlessHeld(db as never, storage, { fileKey: 'verification/u-1/x.enc', userId: 'u-1', documentId: 'doc-1' })).toBeNull();
+    expect(updated).toEqual([]);
+    expect(del).not.toHaveBeenCalled();
   });
 });

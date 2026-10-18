@@ -1251,7 +1251,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
     expect(doc).toMatchObject({ purgedAt: null, fileUrl: key(A) });
     expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({ verificationProbeResult: 'FAILED' }) }));
-    expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
+    // TRANSFORMED (row 243 / #1840, REVIEW-G S2-1): was `not.toHaveBeenCalled()`. The key is now shredded under the
+    // person's row lock BEFORE any storage call (no storage I/O under a lock, so a held document can never be destroyed
+    // late); an unreachable store leaves only unreadable bytes and the document still due, and the next run finishes
+    // the purge (legal-hold-purge-fence.test.ts). Still: exactly one shred, of this person's own object, and nothing else.
+    expect(h.db.encryptedObject.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { fileKey: key(A), createdBy: A }, data: { wrappedDek: null, shreddedAt: expect.any(Date) },
+    });
     expect(h.db.session.deleteMany).toHaveBeenCalledOnce();
     expect(h.db.user.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ phone: `deleted:${A}` }) }));
   });
