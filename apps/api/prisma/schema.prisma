@@ -185,7 +185,13 @@ model Session {
   id                   String    @id @default(cuid())
   userId               String
   user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// [Row 231] SHA-256 hex digest of the access token — never the token.
+  /// The prisma `sessionCredentialDigest` extension (src/lib/session-credential.ts)
+  /// digests every write and lookup that comes through Prisma (call sites pass
+  /// the plaintext the client presented); raw SQL digests explicitly; the CHECK
+  /// constraints `sessions_*_digest_check` refuse any other shape.
   token                String    @unique
+  /// [Row 231] SHA-256 hex digest of the current refresh token (same rules as `token`).
   refreshToken         String    @unique
   /// Durable authentication assurance for this exact session generation.
   /// Existing/pre-cutover rows intentionally remain LEGACY and can continue
@@ -196,6 +202,7 @@ model Session {
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
+  /// [Row 231] SHA-256 hex digest of the replaced refresh token, or NULL (same rules as `token`).
   previousRefreshToken String?   @unique
   rotatedAt            DateTime?
   deviceId             String

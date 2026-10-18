@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { unscopedAccessPolicy, rlsBindEnabled } from '../lib/rls-attestation';
 export { unscopedAccessPolicy, rlsBindEnabled };
 import { destructiveGuardExtension, isTestRuntime, refuseNonTestDatabaseInVitest } from '../lib/test-target-lock';
+import { sessionCredentialDigestExtension } from '../lib/session-credential';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
 import { getTenantContext, tenantContext, type TenantMode } from './tenant-context';
@@ -247,6 +248,14 @@ export function setSystemPrismaClient(client: PrismaClient | null): void { syste
  *  connection — the append-only evidence rule, the tenant predicate for any
  *  tenant-bound query run on it, and (in tests) the destructive guard — because
  *  a system transaction now runs every one of its queries there. */
+/* SESSION_DIGEST_INNERMOST — [Row 231] Session credentials at rest are digests
+ * (lib/session-credential.ts). The digest extension is the LAST `$extends` of
+ * every client — the process client, the system connection and the probe
+ * client — so it is the innermost layer: the layers above it (the test guard,
+ * the tenant scoping, the bindings that may re-issue a query on the system
+ * connection) all see the plaintext the caller passed, and whichever
+ * connection finally runs the query digests it exactly once. Installed any
+ * higher, a re-issued session query would be digested twice and match nothing. */
 /** The test-mode destructive guard (a no-op extension outside tests). Installed FIRST, so it is the outermost layer. */
 const testGuardOutermost = () => (isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
 
@@ -257,7 +266,9 @@ function systemConnection(raw: PrismaClient): PrismaClient {
   // is the engine's own), so tests exercise production's transaction routing.
     .$extends(testGuardOutermost())
     .$extends(orderStatusLogAppendOnly)
-    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS }) as unknown as PrismaClient;
+    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS })
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension()) as unknown as PrismaClient;
 }
 
 /** [MASTER-019] A system query that could only run by leaving the caller's
@@ -758,7 +769,9 @@ export function createScopedProcessClient(options: { datasourceUrl: string | und
     .$extends(orderStatusLogAppendOnly).$extends({
       name: 'tenantScope',
       query: scoping,
-    }).$extends(nonTenantBindingExtension(wiring)).$extends(rawTenantBindingExtension(wiring));
+    }).$extends(nonTenantBindingExtension(wiring)).$extends(rawTenantBindingExtension(wiring))
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension());
   self = routeSystemTransactions(extended, systemPrismaClient) as unknown as PrismaClient;
   return self;
 }
@@ -802,7 +815,9 @@ export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | nul
   const extended = guarded
     .$extends(tenantScopeExtensionFor(guarded, system))
     .$extends(nonTenantBindingExtension(wiring))
-    .$extends(rawTenantBindingExtension(wiring)) as unknown as PrismaClient;
+    .$extends(rawTenantBindingExtension(wiring))
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension()) as unknown as PrismaClient;
   return routeSystemTransactions(extended, () => system);
 }
 
