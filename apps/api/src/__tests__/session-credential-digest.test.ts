@@ -5,7 +5,7 @@ import { nanoid } from 'nanoid';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { io as ioClient, type Socket } from 'socket.io-client';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { prismaPlugin, runWithoutTenant, setSystemPrismaClient } from '../plugins/prisma';
 import { runAsSystem } from '../plugins/tenant-context';
 import { tenantBindCounter } from '../plugins/observability';
@@ -415,7 +415,7 @@ describe('[Row 231] a session query the tenant layers re-issue on the system con
     const { accessToken } = await tokensOf(PHONE_A);
     const priorBind = process.env['TENANT_RLS_BIND'];
     const priorSystemUrl = process.env['SYSTEM_DATABASE_URL'];
-    const system = new PrismaClient({ datasourceUrl: process.env['DATABASE_URL'] });
+    const system = testPrismaClient();
     setSystemPrismaClient(system);
     // the routing asks for a system connection only when one is configured
     process.env['SYSTEM_DATABASE_URL'] = process.env['DATABASE_URL'];
