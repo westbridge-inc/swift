@@ -386,6 +386,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   // The window under test is the real one: the flag on, the minutes unset
   // (the settled default, five).
   vi.stubEnv('LIFECYCLE_V2', '1');

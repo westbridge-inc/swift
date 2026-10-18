@@ -140,8 +140,24 @@ describe('[R3] every store page carries the seller block', () => {
     expect((await webView(slug)).seller).toEqual(bare);
   });
 
-  it('MMG is named only while the store has a working MMG link of its own', async () => {
+  it('[PAYMENT-SIMPLIFY] switch off (default): MMG is named for a store with a valid MMG NUMBER, never for a pay link alone', async () => {
     vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '');
+    const { vendorId, slug } = await store(3001); // own index: main's row-248 receipt test uses 9
+    await setStore(vendorId, { mmgPayUrl: LINK });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+    await setStore(vendorId, { mmgNumber: '+5926001234' });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });
+    const web = await webView(slug);
+    expect(web.seller.payment).toEqual({ cash: true, storeMmg: true });
+    expect(JSON.stringify(web)).not.toContain('6001234'); // the number is never on the storefront
+    await setStore(vendorId, { mmgNumber: '+5922251234' }); // a landline row: re-checked on read
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+  });
+
+  it('MMG is named only while the store has a working MMG link of its own (the dormant link, STORE_MMG_PAY_LINK=1)', async () => {
+    vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '1');
     const { vendorId, slug } = await store(3);
     await setStore(vendorId, { mmgPayUrl: LINK });
     expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });

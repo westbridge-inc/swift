@@ -27,7 +27,7 @@ it.each([1500, 1500.25])('pickup confirmation submits the reviewed quote %s, not
     exports: {}, pickup: false, pricing: {},
     c: { totalAmount: 2000, items: [{ id: 'line-1', vendorId: 'store-1', customerPrice: 1500 }] },
     pickupQuote: { isFetching: false, isPlaceholderData: false, isError: false, data: { totalAmount: reviewed, items: [{ id: 'line-1', vendorId: 'store-1', customerPrice: reviewed }] } },
-    effectivePaySelection: {}, paymentCapabilities: {}, checkoutPaymentMethod: () => 'CASH',
+    effectivePaySelection: {}, paymentCapabilities: {}, checkoutPaymentMethod: () => 'CASH', checkoutPaymentFields: () => ({ paymentMethod: 'CASH' }),
     apptPayload: [], instructions: '', placeOrder: { mutate: (body: any) => { submitted = body; } },
     confirmPickup: true, pickupAttempt: 1, pickupConfirmShown: { current: false }, onOrderLatest: { current: null },
     setConfirmPickup: () => {}, money,

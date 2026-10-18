@@ -33,7 +33,7 @@ import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
-import { mmgDispatchBlocked } from '../order/mmg-claim.service';
+import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import {
@@ -3237,6 +3237,47 @@ export function makeDispatchService(app: FastifyInstance): DispatchService {
  *  each) forever. The app pings location every 8–25s while online, so
  *  STALE_LOCATION_MINUTES of silence means the app is gone, not slow.
  *  Movers with no location at all are already invisible to findCandidates. */
+/** The rows the stuck-dispatch reconciler may re-drive, as ONE filter (exported so its edges are testable). */
+export function stuckDispatchEligibleWhere(cutoff: Date): Prisma.OrderWhereInput {
+  return {
+      updatedAt: { lt: cutoff },
+      OR: [
+        // Food / grocery / courier: waiting on a rider. A held order
+        // (LIFECYCLE_V2 free-cancel window still open) is NOT stuck —
+        // reconciling it would dispatch inside the customer's window.
+        {
+          orderType: { not: 'TAXI' },
+          fulfillment: 'DELIVERY',
+          riderId: null,
+          // [hold v3 · N-03] A held row is not stuck; it is waiting for a person.
+          foodAgeHeldAt: null,
+          // [F-0026] A self-delivering vendor's order has no rider BY DESIGN —
+          // without this the reconciler re-enqueued it every two minutes forever,
+          // pushing riders offers for food that already left the store.
+          status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+          AND: [
+            { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] },
+            notSelfDeliveredFilter(),
+            riderDispatchReadinessFilter(),
+            // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] A store may ACCEPT an unpaid MMG
+            // order now; it is not "stuck" — it waits for the store's "Paid by MMG". The
+            // same predicate the dispatch engine and the boards apply (mmg-claim.service).
+            mmgDispatchEligibleWhere(),
+          ],
+        },
+        // Taxi: waiting on a driver. [E02 · DS274 A1] A ride paid by MMG
+        // (legacy only: rides are born CASH) that the slow lane held for a
+        // person is not stuck either; re-driving it would re-offer drivers a
+        // ride past its wait limit, hold it again, and loop every cooldown.
+        // The same predicate as the release CAS in the slow lane.
+        {
+          orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()],
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
+      ],
+  };
+}
+
 /**
  * Recover orders that fell OUT of the dispatch lifecycle — the load-bearing
  * failure this whole design has to survive. The offer key and the delayed
@@ -3258,40 +3299,7 @@ export async function reconcileStuckDispatch(
   enqueue: (orderId: string) => Promise<void>,
   stuckMinutes = RECONCILE_STUCK_MINUTES,
 ): Promise<{ recovered: string[] }> {
-  const cutoff = new Date(Date.now() - stuckMinutes * 60_000);
-  const eligible: Prisma.OrderWhereInput = {
-      updatedAt: { lt: cutoff },
-      OR: [
-        // Food / grocery / courier: waiting on a rider. A held order
-        // (LIFECYCLE_V2 free-cancel window still open) is NOT stuck —
-        // reconciling it would dispatch inside the customer's window.
-        {
-          orderType: { not: 'TAXI' },
-          fulfillment: 'DELIVERY',
-          riderId: null,
-          // [hold v3 · N-03] A held row is not stuck; it is waiting for a person.
-          foodAgeHeldAt: null,
-          // [F-0026] A self-delivering vendor's order has no rider BY DESIGN —
-          // without this the reconciler re-enqueued it every two minutes forever,
-          // pushing riders offers for food that already left the store.
-          status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
-          AND: [
-            { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] },
-            notSelfDeliveredFilter(),
-            riderDispatchReadinessFilter(),
-          ],
-        },
-        // Taxi: waiting on a driver. [E02 · DS274 A1] A ride paid by MMG
-        // (legacy only: rides are born CASH) that the slow lane held for a
-        // person is not stuck either; re-driving it would re-offer drivers a
-        // ride past its wait limit, hold it again, and loop every cooldown.
-        // The same predicate as the release CAS in the slow lane.
-        {
-          orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()],
-          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
-        },
-      ],
-  };
+  const eligible = stuckDispatchEligibleWhere(new Date(Date.now() - stuckMinutes * 60_000));
   // One bounded page per invocation, with Redis-persisted progress. A fixed
   // upper ID per sweep prevents new arrivals from indefinitely postponing the
   // wrap. This is a scan cursor, not a delivery acknowledgement: failed rows
