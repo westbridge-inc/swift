@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { scanUpload } from '../../lib/malware-scan';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -6,8 +7,9 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
+import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { looksLikeDocument } from '../../utils/images';
+import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 
@@ -35,9 +37,11 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match: the selfie is optional. Store build 9
+// still sends one (it must be the caller's own upload); a newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048),
+  selfieUrl: z.string().min(5).max(2048).optional(),
   ...consentFields,
 });
 
@@ -130,6 +134,15 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
+    // [Row 108] Read by the real decoder here, because the storage seam only ever sees this file encrypted.
+    // What the bytes ARE decides it (a PDF passed the sniff above as a PDF).
+    if (file.mimetype !== 'application/pdf') {
+      const sniffed = sniffImageType(buffer);
+      if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+      await inspectImage(buffer, sniffed);
+    }
+    // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
+    await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -197,11 +210,15 @@ export async function verificationRoutes(app: FastifyInstance) {
    */
   app.get<{ Params: { docId: string } }>('/render/:docId', async (request, reply) => {
     const { docId } = request.params;
-    const { expires, sig } = z.object({ expires: z.coerce.number(), sig: z.string().min(16) }).parse(request.query);
+    const { expires, sig, reviewer } = z.object({
+      expires: z.coerce.number(), sig: z.string().min(16), reviewer: z.string().min(1).max(64).optional(),
+    }).parse(request.query);
     if (expires < Math.floor(Date.now() / 1000)) {
       throw new AppError(410, 'LINK_EXPIRED', 'This view link has expired — reopen the document.');
     }
-    if (!verifyRenderToken(docId, expires, sig)) {
+    // [VERIFY-DOCS V3] A link names the reviewer it was minted for, inside the
+    // signature: a link without one, or re-aimed at someone else, is refused.
+    if (!reviewer || !verifyRenderToken(docId, expires, reviewer, sig)) {
       throw new AppError(403, 'BAD_SIGNATURE', 'Invalid view link.');
     }
 
@@ -211,6 +228,12 @@ export async function verificationRoutes(app: FastifyInstance) {
     });
     if (!doc || doc.purgedAt || !doc.fileUrl) {
       throw new AppError(410, 'DOCUMENT_PURGED', 'This document has been deleted under the retention policy');
+    }
+    // [VERIFY-DOCS V3] ...and that reviewer must STILL be one, on every load:
+    // revoking the grant, suspending or demoting the reviewer kills links that
+    // are already open. Same tenant as the person whose document it is.
+    if (!(await isActiveDocumentReviewer(app.prisma, reviewer, doc.userId))) {
+      throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
     const keys = getKeyProvider();
@@ -231,7 +254,10 @@ export async function verificationRoutes(app: FastifyInstance) {
     return reply.send(plaintext);
   });
 
-  /** POST /identity — L2 flow: government ID + selfie. Permanent once approved. */
+  /** POST /identity — the customer's ID (L2). [Owner ruling 8 Oct 2026] On file at once unless an
+   *  automatic check holds it for a person. `idCheck` (additive) says which, in words an app can
+   *  repeat truthfully: ON_FILE (unlocked now, no person reviewed it), WAITING (a person looks
+   *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
     const doc = await verification.submitIdentity(
@@ -241,6 +267,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.privacyNoticeVersion,
     );
     reply.code(201);
-    return { success: true, data: doc };
+    const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
+    return { success: true, data: { ...doc, idCheck } };
   });
 }

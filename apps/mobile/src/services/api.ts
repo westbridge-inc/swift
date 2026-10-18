@@ -1,4 +1,8 @@
 import axios, { type AxiosRequestConfig } from 'axios';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import Constants from 'expo-constants';
 import { Platform, TurboModuleRegistry } from 'react-native';
 import {
@@ -8,12 +12,14 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, type AuthSessionSnapshot } from '../lib/authSession';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
+import { noticeSessionEnded } from '../lib/sessionEndedNotice';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
 } from './apiOrigin';
+import { explainDemoEnded, isReviewSessionClosed } from '../lib/reviewSessionClosed';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -118,6 +124,11 @@ function capturedVendorAuthConfig(
 
 // Request interceptor to attach auth token
 api.interceptors.request.use((config) => {
+  // Weak mobile links need more time for reads. Writes keep their existing
+  // timeout/retry contracts, and explicit endpoint timeouts remain intact.
+  if ((config.method === 'get' || config.method === 'head') && config.timeout === 10000) {
+    config.timeout = 20000;
+  }
   if (/^\/(vendor|rider|driver)(?:\/|$)/.test(config.url ?? '')) config.headers['x-client-platform'] = Platform.OS;
   const session = getAuthSessionSnapshot();
   const binding = consumeAuthBinding(config as AuthBindingConfig);
@@ -151,6 +162,9 @@ api.interceptors.request.use((config) => {
   return config;
 }, undefined, { synchronous: true });
 
+/** [Row 3] "Sign in" on the you-were-signed-out notice: straight to sign-in. */
+const signInAgain = () => useAuthStore.getState().promptLogin();
+
 // Response interceptor for token refresh. The coordinator single-flights an
 // exact session, but lets a newly logged-in account start its own flight. Every
 // rotate/logout is compare-and-swap bound to the user + generation + refresh
@@ -176,7 +190,14 @@ const refreshCoordinator = new AuthRefreshCoordinator(
   },
   (error) => axios.isAxiosError(error)
     && (error.response?.status === 401 || error.response?.status === 403),
+  (error) => noticeSessionEnded(error, signInAgain),
 );
+
+/** [PERF #9] The same one refresh the 401 path below uses, started before
+ *  the access token lapses (lib/sessionRefreshAhead.ts). */
+export function refreshSessionAhead(session: AuthSessionSnapshot): Promise<AuthRefreshOutcome | null> {
+  return refreshCoordinator.resolve(session);
+}
 
 api.interceptors.response.use(
   (response) => response,
@@ -190,6 +211,13 @@ api.interceptors.response.use(
     const captured = originalRequest
       ? requestAuthBindings.get(originalRequest)?.session
       : undefined;
+    // [Row 353 · DL-9] The store-review demo's session is over: sign that exact
+    // demo session out once and say why. Never a refresh, never a retry.
+    if (isReviewSessionClosed(error)) {
+      if (captured && useAuthStore.getState().logoutIfCurrent(captured)) explainDemoEnded();
+      return Promise.reject(error);
+    }
+
     if (
       error.response?.status === 401
       && originalRequest
@@ -198,7 +226,7 @@ api.interceptors.response.use(
       if (authRefreshRetries.has(originalRequest)) {
         // A refreshed credential was authoritatively rejected. End only the
         // exact replay session; a newer login/rotation must remain untouched.
-        useAuthStore.getState().logoutIfCurrent(captured);
+        if (useAuthStore.getState().logoutIfCurrent(captured)) noticeSessionEnded(error, signInAgain);
         return Promise.reject(error);
       }
       const outcome = await refreshCoordinator.resolve(captured);
@@ -238,8 +266,37 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
   );
 }
 
+export const UPLOAD_TIMEOUT_MS = 90_000;
+
+/** Retry only standalone file uploads, never custody/identity decisions.
+ * Each attempt uses the original account boundary and the same captured file. */
+async function uploadPhoto(url: string, form: FormData, session?: AuthSessionSnapshot) {
+  const owner = session ?? getAuthSessionSnapshot();
+  const send = (retry = false) => {
+    const current = retry ? owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner) : owner;
+    if (retry && !current) throw new Error('Your session changed. Please select the photo again.');
+    return api.post(url, form, capturedAuthConfig(current ?? undefined, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }));
+  };
+  try {
+    return await send();
+  } catch (error) {
+    if (!axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !owner || !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    return send(true);
+  }
+}
+
 // Auth
 export const authApi = {
+  /** [R26 · research G2] Whether the signed-in person must accept the served legal texts again, and what changed. */
+  legalAcceptance: () => api.get('/auth/legal-acceptance'),
+  /** [R26] The fresh tick, for the version the person read. */
+  acceptLegal: (version: string) => api.post('/auth/legal-acceptance', { version, accept: true }),
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
@@ -259,14 +316,14 @@ export const authApi = {
     countryCode?: string;
     /** Server records consent + the legal version it covered [SWIFT-AUD-D9-03]. */
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" — recorded in the consent ledger. */
+    ageConfirmed?: boolean;
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),
   // Mandatory signup selfie — multipart camera capture; becomes the public photo.
   uploadSelfie: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/auth/selfie', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/auth/selfie', form, session),
 };
 
 // Customer
@@ -360,8 +417,13 @@ export const customerApi = {
   // DPA-2023 self-serve rights (D9-05): export your data; erase your account.
   exportAccount: (session?: AuthSessionSnapshot) =>
     api.get('/customer/account/export', capturedAuthConfig(session)),
+  requestAccountClosure: (session?: AuthSessionSnapshot) =>
+    api.post('/customer/account/closure-request', {}, capturedAuthConfig(session)),
+  // receipts=v2: this app shows every deletion receipt by its own message, so
+  // the server may answer a closure request or a pending erasure as such. An
+  // app that does not declare it is answered in the older build's words.
   deleteAccount: (session?: AuthSessionSnapshot) =>
-    api.delete('/customer/account', capturedAuthConfig(session)),
+    api.delete('/customer/account', capturedAuthConfig(session, { params: { receipts: 'v2' } })),
   switchRole: (role: string, session?: AuthSessionSnapshot) =>
     api.post('/customer/switch-role', { role }, capturedAuthConfig(session)),
   // In-app support / dispute channel.
@@ -428,14 +490,16 @@ export const customerApi = {
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  // This client renders the server's swap permissions and refusal guidance.
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
-  // returns { success, data: { message, cancellationFee } } inside the axios
-  // body — reading one level short silently discarded the authoritative
-  // cancellation outcome and the fee actually charged.
+  // returns { success, data: { message } } inside the axios body — reading one
+  // level short silently discarded the authoritative cancellation outcome.
+  // [owner #46/#50] There is no cancellation fee (the server's
+  // `cancellationFee` is always 0, kept only for older builds).
   cancelOrder: (id: string, reason?: string) =>
     api.post(`/customer/orders/${id}/cancel`, { reason })
-      .then((res) => (res.data?.data ?? {}) as { message?: string; cancellationFee?: number }),
+      .then((res) => (res.data?.data ?? {}) as { message?: string }),
   // Order placement = checkout; it reads the server-side cart. (The old POST
   // /customer/orders had no backend route.)
   placeOrder: (data: {
@@ -447,6 +511,9 @@ export const customerApi = {
     fulfillmentSelections?: Record<string, 'DELIVERY' | 'PICKUP'>;
     /** Priority delivery: 1.5x delivery fee, dispatched first */
     express?: boolean;
+    /** [L09 · price lock] The quote's total and line prices the customer saw. */
+    expectedTotal?: number;
+    expectedLines?: Array<{ lineId: string; unitPrice: number }>;
   }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
     // [TA-S1-001] The key is the ATTEMPT's, not this call's: minted once by
     // the checkout hook (lib/checkoutAttempt), reused by every retry, ended
@@ -462,6 +529,10 @@ export const customerApi = {
   checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
     api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
+  // [Row 55] Store team invites this signed-in person has received
+  teamInvites: () => api.get('/customer/team-invites'),
+  acceptTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/accept`, {}),
+  declineTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/decline`, {}),
   reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
@@ -538,8 +609,9 @@ export interface TieredEstimate {
   /** [TAXI waiting charge] The terms shown beside the fare, when the server sends them. */
   waiting?: unknown;
 }
-/** The ride request body. `stops` and `expectedFare` travel only on a ride
- *  WITH stops; a ride without them sends exactly today's body. */
+/** The ride request body. `stops` travel only on a ride WITH stops.
+ *  [PRICE-LOCK] `expectedFare` travels with every ride whose quote is on
+ *  screen: the server books only at it (409 FARE_CHANGED otherwise). */
 export interface RideRequestBody {
   pickup: Point;
   dropoff: Point;
@@ -594,10 +666,11 @@ export const safetyApi = {
    * sweep prompts random online movers the same way. This client call is what
    * makes both of those answerable — the endpoint existed with no caller.
    */
-  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER') =>
-    api.post(`/safety/liveness-check?profile=${profile}`, form, {
+  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER', session?: AuthSessionSnapshot) =>
+    api.post(`/safety/liveness-check?profile=${profile}`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+    })),
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room, or by the outstanding read below). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
@@ -747,19 +820,22 @@ export const courierApi = {
     dropoffAddress: string;
     packageSize: CourierSize;
     packageDescription?: string;
+    /** [owner #67] The sender's tick: "This parcel has no prohibited items". */
+    declaresNoProhibitedItems?: boolean;
     speed: CourierSpeed;
     recipientName: string;
     recipientPhone: string;
     payer?: 'SENDER' | 'RECIPIENT';
+    /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
+     *  the job only at it (409 PRICE_CHANGED otherwise). */
+    expectedFee?: number;
   }) => api.post('/courier/order', data),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
   // Proof of delivery (D8-02): upload the photo → get a url → confirm handoff.
   uploadProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/proof-photo`, form, session),
   // [M-28] The proof carries the cash outcome when the RECIPIENT pays: the
   // server refuses a bare proof on an unpaid cash job (a proof never implies
   // money). The GPS is the claim's evidence when the recipient did not pay.
@@ -785,14 +861,13 @@ export const courierApi = {
   ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
   returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // E16: pickup custody proof — upload the captured pickup photo, then confirm
   // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
   uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/pickup-proof-photo`, form, session),
   pickupProof: (
     id: string,
     body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
@@ -801,6 +876,14 @@ export const courierApi = {
 };
 
 // Services (mounted at /api/v1/services)
+function serviceJobLifecycleConfig(): AxiosRequestConfig {
+  return {
+    headers: {
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+    },
+  };
+}
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>
@@ -821,17 +904,25 @@ export const servicesApi = {
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
   // Customer accepts the provider's quote by scheduling the job.
-  scheduleJob: (id: string, scheduledFor: string) => api.post(`/services/jobs/${id}/schedule`, { scheduledFor }),
-  cancelJob: (id: string) => api.post(`/services/jobs/${id}/cancel`, {}),
+  scheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedQuoteAmount: number }) =>
+    api.post(`/services/jobs/${id}/schedule`, input, serviceJobLifecycleConfig()),
+  cancelJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
   rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
   // Provider side: send the quote, then accept/decline the customer's slot (§4.3),
   // then close the job out when the work is done (SWIFT-AUD-D8-04: the complete
   // endpoint existed server-side but was never wired, so a ServiceJob stalled
   // forever at SCHEDULED — no completion, no rating, no reputation).
-  quoteJob: (id: string, amount: number) => api.post(`/services/jobs/${id}/quote`, { amount }),
-  confirmJob: (id: string) => api.post(`/services/jobs/${id}/confirm`, {}),
-  declineSlot: (id: string) => api.post(`/services/jobs/${id}/decline-slot`, {}),
-  completeJob: (id: string) => api.post(`/services/jobs/${id}/complete`, {}),
+  quoteJob: (id: string, amount: number, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }, serviceJobLifecycleConfig()),
+  confirmJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  declineSlot: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  startJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  completeJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
 // Verification (mounted at /api/v1/verification)
@@ -839,9 +930,7 @@ export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
     api.get('/verification/status', { params: { role, ...(vehicleType ? { vehicleType } : {}) } }),
   upload: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/verification/upload', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/verification/upload', form, session),
   submitDocument: (data: {
     role: string;
     docType: string;
@@ -851,7 +940,7 @@ export const verificationApi = {
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl: string; consent: true; privacyNoticeVersion: string },
+    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
@@ -900,6 +989,10 @@ export const partnerApi = {
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
   }, session?: AuthSessionSnapshot) =>
     api.put('/partner/vehicle', data, capturedAuthConfig(session)),
+  /** [R18] The answer to the background-location disclosure, for the consent
+   *  ledger. Names the platform so the ledger records where it was given. */
+  recordBackgroundLocationConsent: (granted: boolean) =>
+    api.post('/partner/consent/background-location', { granted }, { headers: { 'x-client-platform': Platform.OS } }),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -930,10 +1023,11 @@ export const riderApi = {
   active: () => api.get('/rider/orders/active'),
   // [B6] Every live leg, primary first, plus the server-computed run summary.
   activeLegs: () => api.get('/rider/orders/active-legs'),
-  accept: (id: string, fare?: number) => api.post(`/rider/orders/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => api.post(`/rider/orders/${id}/accept`, {}),
   // Accepting a dispatch OFFER (the offer card) vs grabbing from the open board:
   // this path acks the offer so it's never scored as a timeout [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/rider/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   // Golden-rule handover: GPS is mandatory server-side (claims are impossible
   // without it) — an empty body 400s.
@@ -943,7 +1037,7 @@ export const riderApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/rider/orders/${id}/handover-photo`, form, session),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -977,10 +1071,55 @@ export const riderApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/rider/vehicle-photo', form, session),
 };
+
+/** Resolve a lost response against the same driver's authority. Offers return
+ * the held assignment on repeat; board acceptance first checks the active ride. */
+async function acceptDriver(path: string, body: object, boardId?: string) {
+  const owner = getAuthSessionSnapshot();
+  const currentSession = () => {
+    const current = owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner);
+    if (owner && !current) throw new Error('Your session changed. Please check your active ride.');
+    return current ?? undefined;
+  };
+  const config = () => capturedAuthConfig(currentSession());
+  const heldRide = async () => {
+    const active = await api.get('/driver/rides/active', config());
+    currentSession();
+    return active.data?.data?.id === boardId ? active : null;
+  };
+  try {
+    const result = await api.post(path, body, config());
+    currentSession();
+    return result;
+  } catch (error) {
+    if (!owner || !axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    if (boardId) {
+      const held = await heldRide();
+      if (held) return held;
+    }
+    try {
+      const result = await api.post(path, body, config());
+      currentSession();
+      return result;
+    } catch (retryError) {
+      // The first accept may finish between the active read and the retry:
+      // the retry is then refused (UNAVAILABLE before the claim, or
+      // ALREADY_TAKEN / DRIVER_BUSY when it lands during the claim). Only the
+      // server's own current ride, matched by exact id, counts as held.
+      if (boardId && axios.isAxiosError(retryError) &&
+          ['UNAVAILABLE', 'ALREADY_TAKEN', 'DRIVER_BUSY'].includes(retryError.response?.data?.error?.code)) {
+        const held = await heldRide();
+        if (held) return held;
+      }
+      throw retryError;
+    }
+  }
+}
 
 // Mover ops — Driver (taxi), mounted at /api/v1/driver
 export const driverApi = {
@@ -1003,12 +1142,13 @@ export const driverApi = {
     api.put('/driver/location', { latitude, longitude, ...(fix?.accuracy != null ? { accuracy: fix.accuracy } : {}), ...(fix?.mocked != null ? { mocked: fix.mocked } : {}) }, capturedAuthConfig(session)),
   available: () => api.get('/driver/rides/available'),
   active: () => api.get('/driver/rides/active'),
-  accept: (id: string, fare?: number) => api.post(`/driver/rides/${id}/accept`, { fare }),
+  // [OWNER RULING 8 Oct] No fare is ever sent: the price is the set formula.
+  accept: (id: string) => acceptDriver(`/driver/rides/${id}/accept`, {}, id),
   /** Give an accepted, pre-custody ride back to dispatch. The server keeps the
    * passenger's ride alive, frees this driver, and matches another driver. */
   handback: (id: string, reason: string) => api.post(`/driver/rides/${id}/cancel`, { reason }),
   // Offer-card accept (acks the offer, no timeout penalty) vs board-grab [SWIFT-016].
-  acceptOffer: (orderId: string, fare?: number, offerAttemptId?: string) => api.post('/driver/offers/accept', { orderId, fare, ...(offerAttemptId ? { offerAttemptId } : {}) }),
+  acceptOffer: (orderId: string, offerAttemptId?: string) => acceptDriver('/driver/offers/accept', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   declineOffer: (orderId: string, offerAttemptId?: string) => api.post('/driver/offers/decline', { orderId, ...(offerAttemptId ? { offerAttemptId } : {}) }),
   enRoute: (id: string) => api.put(`/driver/rides/${id}/en-route`),
   arrived: (id: string) => api.put(`/driver/rides/${id}/arrived`),
@@ -1032,7 +1172,7 @@ export const driverApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/driver/rides/${id}/handover-photo`, form, session),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -1049,9 +1189,7 @@ export const driverApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/driver/vehicle-photo', form, session),
 };
 
 // Vendor ops (mounted at /api/v1/vendor)
@@ -1147,6 +1285,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post(`/vendor/items/${id}/image`, form, capturedVendorAuthConfig(session, storeId, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // Modifiers (option groups + options on an item)
@@ -1187,7 +1326,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
@@ -1207,6 +1346,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/xlsx', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   importMenuPdf: (
@@ -1214,6 +1354,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/menu-parse', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   // Storefront QR (manager+) — short link + printable SVG code + lifecycle
@@ -1241,6 +1382,8 @@ export const vendorApi = {
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
+  /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
+  withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
@@ -1281,6 +1424,7 @@ export const adsApi = {
   ) => api.post(`/ads/campaigns/${campaignId}/checkout`, { provider }, capturedAuthConfig(session)),
   uploadCreative: (campaignId: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/ads/campaigns/${campaignId}/creatives`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   stats: (campaignId: string) => api.get(`/ads/campaigns/${campaignId}/stats`),

@@ -8,10 +8,11 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { adminAuditCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] A BROADCAST IS ANNOUNCED BEFORE IT IS RECORDED.
@@ -65,7 +66,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'Bcast', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });
@@ -91,8 +92,7 @@ afterAll(async () => {
   await runWithoutTenant(async () => {
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: userIds } } }).catch(() => {});
     await app.prisma.notification.deleteMany({ where: { userId: { in: all } } }).catch(() => {});
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'bc').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'bc').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-broadcast');
     await app.prisma.session.deleteMany({ where: { userId: { in: all } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: all } } }).catch(() => {});

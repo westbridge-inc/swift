@@ -25,6 +25,8 @@ vi.mock('react-native', async () => {
   return { View, Pressable, Text: View, StyleSheet: { create: (s: unknown) => s, flatten: (s: unknown) => s, hairlineWidth: 1 }, Platform: { OS: 'ios' } };
 });
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
+// [STORE-ALERT] The push-off strip reads the OS permission; this suite grades the board only.
+vi.mock('../../../components/PushOffStrip', () => ({ PushOffStrip: () => null }));
 vi.mock('react-native-maps', async () => {
   const R = await import('react');
   return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: () => null, PROVIDER_DEFAULT: 'default' };
@@ -41,7 +43,7 @@ vi.mock('../../../kit', async () => {
   const T = (p: any) => h('span', a11y(p), p.children);
   return {
     T, Screen: (p: any) => h('div', null, p.children), ErrorState: () => null, LoadingBlock: () => null, Pictogram: () => null,
-    TonePill: (p: any) => h('span', null, p.label), FareSlider: () => null, canAdjustFare: () => true, cardShadow: {},
+    TonePill: (p: any) => h('span', null, p.label), cardShadow: {},
     PillButton: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, p.label),
   };
 });
@@ -144,6 +146,8 @@ describe('the open board (§6.1)', () => {
 });
 
 describe('[review 2] flag off: the offer card and the board are main’s, byte for byte', () => {
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The snapshot lost the slider's
+  // "Slide to set your fare · Market max" row; nothing else on the card moved.
   it('the live offer without stops', async () => {
     await draw(offerCard(baseOffer));
     await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-offer.html');
@@ -153,5 +157,30 @@ describe('[review 2] flag off: the offer card and the board are main’s, byte f
     fx.jobs = [{ id: 'plain-1', pickupAddress: 'Bourda Market', dropoffAddress: 'Kitty', fareTotal: 1800, paymentMethod: 'CASH' }];
     await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
     await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-board.html');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] "we go by the thing we set up,
+// base fee plus km": a mover never sets the price. The offer card shows the
+// formula price as YOUR PRICE ("100% yours" stays) with no slider, no "Market
+// max", and Accept sends no fare.
+// ---------------------------------------------------------------------------
+describe('[owner ruling 8 Oct] the offer card has no fare slider', () => {
+  it('shows the booked price, 100% yours, and nothing to slide', async () => {
+    await draw(offerCard(baseOffer));
+    const all = text();
+    expect(all).toContain('YOUR PRICE');
+    expect(all).toContain('$3,400');
+    expect(all).toContain('100% yours · cash');
+    expect(all).not.toMatch(/Slide to set your fare|Market max|No time left to adjust/);
+  });
+
+  it('Accept sends no fare — the server books the formula price', async () => {
+    const onAccept = vi.fn();
+    await draw(React.createElement(DispatchOfferCard, { offer: baseOffer as never, job: null, kind: 'DRIVER', accepting: false, onAccept, onDecline: vi.fn() }));
+    await act(async () => { (host.querySelector('button[aria-label="Accept ride"]') as HTMLButtonElement).click(); });
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept.mock.calls[0]).toEqual([]);
   });
 });

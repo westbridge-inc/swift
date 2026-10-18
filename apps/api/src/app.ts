@@ -2,10 +2,9 @@ import Fastify, { type RouteOptions } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import Redis from 'ioredis';
 import multipart from '@fastify/multipart';
 import { helmetOptions } from './config/security-headers';
-import { rateLimitKey } from './utils/rate-limit-key';
+import { createRateLimitStore, rateLimitOptions } from './utils/rate-limit-options';
 import { authRoutes } from './modules/auth/auth.routes';
 import { customerRoutes } from './modules/user/customer.routes';
 import { vendorRoutes } from './modules/vendor/vendor.routes';
@@ -49,9 +48,11 @@ import { marketRoutes } from './modules/market/market.routes';
 import { statementRoutes } from './modules/order/statement.routes';
 import path from 'node:path';
 import { installProcessLifecycle } from './utils/process-lifecycle';
-import { resolveCorsOrigins } from './utils/cors-origin';
+import { corsPluginOptions, resolveCorsOrigins } from './utils/cors-origin';
 import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
+import { getMapsProvider } from './providers/maps/maps-provider';
+import { createRoutingProbe } from './providers/maps/routing-probe';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -102,7 +103,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // tests that grade every public GET under TENANT_UNSCOPED_ACCESS=deny.
   if (options.onRoute) app.addHook('onRoute', options.onRoute);
   let bootContractsComplete = false;
+  const checkRouting = createRoutingProbe(getMapsProvider());
+  app.addHook('onListen', async () => {
+    const routing = await checkRouting();
+    app.log[routing.status === 'degraded' ? 'warn' : 'info']({ routing }, 'routing readiness');
+  });
   const runtimeReadiness: RuntimeReadinessState = {
+    checkRouting,
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -127,10 +134,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
 
   // Core plugins
   const corsOrigin = resolveCorsOrigins(process.env['CORS_ORIGIN'], process.env['NODE_ENV']);
-  await app.register(cors, {
-    origin: corsOrigin,
-    credentials: true,
-  });
+  // Same allowlist + credentials as before; the browser may now reuse a
+  // preflight answer for 2 h instead of 5 s (see corsPluginOptions).
+  await app.register(cors, corsPluginOptions(corsOrigin));
   await app.register(helmet, helmetOptions);
   // SWIFT-AUD-D6-02: back the limiter with Redis IN PRODUCTION so the ceiling is
   // shared across all API instances. An in-memory store gives each instance its
@@ -138,31 +144,15 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // OTP/login limits weaken linearly with the fleet size you scale up for launch.
   // Dev/test keep the in-memory store (a shared Redis counter across vitest's
   // per-file workers would cross-contaminate the whole suite's rate-limit state).
-  const rateLimitRedis =
-    isProduction()
-      ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', {
-          connectionName: 'swift-rate-limit',
-          // A rate-limit store must fail OPEN, never queue or crash a request if
-          // Redis blips — the plugin degrades gracefully on a store error.
-          maxRetriesPerRequest: 1,
-          enableOfflineQueue: false,
-        })
-      : undefined;
-  await app.register(rateLimit, {
-    // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
-    // can raise it without a code change (per-route limits on auth/OTP stay tight
-    // regardless). Callers with a VERIFIED token are bucketed per userId;
-    // anonymous and unverifiable requests share the resolved-IP bucket (never
-    // the spoofable X-Forwarded-For) — see D1-01.
-    ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: 'swift-rl:' } : {}),
-    // The key generator verifies the bearer token (captured lazily via the
-    // closure — app.jwt is decorated by authPlugin, registered below) so an
-    // attacker cannot mint a fresh bucket per fake token; unverified and
-    // anonymous requests share the resolved-IP bucket.
-    keyGenerator: rateLimitKey((token) => app.jwt.verify(token)),
-    max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
-    timeWindow: '1 minute',
-  });
+  // [row 331 · G5-F3] The store fails OPEN with a logged alert, never a 500 on
+  // every route; /live does not consult it. Composed in utils/rate-limit-options.
+  const rateLimitRedis = isProduction() ? createRateLimitStore(process.env['REDIS_URL'] || 'redis://localhost:6379', app.log) : undefined;
+  // Global ceiling. Tunable via RATE_LIMIT_MAX so a load test or a busy launch
+  // can raise it without a code change (per-route limits on auth/OTP stay tight
+  // regardless). The key generator verifies the bearer token (captured lazily
+  // via the closure — app.jwt is decorated by authPlugin, registered below) so
+  // an attacker cannot mint a fresh bucket per fake token.
+  await app.register(rateLimit, rateLimitOptions({ store: rateLimitRedis, verify: (token) => app.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));
   await app.register(multipart, {
     limits: { fileSize: 5 * 1024 * 1024, files: 1 },
   });
@@ -200,6 +190,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   registerRoutedWhileDegradedCounter(app);
   app.get('/health', async (request, reply) => {
     const checks: Record<string, string> = { api: 'ok' };
+    const routing = await checkRouting();
 
     try {
       await app.prisma.$queryRaw`SELECT 1`;
@@ -277,6 +268,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      routing,
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged
@@ -355,6 +347,11 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // reply only prompts the server's own MMG lookup, never a credit.
   const { mmgCheckoutPublicRoutes } = await import('./modules/billing/mmg-checkout.routes');
   await app.register(mmgCheckoutPublicRoutes, { prefix: '/api/v1/billing/mmg-checkout' });
+  // [R22] Texted STOP: the Twilio incoming-message webhook withdraws marketing
+  // consent in the ledger. Signature-checked before the body is used; dark (503)
+  // until TWILIO_WEBHOOK_AUTH_TOKEN and TWILIO_INBOUND_SMS_URL are set.
+  const { smsInboundRoutes } = await import('./modules/notification/sms-inbound.routes');
+  await app.register(smsInboundRoutes, { prefix: '/api/v1/sms' });
 
   // Background job queues.
   // SWIFT-AUD-D7-01: workers are opt-out per process. Default (unset) keeps
@@ -390,6 +387,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     // Decorate so routes can enqueue jobs
     app.decorate('queues', queues);
     app.decorate('dispatchQueue', queues.dispatchQueue);
+    app.decorate('offerQueue', queues.offerQueue);
   } catch (err) {
     if (isProduction()) {
       app.log.fatal({ err }, 'Background jobs failed to initialize — refusing production boot');

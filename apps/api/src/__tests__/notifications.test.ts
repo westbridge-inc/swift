@@ -283,7 +283,8 @@ describe('THE vendor order alert — unmissable until acknowledged', () => {
     const second = await escalateVendorAlert(app.prisma, ioStub, getChannels(), orderId, 1);
     expect(second).toBe('sms_sent');
     const sms = smsEntriesTo(vendorUser.phone);
-    expect(sms.at(-1)!.body).toContain('still waiting');
+    // [STORE-ALERT · owner ruling 18 Oct] The store's backup SMS wording.
+    expect(sms.at(-1)!.body).toContain('is waiting. Open the Swift app to accept or decline.');
   });
 
   it('a failed escalation SMS is counted, never swallowed silently [SWIFT-100]', async () => {

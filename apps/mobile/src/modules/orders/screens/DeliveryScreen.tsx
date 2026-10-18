@@ -5,6 +5,7 @@ import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDime
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
+import { openDirections } from '../../../lib/openDirections';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -15,7 +16,7 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
+import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
@@ -30,6 +31,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -339,7 +341,6 @@ export function DeliveryScreen() {
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [cancelChecking, setCancelChecking] = useState(false);
   const [cancelPreviewFresh, setCancelPreviewFresh] = useState(false);
-  const [cancelPreviewFee, setCancelPreviewFee] = useState<number | null>(null);
   const [cancelPreviewOrderId, setCancelPreviewOrderId] = useState<string | null>(null);
   const prevStatus = useRef<string | null>(null);
   const prevStatusRef = useRef<string | undefined>(undefined);
@@ -351,13 +352,13 @@ export function DeliveryScreen() {
   // A courier job cancels through its own endpoint so the assigned rider is
   // freed AND told they're back in the dispatch pool (the generic order-cancel
   // frees the rider row but doesn't notify them). Everything else uses the
-  // standard customer cancel with its free-window / fee logic.
+  // standard customer cancel with its free-or-refused rule.
   // [REPORT-011 F-02] The SERVER owns the clock: the cancel result carries the
-  // authoritative message (and any late-cancel fee it actually charged). Keep
-  // it and show it, instead of discarding it and rendering a stale generic
-  // banner — a client-clock/preview "free" promise must never be the last word.
+  // authoritative message. Keep it and show it, instead of discarding it and
+  // rendering a stale generic banner — a client-clock/preview "free" promise
+  // must never be the last word. [owner #46/#50] Cancelling never costs a fee:
+  // a cancel is free or refused, so no amount is ever shown.
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
-  const [cancelFee, setCancelFee] = useState<number | null>(null);
   const qc = useQueryClient();
   const cancelOrder = useMutation<any, any, { targetOrderId: string; orderType: string }>({
     mutationFn: ({ targetOrderId, orderType }: { targetOrderId: string; orderType: string }) =>
@@ -373,10 +374,9 @@ export function DeliveryScreen() {
       if (target.targetOrderId !== activeOrderIdRef.current) return;
       // customerApi.cancelOrder is unwrapped at the seam; the courier endpoint
       // still returns the raw envelope — accept both shapes, never lose the
-      // message OR the numeric fee the server actually charged.
+      // server's message.
       const payload = res?.data?.data ?? res?.data ?? res ?? {};
       if (typeof payload.message === 'string') setCancelMessage(payload.message);
-      setCancelFee(typeof payload.cancellationFee === 'number' ? payload.cancellationFee : null);
       setConfirmCancel(false);
       order.refetch();
     },
@@ -398,7 +398,7 @@ export function DeliveryScreen() {
       void order.refetch();
     },
   });
-  const decideSub = useDecideSubstitution(orderId);
+  const decideSub = useDecideSubstitution();
   // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
   // their only first-party door to "I didn't pay". That statement can pause
   // the order, so it is confirmed first; the order refetches either way.
@@ -422,14 +422,25 @@ export function DeliveryScreen() {
   const liveTrackingAllowedRef = useRef(liveTrackingAllowed);
   liveTrackingAllowedRef.current = liveTrackingAllowed;
 
+  // [row 5 · ANDROID-QA] The cancel taps read the order straight from the
+  // server (readOrderFresh), not through `order.refetch()`: the screen's own
+  // background refreshes cancel a shared read in flight, and the tap then
+  // waited on their read, which on a slow line could time out and drop it.
+  const readCancelSnapshot = async (targetOrderId: string): Promise<{ data: any; isError: boolean }> => {
+    try {
+      return { data: await readOrderFresh<any>(qc, targetOrderId), isError: false };
+    } catch {
+      return { data: undefined, isError: true };
+    }
+  };
+
   const openCancelConfirmation = async () => {
     const targetOrderId = orderId;
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -437,16 +448,8 @@ export function DeliveryScreen() {
         return;
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
-        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const previewFee = latest.cancellationFee;
-        if (typeof previewFee !== 'number' || !Number.isFinite(previewFee)) {
-          toast.error('Couldn’t confirm cancellation cost', 'Try again before cancelling. Your order is unchanged.');
-          return;
-        }
-        setCancelPreviewFee(previewFee);
       }
       setCancelPreviewFresh(true);
       setCancelPreviewOrderId(targetOrderId);
@@ -464,7 +467,7 @@ export function DeliveryScreen() {
     }
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -473,21 +476,8 @@ export function DeliveryScreen() {
       }
       if (latest.canCancel !== true || isTerminalOrderSnapshot(latest)) {
         setConfirmCancel(false);
-        toast.show('This order can no longer be cancelled', 'Check the latest status on the order timeline.');
+        toast.show('This order can no longer be cancelled', latest.cancelUnavailable?.message ?? 'Check the latest status on the order timeline.');
         return;
-      }
-      if (latest.orderType !== 'COURIER') {
-        const latestFee = latest.cancellationFee;
-        if (typeof latestFee !== 'number' || !Number.isFinite(latestFee)) {
-          toast.error('Couldn’t recheck cancellation cost', 'Nothing was cancelled. Try again.');
-          return;
-        }
-        if (cancelPreviewFee !== latestFee) {
-          setCancelPreviewFee(latestFee);
-          setCancelPreviewFresh(true);
-          toast.show('Cancellation fee changed', 'Check the new amount, then confirm again.');
-          return;
-        }
       }
       cancelOrder.mutate({ targetOrderId, orderType: latest.orderType });
     } finally {
@@ -625,10 +615,8 @@ export function DeliveryScreen() {
     setConfirmCancel(false);
     setCancelChecking(false);
     setCancelPreviewFresh(false);
-    setCancelPreviewFee(null);
     setCancelPreviewOrderId(null);
     setCancelMessage(null);
-    setCancelFee(null);
     setPendingMmgClaim(null);
     lastCourierServerFixAt.current = null;
     prevStatus.current = null;
@@ -689,7 +677,12 @@ export function DeliveryScreen() {
   }, [isFocused, o?.status, o?.fulfillment]);
 
   if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
-  if (order.isError || !o) {
+  // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
+  // On a slow line a background refresh (the 15 s poll, a reconnect) can time
+  // out; that used to swap the whole order, and the Cancel button under the
+  // customer's finger, for an error screen until the next read landed. The
+  // order already on screen stays (the cart's E07 rule).
+  if (!o) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
         <ErrorState onRetry={() => order.refetch()} />
@@ -787,7 +780,7 @@ export function DeliveryScreen() {
   const holdCancellationCaption = o.orderType === 'COURIER'
     ? 'Changed your mind? Cancel before a rider accepts. Swift does not collect or hold courier payment.'
     : o.fulfillment === 'APPOINTMENT'
-      ? 'Changed your mind? Cancel before the provider starts — the app shows any cost before you confirm.'
+      ? 'Changed your mind? You can cancel until the provider accepts your booking. Swift never charges for cancelling.'
       : holdRingCaption(mmgCancellationAmbiguous);
   const pendingSummary = o.orderType === 'COURIER'
     ? 'Waiting for an eligible rider to accept'
@@ -1054,24 +1047,44 @@ export function DeliveryScreen() {
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
-                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead.{swapDecisionPermissions(it.substitution, o.paymentMethod).reject ? ' Rejecting removes the item and lowers your total.' : ''}
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution, o.paymentMethod) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution, o.paymentMethod)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The question waits a bounded
+                    time; say until when and what happens without an answer. */}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
                     size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
                   />
                   <PillButton
                     label="No thanks"
                     variant="soft"
                     size="md"
                     style={{ flex: 1 }}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: false })}
                   />
                 </View>
               </View>
@@ -1209,18 +1222,6 @@ export function DeliveryScreen() {
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
                 </T>
-                {/* [REPORT-012 F-012-03] The fee the server ACTUALLY charged —
-                    rendered from the committed result, never a preview. */}
-                {!failed && cancelFee != null ? (
-                  <T variant="caption" tone="error" style={{ marginTop: space.xs }}>
-                    {/* [REPORT-013 F-013-03] The fee is a recorded deterrence
-                        marker on a cash platform — Swift never collects it;
-                        saying "charged" would be a false financial fact. */}
-                    {cancelFee > 0
-                      ? `Late-cancellation fee recorded: ${money(cancelFee)} (not collected by Swift).`
-                      : 'No cancellation fee.'}
-                  </T>
-                ) : null}
               </View>
             </View>
           ) : (
@@ -1288,10 +1289,9 @@ export function DeliveryScreen() {
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
-                    onPress={() => {
-                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
-                    }}
+                    // [row 363] The phone's own maps: Apple Maps on iOS, Google
+                    // Maps on Android (it was maps.apple.com on every phone).
+                    onPress={() => { void openDirections({ lat: o.pickupLat, lng: o.pickupLng, address: o.pickupAddress }); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
                     accessibilityHint="Opens turn-by-turn directions"
@@ -1326,6 +1326,19 @@ export function DeliveryScreen() {
                 </T>
               </View>
             )
+          ) : null}
+
+          {/* [R14 · legal research D12] The server's words, shown while the store delivers THIS order
+              with its own rider (null on every other order) — never decided here. */}
+          {typeof o.ownRiderNotice === 'string' && o.ownRiderNotice ? (
+            <View
+              accessible
+              accessibilityLabel={o.ownRiderNotice}
+              style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.xl, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info }}
+            >
+              <Feather name="info" size={16} color={color.info} />
+              <T variant="caption" tone="info" style={{ flex: 1 }}>{o.ownRiderNotice}</T>
+            </View>
           ) : null}
 
           {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
@@ -1465,6 +1478,26 @@ export function DeliveryScreen() {
             style={{ marginTop: space.md }}
           />
 
+          {/* [owner #46/#50] No Cancel once the store (or the driver, rider or
+              provider five minutes after accepting) has the order: the server's
+              reason, and the store's published number to call instead. */}
+          {!o.canCancel && !terminal && o.cancelUnavailable?.message ? (
+            <View
+              accessibilityRole="summary"
+              style={{ marginTop: space.md, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info, gap: space.sm }}
+            >
+              <T variant="label" tone="info">{o.cancelUnavailable.message}</T>
+              {o.cancelUnavailable.contactPhone ? (
+                <PillButton
+                  label={`Call ${o.cancelUnavailable.contactPhone}`}
+                  variant="soft"
+                  icon="phone"
+                  onPress={() => { void openExternal(`tel:${o.cancelUnavailable.contactPhone}`); }}
+                />
+              ) : null}
+            </View>
+          ) : null}
+
           {o.canCancel && !terminal && !holdActive && !holdTimingUnavailable && !releasePending ? (
             <PillButton
               label={`Cancel ${referenceNoun}`}
@@ -1493,26 +1526,17 @@ export function DeliveryScreen() {
               : 'This stops the rider search and cancels the pickup request. It can’t be undone.'
             : mmgCancellationAmbiguous
               ? `Cancelling stops this ${cancelledNoun}. If you already sent the MMG payment, ${refundParty} refunds you directly.`
-              : `Cancelling stops this ${cancelledNoun}. Check the possible fee below. We’ll show the final result when cancellation is confirmed.`}
+              : `Cancelling stops this ${cancelledNoun}. We’ll show the final result when cancellation is confirmed.`}
         </T>
-        {cancelPreviewFresh && o.orderType === 'COURIER' ? (
+        {/* [owner #46/#50] The server's own words — never a fee, and never a
+            "free" the app authored itself (DS1141 S1). */}
+        {cancelPreviewFresh && o.cancellationMessage ? (
           <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: color.soft.info }}>
             <DecorativeIcon>
               <Feather name="info" size={18} color={color.info} />
             </DecorativeIcon>
             <T variant="label" tone="info" style={{ flex: 1 }}>
-              You can still cancel. Swift cannot show a cancellation fee for this courier request in the app. Swift does not collect courier payment.
-            </T>
-          </View>
-        ) : cancelPreviewFresh && cancelPreviewFee != null ? (
-          <View style={{ alignSelf: 'stretch', flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.lg, padding: space.md, borderRadius: radius.md, backgroundColor: cancelPreviewFee > 0 ? color.soft.warning : color.soft.info }}>
-            <DecorativeIcon>
-              <Feather name={cancelPreviewFee > 0 ? 'alert-triangle' : 'info'} size={18} color={cancelPreviewFee > 0 ? color.warning : color.info} />
-            </DecorativeIcon>
-            <T variant="label" tone={cancelPreviewFee > 0 ? 'warning' : 'info'} style={{ flex: 1 }}>
-              {cancelPreviewFee > 0
-                ? `If you cancel now, a ${money(cancelPreviewFee)} fee may be recorded. Swift does not collect it. We’ll check again when you confirm.`
-                : 'The last check showed no cancellation fee. We’ll check again when you confirm.'}
+              {o.cancellationMessage}
             </T>
           </View>
         ) : null}

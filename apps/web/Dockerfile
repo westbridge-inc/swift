@@ -44,10 +44,12 @@ ARG SWIFT_WEB_CHANNEL
 # Unset or empty keeps src/site.config.ts refusing to build while a company
 # detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
 ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
-# [Item 7] The pre-launch switch for the public site: `live` opens ordering on
-# the apex and www; unset or empty shows the "Launching soon" front door there.
-# Other hosts this image answers (staging) keep the full marketplace either way.
-ARG NEXT_PUBLIC_WEB_ORDERING
+# [WEB-TILES] The MapTiler browser key: public by design (inlined into the
+# bundle) and restricted in MapTiler to the site's own origins. Empty: the
+# site draws no map tiles (apps/web/src/lib/map-tiles.ts), never OpenStreetMap's.
+ARG NEXT_PUBLIC_MAPTILER_KEY
+# [Item 7 · S1] The pre-launch switch is NOT a build argument: the site reads
+# SWIFT_WEB_ORDERING from its environment while it runs (deploy/docker-compose.yml).
 # next.config.ts: the standalone server, and the type check and lint stay
 # with CI (the reason is written there).
 ENV SWIFT_WEB_IMAGE_BUILD=1
@@ -66,6 +68,10 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [W6] The store page judges an item's choices with the API's own validator
+# (src/lib/menu-options.ts imports it by path, never a second copy). It is a
+# pure module with no imports of its own, so exactly this file.
+COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 

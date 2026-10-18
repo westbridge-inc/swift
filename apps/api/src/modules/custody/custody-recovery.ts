@@ -1,3 +1,4 @@
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { randomInt, timingSafeEqual } from 'node:crypto';
 import type { CustodyIncidentReason, CustodyRecoveryCase, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
@@ -7,8 +8,10 @@ import { haversineDistance } from '../../utils/distance';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
-import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
+import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs, VEHICLE_PASSENGERS_ONLY } from '../dispatch/concurrency-policy';
 import { vehicleCanCarry } from '../dispatch/dispatch.service';
+import { carriesGoods } from '../../config/vehicle-classes';
+import { assertDispatchPairEligible, safetyExcludedMovers } from '../dispatch/pair-safety';
 import { handoverAttemptState } from '../handover/handover-security';
 import { assertActiveMoverAccount, assertMoverRoleAuthority, lockUserRoleAuthority } from '../mover-authority';
 import type { OrderService } from '../order/order.service';
@@ -161,8 +164,8 @@ export async function publishCaseChange(
 ): Promise<void> {
   try {
     const event = { orderId: order.id, caseId: kase.id, state: kase.state, timestamp: new Date().toISOString() };
-    deps.io.to(`order:${order.id}`).emit(CASE_ROOM_EVENT, event);
-    if (order.vendorId) deps.io.to(`vendor:${order.vendorId}`).emit(CASE_ROOM_EVENT, event);
+    await emitToOrderRoom(deps.prisma, deps.io, order.id, CASE_ROOM_EVENT, event);
+    if (order.vendorId) await emitToStoreRoom(deps.prisma, deps.io, order.vendorId, CASE_ROOM_EVENT, event);
   } catch (err) {
     log().warn({ err, orderId: order.id }, 'custody case socket publication failed after commit');
   }
@@ -190,7 +193,7 @@ export async function pageOps(
   deps: CustodyDeps,
   order: Pick<CaseOrder, 'id' | 'tenantId' | 'orderNumber'>,
   kase: Pick<CustodyRecoveryCase, 'id' | 'state'>,
-  event: 'opened' | 'overdue' | 'relay_declined' | 'transfer_locked',
+  event: 'opened' | 'overdue' | 'relay_declined' | 'transfer_locked' | 'short_payment',
   body: string,
 ): Promise<void> {
   const titles = {
@@ -198,6 +201,7 @@ export async function pageOps(
     overdue: 'Custody case overdue — nobody has acted',
     relay_declined: 'Relay rider declined a custody handoff',
     transfer_locked: 'Custody handoff locked after wrong codes',
+    short_payment: 'Customer could not pay in full — order returning to the store',
   } as const;
   await notifyAdmins(deps.prisma, deps.notifications, {
     tenantId: order.tenantId ?? null,
@@ -243,6 +247,26 @@ export async function reportIncident(deps: CustodyDeps, input: ReportInput) {
     await publishCaseChange(deps, result.kase, result.order);
   }
   return result;
+}
+
+/**
+ * [L02 · row 34] After the commit of a "customer cannot pay in full" return
+ * (cash-rules.service.ts): operations is paged about the order's ONE case and
+ * the customer and the store are told what it now says. Called once per
+ * committed return, never for a replayed answer. Never throws.
+ */
+export async function announceShortPaymentReturn(deps: CustodyDeps, orderId: string): Promise<void> {
+  try {
+    const order = await readOrder(deps.prisma, orderId);
+    const kase = await latestCaseFor(deps.prisma, orderId);
+    if (!kase) return;
+    await pageOps(deps, order, kase, 'short_payment',
+      'the customer could not pay the full cash amount, so the rider did not hand the order over and is bringing it back to the store. '
+      + 'The store gives the rider back the cash they fronted when it confirms the goods are back.');
+    await publishCaseChange(deps, kase, order, { notifyVendor: true });
+  } catch (err) {
+    log().warn({ err, orderId }, 'short-payment return announcement failed after commit');
+  }
 }
 
 /** What the rider holding the order sees about its latest case (after a
@@ -408,6 +432,11 @@ export async function transferCustody(deps: CustodyDeps, input: TransferInput) {
     if (order.customerId === input.relayUserId) {
       throw new AppError(409, 'SELF_OWN_ORDER', 'You cannot take over a delivery placed by your own account.');
     }
+    // [L07] The same pair policy as every claim door, by any path: a block,
+    // an incident pair or a shadow restriction that formed after the relay
+    // was named stops the handoff here, under the relay rider's User lock and
+    // the order lock, before custody, the leg or the float moves.
+    await assertDispatchPairEligible(tx, order.customerId, input.relayUserId, 'RIDER');
     const holderRiderId = kase.holderRiderId;
 
     // 1. The order's one holder becomes the relay rider.
@@ -670,11 +699,19 @@ export async function assignRelay(
     if (!relay) throw new NotFoundError('Rider', input.riderId);
     if (relay.id === kase.holderRiderId) throw new AppError(400, 'RELAY_IS_HOLDER', 'The relay rider must be someone other than the rider holding the order.');
     if (relay.userId === order.customerId) throw new AppError(400, 'SELF_OWN_ORDER', 'That rider placed this order.');
+    // [L07] Ops cannot see a customer's blocks or incident pairings, so the
+    // server applies the claim doors' pair policy here and says only that
+    // this rider cannot serve this customer, never why.
+    if ((await safetyExcludedMovers(tx, order.customerId, [relay.userId], 'RIDER')).has(relay.userId)) {
+      throw new AppError(400, 'RELAY_PAIR_EXCLUDED', 'That rider cannot serve this customer. Choose another rider.');
+    }
     if (relay.user.status !== 'ACTIVE') throw new AppError(400, 'RELAY_NOT_ACTIVE', 'That rider account is not active.');
     if (!relay.isOnline) throw new AppError(400, 'RELAY_OFFLINE', 'That rider is offline.');
     const needsCourier = order.orderType === 'COURIER';
     const serves = needsCourier ? relay.riderType === 'COURIER' || relay.riderType === 'BOTH' : relay.riderType === 'DELIVERY' || relay.riderType === 'BOTH';
     if (!serves) throw new AppError(400, 'WRONG_SERVICE_TYPE', `That rider does not do ${needsCourier ? 'courier' : 'delivery'} work.`);
+    // [Owner ruling 15 Oct 2026] A taxi car carries no goods while car deliveries are off (the claim refuses it too).
+    if (!carriesGoods(relay.vehicleType)) throw new AppError(400, VEHICLE_PASSENGERS_ONLY, 'That rider’s vehicle is a taxi car, and taxi cars carry passengers only for now. Choose another rider.');
     if (needsCourier && order.courierPackageSize && !vehicleCanCarry(relay.vehicleType, order.courierPackageSize)) {
       throw new AppError(400, 'VEHICLE_TOO_SMALL', 'That rider’s vehicle cannot carry this parcel.');
     }

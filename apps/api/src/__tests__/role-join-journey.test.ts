@@ -18,6 +18,7 @@ import { loginWithOtp, requestOtp } from './helpers/otp';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { injectWithApproval } from './helpers/admin-approval';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // ---------------------------------------------------------------------------
 // [phone feedback P2] The owner installed the app, signed up as a customer
@@ -52,10 +53,15 @@ import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 const VENDOR_PHONE = '+59200199101';
 const RIDER_PHONE = '+59200199102';
 const DRIVER_PHONE = '+59200199103';
-const PHONES = [VENDOR_PHONE, RIDER_PHONE, DRIVER_PHONE];
+// [VERIFY-DOCS V3] Approving a document needs the explicit document reviewer
+// grant, which the seeded admin's `*` never confers; this journey's document
+// reviewer holds it.
+const REVIEWER_PHONE = '+59200199104';
+const PHONES = [VENDOR_PHONE, RIDER_PHONE, DRIVER_PHONE, REVIEWER_PHONE];
 
 let app: FastifyInstance;
 let adminToken = '';
+let reviewerToken = '';
 const tokens: Record<string, string> = {};
 const userIds: Record<string, string> = {};
 
@@ -157,6 +163,15 @@ beforeAll(async () => {
   }
   const admin = await loginWithOtp(app, '+5926001000');
   adminToken = admin.json().data.tokens.accessToken;
+  const reviewer = await app.prisma.user.create({ data: {
+    phone: REVIEWER_PHONE, firstName: 'Rae', lastName: 'Reviewer', roles: ['ADMIN'], activeRole: 'ADMIN', status: 'ACTIVE',
+    isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
+  } });
+  reviewerToken = app.jwt.sign({ userId: reviewer.id, role: 'ADMIN', jti: `rjj-${Date.now()}` });
+  await app.prisma.session.create({ data: {
+    userId: reviewer.id, token: reviewerToken, refreshToken: `rjj-refresh-${Date.now()}-${reviewer.id}`, authMethod: 'OTP',
+    deviceId: 'role-join-journey-reviewer', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
+  } });
 });
 
 afterAll(async () => {
@@ -225,13 +240,24 @@ describe('business: a customer with no business lists one, end to end', () => {
   });
 
   it('an admin reviews each document through the real route; the completed checklist activates the store and the dashboard loads', async () => {
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the owner adds it on the
+    // waiting store's screen before the review completes.
+    const waiting = await get('/api/v1/vendor/profile', tokens['vendor']!);
+    const waitingStore = waiting.json().data.vendors[0] as { id: string; goLiveMissing: string[] };
+    expect(waitingStore.goLiveMissing).toEqual(['PUBLISHED_PHONE']);
+    const phoneSaved = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/profile', payload: { publicPhone: '+592 600 5544' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${tokens['vendor']!}`, 'x-vendor-id': waitingStore.id },
+    });
+    expect(phoneSaved.statusCode, phoneSaved.body).toBe(200);
     const status = await get('/api/v1/verification/status?role=SUPERMARKET', tokens['vendor']!);
-    const pending = (status.json().data.documents as Array<{ id: string; status: string }>).filter((d) => d.status === 'PENDING');
+    const pending = (status.json().data.documents as Array<{ id: string; status: string; docType: string }>).filter((d) => d.status === 'PENDING');
     expect(pending.length).toBeGreaterThan(0);
     for (const doc of pending) {
       const approved = await injectWithApproval(app, {
-        method: 'PUT', url: `/api/v1/admin/verification/${doc.id}/approve`, payload: {},
-        headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}`, 'content-type': 'application/json' },
+        // [VERIFY-DOCS] the reviewer (holding the explicit grant) types the owner's ID number, as the console asks
+        method: 'PUT', url: `/api/v1/admin/verification/${doc.id}/approve`, payload: reviewerTyped(doc.docType, doc.id),
+        headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${reviewerToken}`, 'content-type': 'application/json' },
       });
       expect(approved.statusCode, approved.body).toBe(200);
       expect(approved.json().data.status).toBe('APPROVED');

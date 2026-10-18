@@ -8,8 +8,9 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { adminAuditCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE HOOK VERIFIES THE ROW IT IS ASKED TO TRUST.
@@ -76,7 +77,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'Verify', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });
@@ -89,8 +90,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await runWithoutTenant(async () => {
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'hv').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'hv').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-hook-verify');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});

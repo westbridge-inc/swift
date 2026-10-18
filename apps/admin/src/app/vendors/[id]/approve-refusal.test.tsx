@@ -23,6 +23,11 @@ import {
 // The reason is supplied through whichever surface the page offers. At the
 // old main that was a browser prompt (stubbed below); now it is the in-page
 // panel, which `giveReason` fills. The assertions are the same either way.
+//
+// [MC-PR2] The button is "Activate now…" and appears only when the server's
+// checklist verdict says every rule is met (CAN_ACTIVATE). The refusal can
+// still happen — the documents can change between reading the checklist and
+// pressing the button — and it must still arrive in words.
 // ---------------------------------------------------------------------------
 
 const REASON = 'Checked the owner ID and the food licence against the originals';
@@ -62,10 +67,21 @@ const CHECKLIST_INCOMPLETE = {
   },
 };
 
+/** The server said every rule was met when the page loaded (GET /vendors/:id/activation-checklist). */
+const readyChecklist = {
+  vendorId: 'vendor-target', applicantId: 'owner-1', storeStatus: 'PENDING_APPROVAL', suspensionSource: null,
+  ownerAccountStatus: 'ACTIVE', isVerified: false, activationValidUntil: null, role: 'RESTAURANT',
+  checklist: { complete: true, items: [{ docType: 'owner_national_id', state: 'APPROVED', documentId: 'd1', submittedAt: null, expiresAt: null, note: null, renewalPending: false }] },
+  disclosure: { engaged: false, complete: true, missing: [] }, ready: true, next: 'CAN_ACTIVATE',
+};
+
 function handler(onApprove: () => { status?: number; body: unknown }) {
   return (request: ApiRequest) => {
     if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target') {
       return { body: { success: true, data: pendingStore } };
+    }
+    if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/activation-checklist') {
+      return { body: { success: true, data: readyChecklist } };
     }
     if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/vendors/vendor-target/approve') {
       return onApprove();
@@ -79,7 +95,7 @@ async function giveReason(user: UserEvent, reason: string) {
   const dialog = screen.queryByRole('dialog');
   if (!dialog) return; // the page asked through the browser (stubbed in the test)
   await user.type(within(dialog).getByRole('textbox', { name: /reason/i }), reason);
-  await user.click(within(dialog).getByRole('button', { name: /^Approve/ }));
+  await user.click(within(dialog).getByRole('button', { name: /^Activate/ }));
 }
 
 describe('[MC-PR1] approving a store whose documents are not all approved', () => {
@@ -89,11 +105,12 @@ describe('[MC-PR1] approving a store whose documents are not all approved', () =
     const fetchMock = mockApi(handler(() => CHECKLIST_INCOMPLETE));
     const { user } = renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
 
-    await user.click(await screen.findByRole('button', { name: /^Approve/ }));
+    await user.click(await screen.findByRole('button', { name: /^Activate now/ }));
     await giveReason(user, REASON);
 
-    expect(await screen.findByText('Approve the required documents in Verification first')).toBeTruthy();
-    const link = screen.getByRole('link', { name: 'Open in Review Center' });
+    const title = await screen.findByText('Approve the required documents in Verification first');
+    // the refusal's own link (the checklist panel on the page has one too [MC-PR2])
+    const link = within(title.closest('[role=alert]') as HTMLElement).getByRole('link', { name: 'Open in Review Center' });
     expect(link.getAttribute('href')).toBe('/verification?applicant=owner-1');
     // the server's own sentence (which store) and its code stay on screen
     expect(screen.getByText(/required documents are not all approved and current/)).toBeTruthy();
@@ -112,7 +129,7 @@ describe('[MC-PR1] approving a store whose documents are not all approved', () =
     const fetchMock = mockApi(handler(() => CHECKLIST_INCOMPLETE));
     const { user } = renderWithQuery(<VendorDetailPage params={fulfilledParams({ id: 'vendor-target' })} />);
 
-    await user.click(await screen.findByRole('button', { name: /^Approve/ }));
+    await user.click(await screen.findByRole('button', { name: /^Activate now/ }));
     await giveReason(user, REASON);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));

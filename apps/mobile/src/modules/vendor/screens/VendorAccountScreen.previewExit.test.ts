@@ -199,6 +199,7 @@ const fx = vi.hoisted(() => {
   };
 });
 
+vi.mock('../../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown> & { default?: Record<string, unknown> }>();
   const hooks = { ...fx.hooks, useLayoutEffect: fx.hooks.useEffect };
@@ -262,6 +263,7 @@ vi.mock('../../../kit/toast', () => ({ toast: { error: fx.toastError, info: vi.f
 vi.mock('../../../components/SwiftLogo', () => ({ SwiftMark: 'SwiftMark' }));
 vi.mock('../../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: 'MmgPayLinkCard' }));
 vi.mock('../../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: 'PublicCallNumberCard' }));
+vi.mock('../../../components/RefundRuleCard', () => ({ RefundRuleCard: 'RefundRuleCard' }));
 // [Q8] The store map: react-native-maps and expo-location are native. Its props are the contract.
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));

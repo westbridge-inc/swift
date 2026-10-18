@@ -10,6 +10,11 @@ import { DEFAULT_COURIER_RATES, type DeliverySpeed } from '../modules/courier/co
  * Calculate delivery fee based on distance.
  * delivery_fee = base_fee + (distance_km - included_km) * per_km_rate
  * The defaults are DEFAULT_DELIVERY_RATES (below), never numbers of their own.
+ *
+ * [owner #18, 13 Oct 2026] Never below the base fee, whatever the distance
+ * engine (the road route, or the straight-line fallback when routing is down)
+ * or the per-market config says: a negative per-km rate or a surge below 1
+ * cannot price a delivery under the first-3-km fee the rider is promised.
  */
 export function calculateDeliveryFee(
   distanceKm: number,
@@ -18,9 +23,9 @@ export function calculateDeliveryFee(
   includedKm: number = DEFAULT_DELIVERY_RATES.includedKm,
   surgeMultiplier: number = DEFAULT_DELIVERY_RATES.surgeMultiplier,
 ): number {
-  const distanceFee = Math.max(0, distanceKm - includedKm) * perKmRate;
+  const distanceFee = Math.max(0, distanceKm - includedKm) * Math.max(0, perKmRate);
   const subtotal = baseFee + distanceFee;
-  return Math.ceil(subtotal * surgeMultiplier);
+  return Math.max(baseFee, Math.ceil(subtotal * surgeMultiplier));
 }
 
 /**
@@ -117,19 +122,10 @@ export function calculateTaxiFare(
   return Math.max(minimumFare, Math.ceil(surgedFare));
 }
 
-/**
- * Driver-set pricing (legal marketplace model). A mover may charge anywhere from a
- * floor UP TO the market rate Swift computed for the trip — never above it. Swift
- * computes the cap, but the driver sets the final price, so Swift is a service
- * provider / marketplace, not a price controller; the cap stops customers being
- * overcharged. This clamp runs server-side — the client value is never trusted.
- */
-export const DRIVER_FARE_FLOOR_PCT = 0.6;
-export function clampDriverFare(requested: number, marketMax: number): number {
-  if (!Number.isFinite(requested) || marketMax <= 0) return marketMax;
-  const floor = Math.ceil(marketMax * DRIVER_FARE_FLOOR_PCT);
-  return Math.min(marketMax, Math.max(floor, Math.round(requested)));
-}
+// [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] There is no mover-set price:
+// "we go by the thing we set up, base fee plus km". Every delivery fee, courier
+// fee and taxi fare is the set formula, booked at checkout and never rewritten
+// by an accept. (The driver-set price clamp that lived here is gone.)
 
 const ORDER_SUFFIX_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'; // no 0/O/1/I/L
 

@@ -41,18 +41,16 @@ import { toast } from '../../../kit/toast';
 import { money } from '../../../lib/money';
 import { moverJobsToday } from '../../../lib/earnings';
 import { earningsSplit } from '../../../lib/earnings-breakdown';
-import { FareSlider } from '../../../kit';
 import { GUTTER, RoutePair, jobAmount, CustomerTrustBadge } from '../shared';
 import { dk, withAlpha, DCard, DemandBand, DStat, DWeekBars } from '../surface';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { MoverHomeAccountButton } from './MoverHomeAccountButton';
 import { useBackgroundLocationDisclosure } from './BackgroundLocationDisclosure';
-import { fareLockedFor, fareToSubmit } from './fare-locked';
 import { offerEarnings } from './offer-earnings';
-import { canAdjustFare } from '../../../kit';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -65,7 +63,8 @@ import { RelayTasks } from '../RelayTasks';
 /**
  * Uber-grade incoming request — a focused full-screen card: the fare you earn
  * (100% yours, cash), pickup→drop-off, a countdown, and big Accept/Decline.
- * The capped fare slider lets the mover undercut the market max, never exceed it.
+ * [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The price is the set formula
+ * (base fee plus km), booked at checkout: the mover takes it or leaves it.
  */
 export function DispatchOfferCard({
   offer,
@@ -79,7 +78,7 @@ export function DispatchOfferCard({
   job: BoardJob | null | undefined;
   kind: MoverKind;
   accepting: boolean;
-  onAccept: (fare: number | undefined) => void;
+  onAccept: () => void;
   onDecline: () => void;
 }) {
   const total: number = offer.expiresInSeconds ?? 0;
@@ -110,21 +109,12 @@ export function DispatchOfferCard({
   const offerStops = rideStops(offer).length > 0 ? rideStops(offer) : rideStops(job);
   const pct = total ? Math.max(0, secs / total) : 0;
 
-  // Driver-set price: the slider runs from a floor up to the market max Swift
-  // computed (ride fare for drivers, delivery fee for riders). Defaults at the
-  // max — the mover lowers it to compete, never raises it. Server re-clamps.
-  // Board row first, recovery payload second — NEVER an unanchored zero.
-  const marketMax = isDriver
+  // The price Swift booked with the set formula (ride fare for drivers,
+  // delivery fee for riders). Board row first, recovery payload second —
+  // NEVER an unanchored zero. [OWNER RULING 8 Oct] Nobody slides it.
+  const price = isDriver
     ? Number(job?.fareTotal ?? job?.taxiFareTotal ?? offer.taxiFareTotal ?? 0)
     : Number(job?.deliveryFee ?? offer.deliveryFee ?? 0);
-  // [REPORT-011 F-05] MMG money is LOCKED at the checkout total — the mover
-  // cannot undercut it. Hide the fare slider and NEVER submit a fare on MMG,
-  // so a recovered card can't consume the exclusive offer only to be rejected
-  // with MMG_PRICE_LOCKED (which burned that mover's offer).
-  const fareLocked = fareLockedFor(job, offer);
-  const floor = marketMax > 0 ? Math.max(0, Math.ceil(marketMax * 0.6)) : 0;
-  const [price, setPrice] = useState<number>(marketMax);
-  useEffect(() => setPrice(marketMax), [offer.orderId, marketMax]);
   // Tips are proven to be the mover's on DELIVERIES only; taxi driver earnings
   // accrue in an Earning table, so a ride tip stays unclaimed here [F-257].
   const earnings = offerEarnings(price, offer.tipAmount, !isDriver, offer.rescueIncentiveGyd);
@@ -161,7 +151,7 @@ export function DispatchOfferCard({
 
         <View style={{ padding: space.xl }}>
           <View style={{ alignItems: 'center' }}>
-            {marketMax > 0 ? (
+            {price > 0 ? (
               <>
                 <T variant="caption" weight="bold" tone="muted" style={{ letterSpacing: 1 }}>
                   YOUR PRICE
@@ -177,8 +167,8 @@ export function DispatchOfferCard({
                     the fare (`deliveryFee + tipAmount` — rider.routes, four
                     sites). It rode the offer payload and was never drawn, so
                     the accept/decline decision was made against a number
-                    smaller than the pay [F-257]. The fare keeps the big type
-                    because the slider governs it; the total is what lands. */}
+                    smaller than the pay [F-257]. The fare keeps the big type;
+                    the total is what lands. */}
                 {earnings.showTip ? (
                   <T variant="caption" weight="semibold" tone="success" style={{ marginTop: 2 }}>
                     + {money(earnings.tip)} tip · you get {money(earnings.total)}
@@ -242,34 +232,6 @@ export function DispatchOfferCard({
             )}
           </View>
 
-          {/* [F-028-18] A RECOVERED card can arrive with as little as 4s of
-              authority (TTL 14 minus the 10s worker tail) — ten adjust
-              gestures cannot traverse the band in that. With too little time
-              the slider is not offered at all: accepting needs ONE gesture
-              and stays instant; a control that cannot finish is worse than
-              its absence. */}
-          {!fareLocked && marketMax > floor && canAdjustFare(offer.expiresInSeconds) ? (
-            <View style={{ marginTop: space.md }}>
-              {/* [F-027-08] secondsLeft makes the expiring server authority
-                  audible: it was a 4dp visual bar and nothing else, so a
-                  screen-reader user was never told the offer was vanishing
-                  underneath them while they adjusted the fare. */}
-              <FareSlider min={floor} max={marketMax} value={price} onChange={setPrice} secondsLeft={secs} />
-              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                <T variant="caption" tone="muted">
-                  Slide to set your fare
-                </T>
-                <T variant="caption" weight="semibold" tone="muted">
-                  Market max {money(marketMax)}
-                </T>
-              </View>
-            </View>
-          ) : !fareLocked && marketMax > floor ? (
-            <T variant="caption" tone="muted" style={{ marginTop: space.md, textAlign: 'center' }}>
-              No time left to adjust — accept at {money(marketMax)}
-            </T>
-          ) : null}
-
           <View style={{ marginTop: space.lg }}>
             <RoutePair
               pickup={pickup}
@@ -280,18 +242,17 @@ export function DispatchOfferCard({
             <StopsSummary count={offerStops.length} testID="driver-offer-stops" />
           </View>
 
+          {accepting ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
           <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.xl }}>
             <PillButton label="Decline" variant="outline" onPress={onDecline} style={{ paddingHorizontal: space['2xl'] }} />
             <PillButton
-              label={`Accept ${isDriver ? 'ride' : 'delivery'}`}
+              label={accepting ? 'Checking acceptance…' : `Accept ${isDriver ? 'ride' : 'delivery'}`}
               loading={accepting}
               onPress={() => {
                 haptic.commit();
-                // [REPORT-010 F-07] Without a market anchor there is no
-                // legitimate price choice: send NO fare (= market rate).
-                // fare 0 used to clamp the mover's pay to the 60% floor on
-                // CASH and burn the offer on MMG.
-                onAccept(fareToSubmit(fareLocked, marketMax, price));
+                // [OWNER RULING 8 Oct] No fare is ever sent: the server books
+                // the formula price (and ignores one an older app sends).
+                onAccept();
               }}
               style={{ flex: 1 }}
             />
@@ -436,6 +397,14 @@ function MoverKindChoiceScreen({
 export function MoverHomeScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const insets = useSafeAreaInsets();
+  // [STORE-ALERT] Offers ring a mover's phone: ask while the OS still can
+  // (once per app session). A preview rings nothing, so it never asks.
+  useEffect(() => {
+    if (preview) return;
+    void Promise.all([import('../../../services/notification-priming'), import('../../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('mover_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [preview]);
   const {
     kind,
     profile,
@@ -757,7 +726,11 @@ export function MoverHomeScreen({ navigation }: any) {
               <T variant="caption" style={{ color: dk.muted, marginTop: 2 }}>
                 {online
                   ? demandLine ?? 'Watching for jobs near you'
-                  : 'Go online to receive jobs'}
+                  : preparingOnline && !goOnline.isPending
+                    // [GO-RELIABILITY] GO waits for a fix (up to the GPS
+                    // budget) instead of failing fast; say so while it does.
+                    ? 'Finding your location…'
+                    : 'Go online to receive jobs'}
               </T>
             </View>
             {online ? (
@@ -772,6 +745,9 @@ export function MoverHomeScreen({ navigation }: any) {
               </Pressable>
             ) : null}
           </View>
+
+          {/* [STORE-ALERT] Says so when this phone cannot ring for offers. */}
+          {!preview ? <PushOffStrip audience="mover" style={{ marginTop: space.lg }} /> : null}
 
           {!online && !activeJob && demandOpportunity ? (
             <DemandBand
@@ -995,7 +971,8 @@ export function MoverHomeScreen({ navigation }: any) {
                     ) : null}
                     {/* Who you'd front cash for — trust before float (§4d) */}
                     <CustomerTrustBadge trust={j.customerTrust} cash={j.paymentMethod === 'CASH'} />
-                    <PillButton label="Accept" size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    <PillButton label={accept.isPending ? 'Checking acceptance…' : 'Accept'} size="md" style={{ marginTop: space.md }} loading={accept.isPending} onPress={() => accept.mutate({ id: j.id })} />
+                    {accept.isPending ? <T variant="label" tone="muted">Checking acceptance… Keep this screen open.</T> : null}
                   </DCard>
                 ))}
               </>
@@ -1024,7 +1001,7 @@ export function MoverHomeScreen({ navigation }: any) {
           job={jobs.find((j) => j.id === offer.orderId)}
           kind={k}
           accepting={acceptOffer.isPending}
-          onAccept={(fare) => acceptOffer.mutate({ orderId: offer.orderId, fare, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
+          onAccept={() => acceptOffer.mutate({ orderId: offer.orderId, offerAttemptId: offer.offerAttemptId }, { onSuccess: dismiss })}
           // Tell the server too — the cascade re-offers the next mover NOW
           // instead of waiting out the 20s timeout on a card nobody wants.
           onDecline={() => {

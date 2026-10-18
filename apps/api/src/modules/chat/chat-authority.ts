@@ -6,6 +6,8 @@ import { AppError, ForbiddenError, NotFoundError } from '../../utils/errors';
 import { mediaUrlCarriesSecret, redactOrderSecrets, type OrderSecrets } from './secret-guard';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
 
+type ChatAuthorityDb = Pick<PrismaClient, 'chatRoom' | 'order' | 'serviceJob' | 'chatRoomParticipant'>;
+
 // ---------------------------------------------------------------------------
 // [R048-004] CHAT AUTHORITY AND THE ONE EGRESS SERIALIZER.
 //
@@ -61,7 +63,7 @@ export interface RoomAuthority {
 
 /** Resolve a room's authority from the order or job behind it. A room whose
  *  order and job have both vanished has no authority and is not found. */
-export async function resolveRoomAuthority(prisma: PrismaClient, roomId: string): Promise<RoomAuthority | null> {
+export async function resolveRoomAuthority(prisma: ChatAuthorityDb, roomId: string): Promise<RoomAuthority | null> {
   const room = await prisma.chatRoom.findUnique({ where: { id: roomId }, select: { id: true, orderId: true, serviceJobId: true, isActive: true } });
   if (!room) return null;
   const participants = new Map<string, 'customer' | 'rider' | 'driver' | 'provider'>();
@@ -104,7 +106,7 @@ export type RoomAccess = RoomAuthority & { role: 'customer' | 'rider' | 'driver'
  * stranger — is refused and counted; the participant cache is reconciled so
  * the socket door (which reads the cache) closes in the same moment.
  */
-export async function assertRoomAccess(prisma: PrismaClient, roomId: string, userId: string, opts: { write?: boolean; tenantId?: string | null } = {}): Promise<RoomAccess> {
+export async function assertRoomAccess(prisma: ChatAuthorityDb, roomId: string, userId: string, opts: { write?: boolean; tenantId?: string | null } = {}): Promise<RoomAccess> {
   const authority = await resolveRoomAuthority(prisma, roomId);
   if (!authority) throw new NotFoundError('Chat room', roomId);
   if (opts.tenantId && opts.tenantId !== authority.tenantId) {
@@ -126,7 +128,7 @@ export async function assertRoomAccess(prisma: PrismaClient, roomId: string, use
 
 /** Bring the participant rows in line with the authority: current people are
  *  present, nobody else is. Idempotent; returns what changed. */
-export async function reconcileParticipants(prisma: PrismaClient, authority: RoomAuthority): Promise<{ added: number; removed: number }> {
+export async function reconcileParticipants(prisma: Pick<PrismaClient, 'chatRoomParticipant'>, authority: RoomAuthority): Promise<{ added: number; removed: number }> {
   const rows = await prisma.chatRoomParticipant.findMany({ where: { chatRoomId: authority.roomId }, select: { id: true, userId: true } });
   const present = new Set(rows.map((r) => r.userId));
   const stale = rows.filter((r) => !authority.participants.has(r.userId));

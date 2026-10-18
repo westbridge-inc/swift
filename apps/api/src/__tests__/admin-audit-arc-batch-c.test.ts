@@ -8,11 +8,12 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { ensureSan } from '../modules/billing/san.service';
 import { settlementFileHash } from '../modules/billing/settlement-import';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH C — agent cash (record, attach), the manual refund
@@ -41,7 +42,7 @@ const changedOf = (row: { changes: unknown }) => (changesOf(row)['changed'] ?? {
 
 async function person(role: 'VENDOR_OWNER', tag: string) {
   const u = await app.prisma.user.create({ data: {
-    phone: `+5926${String(500000 + Math.floor(Math.random() * 99999))}`, firstName: 'C', lastName: `${tag}${RUN}${nanoid(3)}`,
+    phone: testPhone(), firstName: 'C', lastName: `${tag}${RUN}${nanoid(3)}`,
     roles: [role], activeRole: role, status: 'ACTIVE', isPhoneVerified: true } });
   userIds.push(u.id); return u;
 }
@@ -50,7 +51,7 @@ async function sanSubscription() {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
     ownerId: owner.id, name: `C Kitchen ${RUN} ${nanoid(3)}`, slug: `arcc-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
-    phone: `+59270${String(Math.floor(Math.random() * 90000) + 10000)}`, addressLine1: '3 Audit Row', city: 'Georgetown',
+    phone: testPhone(), addressLine1: '3 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);
   const sub = await app.prisma.subscription.create({ data: {
@@ -82,7 +83,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'ArcC', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });
@@ -113,8 +114,7 @@ afterAll(async () => {
     await app.prisma.subscription.deleteMany({ where: { id: { in: subIds } } }).catch(() => {});
     await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } }).catch(() => {});
     await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } }).catch(() => {});
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'arcc').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'arcc').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-arc-batch-c');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});

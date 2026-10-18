@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import VerificationPage from './page';
-import { GlobalSearch } from '@/components/layout/GlobalSearch';
+import { SearchLauncher } from '@/components/layout/CommandPalette';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { mockApi, renderWithQuery, requestsByMethod } from '@/test/test-utils';
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -80,7 +80,7 @@ describe('coordinator screenshot fixes', () => {
     expect(history.textContent).not.toMatch(/reviewer-id|V_PLATE_CLASS|\/api\/|VENDOR_OWNER|owner_national_id/);
     expect(history.querySelectorAll('time')).toHaveLength(3);
   });
-  it('keeps an audited new-tab PDF fallback visible and approval locked until the label row is checked', async () => {
+  it('keeps an audited new-tab PDF fallback visible while failed inline rendering locks approval', async () => {
     const fetch = vi.fn(async (...[url]: [string, RequestInit?]) => url.includes('/document-url')
       ? new Response(JSON.stringify({ data: { url: '/api/v1/verification/render/doc?sig=fixture&expires=1' } }), { headers: { 'content-type': 'application/json' } })
       : new Response('pdf', { headers: { 'content-type': 'application/pdf' } }));
@@ -100,11 +100,14 @@ describe('coordinator screenshot fixes', () => {
     expect(screen.getByRole('link', { name: 'Open document in a new tab' })).toBeTruthy();
     const check = screen.getByRole('checkbox');
     await user.click(check.closest('label')!);
-    expect(viewed).toHaveBeenLastCalledWith(true);
+    expect((check as HTMLInputElement).disabled).toBe(true);
+    expect(viewed).not.toHaveBeenCalledWith(true);
   });
-  it('uses a concise global search placeholder with a descriptive accessible label', () => {
-    renderWithQuery(<GlobalSearch />);
-    expect(screen.getByRole('textbox', { name: 'Search orders, users, vendors' }).getAttribute('placeholder')).toBe('Search');
+  it('uses a concise search control with a descriptive accessible label [MC shell: the ⌘K palette]', async () => {
+    const { user } = renderWithQuery(<SearchLauncher />);
+    await user.click(screen.getByRole('button', { name: /Search everything/ }));
+    const box = screen.getByRole('combobox', { name: 'Search everything' });
+    expect(box.getAttribute('placeholder')).toBe('Search orders, people, businesses — or go to a screen');
   });
 });
 function documentGlobal() { return window.document; }

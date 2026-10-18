@@ -10,11 +10,14 @@ test files. Nothing here needs root, a network, Docker or systemd.
 """
 
 import base64
+import inspect
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
+import ssl
 import subprocess
 import tempfile
 import time
@@ -293,6 +296,7 @@ class StgDWorkerProbe(unittest.TestCase):
 
 class SeedProductionScript(unittest.TestCase):
     SHA = "a" * 40
+    OWNER_EMAIL = "owner.seed@example.invalid"
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="swift-seed-test-"))
@@ -300,6 +304,9 @@ class SeedProductionScript(unittest.TestCase):
         self.deploy = self.tmp / "deploy"
         self.deploy.mkdir()
         shutil.copy(DEPLOY / "seed-production.sh", self.deploy / "seed-production.sh")
+        # [PROD-PATH] the script reads the Compose files it runs (the shell-override guard).
+        shutil.copy(DEPLOY / "docker-compose.yml", self.deploy / "docker-compose.yml")
+        shutil.copy(DEPLOY / "docker-compose.seed.yml", self.deploy / "docker-compose.seed.yml")
         (self.deploy / ".env").write_text("PILOT_ENV=staging\n")
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
@@ -307,7 +314,7 @@ class SeedProductionScript(unittest.TestCase):
         self.log.write_text("")
         sh_shim(self.bin, "id", 'if [ "$1" = "-u" ]; then echo 1000; else exec /usr/bin/id "$@"; fi')
         sh_shim(self.bin, "git", 'echo "git $*" >> "$CALL_LOG"\ncase "$*" in *"rev-parse HEAD"*) echo "$GIT_HEAD";; esac\nexit 0')
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit "${POSTGRES_FAIL:-0}";; *config*) exit "${CONFIG_FAIL:-0}";; *build*) exit "${BUILD_FAIL:-0}";; *"run --rm --no-TTY seed"*) exit "${RUN_FAIL:-0}";; *) exit 0;; esac')
 
     def run_script(self, argv=None, **extra):
         env = os.environ.copy()
@@ -316,6 +323,8 @@ class SeedProductionScript(unittest.TestCase):
             "CALL_LOG": str(self.log),
             "GIT_HEAD": self.SHA,
             "IDENTITY": "1",
+            # The production seed's owner email (typed at its hidden prompt on a terminal).
+            "SEED_ADMIN_EMAIL": self.OWNER_EMAIL,
         })
         env.update(extra)
         return subprocess.run(
@@ -374,64 +383,48 @@ class SeedProductionScript(unittest.TestCase):
 
 
 class SeedBreakGlassCeremony(SeedProductionScript):
-    """The two-person promotion (runbook §6): SEED_SIGN_APPROVER signs one
-    approver's half and seeds nothing; SEED_PROMOTION_APPROVALS carries both
-    halves. Either needs SEED_PLAN_SECRET in the encrypted store, and the key
-    reaches the one-off container only as a FILE path — never as a value."""
+    """The two-person ceremony (runbook §6b): approvals are signatures by the
+    approvers' OWN keys; the server only pins their public keys
+    (SEED_APPROVER_KEYS), which reach the one-off container only as a FILE.
+    [PROD-PATH] There is no server-side signing mode and no shared key."""
 
     def setUp(self):
         super().setUp()
-        # The store lists names only; sudo -n runs the named tool; systemctl is logged.
         sh_shim(self.bin, "swift-secrets", 'echo "swift-secrets $*" >> "$CALL_LOG"\n[ "$1" = list ] && echo "$STORE_NAMES"\nexit 0')
         sh_shim(self.bin, "sudo", '[ "$1" = -n ] && shift\nexec "$@"')
         sh_shim(self.bin, "systemctl", 'echo "systemctl $*" >> "$CALL_LOG"\nexit 0')
-        # The container run records which ceremony variables reached it.
-        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV file=[$SEED_PLAN_SECRET_FILE] signer=[$SEED_SIGN_APPROVER] approvals=[$SEED_PROMOTION_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) [ "$IDENTITY" = 1 ] && echo "1:staging"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV keys=[$SEED_APPROVER_KEYS_FILE] promotion=[$SEED_PROMOTION_APPROVALS] plan=[$SEED_PLAN_APPROVALS]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
 
-    def test_sign_mode_refuses_without_the_key_in_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
+    def test_approvals_refuse_without_the_pinned_keys_in_the_store(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS="[]", STORE_NAMES="JWT_SECRET OTP_HASH_SECRET")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_PLAN_SECRET", result.stderr)
+        self.assertIn("SEED_APPROVER_KEYS", result.stderr)
         self.assertNotIn("run --rm", self.log.read_text())
 
-    def test_sign_mode_refuses_a_malformed_approver_name(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="Owner Name", STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("SEED_SIGN_APPROVER", result.stderr)
-        self.assertNotIn("run --rm", self.log.read_text())
-
-    def test_sign_mode_passes_the_key_only_as_a_file_and_materializes_the_store(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SIGN_APPROVER="owner", STORE_NAMES="JWT_SECRET SEED_PLAN_SECRET")
+    def test_the_promotion_carries_both_lines_and_the_keys_file(self):
+        approvals = '[{"approver":"owner","request":"cg==","signature":"ab"},{"approver":"coordinator","request":"cg==","signature":"cd"}]'
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertIn("systemctl restart swift-secrets.service", calls)
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[owner]", calls)
-        self.assertEqual(calls.count("run --rm --no-TTY seed"), 1)
-
-    def test_the_promotion_carries_both_halves_and_the_key_file(self):
-        approvals = '[{"approver":"owner","signature":"ab"},{"approver":"coordinator","signature":"cd"}]'
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_PROMOTION_APPROVALS=approvals, STORE_NAMES="SEED_PLAN_SECRET")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.log.read_text()
-        self.assertIn("ENV file=[/run/secrets/SEED_PLAN_SECRET] signer=[]", calls)
+        self.assertIn("ENV keys=[/run/secrets/SEED_APPROVER_KEYS]", calls)
         self.assertIn('"approver":"coordinator"', calls)
 
     def test_an_ordinary_seed_leaves_the_ceremony_off(self):
-        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_PLAN_SECRET")
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", STORE_NAMES="SEED_APPROVER_KEYS")
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
-        self.assertIn("ENV file=[] signer=[] approvals=[]", calls)
+        self.assertIn("ENV keys=[] promotion=[] plan=[]", calls)
         self.assertNotIn("swift-secrets", calls)
         self.assertNotIn("systemctl", calls)
 
     def test_the_compose_override_wires_the_ceremony_with_empty_defaults(self):
         override = (DEPLOY / "docker-compose.seed.yml").read_text()
-        for line in ("SEED_PLAN_SECRET_FILE: ${SEED_PLAN_SECRET_FILE:-}",
+        for line in ("SEED_APPROVER_KEYS_FILE: ${SEED_APPROVER_KEYS_FILE:-}",
                      "SEED_PROMOTION_APPROVALS: ${SEED_PROMOTION_APPROVALS:-}",
-                     "SEED_SIGN_APPROVER: ${SEED_SIGN_APPROVER:-}"):
+                     "SEED_PLAN_APPROVALS: ${SEED_PLAN_APPROVALS:-}"):
             self.assertIn(line, override)
-        # The key is never a plain value anywhere in the ceremony's files.
-        self.assertIsNone(re.search(r"(?m)^\s*SEED_PLAN_SECRET\s*[:=]", override))
+        self.assertIsNone(re.search(r"SEED_PLAN_SECRET|SEED_SIGN_", override))
 
     def test_the_seed_runs_in_the_stacks_posture_never_an_unset_one(self):
         # The promotion calls isProduction() (seedFxRate); runtime-mode refuses
@@ -444,7 +437,137 @@ class SeedBreakGlassCeremony(SeedProductionScript):
         self.assertIn("NODE_ENV: ${NODE_ENV:?", stack)
         self.assertNotIn("${NODE_ENV:-", override)
         self.assertIn("SEED_FX_GYD_PER_USD: ${SEED_FX_GYD_PER_USD:-}", override)
-        self.assertNotIn("SEED_PLAN_SECRET=", (DEPLOY / "seed-production.sh").read_text())
+        self.assertNotIn("SEED_APPROVER_KEYS=", (DEPLOY / "seed-production.sh").read_text())
+
+
+class SeedSoloCeremony(SeedBreakGlassCeremony):
+    """[SOLO SEED] Owner ruling 13 Oct: while there is no second admin, the
+    production seed that mints the first SUPER_ADMIN may be approved by ONE
+    pinned person after a 12-hour cooling-off (enforced by the seed itself,
+    seed-solo.test.ts). The script passes SEED_SOLO through, exactly 1 or
+    unset, and only on the production host."""
+
+    def production(self):
+        (self.deploy / ".env").write_text("PILOT_ENV=production\nNODE_ENV=production\n")
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in "context show") echo default;; *"exec -T postgres"*) echo "1:production"; exit 0;; *"run --rm --no-TTY seed"*) echo "ENV solo=[$SEED_SOLO] plan=[$SEED_PLAN_APPROVALS] email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG"; exit 0;; *) exit 0;; esac')
+
+    def test_solo_reaches_the_seed_container_on_production(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[1] plan=[]", self.log.read_text())
+
+    def test_without_solo_the_container_sees_none(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ENV solo=[] plan=[]", self.log.read_text())
+
+    def test_solo_is_the_production_ceremony_only(self):
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_SOLO="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("SEED_SOLO is for the production seed ceremony only", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_solo_is_exactly_1_or_unset(self):
+        self.production()
+        for value in ("yes", "true", "0", " 1", "2"):
+            with self.subTest(value=value):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_SOLO must be exactly 1", result.stderr)
+                self.assertNotIn("run --rm", self.log.read_text())
+
+    # [OWNER EMAIL] Opus money review 14 Oct, S2-L: the app's solo approval
+    # emails the owner and no shipped client can add an admin email, so the
+    # production seed takes it (personal data: a hidden prompt, never an
+    # argument, never printed) and hands it to the seed through the environment.
+    def test_production_hands_the_owner_email_to_the_seed_and_never_prints_it(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_SOLO="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text()
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", calls)   # the container's environment
+        argv = "\n".join(l for l in calls.splitlines() if l.startswith("docker "))
+        self.assertNotIn(self.OWNER_EMAIL, argv)                # never on a command line
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_production_without_the_owner_email_refuses_before_anything_runs(self):
+        self.production()
+        result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL="")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("the production seed needs the owner's admin email", result.stderr)
+        self.assertNotIn("docker", self.log.read_text())
+
+    def test_a_value_that_is_not_an_email_is_refused_and_not_shown(self):
+        self.production()
+        for bad in ("owner", "owner@example", "own er@example.invalid", "@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn(bad, result.stdout + result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_an_address_outside_plain_ascii_is_refused_and_not_shown(self):
+        # [SECREVIEW 14 Oct] The approver reads the domain exactly: nothing
+        # invisible, right-to-left or look-alike may pass, and no second line.
+        self.production()
+        for bad in ("owner@exa\u200bmple.invalid", "owner@\u202ednalavni.elpmaxe", "owner@ex\u0430mple.invalid",
+                    "own\u00e9r@example.invalid", "owner@example.invalid\nx@example.invalid"):
+            with self.subTest(bad=bad):
+                self.log.write_text("")
+                result = self.run_script(SEED_ADMIN_PHONE="+5920400001", SEED_FX_GYD_PER_USD="209", SEED_ADMIN_EMAIL=bad)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("SEED_ADMIN_EMAIL is not an email address (it is not shown)", result.stderr)
+                self.assertNotIn("docker", self.log.read_text())
+
+    def test_on_a_terminal_the_email_is_typed_at_a_hidden_prompt(self):
+        import pty
+        self.production()
+        import threading
+        main, sub = pty.openpty()
+        self.addCleanup(os.close, main)
+        # `read -s` resets the terminal and may drop input typed before it, so
+        # the "owner" keeps typing the line until the script has finished.
+        done = threading.Event()
+        def type_it():
+            while not done.wait(0.3):
+                try:
+                    os.write(main, f"{self.OWNER_EMAIL}\n".encode())
+                except OSError:
+                    return
+        typist = threading.Thread(target=type_it, daemon=True)
+        typist.start()
+        self.addCleanup(done.set)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "SEED_ADMIN_PHONE": "+5920400001", "SEED_FX_GYD_PER_USD": "209"})
+        env.pop("SEED_ADMIN_EMAIL", None)
+        try:
+            result = subprocess.run(["bash", str(self.deploy / "seed-production.sh"), self.SHA], env=env, stdin=sub,
+                                    text=True, capture_output=True, timeout=20)
+        finally:
+            os.close(sub)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The owner's admin email (typed, not shown): ", result.stderr)
+        self.assertIn(f"email=[{self.OWNER_EMAIL}]", self.log.read_text())
+        self.assertNotIn(self.OWNER_EMAIL, result.stdout + result.stderr)
+
+    def test_staging_never_asks_and_hands_the_seed_no_email(self):
+        sh_shim(self.bin, "docker", 'echo "docker $*" >> "$CALL_LOG"\ncase "$*" in *"exec -T postgres"*) echo "1:staging";; *"run --rm --no-TTY seed"*) echo "ENV email=[$SEED_ADMIN_EMAIL]" >> "$CALL_LOG";; esac\nexit 0')
+        result = self.run_script(SEED_ADMIN_PHONE="+5925559001")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("admin email", result.stderr)
+        self.assertIn("ENV email=[]", self.log.read_text())
+
+    def test_the_compose_override_passes_the_owner_email_with_an_empty_default(self):
+        self.assertIn("SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
+
+    def test_the_compose_override_passes_solo_with_an_empty_default(self):
+        self.assertIn("SEED_SOLO: ${SEED_SOLO:-}", (DEPLOY / "docker-compose.seed.yml").read_text())
 
 
 
@@ -469,7 +592,12 @@ def caddy_render(text: str, env: dict) -> str:
 
 
 def top_level_blocks(rendered: str):
-    """[addresses, body lines] for every top-level block of a rendered Caddyfile."""
+    """[addresses, body lines] for every top-level SITE block of a rendered
+    Caddyfile. The file opens with Caddy's global options block (the log filter
+    that keeps credentials out of proxy-failure logs, #1435, then the one
+    certificate issuer, CERT-ISSUER); having no address,
+    it is no site and is left out. Only the FIRST block may be address-less:
+    any later one is a site that lost its address, and is returned as such."""
     blocks, depth = [], 0
     for raw in rendered.splitlines():
         line = raw.split("#", 1)[0].strip()
@@ -484,6 +612,10 @@ def top_level_blocks(rendered: str):
         depth += line.count("{") - line.count("}")
         if depth > 0:
             blocks[-1][1].append(line)
+    if blocks and not blocks[0][0]:
+        global_options = blocks.pop(0)[1]
+        if not global_options or global_options[0] != "log {":
+            raise AssertionError(f"the global options block holds more than the log filter: {global_options!r}")
     return blocks
 
 
@@ -495,6 +627,86 @@ def dockerfile_stages(path: Path) -> dict:
         if head:
             stages[head.group(1)] = chunk
     return stages
+
+
+class SeedApproveTypedEmail(unittest.TestCase):
+    """[SECREVIEW S4 · 14 Oct] deploy/seed-approve.sh on the approver's own
+    terminal: the admin email he types decides. SEED_APPROVE_EMAIL (the test
+    suites' stand-in) never overrides what is typed on a terminal."""
+
+    EMAIL = "owner.seed@example.invalid"
+
+    def setUp(self):
+        if shutil.which("ssh-keygen") is None:
+            self.skipTest("ssh-keygen is needed to sign")
+        self.tmp = Path(tempfile.mkdtemp(prefix="swift-approve-tty-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.key = self.tmp / "owner"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(self.key), "-C", "owner"], check=True)
+        digest = __import__("hashlib").sha256(self.EMAIL.encode()).hexdigest()
+        self.request = "\n".join([
+            "swift-seed-approval v2", "kind: plan", "target: " + "a" * 64, "subject: " + "b" * 64,
+            "admin: phone-sha256:" + "c" * 64, "issued: 2026-10-14T00:00:00.000Z", "expires: 2026-10-16T00:00:00.000Z",
+            "nonce: " + "d" * 32, "database: swift on postgres, deployment dep-x (production)",
+            "config: v1 (0123456789abcdef), 0 changes, FX 209 GYD per USD",
+            "admin phone: ending 0001 becomes the first SUPER_ADMIN if there is none",
+            f"admin email: o\u2026@example.invalid (sha256 {digest}) is set on that account if it has no email",
+            "end"]) + "\n"
+
+    def approve_on_a_terminal(self, typed_email, **env_extra):
+        import fcntl, pty, select, signal
+        req = self.tmp / "request.txt"
+        req.write_text(self.request)
+        env = {"PATH": os.environ["PATH"], "HOME": str(self.tmp), **env_extra}
+        pid, fd = pty.fork()
+        if pid == 0:  # the approver's shell: the request on stdin, the terminal for typing
+            os.execvpe("bash", ["bash", "-c", 'exec bash "$0" owner "$1" < "$2"', str(DEPLOY / "seed-approve.sh"), str(self.key), str(req)], env)
+        fcntl.fcntl(fd, fcntl.F_SETFL, os.O_NONBLOCK)  # never block on a full terminal
+        out, said_yes, typed, next_type, deadline = b"", False, 0, 0.0, time.monotonic() + 30
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.3)
+            if ready:
+                try:
+                    chunk = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+            try:
+                if not said_yes and b"Type yes to sign: " in out:
+                    os.write(fd, b"yes\n")
+                    said_yes = True
+                elif b"Type the admin email" in out and typed < 5 and time.monotonic() >= next_type:
+                    # read -s may drop what was typed before it switched echo
+                    # off: type a moment after the prompt, and again if unread.
+                    if typed or next_type:
+                        os.write(fd, typed_email.encode() + b"\n")
+                        typed += 1
+                    next_type = time.monotonic() + (2.0 if typed else 0.5)
+            except OSError:
+                pass
+        for _ in range(50):
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return os.waitstatus_to_exitcode(status), out.decode("utf-8", "replace")
+
+    def test_the_typed_address_decides_even_with_the_stand_in_set(self):
+        code, out = self.approve_on_a_terminal("other.person@example.invalid", SEED_APPROVE_EMAIL=self.EMAIL)
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("not the address you typed; nothing signed", out)
+        self.assertNotIn('{"approver":', out)
+
+    def test_the_right_address_typed_on_the_terminal_signs(self):
+        code, out = self.approve_on_a_terminal(self.EMAIL)
+        self.assertEqual(code, 0, out)
+        self.assertIn('{"approver":"owner"', out)
 
 
 class Q11WebsiteCompose(unittest.TestCase):
@@ -518,9 +730,12 @@ class Q11WebsiteCompose(unittest.TestCase):
         self.assertIn("dockerfile: apps/web/Dockerfile", web)
         self.assertIn("image: swift-web:${SWIFT_TAG:-local}", web)
         self.assertIn("NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}", web)
-        self.assertIn("SWIFT_WEB_CHANNEL: staging", web)
+        self.assertIn("SWIFT_WEB_CHANNEL: ${SWIFT_WEB_CHANNEL:-staging}", web)
         # Unfilled company details stay refused unless the operator says otherwise.
         self.assertIn("NEXT_PUBLIC_ALLOW_SITE_TOKENS: ${WEB_ALLOW_SITE_TOKENS:-}", web)
+        # [WEB-TILES] The MapTiler browser key (public, domain-restricted) reaches the
+        # build from deploy/.env's WEB_MAPTILER_KEY; unset, the site draws no map tiles.
+        self.assertIn("NEXT_PUBLIC_MAPTILER_KEY: ${WEB_MAPTILER_KEY:-}", web)
 
     def test_the_website_has_a_memory_ceiling_that_v8_collects_below(self):
         web = self.web()
@@ -567,10 +782,22 @@ class Q11WebsiteRenderedByCompose(unittest.TestCase):
         web = model["services"]["web"]
         self.assertNotIn("ports", web)
         self.assertEqual(list((web.get("networks") or {}).keys()), ["private"])
-        self.assertEqual(sorted((web.get("environment") or {}).keys()), ["NODE_OPTIONS"])
+        # [S1] Besides its memory limit, the site's settings are the public
+        # site's pre-launch switch, read while it runs (closed unless WEB_ORDERING=live),
+        # and [#1608] the Android signing fingerprint it publishes in
+        # /.well-known/assetlinks.json: a public value, empty unless deploy/.env sets it.
+        # No other setting, and never a settings file, reaches the website.
+        self.assertEqual(sorted((web.get("environment") or {}).keys()),
+                         ["ANDROID_CERT_SHA256", "NODE_OPTIONS", "SWIFT_WEB_ORDERING"])
+        self.assertEqual(web["environment"]["SWIFT_WEB_ORDERING"], "")
+        self.assertEqual(web["environment"]["ANDROID_CERT_SHA256"], "")
+        self.assertNotIn("env_file", web)
+        self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web["build"]["args"])
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_API_URL"], "https://api-staging.example.invalid")
         self.assertEqual(web["build"]["args"]["SWIFT_WEB_CHANNEL"], "staging")
         self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_ALLOW_SITE_TOKENS"], "1")
+        # [WEB-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so no tiles (never OpenStreetMap's).
+        self.assertEqual(web["build"]["args"]["NEXT_PUBLIC_MAPTILER_KEY"], "")
         self.assertEqual(model["services"]["caddy"]["environment"]["WEB_HOST"], "staging.example.invalid")
         # pilot-up's isolation check passes with the website in the model.
         check = subprocess.run(
@@ -610,18 +837,58 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
         # [STORE-1] The optional API alias sits with the API host, before the website.
         # [Item 8] The optional website aliases follow the website's own name.
         # [ADMIN-CONSOLE] The optional admin console's name follows them.
+        # [WEB-GATE] The website's password gate names WEB_HOST in its own
+        # matcher, beside a reserved name, so it is never argument-less; the
+        # API/website split still keys on the API host alone.
+        # [WEB-GATE-SW] The retiring worker and the refusal page name it the
+        # same way.
         self.assertEqual([line for line in code if "$WEB_HOST" in line],
-                         ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {"])
+                         ["{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {",
+                          "@web_refused host {$WEB_HOST} web.invalid",
+                          "host {$WEB_HOST} web.invalid",
+                          "host {$WEB_HOST} web.invalid"])
         body = "\n".join(self.blocks(API_HOST=API_HOST, WEB_HOST=WEB_HOST)[0][1])
         self.assertRegex(
             body,
             re.escape(f"@api host {API_HOST}") + r"\nhandle @api \{\n@metrics path /metrics\nrespond @metrics 403\n"
-            r"reverse_proxy api:3000\n\}\nhandle \{\nreverse_proxy web:3000\n\}",
+            r"reverse_proxy api:3000\n\}\n",
         )
+        # Every host that is not the API's (or the console's) is the website:
+        # its catch-all route stays last.
+        self.assertTrue(body.endswith("\nhandle {\nreverse_proxy web:3000\n}"), body)
 
     def test_the_website_keeps_its_own_security_headers(self):
         # next.config.ts sets them; the proxy neither duplicates nor overrides any.
-        self.assertNotRegex(self.TEXT, r"(?m)^\s*header\b")
+        # [WEB-GATE-SW] The only `header` lines set the two fixed answers the
+        # proxy makes itself (the retiring worker and the refusal page), which
+        # never carry a response from the website.
+        code = code_lines(self.TEXT)
+        fixed = block_from(code, "handle @web_retire_worker {") + block_from(code, "handle @web_refused {")
+        headers = [line for line in code if line.startswith("header ")]
+        self.assertEqual(len(headers), 7)
+        self.assertTrue(all(line in fixed for line in headers), headers)
+        for route in ("handle @admin {", "handle @api {", "handle @web_gate {"):
+            with self.subTest(route=route):
+                self.assertFalse(any(line.startswith("header ") for line in block_from(code, route)))
+
+
+def with_global_options(text: str, options: str) -> str:
+    """The Caddyfile with test-only global options added to its own global
+    options block, which must open the file (Caddy refuses a second one).
+    [CERT-ISSUER] When the test options choose Caddy's own local CA
+    (local_certs: the live tests run with no network), the file's production
+    issuer line is taken out, exactly once: an explicit cert_issuer outranks
+    local_certs, so the test Caddy would wait on Let's Encrypt forever. The
+    production issuer itself is held by CertificateIssuerRenderedByCaddy and
+    caddy-cert-issuer.test.ts."""
+    if not text.startswith("{\n"):
+        raise AssertionError("the Caddyfile must open with its global options block")
+    if "local_certs" in options.split():
+        production_issuer = f"    cert_issuer acme {LETS_ENCRYPT_DIRECTORY}\n"
+        if text.count(production_issuer) != 1:
+            raise AssertionError("the Caddyfile must name its production certificate issuer exactly once")
+        text = text.replace(production_issuer, "", 1)
+    return "{\n" + options + text[len("{\n"):]
 
 
 def caddy_image_present() -> bool:
@@ -629,6 +896,106 @@ def caddy_image_present() -> bool:
         return False
     probe = subprocess.run(["docker", "image", "inspect", "caddy:2.10"], capture_output=True, timeout=30)
     return probe.returncode == 0
+
+
+# How long a live test waits for its Caddy to answer. On a cold CI runner,
+# starting the container and issuing the local certificates for every site name
+# once took longer than the old fixed 60 x 0.5 s poll (main CI, 14 Oct: "the test
+# Caddy never answered" after ~34 s, then green on a re-run). The bound is wall
+# time, not a count of attempts, so a slow probe cannot shorten it.
+CADDY_READY_SECONDS = 120
+
+
+def container_state(name: str) -> str:
+    """'running exit=0', 'exited exit=1', ... or '' when Docker cannot say."""
+    probe = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} exit={{.State.ExitCode}}", name],
+                           text=True, capture_output=True, timeout=30)
+    return probe.stdout.strip() if probe.returncode == 0 else ""
+
+
+def container_log_tail(name: str) -> str:
+    """The end of the test Caddy's own log (it holds no secret: the test hashes
+    are of throwaway passwords), so a failure says why it did not answer."""
+    out = subprocess.run(["docker", "logs", "--tail", "30", name], text=True, capture_output=True, timeout=30)
+    return (out.stdout + out.stderr)[-3000:]
+
+
+def wait_for_test_caddy(case: unittest.TestCase, name: str, ready, *, deadline_s: float = CADDY_READY_SECONDS,
+                        clock=time.monotonic, sleep=time.sleep, state=container_state, logs=container_log_tail) -> None:
+    """Poll ready() until it says the test Caddy answers. What "answers" means is
+    the caller's own unchanged check (the API's /metrics refusing with 403); this
+    only decides how long to wait. A container that has stopped is reported at
+    once with its exit code and log; one that never answers is reported at the
+    deadline with the same detail."""
+    end = clock() + deadline_s
+    while True:
+        if ready():
+            return
+        status = state(name)
+        if status.split(" ", 1)[0] in ("exited", "dead"):
+            case.fail(f"the test Caddy stopped before it answered ({status})\n{logs(name)}")
+        if clock() >= end:
+            case.fail(f"the test Caddy never answered within {deadline_s:g} s ({status or 'state unknown'})\n{logs(name)}")
+        sleep(0.5)
+
+
+class LiveCaddyReadinessWait(unittest.TestCase):
+    """The live tests' readiness wait, with a fake clock (no Docker needed)."""
+
+    class Clock:
+        def __init__(self):
+            self.now = 1000.0
+            self.sleeps = 0
+
+        def __call__(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps += 1
+            self.now += seconds
+
+    def wait(self, ready, state=lambda name: "running exit=0", **kw):
+        clock = self.Clock()
+        wait_for_test_caddy(self, "caddy-x", ready, clock=clock, sleep=clock.sleep, state=state,
+                            logs=lambda name: f"log of {name}", **kw)
+        return clock
+
+    def test_a_caddy_that_needs_40_seconds_on_a_cold_runner_is_waited_for(self):
+        clock = self.Clock()
+        ready_at = clock.now + 40          # longer than the old fixed ~30 s poll
+        wait_for_test_caddy(self, "caddy-x", lambda: clock.now >= ready_at, clock=clock, sleep=clock.sleep,
+                            state=lambda name: "running exit=0", logs=lambda name: "")
+        self.assertGreaterEqual(clock.now, ready_at)
+        self.assertEqual(clock.sleeps, 80)
+
+    def test_a_ready_caddy_is_not_waited_on(self):
+        self.assertEqual(self.wait(lambda: True).sleeps, 0)
+
+    def test_one_that_never_answers_fails_at_the_deadline_with_its_state_and_log(self):
+        with self.assertRaises(AssertionError) as caught:
+            self.wait(lambda: False)
+        message = str(caught.exception)
+        self.assertIn("the test Caddy never answered within 120 s (running exit=0)", message)
+        self.assertIn("log of caddy-x", message)
+
+    def test_a_stopped_container_fails_at_once_with_its_exit_code_and_log(self):
+        for status in ("exited exit=1", "dead exit=137"):
+            with self.subTest(status=status):
+                clock = self.Clock()
+                with self.assertRaises(AssertionError) as caught:
+                    wait_for_test_caddy(self, "caddy-x", lambda: False, clock=clock, sleep=clock.sleep,
+                                        state=lambda name: status, logs=lambda name: "Error: loading config")
+                self.assertIn(f"the test Caddy stopped before it answered ({status})", str(caught.exception))
+                self.assertIn("Error: loading config", str(caught.exception))
+                self.assertEqual(clock.sleeps, 0)
+
+    def test_every_live_serve_waits_through_it_and_keeps_its_own_readiness_check(self):
+        # This class names the strings it counts, so it is cut out of the text first.
+        source = Path(__file__).read_text().replace(inspect.getsource(LiveCaddyReadinessWait), "")
+        self.assertNotIn("for _ in range(60):", source)
+        self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
+        self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
+        self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -665,6 +1032,36 @@ class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
         self.assertIn('"dial": "api:3000"', config)
 
 
+LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory"
+
+
+@unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
+class CertificateIssuerRenderedByCaddy(unittest.TestCase):
+    """[CERT-ISSUER] The apps pin api.swiftgy.com to the Let's Encrypt roots (ISRG Root X1 and X2;
+    GTS Root R1 is the backup pin, apps/mobile/app.config.ts and plugins/withTlsPinning.js). Caddy's
+    built-in issuers can fall back to another CA whose chain is outside that pin set, so the
+    Caddyfile names its only issuer. Whatever names are set, the config Caddy actually runs must
+    carry exactly that issuer and nothing else."""
+
+    caddy = Q11WebsiteCaddyfileRenderedByCaddy.caddy
+
+    def test_every_host_combination_validates_and_carries_only_lets_encrypt(self):
+        for env in (
+            {"API_HOST": API_HOST},
+            {"API_HOST": API_HOST, "API_ALIAS_HOST": "", "WEB_HOST": "", "WEB_ALIAS_HOSTS": "", "ADMIN_HOST": ""},
+            {"API_HOST": API_HOST, "API_ALIAS_HOST": ALIAS_HOST, "WEB_HOST": WEB_HOST,
+             "WEB_ALIAS_HOSTS": PUBLIC_ALIASES, "ADMIN_HOST": ADMIN_HOST},
+        ):
+            with self.subTest(env=env):
+                self.caddy("validate", env)
+                config = json.loads(self.caddy("adapt", env))
+                policies = config.get("apps", {}).get("tls", {}).get("automation", {}).get("policies", [])
+                self.assertTrue(policies, "no certificate issuer is named: Caddy would use its built-in issuers")
+                for policy in policies:
+                    self.assertEqual(policy.get("issuers"), [{"module": "acme", "ca": LETS_ENCRYPT_DIRECTORY}])
+                self.assertNotIn("zerossl", json.dumps(config).lower())
+
+
 class Q11WebsiteDockerfile(unittest.TestCase):
     def setUp(self):
         self.stages = dockerfile_stages(WEB_DOCKERFILE)
@@ -680,7 +1077,7 @@ class Q11WebsiteDockerfile(unittest.TestCase):
 
     def test_the_api_origin_and_channel_are_build_args_of_the_building_stage(self):
         build_step = self.build.index("RUN pnpm run build")
-        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS"):
+        for arg in ("NEXT_PUBLIC_API_URL", "SWIFT_WEB_CHANNEL", "NEXT_PUBLIC_ALLOW_SITE_TOKENS", "NEXT_PUBLIC_MAPTILER_KEY"):
             declared = re.search(rf"(?m)^ARG {arg}$", self.build)
             self.assertIsNotNone(declared, f"{arg} must be a build ARG with no baked-in default")
             self.assertLess(declared.start(), build_step, arg)
@@ -832,7 +1229,8 @@ class Q11PilotUpWebsite(unittest.TestCase):
         site_probe = self.first(calls, f"--resolve {WEB_HOST}:443:127.0.0.1")
         self.assertLess(started, site_probe)
         self.assertIn(f"https://{WEB_HOST}/", calls[site_probe])
-        self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA})", result.stdout)
+        # [WEB-GATE] The ready line also says whether the password gate is on.
+        self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA}; password gate off)", result.stdout)
         self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
 
     def test_a_malformed_web_host_is_refused_before_anything_changes(self):
@@ -1213,7 +1611,13 @@ class AdminConsoleCaddyfile(unittest.TestCase):
             "}",
         ])
         # Nowhere else: the API and the website never sit behind the console's gate.
-        self.assertEqual(sum(line.startswith("basic_auth") for line in code), 1)
+        # [WEB-GATE] The only other basic_auth is the website's own password,
+        # inside the website's gated route (its own tests below); the API's
+        # route has none.
+        self.assertEqual([line for line in code if line.startswith("basic_auth")],
+                         ["basic_auth @admin_gate {", "basic_auth {"])
+        self.assertIn("basic_auth {", block_from(code, "handle @web_gate {"))
+        self.assertNotIn("basic_auth", " ".join(block_from(code, "handle @api {")))
         self.assertEqual(sum("ADMIN_BASIC_AUTH" in line for line in code), 2)
 
     def test_no_password_hash_is_written_into_the_repository(self):
@@ -1226,10 +1630,12 @@ class AdminConsoleCaddyfile(unittest.TestCase):
 class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     """The real Caddyfile through the stack's pinned Caddy (no network, no pull)."""
 
-    # Live runs only: a test-only global block swaps ACME for Caddy's own local
+    # Live runs only: test-only global options swap ACME for Caddy's own local
     # CA (nothing leaves the container), and a stand-in on :3000 answers for
-    # the console and echoes any Authorization header that reaches it.
-    LIVE_PREFIX = "{\n    local_certs\n    skip_install_trust\n    admin off\n}\n"
+    # the console and echoes any Authorization header that reaches it. Caddy
+    # takes ONE global options block, first in the file, and the file opens
+    # with its own (the log filter), so the options join that block.
+    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n"
     STAND_IN = '\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}]" 200\n}\n'
 
     @classmethod
@@ -1298,7 +1704,8 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     def serve(self, env) -> str:
         tmp = Path(tempfile.mkdtemp(prefix="swift-admin-caddy-test-"))
         self.addCleanup(shutil.rmtree, tmp, True)
-        (tmp / "Caddyfile").write_text(self.LIVE_PREFIX + (DEPLOY / "Caddyfile").read_text() + self.STAND_IN)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS)
+                                       + self.STAND_IN)
         name = f"swift-admin-caddy-test-{secrets.token_hex(4)}"
         args = ["docker", "run", "-d", "--name", name, "--network", "none"]
         for host in (API_HOST, ADMIN_HOST, "admin"):
@@ -1310,11 +1717,8 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        for _ in range(60):
-            if self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403:
-                return name
-            time.sleep(0.5)
-        self.fail("the test Caddy never answered")
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
 
     @staticmethod
     def fetch(name, url, credential=None):
@@ -1422,7 +1826,8 @@ if argv[:1] == ["inspect"]:
     if "ExitCode" in fmt:
         print("exited 0")
     elif "Health" in fmt:
-        print(os.environ.get("ADMIN_HEALTH", "healthy") if target == "admin-id" else "healthy")
+        # <SERVICE>_HEALTH answers for <service>-id (ADMIN_HEALTH, WEB_HEALTH); healthy otherwise.
+        print(os.environ.get(target[:-len("-id")].upper() + "_HEALTH", "healthy") if target.endswith("-id") else "healthy")
     else:
         print("running")
     sys.exit(0)
@@ -1655,7 +2060,10 @@ class AdminConsoleDocs(unittest.TestCase):
 
     def test_the_runbook_says_how_the_owner_becomes_an_admin_without_skipping_the_two_person_rule(self):
         section = self.section()
-        for needle in ("6b", "SEED_SIGN_APPROVER", "SEED_PROMOTION_APPROVALS", "two different people"):
+        # Each approver signs the printed request with their own key on their
+        # own machine (deploy/seed-approve.sh); no private key reaches the server.
+        for needle in ("6b", "deploy/seed-approve.sh", "with their own key", "SEED_PROMOTION_APPROVALS",
+                       "two different people", "no private key"):
             self.assertIn(needle, section)
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):
@@ -1742,15 +2150,766 @@ class PublicSiteWebAliasHosts(unittest.TestCase):
         caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
         self.assertIn("WEB_ALIAS_HOSTS: ${WEB_ALIAS_HOSTS:-}", caddy)
 
-    def test_the_website_build_takes_the_pre_launch_switch_closed_by_default(self):
+    def test_the_website_reads_the_pre_launch_switch_at_run_time_closed_by_default(self):
+        # [S1] The switch is the running site's own environment, never a build
+        # argument: flipping it recreates the container, it never rebuilds it.
         web = service_block(DEPLOY / "docker-compose.yml", "web")
-        self.assertIn("NEXT_PUBLIC_WEB_ORDERING: ${WEB_ORDERING:-}", web)
-        self.assertIn("ARG NEXT_PUBLIC_WEB_ORDERING", dockerfile_stages(WEB_DOCKERFILE)["build"])
+        self.assertIn("SWIFT_WEB_ORDERING: ${WEB_ORDERING:-}", web)
+        self.assertNotIn("NEXT_PUBLIC_WEB_ORDERING", web)
+        self.assertNotRegex(dockerfile_stages(WEB_DOCKERFILE)["build"], r"(?m)^ARG \S*WEB_ORDERING")
 
     def test_the_example_settings_document_both_and_leave_them_empty(self):
         example = (DEPLOY / ".env.deploy.example").read_text()
         self.assertRegex(example, r"(?m)^WEB_ALIAS_HOSTS=$")
         self.assertRegex(example, r"(?m)^WEB_ORDERING=$")
+
+
+# ===========================================================================
+# [WEB-GATE] A password on the staging WEBSITE (owner ruling, 10 Oct): HTTP
+# basic authentication (user `tester`) on WEB_HOST alone, on when deploy/.env
+# sets WEB_BASIC_AUTH_HASH (a bcrypt hash: the password never reaches the
+# host), built like the admin console's gate. The public names
+# (WEB_ALIAS_HOSTS, where Apple's privacy-policy and account-deletion links
+# point), the API's names and the console's name never sit behind it. On
+# WEB_HOST two path families stay open: /pay/mmg/* (MMG sends the payer back
+# there in the middle of a payment) and /.well-known/* (the app-link files);
+# a path that climbs (`..` in any spelling) is never one of them. The gate's
+# credential is stripped before the website, on gated requests only.
+# ===========================================================================
+
+AASA = "/.well-known/apple-app-site-association"
+# A real pilot-up refusal pattern: a bcrypt hash of cost 10 or more.
+BCRYPT_SHAPE = r"^\$2[aby]\$(1[0-9]|2[0-9]|3[01])\$[./A-Za-z0-9]{53}$"
+
+
+def caddy_hash_on_stdin(password: str, cost: int) -> str:
+    """A real bcrypt hash, made the way PILOT-RUNBOOK.md 3e makes it: the
+    password reaches `caddy hash-password` on stdin, never as an argument."""
+    made = subprocess.run(["docker", "run", "--rm", "-i", "--network", "none", "caddy:2.10",
+                           "caddy", "hash-password", "--bcrypt-cost", str(cost)],
+                          input=password + "\n", text=True, capture_output=True, timeout=60)
+    if made.returncode != 0:
+        raise AssertionError(made.stderr[-300:])
+    return made.stdout.strip()
+
+
+class WebGateCompose(unittest.TestCase):
+    def test_caddy_gets_the_gate_with_an_empty_default_and_its_user_from_the_one_setting(self):
+        caddy = service_block(DEPLOY / "docker-compose.yml", "caddy")
+        self.assertIn("WEB_BASIC_AUTH_HASH: ${WEB_BASIC_AUTH_HASH:-}", caddy)
+        # The user exists exactly when the hash does: the Caddyfile keys the
+        # gate on it and cannot parse one without the other.
+        self.assertIn("WEB_BASIC_AUTH_USER: ${WEB_BASIC_AUTH_HASH:+tester}", caddy)
+        self.assertIn("ADMIN_BASIC_AUTH_USER: ${ADMIN_BASIC_AUTH_HASH:+admin}", caddy)
+
+    def test_the_website_and_the_console_never_hold_a_gate(self):
+        for service in ("web", "admin"):
+            with self.subTest(service=service):
+                self.assertNotIn("BASIC_AUTH", service_block(DEPLOY / "docker-compose.yml", service))
+
+
+@unittest.skipUnless(shutil.which("docker"), "Docker CLI not installed")
+class WebGateRenderedByCompose(unittest.TestCase):
+    """The real file, rendered by `docker compose config` (client-side; no daemon)."""
+
+    BASE = ("NODE_ENV=development\nPILOT_ENV=staging\nAPI_HOST=api-staging.example.invalid\n"
+            "WEB_HOST=staging.example.invalid\nWEB_ALLOW_SITE_TOKENS=1\n")
+    render = AdminConsoleRenderedByCompose.render  # the same renderer, over this BASE
+
+    def test_the_gate_user_exists_exactly_when_the_hash_does(self):
+        for extra, user, hashed in (("", "", ""), ("WEB_BASIC_AUTH_HASH=\n", "", ""),
+                                    (f"WEB_BASIC_AUTH_HASH={GATE_SETTING}\n", "tester", SHAPE_ONLY_HASH)):
+            with self.subTest(extra=extra):
+                env = self.render(extra)["services"]["caddy"]["environment"]
+                self.assertEqual(env["WEB_BASIC_AUTH_USER"], user)
+                # `compose config` prints a literal `$` as `$$`, so its model reads back unchanged.
+                self.assertEqual(env["WEB_BASIC_AUTH_HASH"].replace("$$", "$"), hashed)
+                # Each gate derives from its own setting alone.
+                self.assertEqual(env["ADMIN_BASIC_AUTH_USER"], "")
+
+    def test_the_website_never_receives_the_gate(self):
+        model = self.render(f"WEB_BASIC_AUTH_HASH={GATE_SETTING}\n", "--profile", "web")
+        web = model["services"]["web"]
+        self.assertEqual([name for name in (web.get("environment") or {}) if "BASIC_AUTH" in name], [])
+        self.assertNotIn(SHAPE_ONLY_HASH, json.dumps(web).replace("$$", "$"))
+        # pilot-up's isolation check passes with the gate in the model.
+        check = subprocess.run(
+            ["python3", str(DEPLOY / "verify-journeys-isolation.py"), str(DEPLOY / "Caddyfile")],
+            input=json.dumps(model), text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+
+class WebGateCaddyfile(unittest.TestCase):
+    TEXT = (DEPLOY / "Caddyfile").read_text()
+
+    def site(self, **env):
+        [[addresses, body]] = top_level_blocks(caddy_render(self.TEXT, env))
+        return addresses, [" ".join(line.split()) for line in body]
+
+    def test_the_gate_keys_on_the_website_name_and_spares_mmg_returns_and_app_links(self):
+        self.assertEqual(block_from(code_lines(self.TEXT), "@web_gate {"), [
+            "@web_gate {",
+            "host {$WEB_HOST} web.invalid",
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            "not {",
+            "path /pay/mmg/* /.well-known/*",
+            # Exempt only while the path as sent never climbs: Caddy matches the
+            # CLEANED path, and an encoded slash (%2F) would let `..` move a
+            # path into an exempt prefix that the website does not see.
+            'not expression `{http.request.orig_uri}.matches("(?i)^[^?]*([.]|%2e)([.]|%2e)")`',
+            "}",
+            "}",
+        ])
+
+    def test_the_gate_and_the_credential_strip_belong_to_the_gated_route_alone(self):
+        code = code_lines(self.TEXT)
+        self.assertEqual(block_from(code, "handle @web_gate {"), [
+            "handle @web_gate {",
+            "basic_auth {",
+            "{$WEB_BASIC_AUTH_USER} {$WEB_BASIC_AUTH_HASH}",
+            "}",
+            "reverse_proxy web:3000 {",
+            "header_up -Authorization",
+            "}",
+            "}",
+        ])
+        # The gate's matcher and its account, plus the retiring worker's
+        # matcher (it answers only while the gate is on); nothing else.
+        self.assertEqual([line for line in code if "WEB_BASIC_AUTH" in line], [
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            "{$WEB_BASIC_AUTH_USER} {$WEB_BASIC_AUTH_HASH}",
+        ])
+        self.assertIn('expression `"{$WEB_BASIC_AUTH_USER}" != ""`', block_from(code, "@web_retire_worker {"))
+        # The website's catch-all (the public names, the open paths, and every
+        # website request while the gate is off) is exactly what it was, and last.
+        self.assertEqual(code[-4:], ["handle {", "reverse_proxy web:3000", "}", "}"])
+
+    def test_no_other_name_reaches_the_gate(self):
+        gate = " ".join(block_from(code_lines(self.TEXT), "@web_gate {"))
+        for name in ("$WEB_ALIAS_HOSTS", "$API_HOST", "$API_ALIAS_HOST", "$ADMIN_HOST"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, gate)
+
+    def test_the_gate_matcher_always_has_an_argument(self):
+        # A host matcher left with no argument stops Caddy loading the WHOLE
+        # configuration, the API included; .invalid is never this site's address.
+        for env in ({"API_HOST": API_HOST}, {"API_HOST": API_HOST, "WEB_HOST": ""}):
+            with self.subTest(env=env):
+                self.assertIn("host web.invalid", self.site(**env)[1])
+        addresses, body = self.site(API_HOST=API_HOST, WEB_HOST=WEB_HOST, WEB_ALIAS_HOSTS=PUBLIC_ALIASES)
+        self.assertIn(f"host {WEB_HOST} web.invalid", body)
+        self.assertNotIn("web.invalid", addresses)
+
+    def test_routes_keep_their_order_and_the_api_and_console_routes_are_unchanged(self):
+        _, body = self.site(API_HOST=API_HOST, WEB_HOST=WEB_HOST, ADMIN_HOST=ADMIN_HOST)
+        self.assertEqual([line for line in body if line.startswith("handle")],
+                         ["handle @admin {", "handle @api {", "handle_errors 401 {", "handle @web_refused {",
+                          "handle @web_retire_worker {", "handle @web_gate {", "handle {"])
+        self.assertEqual(block_from(body, "handle @api {"),
+                         ["handle @api {", "@metrics path /metrics", "respond @metrics 403", "reverse_proxy api:3000", "}"])
+        self.assertEqual(body[-3:], ["handle {", "reverse_proxy web:3000", "}"])
+
+    def test_the_retiring_worker_answers_on_the_website_name_alone_and_only_while_the_gate_is_on(self):
+        code = code_lines(self.TEXT)
+        self.assertEqual(block_from(code, "@web_retire_worker {"), [
+            "@web_retire_worker {",
+            "host {$WEB_HOST} web.invalid",
+            'expression `"{$WEB_BASIC_AUTH_USER}" != ""`',
+            "path /sw.js",
+            "}",
+        ])
+        block = block_from(code, "handle @web_retire_worker {")
+        self.assertEqual(block[1:4], ['header Content-Type "text/javascript; charset=utf-8"',
+                                      "header Cache-Control no-store", "header X-Content-Type-Options nosniff"])
+        # A fixed answer: nothing in it reaches the website.
+        self.assertFalse(any("reverse_proxy" in line for line in block))
+
+    def test_the_retiring_worker_clears_the_sites_caches_and_unregisters_without_reloading(self):
+        script = WEB_RETIRE_WORKER(self.TEXT)
+        for needed in ("self.skipWaiting()", "caches.keys()", "name.startsWith('swift-')", "caches.delete(name)",
+                       "self.registration.unregister()"):
+            with self.subTest(needed=needed):
+                self.assertIn(needed, script)
+        # It takes no request (a fetch handler would answer pages again), and
+        # it moves no page: the site registers /sw.js on every load, so a
+        # reload or navigate would never end.
+        for absent in ("'fetch'", "clients", "navigate", "reload", "location"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, script)
+        # Braces are Caddy placeholders: the script is written without them.
+        self.assertNotIn("{", script)
+        self.assertNotIn("}", script)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not installed")
+    def test_the_retiring_worker_is_valid_javascript(self):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-retire-worker-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "sw.js").write_text(WEB_RETIRE_WORKER(self.TEXT))
+        checked = subprocess.run(["node", "--check", str(tmp / "sw.js")], text=True, capture_output=True, timeout=60)
+        self.assertEqual(checked.returncode, 0, checked.stderr[-300:])
+
+    def test_a_refusal_on_the_website_name_explains_itself_and_no_other_refusal_changes(self):
+        code = code_lines(self.TEXT)
+        block = block_from(code, "handle_errors 401 {")
+        self.assertEqual(block[:6], [
+            "handle_errors 401 {",
+            "@web_refused host {$WEB_HOST} web.invalid",
+            "handle @web_refused {",
+            'header Content-Type "text/html; charset=utf-8"',
+            "header Cache-Control no-store",
+            "header X-Content-Type-Options nosniff",
+        ])
+        self.assertEqual(block[6:], [
+            "header Content-Security-Policy \"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'\"",
+            block[7], "}", "}"])
+        page = block[7]
+        self.assertTrue(page.startswith("respond `<!doctype html>") and page.endswith("` 401"), page[:60])
+        self.assertIn("This test site needs the tester password. Reload the page to sign in.", page)
+        # Self-contained and inert: no script, no outside file, no placeholder.
+        for absent in ("<script", "src=", "href=", "http", "{", "}", "#"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, page[len("respond `"):-len("` 401")])
+
+
+def WEB_RETIRE_WORKER(text: str) -> str:
+    """The script the retiring-worker route answers with."""
+    [line] = [line for line in block_from(code_lines(text), "handle @web_retire_worker {") if line.startswith("respond `")]
+    assert line.endswith("` 200"), line[-20:]
+    return line[len("respond `"):-len("` 200")]
+
+
+@unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
+class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
+    """The real Caddyfile through the stack's pinned Caddy (no network, no pull),
+    validated, adapted and LIVE: a stand-in on :3000 answers for the website,
+    the console and the API, and echoes the Authorization header, the path and
+    the name each request reached it with."""
+
+    LIVE_OPTIONS = AdminConsoleCaddyfileRenderedByCaddy.LIVE_OPTIONS
+    STAND_IN = ('\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}] '
+                'uri=[{http.request.uri}] host=[{http.request.host}]" 200\n}\n')
+    fetch = staticmethod(AdminConsoleCaddyfileRenderedByCaddy.fetch)
+    caddy = AdminConsoleCaddyfileRenderedByCaddy.caddy
+    accounts = AdminConsoleCaddyfileRenderedByCaddy.accounts
+
+    @classmethod
+    def setUpClass(cls):
+        # Real bcrypt hashes of passwords that exist only in this process.
+        cls.web_password = secrets.token_urlsafe(18)
+        cls.admin_password = secrets.token_urlsafe(18)
+        cls.web_hash = caddy_hash_on_stdin(cls.web_password, 12)
+        cls.admin_hash = caddy_hash_on_stdin(cls.admin_password, 10)
+
+    def env(self, web_gate=True, admin_gate=True, **extra) -> dict:
+        env = {"API_HOST": API_HOST, "WEB_HOST": WEB_HOST, "WEB_ALIAS_HOSTS": PUBLIC_ALIASES, "ADMIN_HOST": ADMIN_HOST,
+               "WEB_BASIC_AUTH_USER": "tester" if web_gate else "",
+               "WEB_BASIC_AUTH_HASH": self.web_hash if web_gate else "",
+               "ADMIN_BASIC_AUTH_USER": "admin" if admin_gate else "",
+               "ADMIN_BASIC_AUTH_HASH": self.admin_hash if admin_gate else ""}
+        env.update(extra)
+        return env
+
+    def routes(self, env):
+        validated = self.caddy("validate", env)
+        self.assertEqual(validated.returncode, 0, validated.stderr[-600:])
+        adapted = self.caddy("adapt", env)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        inner = json.loads(adapted.stdout)["apps"]["http"]["servers"]["srv0"]["routes"][0]["handle"][0]["routes"]
+        [gate] = [r for r in inner if any("web.invalid" in m.get("host", []) and "path" not in m
+                                           for m in r.get("match", []))]
+        return inner, gate
+
+    def test_the_runbook_way_of_hashing_makes_a_hash_pilot_up_accepts(self):
+        self.assertRegex(self.web_hash, BCRYPT_SHAPE)
+        self.assertTrue(self.web_hash.startswith("$2a$12$"), "the runbook asks for cost 12")
+        self.assertNotIn(self.web_password, self.web_hash)
+
+    def test_without_the_gate_it_validates_and_holds_no_account(self):
+        for env in (self.env(web_gate=False), {"API_HOST": API_HOST, "WEB_HOST": WEB_HOST}):
+            with self.subTest(env=sorted(env)):
+                _, gate = self.routes(env)
+                self.assertEqual(self.accounts(gate), [])
+                self.assertEqual(gate["match"][0]["expression"]["expr"], '"" != ""')
+
+    def test_with_the_gate_the_tester_account_guards_the_website_name_alone(self):
+        inner, gate = self.routes(self.env())
+        self.assertEqual(self.accounts(gate), ["tester"])
+        [matcher] = gate["match"]
+        self.assertEqual(matcher["host"], [WEB_HOST, "web.invalid"])
+        self.assertEqual(matcher["not"][0]["path"], ["/pay/mmg/*", "/.well-known/*"])
+        handlers = gate["handle"][0]["routes"][0]["handle"]
+        self.assertEqual([h["handler"] for h in handlers], ["authentication", "reverse_proxy"])
+        self.assertEqual(handlers[1]["headers"], {"request": {"delete": ["Authorization"]}})
+        self.assertEqual(handlers[1]["upstreams"], [{"dial": "web:3000"}])
+        # The catch-all is last, unmatched, and passes requests through untouched.
+        self.assertNotIn("match", inner[-1])
+        self.assertEqual(inner[-1]["handle"][0]["routes"], [{"handle": [{"handler": "reverse_proxy",
+                                                                          "upstreams": [{"dial": "web:3000"}]}]}])
+
+    def test_with_web_host_unset_the_gate_keys_on_the_reserved_name_alone(self):
+        _, gate = self.routes({"API_HOST": API_HOST, "WEB_BASIC_AUTH_USER": "tester", "WEB_BASIC_AUTH_HASH": self.web_hash})
+        self.assertEqual(gate["match"][0]["host"], ["web.invalid"])
+
+    def test_a_half_configured_gate_refuses_to_load_rather_than_serve_the_website_ungated(self):
+        for user, hashed in (("", self.web_hash), ("tester", "")):
+            with self.subTest(user=user):
+                result = self.caddy("validate", self.env(WEB_BASIC_AUTH_USER=user, WEB_BASIC_AUTH_HASH=hashed))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("username and password cannot be empty or missing", result.stderr)
+
+    def serve(self, env) -> str:
+        tmp = Path(tempfile.mkdtemp(prefix="swift-web-gate-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS)
+                                       + self.STAND_IN)
+        name = f"swift-web-gate-caddy-test-{secrets.token_hex(4)}"
+        args = ["docker", "run", "-d", "--name", name, "--network", "none"]
+        for host in (API_HOST, WEB_HOST, *PUBLIC_ALIASES.split(), ADMIN_HOST, "api", "web", "admin"):
+            args += ["--add-host", f"{host}:127.0.0.1"]
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        args += ["-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                 "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+        started = subprocess.run(args, text=True, capture_output=True, timeout=60)
+        self.assertEqual(started.returncode, 0, started.stderr[-400:])
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        return name
+
+    def reached_website(self, out, path, host=WEB_HOST, authorization=""):
+        self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
+
+    def test_live_the_gate_keeps_strangers_off_the_website_name_and_its_credential_stops_there(self):
+        name = self.serve(self.env())
+        site = f"https://{WEB_HOST}"
+        status, out = self.fetch(name, f"{site}/")
+        self.assertEqual(status, 401, out[-300:])
+        for credential in ("tester:not-the-password", f"someone-else:{self.web_password}",
+                           f"admin:{self.admin_password}", f"admin:{self.web_password}"):
+            with self.subTest(credential=credential.split(":")[0]):
+                self.assertEqual(self.fetch(name, f"{site}/", credential)[0], 401)
+        status, out = self.fetch(name, f"{site}/", f"tester:{self.web_password}")
+        self.assertEqual(status, 200, out[-300:])
+        # The gate's credential stops at the gate: the website never receives it.
+        self.reached_website(out, "/")
+        for path in ("/orders", "/dashboard", "/weekly-fee", "/s/abc123", "/metrics", "/robots.txt",
+                     "/media/x.jpg", "/pay/mmg", "/pay", "/well-known/assetlinks.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch(name, f"{site}{path}")[0], 401)
+
+    def test_live_mmg_returns_and_app_links_reach_the_website_without_the_password(self):
+        name = self.serve(self.env())
+        for path in ("/pay/mmg/success", "/pay/mmg/error", "/pay/mmg/response",
+                     "/pay/mmg/success?token=ab%2Fcd%2B%3D%3D", "/pay/mmg/success/token=ab%2Fcd%2B==",
+                     "/pay/mmg/token=ab%2Fcd", AASA, "/.well-known/assetlinks.json"):
+            with self.subTest(path=path):
+                status, out = self.fetch(name, f"https://{WEB_HOST}{path}")
+                self.assertEqual(status, 200, out[-300:])
+                # Proxied exactly as sent, untouched.
+                self.reached_website(out, path)
+        # The gate never matched these, so nothing is stripped either.
+        status, out = self.fetch(name, f"https://{WEB_HOST}/pay/mmg/success", "anyone:anything")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/pay/mmg/success", authorization="Basic YW55b25lOmFueXRoaW5n")
+
+    def test_live_a_path_that_climbs_is_never_one_of_the_open_paths(self):
+        name = self.serve(self.env())
+        for path in ("/pay/mmg/../../dashboard", "/pay/mmg/%2e%2e/%2e%2e/dashboard", "/pay/mmg/..%2f..%2fdashboard",
+                     "/.well-known/../dashboard", "/.well-known/%2E%2E/orders",
+                     # Caddy cleans this one to /pay/mmg/a, while the website
+                     # would route it under /media: never open.
+                     "/media/x%2F..%2F..%2Fpay/mmg/a", "/media/x%2F.%2e%2F%2E.%2F.well-known/assetlinks.json"):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch(name, f"https://{WEB_HOST}{path}")[0], 401)
+
+    def test_live_the_public_names_the_api_and_the_console_are_where_they_were(self):
+        name = self.serve(self.env())
+        # The public names: open, and the catch-all passes any header through as before.
+        for host in PUBLIC_ALIASES.split():
+            with self.subTest(host=host):
+                status, out = self.fetch(name, f"https://{host}/")
+                self.assertEqual(status, 200, out[-300:])
+                self.reached_website(out, "/", host=host)
+                status, out = self.fetch(name, f"https://{host}/account/delete", "anyone:anything")
+                self.assertEqual(status, 200, out[-300:])
+                self.reached_website(out, "/account/delete", host=host, authorization="Basic YW55b25lOmFueXRoaW5n")
+        # The API: its guard and its route, no password.
+        self.assertEqual(self.fetch(name, f"https://{API_HOST}/metrics")[0], 403)
+        status, out = self.fetch(name, f"https://{API_HOST}/ready")
+        self.assertEqual(status, 200, out[-300:])
+        self.assertIn(f"uri=[/ready] host=[{API_HOST}]", out)
+        # The console: its own gate and its own password, never the website's.
+        console = f"https://{ADMIN_HOST}/login"
+        self.assertEqual(self.fetch(name, console)[0], 401)
+        self.assertEqual(self.fetch(name, console, f"tester:{self.web_password}")[0], 401)
+        status, out = self.fetch(name, console, f"admin:{self.admin_password}")
+        self.assertEqual(status, 200, out[-300:])
+        self.assertIn("authorization=[]", out)
+
+    @unittest.skipUnless(shutil.which("htpasswd"), "htpasswd is not installed")
+    def test_live_a_hash_made_with_htpasswd_opens_the_gate_too(self):
+        # The console's runbook makes its hash with htpasswd ($2y$), and the
+        # website's may be made the same way: Caddy takes it as it is.
+        password = secrets.token_urlsafe(18)
+        made = subprocess.run(["htpasswd", "-niBC", "12", "tester"], input=password + "\n",
+                              text=True, capture_output=True, timeout=60)
+        self.assertEqual(made.returncode, 0, made.stderr[-300:])
+        user, _, hashed = made.stdout.strip().partition(":")
+        self.assertEqual(user, "tester")
+        self.assertRegex(hashed, BCRYPT_SHAPE)
+        self.assertTrue(hashed.startswith("$2y$12$"))
+        name = self.serve(self.env(WEB_BASIC_AUTH_HASH=hashed))
+        self.assertEqual(self.fetch(name, f"https://{WEB_HOST}/")[0], 401)
+        self.assertEqual(self.fetch(name, f"https://{WEB_HOST}/", "tester:not-the-password")[0], 401)
+        status, out = self.fetch(name, f"https://{WEB_HOST}/", f"tester:{password}")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/")
+
+    def test_live_without_the_gate_the_website_answers_everyone_exactly_as_before(self):
+        name = self.serve(self.env(web_gate=False, admin_gate=False))
+        status, out = self.fetch(name, f"https://{WEB_HOST}/")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/")
+        status, out = self.fetch(name, f"https://{WEB_HOST}/orders", "anyone:anything")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/orders", authorization="Basic YW55b25lOmFueXRoaW5n")
+
+    def test_with_the_gate_the_retiring_worker_and_the_refusal_page_belong_to_the_website_name(self):
+        env = self.env()
+        adapted = self.caddy("adapt", env)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        server = json.loads(adapted.stdout)["apps"]["http"]["servers"]["srv0"]
+        inner = server["routes"][0]["handle"][0]["routes"]
+        [worker] = [r for r in inner if any(m.get("path") == ["/sw.js"] for m in r.get("match", []))]
+        self.assertEqual(worker["match"][0]["host"], [WEB_HOST, "web.invalid"])
+        self.assertEqual(worker["match"][0]["expression"]["expr"], '"tester" != ""')
+        # The worker comes before the gate, so it never asks for the password.
+        self.assertLess(inner.index(worker), inner.index(self.routes(env)[1]))
+        errors = json.dumps(server["errors"])
+        # Only a 401, and inside it only the website name, gets the page.
+        self.assertIn("{http.error.status_code} in [401]", errors)
+        self.assertIn('"match": [{"host": ["%s", "web.invalid"]}]' % WEB_HOST, errors)
+        self.assertEqual(errors.count('"static_response"'), 1)
+        self.assertIn("This test site needs the tester password.", errors)
+
+    def test_live_the_website_name_answers_sw_js_with_the_retiring_worker_password_or_not(self):
+        name = self.serve(self.env())
+        for path, credential in (("/sw.js", None), ("/sw.js", f"tester:{self.web_password}"),
+                                 ("/sw.js", "tester:not-the-password"), ("/x/%2e%2e/sw.js", None)):
+            with self.subTest(path=path, credential=bool(credential)):
+                status, out = self.fetch(name, f"https://{WEB_HOST}{path}", credential)
+                self.assertEqual(status, 200, out[-300:])
+                self.assertIn("self.registration.unregister()", out)
+                self.assertNotIn("authorization=[", out)
+        # The public names, and the website name with the gate off, keep the site's own worker.
+        for host in PUBLIC_ALIASES.split():
+            with self.subTest(host=host):
+                status, out = self.fetch(name, f"https://{host}/sw.js")
+                self.assertEqual(status, 200, out[-300:])
+                self.reached_website(out, "/sw.js", host=host)
+        open_site = self.serve(self.env(web_gate=False, admin_gate=False))
+        status, out = self.fetch(open_site, f"https://{WEB_HOST}/sw.js")
+        self.assertEqual(status, 200, out[-300:])
+        self.reached_website(out, "/sw.js")
+
+    def serve_on_a_local_port(self, env) -> int:
+        """The live Caddy with :443 on a loopback port, for the headers and body
+        of a refusal (the container's wget shows neither)."""
+        tmp = Path(tempfile.mkdtemp(prefix="swift-web-gate-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS)
+                                       + self.STAND_IN)
+        name = f"swift-web-gate-caddy-test-{secrets.token_hex(4)}"
+        args = ["docker", "run", "-d", "--name", name, "-p", "127.0.0.1::443"]
+        for host in ("api", "web", "admin"):
+            args += ["--add-host", f"{host}:127.0.0.1"]
+        for key, value in env.items():
+            args += ["-e", f"{key}={value}"]
+        args += ["-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                 "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+        started = subprocess.run(args, text=True, capture_output=True, timeout=60)
+        self.assertEqual(started.returncode, 0, started.stderr[-400:])
+        self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
+        mapped = subprocess.run(["docker", "port", name, "443/tcp"], text=True, capture_output=True, timeout=30)
+        port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
+        def answers() -> bool:
+            try:
+                return raw_https(port, API_HOST, "/metrics")[0] == 403
+            except OSError:
+                return False
+        wait_for_test_caddy(self, name, answers)
+        return port
+
+    def test_live_a_refusal_keeps_the_password_box_and_says_what_to_do(self):
+        port = self.serve_on_a_local_port(self.env())
+        for path, credential in (("/", None), ("/orders", "tester:not-the-password"),
+                                 ("/_next/static/chunks/main.js", None)):
+            with self.subTest(path=path):
+                status, headers, body = raw_https(port, WEB_HOST, path, credential)
+                self.assertEqual(status, 401)
+                self.assertEqual(headers.get("www-authenticate"), 'Basic realm="restricted"')
+                self.assertEqual(headers.get("content-type"), "text/html; charset=utf-8")
+                self.assertEqual(headers.get("cache-control"), "no-store")
+                self.assertEqual(headers.get("x-content-type-options"), "nosniff")
+                self.assertIn("frame-ancestors 'none'", headers.get("content-security-policy", ""))
+                self.assertIn("This test site needs the tester password. Reload the page to sign in.", body)
+        status, headers, body = raw_https(port, WEB_HOST, "/sw.js")
+        self.assertEqual((status, headers.get("content-type"), headers.get("cache-control")),
+                         (200, "text/javascript; charset=utf-8", "no-store"))
+        self.assertIn("self.registration.unregister()", body)
+        # The password still opens the site, and the console's refusal is what it was.
+        status, _, body = raw_https(port, WEB_HOST, "/", f"tester:{self.web_password}")
+        self.assertEqual(status, 200, body[-300:])
+        self.assertIn(f"authorization=[] uri=[/] host=[{WEB_HOST}]", body)
+        status, headers, body = raw_https(port, ADMIN_HOST, "/login")
+        self.assertEqual((status, headers.get("www-authenticate"), body), (401, 'Basic realm="restricted"', ""))
+        self.assertNotIn("text/html", headers.get("content-type", ""))
+
+
+def raw_https(port: int, host: str, path: str, credential=None):
+    """(status, lower-cased headers, body) of one HTTP/1.1 request to the test
+    Caddy on a loopback port, sent with the site's name for SNI and Host."""
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n"
+    if credential:
+        request += f"Authorization: Basic {base64.b64encode(credential.encode()).decode()}\r\n"
+    data = b""
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        with context.wrap_socket(sock, server_hostname=host) as tls:
+            tls.sendall((request + "\r\n").encode())
+            while chunk := tls.recv(65536):
+                data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    headers = {key.strip().lower(): value.strip() for key, _, value in (line.partition(":") for line in lines[1:])}
+    return int(lines[0].split()[1]), headers, body.decode()
+
+
+FAKE_WEB_GATE_CURL = r'''#!/usr/bin/env python3
+# Answers the website's front page with $WEB_ROOT_CODE, its app-link file with
+# $WEB_FILE_CODE and the console's sign-in page with $ADMIN_CODE (200 when
+# unset), like curl: -w prints the code, and -f fails on 4xx/5xx/000.
+import os, sys
+argv = sys.argv[1:]
+with open(os.environ["CALL_LOG"], "a") as log:
+    log.write("curl " + " ".join(argv) + "\n")
+url = next((a for a in argv if a.startswith("https://")), "")
+codes = {
+    f"https://{os.environ.get('SITE', '')}/": os.environ.get("WEB_ROOT_CODE", "200"),
+    f"https://{os.environ.get('SITE', '')}/.well-known/apple-app-site-association": os.environ.get("WEB_FILE_CODE", "200"),
+    f"https://{os.environ.get('ADMIN_SITE', '')}/login": os.environ.get("ADMIN_CODE", "200"),
+}
+code = codes.get(url, "200")
+if "-w" in argv:
+    sys.stdout.write(code)
+failing = any(a.startswith("-") and not a.startswith("--") and "f" in a for a in argv)
+sys.exit(22 if failing and not code.startswith(("2", "3")) else 0)
+'''
+
+
+class WebGatePilotUp(unittest.TestCase):
+    """The real pilot-up.sh, end to end, against the admin console tests' shims
+    (docker, git, sudo, systemctl, the secret store, sleep) and a curl that
+    answers with the codes above. Nothing is deployed."""
+
+    SHA = "e" * 40
+
+    def setUp(self):
+        AdminConsolePilotUp.setUp(self)
+        curl = self.bin / "curl"
+        curl.write_text(FAKE_WEB_GATE_CURL)
+        curl.chmod(0o755)
+
+    def run_pilot(self, web_host=WEB_HOST, *, gate=None, admin_host=None, admin_gate=None, **extra):
+        settings = (f"PILOT_ENV=staging\nAPI_HOST={API_HOST}\nMAPS_PROVIDER=osrm\nOSRM_URL=http://osrm:5000\n"
+                    f"BACKUP_BUCKET=test-backups\nNODE_ENV=development\nCORS_ORIGIN=https://{WEB_HOST},https://{ADMIN_HOST}\n")
+        for name, value in (("WEB_HOST", web_host), ("WEB_BASIC_AUTH_HASH", gate),
+                            ("ADMIN_HOST", admin_host), ("ADMIN_BASIC_AUTH_HASH", admin_gate)):
+            if value is not None:
+                settings += f"{name}={value}\n"
+        (self.here / ".env").write_text(settings)
+        env = os.environ.copy()
+        env.update({"PATH": f"{self.bin}:{env['PATH']}", "CALL_LOG": str(self.log), "GIT_HEAD": self.SHA,
+                    "STORE_NAMES": self.store, "SITE": web_host or "", "ADMIN_SITE": admin_host or ""})
+        env.update(extra)
+        self.log.write_text("")
+        result = subprocess.run(["bash", str(self.here / "pilot-up.sh"), self.SHA],
+                                env=env, text=True, capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
+        return result, self.log.read_text().splitlines()
+
+    first = staticmethod(AdminConsolePilotUp.first)
+    refused_before_anything_changes = AdminConsolePilotUp.refused_before_anything_changes
+
+    def failed_after_the_api_was_serving(self, result, calls, message):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(message, result.stderr)
+        self.assertIn(f"the API is serving {self.SHA}", result.stderr)
+        self.assertNotIn("WEBSITE READY", result.stdout)
+        self.assertNotIn("STAGING READY", result.stdout)
+        self.assertNotIn(SHAPE_ONLY_HASH, result.stdout + result.stderr)
+        self.assertTrue(any(c.endswith("up -d --no-deps --force-recreate api worker") for c in calls))
+
+    def test_with_the_gate_the_deploy_passes_only_on_a_401_front_page_and_a_served_app_link_file(self):
+        result, calls = self.run_pilot(gate=GATE_SETTING, WEB_ROOT_CODE="401")
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA}; password gate on)", result.stdout)
+        self.assertIn(f"STAGING READY at exact SHA {self.SHA}", result.stdout)
+        self.assertNotIn(SHAPE_ONLY_HASH, result.stdout + result.stderr)
+        started = self.first(calls, "up -d --no-deps --force-recreate web")
+        # Real readiness through an open path with no side effects: the app-link
+        # file the website itself serves, on this host, over HTTPS.
+        served = self.first(calls, f"https://{WEB_HOST}{AASA}")
+        self.assertLess(started, served)
+        self.assertIn(f"--resolve {WEB_HOST}:443:127.0.0.1", calls[served])
+        # Its exact status (200), not curl -f's "any 2xx or 3xx".
+        self.assertIn("-w %{http_code}", calls[served])
+        # And the front page refuses a stranger.
+        refused = next(i for i, c in enumerate(calls) if c.endswith(f"https://{WEB_HOST}/") and "-w" in c)
+        self.assertLess(started, refused)
+        self.assertIn(f"--resolve {WEB_HOST}:443:127.0.0.1", calls[refused])
+        # Never the MMG return: it posts to a billing endpoint.
+        self.assertFalse([c for c in calls if "/pay/" in c], calls)
+
+    def test_with_the_gate_a_website_reachable_without_it_fails_the_deploy(self):
+        for code in ("200", "302", "403", "502", "000"):
+            with self.subTest(code=code):
+                result, calls = self.run_pilot(gate=GATE_SETTING, WEB_ROOT_CODE=code)
+                self.failed_after_the_api_was_serving(result, calls, f"https://{WEB_HOST}/ answered {code}, not 401")
+                self.assertIn("password gate on", result.stderr)
+
+    def test_with_the_gate_the_app_link_file_must_be_served(self):
+        for code in ("404", "308", "502", "000"):
+            with self.subTest(code=code):
+                result, calls = self.run_pilot(gate=GATE_SETTING, WEB_ROOT_CODE="401", WEB_FILE_CODE=code)
+                self.failed_after_the_api_was_serving(result, calls, f"https://{WEB_HOST}{AASA} answered {code}, not 200")
+
+    def test_with_the_gate_a_site_that_never_becomes_healthy_fails_the_deploy(self):
+        result, calls = self.run_pilot(gate=GATE_SETTING, WEB_ROOT_CODE="401", WEB_HEALTH="unhealthy")
+        self.failed_after_the_api_was_serving(result, calls, "the web container never reported healthy")
+
+    def test_without_the_gate_the_front_page_must_answer_exactly_as_before(self):
+        for gate in (None, ""):
+            with self.subTest(gate=gate):
+                result, calls = self.run_pilot(gate=gate)
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+                self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA}; password gate off)",
+                              result.stdout)
+                self.assertFalse([c for c in calls if ".well-known" in c], calls)
+                result, calls = self.run_pilot(gate=gate, WEB_ROOT_CODE="401")
+                self.failed_after_the_api_was_serving(
+                    result, calls, f"the website did not become ready at https://{WEB_HOST} (the API is serving")
+
+    def test_the_gate_setting_is_a_single_quoted_bcrypt_hash_of_real_cost_or_nothing(self):
+        for good in (GATE_SETTING, "'$2a$14$" + "B" * 53 + "'", "'$2b$10$" + "./" * 26 + "c'"):
+            with self.subTest(gate=good):
+                result, _ = self.run_pilot(gate=good, WEB_ROOT_CODE="401")
+                self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        for bad in (SHAPE_ONLY_HASH, f'"{SHAPE_ONLY_HASH}"', f"'{SHAPE_ONLY_HASH}", "'$2y$09$" + "a" * 53 + "'",
+                    "'$2y$04$" + "a" * 53 + "'", "'$2y$12$" + "a" * 52 + "'", "'$2y$12$" + "a" * 54 + "'",
+                    "'$1$salt$" + "a" * 22 + "'", "'a-plain-password-here'", "''"):
+            with self.subTest(gate=bad):
+                result, calls = self.run_pilot(gate=bad, WEB_ROOT_CODE="401")
+                self.refused_before_anything_changes(result, calls, "WEB_BASIC_AUTH_HASH must be a bcrypt hash")
+                # The refusal names the setting, never its value.
+                if bad.strip("'\""):
+                    self.assertNotIn(bad.strip("'\""), result.stdout + result.stderr)
+
+    def test_a_gate_without_the_website_is_refused(self):
+        for web_host in (None, ""):
+            with self.subTest(web_host=web_host):
+                result, calls = self.run_pilot(web_host, gate=GATE_SETTING)
+                self.refused_before_anything_changes(result, calls, "WEB_BASIC_AUTH_HASH needs WEB_HOST")
+
+    def test_both_gates_on_each_with_its_own_proof(self):
+        result, _ = self.run_pilot(gate=GATE_SETTING, admin_host=ADMIN_HOST, admin_gate=GATE_SETTING,
+                                   WEB_ROOT_CODE="401", ADMIN_CODE="401")
+        self.assertEqual(result.returncode, 0, result.stderr[-800:])
+        self.assertIn(f"WEBSITE READY at https://{WEB_HOST} (exact SHA {self.SHA}; password gate on)", result.stdout)
+        self.assertIn(f"ADMIN CONSOLE READY at https://{ADMIN_HOST} (exact SHA {self.SHA}; extra sign-in gate on)",
+                      result.stdout)
+        # Either gate's setting is checked on its own: a bad console hash is
+        # refused by name even when the website's is good, and the other way round.
+        result, calls = self.run_pilot(gate=GATE_SETTING, admin_host=ADMIN_HOST, admin_gate="'nope'")
+        self.refused_before_anything_changes(result, calls, "ADMIN_BASIC_AUTH_HASH must be a bcrypt hash")
+        result, calls = self.run_pilot(gate="'nope'", admin_host=ADMIN_HOST, admin_gate=GATE_SETTING)
+        self.refused_before_anything_changes(result, calls, "WEB_BASIC_AUTH_HASH must be a bcrypt hash")
+
+
+class WebGateDoctor(unittest.TestCase):
+    """deploy/doctor.sh's website check reads the gate from deploy/.env: with
+    it on, a 401 IS the website answering, and a 200 is a missing gate."""
+
+    SITE_URL = "https://site.example"
+    setUp = Q11DoctorWebsite.setUp
+    run_doctor = Q11DoctorWebsite.run_doctor
+
+    def doctor(self, settings, code):
+        here = self.tmp / "deploy"
+        here.mkdir(exist_ok=True)
+        shutil.copy(DEPLOY / "doctor.sh", here / "doctor.sh")
+        (here / ".env").write_text(settings)
+        return self.run_doctor("healthy-hidden", script=here / "doctor.sh", FAKE_SITE_URL=self.SITE_URL,
+                               FAKE_SITE_CODE=code)
+
+    def test_with_the_gate_a_401_is_the_website_answering(self):
+        result = self.doctor(f"WEB_HOST=site.example\nWEB_BASIC_AUTH_HASH={GATE_SETTING}\n", "401")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(f"ok    website {self.SITE_URL} → 401 (password gate on)", result.stdout)
+        self.assertNotIn(SHAPE_ONLY_HASH, result.stdout + result.stderr)
+
+    def test_with_the_gate_a_website_that_answers_without_it_fails(self):
+        for code in ("200", "302"):
+            with self.subTest(code=code):
+                result = self.doctor(f"WEB_HOST=site.example\nWEB_BASIC_AUTH_HASH={GATE_SETTING}\n", code)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"FAIL  website {self.SITE_URL} answered {code} without its password gate",
+                              result.stdout)
+        for code in ("502", "000"):
+            with self.subTest(code=code):
+                result = self.doctor(f"WEB_HOST=site.example\nWEB_BASIC_AUTH_HASH={GATE_SETTING}\n", code)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertRegex(result.stdout, r"FAIL  website")
+
+    def test_without_the_gate_a_401_still_fails(self):
+        for settings in ("WEB_HOST=site.example\n", "WEB_HOST=site.example\nWEB_BASIC_AUTH_HASH=\n"):
+            with self.subTest(settings=settings):
+                result = self.doctor(settings, "401")
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn(f"FAIL  website {self.SITE_URL}/ → 401", result.stdout)
+
+
+class WebGateDocs(unittest.TestCase):
+    def section(self) -> str:
+        runbook = (DEPLOY / "PILOT-RUNBOOK.md").read_text()
+        start = runbook.index("A password on the staging website")
+        end = runbook.find("\n## ", start)
+        return runbook[start:end if end != -1 else len(runbook)]
+
+    def test_the_runbook_says_how_to_set_check_and_remove_the_password(self):
+        section = self.section()
+        for needle in ("WEB_BASIC_AUTH_HASH='$2a$12$", "caddy hash-password --bcrypt-cost 12", "--network none",
+                       "docker run --rm -it", "single quotes", "`tester`", "/pay/mmg/", "/.well-known/",
+                       "WEB_ALIAS_HOSTS", "./deploy/pilot-up.sh", '--resolve "$WEB_HOST:443:127.0.0.1"',
+                       "HTTP/2 401", "To turn the password off", "APP_PUBLIC_URL"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, section)
+        # The password is typed at a hidden prompt, never given as an argument.
+        self.assertNotIn("--plaintext", section)
+        self.assertNotIn("htpasswd -b", section)
+
+    def test_the_example_settings_document_it_beside_the_console_gate_and_leave_it_empty(self):
+        lines = (DEPLOY / ".env.deploy.example").read_text().splitlines()
+        admin, web = lines.index("ADMIN_BASIC_AUTH_HASH="), lines.index("WEB_BASIC_AUTH_HASH=")
+        self.assertLess(admin, web)
+        self.assertTrue(lines[admin + 1:web], "the setting needs its own explanation")
+        self.assertTrue(all(line.startswith("#") for line in lines[admin + 1:web]), lines[admin + 1:web])
+
+    def test_no_password_hash_is_written_into_the_doctor(self):
+        self.assertNotRegex((DEPLOY / "doctor.sh").read_text(), r"\$2[aby]?\$\d\d\$[./A-Za-z0-9]{53}")
 
 
 if __name__ == "__main__":

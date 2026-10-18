@@ -14,6 +14,7 @@ import {
 } from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-005] A SETTLEMENT WAS ONE PERSON'S SAY-SO.
@@ -37,7 +38,7 @@ const userIds: string[] = [];
 const REASON = 'Bank confirmed the transfer cleared on the 3rd, reference GY-88213';
 
 async function makeAdmin(permissions: string[]): Promise<{ token: string; userId: string }> {
-  const phone = `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Approver', lastName: `A${RUN}${userIds.length}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],

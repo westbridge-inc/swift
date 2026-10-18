@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Multi-tenancy foundation (stage 1): the single default tenant exists, every
@@ -49,7 +50,7 @@ describe('tenancy foundation', () => {
   it('a new user with NO explicit tenantId inherits the default (additive property)', async () => {
     const u = await prisma.user.create({
       data: {
-        phone: `+59264${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Ten', lastName: 'Ant',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true,

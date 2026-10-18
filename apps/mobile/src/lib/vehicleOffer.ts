@@ -8,8 +8,8 @@ import type { VehicleKind } from '../services/api';
 // predates the flag) it falls back to the launch list below, which
 // vehicleOffer.test.ts keeps equal to the server's.
 
-/** Mirror of the server's LAUNCH_HIDDEN_VEHICLE_TYPES: canters and box trucks. */
-export const LAUNCH_HIDDEN_VEHICLE_KINDS: readonly VehicleKind[] = ['CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG'];
+/** Mirror of the server's LAUNCH_HIDDEN_VEHICLE_TYPES: canters, box trucks and (owner ruling of 6 Oct 2026) both buses. */
+export const LAUNCH_HIDDEN_VEHICLE_KINDS: readonly VehicleKind[] = ['CANTER_SHORT', 'CANTER_LONG', 'BOX_TRUCK_SHORT', 'BOX_TRUCK_LONG', 'BUS_9', 'BUS_15'];
 
 type PricingLike = { movers?: ReadonlyArray<{ vehicleType?: string; offered?: unknown } | null | undefined> } | null | undefined;
 
@@ -22,7 +22,7 @@ export function vehicleOffered(kind: VehicleKind, pricing?: PricingLike): boolea
 
 /** What the vehicle screens say, in one place. */
 export const VEHICLE_COPY = {
-  notOffered: 'Swift isn’t taking canters and box trucks at launch. Change your vehicle to keep going.',
+  notOffered: 'Swift isn’t taking buses, canters or box trucks at launch. Change your vehicle to keep going.',
   changeWarning: 'A new vehicle needs its own documents. Changing takes you offline until they’re approved; your personal documents stay.',
   saved: 'Vehicle saved',
   change: 'Change vehicle',

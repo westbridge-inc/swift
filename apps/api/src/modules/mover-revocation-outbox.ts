@@ -1,3 +1,4 @@
+import { emitToOrderRoom } from './order/order-room-emission.service';
 import { taxiNotificationData } from './rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
@@ -309,6 +310,9 @@ async function claimNextOutboxRow(
       SELECT "id"
       FROM "mover_revocation_outbox"
       WHERE "processedAt" IS NULL
+        -- [row 267] A row whose retry budget is spent is a dead letter: never claimed again.
+        AND "deadLetteredAt" IS NULL
+        AND "attempts" < "maxAttempts"
         AND "availableAt" <= CURRENT_TIMESTAMP
         AND (
           "claimedAt" IS NULL
@@ -433,7 +437,7 @@ async function applyOutboxEffects(
   for (const order of payload.orders) {
     if (order.action === 'REDISPATCH') {
       await runtime.dispatch.retryDispatch(order.orderId);
-      runtime.io.to(`order:${order.orderId}`).emit('order:status_changed', {
+      await emitToOrderRoom(runtime.prisma, runtime.io, order.orderId, 'order:status_changed', {
         eventId: `${row.id}:${order.orderId}`,
         orderId: order.orderId,
         status: order.status,
@@ -456,7 +460,7 @@ async function applyOutboxEffects(
           select: { category: true, severity: true },
         });
       }
-      runtime.io.to(`order:${order.orderId}`).emit('order:mover_connection_lost', {
+      await emitToOrderRoom(runtime.prisma, runtime.io, order.orderId, 'order:mover_connection_lost', {
         eventId: `${row.id}:${order.orderId}`,
         orderId: order.orderId,
         status: order.status,

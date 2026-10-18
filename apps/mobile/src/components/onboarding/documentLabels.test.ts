@@ -24,14 +24,41 @@ function docLabels(): Record<string, string> {
   return labels;
 }
 
-describe('[owner ruling 2026-10-01] the exterior photo asks for the H plate, never a colour', () => {
-  it('reads "Car exterior photo (H plate visible)"', () => {
-    expect(docLabels()['vehicle_exterior_photo']).toBe('Car exterior photo (H plate visible)');
+describe('[owner ruling 2026-10-01] the exterior photo asks for the plate, never a colour', () => {
+  // [VERIFY-DOCS · ruling 5, 6 Oct 2026] the one car photo replaces the separate plate photo
+  it('reads "Car photo (plate clearly visible)"', () => {
+    expect(docLabels()['vehicle_exterior_photo']).toBe('Car photo (plate clearly visible)');
+  });
+
+  it('[VERIFY-DOCS · ruling 4] the national ID label accepts the Digital ID card', () => {
+    expect(docLabels()['national_id']).toBe('National ID or Digital ID card');
+    expect(docLabels()['owner_national_id']).toBe('Owner National ID or Digital ID card');
+  });
+
+  it('[VERIFY-DOCS · ruling 8] the two licences that replace the hire-car permit are named for what the driver holds', () => {
+    expect(docLabels()['hire_car_driver_licence']).toBe("Hire Car Driver's Licence");
+    expect(docLabels()['hire_car_vehicle_licence']).toBe("Car's Hire Licence (yearly, shown on the car)");
   });
 
   it('no document label asks for a colour', () => {
     for (const [docType, label] of Object.entries(docLabels())) {
       expect(label, docType).not.toMatch(/yellow|colou?r/i);
     }
+  });
+});
+
+describe('[TRADES · 13 Oct 2026; R15] service-trade documents read in plain words, never as a raw code', () => {
+  it.each([
+    ['pest_control_operator_licence', /Pest-Control Operator Licence/],
+    ['pesticide_applicator_certificate', /Applicator Certificate/],
+    ['eating_house_registration', /Eating-House Registration \(Georgetown\)/],
+    ['gei_electrical_licence', /GEI Electrical Licence/],
+  ])('%s', (docType, label) => {
+    expect(docLabels()[docType]).toMatch(label);
+  });
+
+  // [R15] the held trades' documents (Town Clerk, ICAG, GRA practice, GCAA drone) are not asked for
+  it.each(['chartered_accountant_practising_certificate', 'gra_practice_certificate', 'town_clerk_registration', 'town_clerk_shop_certificate', 'drone_authorisation'])('%s has no label of its own', (docType) => {
+    expect(docLabels()[docType]).toBeUndefined();
   });
 });

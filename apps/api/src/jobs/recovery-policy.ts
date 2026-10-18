@@ -27,6 +27,11 @@
 // "The comment says idempotent" is NOT evidence — that is the claim being
 // checked, not a proof of it.
 //
+// [Item 63] The same register now governs BullMQ's OWN replays: only a
+// SAFE_REPLAY class is retried automatically after an error or a stalled run
+// (jobs/queue.ts `inJobContext`); every other class fails once and waits on
+// the dead-letter list for a person.
+//
 // Which classes are certified today is asserted live by
 // `job-recovery-census.test.ts` (it counts the SAFE_REPLAY policies and keeps
 // the certified set under half the registry) — this file states no fixed
@@ -63,8 +68,8 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'ads-weekly-report': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'agent-cash-sla': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'algo-decision-retention': { policy: 'SAFE_REPLAY', why: 'Purges decision-log rows past their retention. A second run finds nothing left to purge.' },
-  'auto-cancel': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
-  'auto-complete': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'auto-cancel': { policy: 'SAFE_REPLAY', why: 'Every effect sits behind one database compare-and-set: the canonical locked transition moves the order PENDING (hold expired) to CANCELLED with its restock, search closure and status log in one commit, and the socket emits and the customer/store notices run only after that commit. A replay finds the order no longer PENDING (AUTO_CANCEL_NOT_ELIGIBLE) and returns before any notice or stock movement.' },
+  'auto-complete': { policy: 'SAFE_REPLAY', why: 'One database compare-and-set: the canonical locked transition moves the order DELIVERED to COMPLETED with its status log in one commit, and nothing but a log line follows it. A replay finds the order no longer DELIVERED (AUTO_COMPLETE_NOT_ELIGIBLE) and returns false.' },
   'reaper-lag': { policy: 'SAFE_REPLAY', why: 'Reads the reaper heartbeat, sets a gauge and pages through opsPageOnce, which dedupes. It writes no business rows.' },
   'audit-chain-verify': { policy: 'SAFE_REPLAY', why: 'Walks the audit chain and recomputes every link; writes only a gauge and, on a break, an admin notification. A second run repeats the same verdict.' },
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
@@ -72,6 +77,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-invariants': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'vat-threshold-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'booking-reminders': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'checkout-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: claimNextRow takes a due row under FOR UPDATE SKIP LOCKED with a claim lease, publishes under jobId = row id, and stamps processedAt on success. A replay finds only unprocessed rows; a crash between the add and the processedAt mark re-claims after the lease lapses and re-adds the same jobId, which BullMQ collapses while the job still exists.' },
   'collusion-affinity-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -101,6 +107,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'prep-shadow-grade': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'prep-stats-nightly': { policy: 'SAFE_REPLAY', why: 'Recomputes every vendor prep-time distribution from a trailing window. The input is the window, not the previous run.' },
   'process-billing': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'process-settlements': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'promote-sos-grace': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'qr-attribution-purge': { policy: 'SAFE_REPLAY', why: 'Hard-deletes attribution rows already past their expiry. A second run finds nothing left to delete.' },
   'rating-actor-fold': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -113,8 +120,11 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'route-match': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
   'stale-movers': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'substitution-expiry': { policy: 'SAFE_REPLAY', why: 'Removes (or, on MMG, withdraws) swap questions past their deadline. Every write is a compare-and-set on the open question with its deadline already passed (subStatus PENDING, substituteDecideBy <= now) under the order-row lock; a closed question no longer matches, so a replay changes nothing and sends nothing. The customer is told only by the compare-and-set winner. A question with no deadline gets one by a compare-and-set on NULL, so a replay cannot extend a running wait.' },
   'supply-watch-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'sync-vendor': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'tier-recalc': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'vendor-alert-escalate': { policy: 'RECONCILE_FIRST', why: 'Re-alerts and texts a store about an order still waiting for its answer. It stops on its own once the order is no longer PENDING, but a run that failed after sending can send again, so it is never retried automatically. Ops may replay it once they have checked the order is still waiting and the store was not already reached.' },
 };
 
 export type JobName =
@@ -133,6 +143,7 @@ export type JobName =
   | 'batching-shadow-scan'
   | 'billing-fx-notices'
   | 'billing-invariants'
+  | 'vat-threshold-watch'
   | 'booking-reminders'
   | 'checkout-outbox'
   | 'collusion-affinity-scan'
@@ -162,6 +173,7 @@ export type JobName =
   | 'prep-shadow-grade'
   | 'prep-stats-nightly'
   | 'process-billing'
+  | 'process-settlements'
   | 'promote-sos-grace'
   | 'qr-attribution-purge'
   | 'rating-actor-fold'
@@ -174,8 +186,11 @@ export type JobName =
   | 'route-match'
   | 'scheduler-heartbeat'
   | 'stale-movers'
+  | 'substitution-expiry'
   | 'supply-watch-scan'
-  | 'tier-recalc';
+  | 'sync-vendor'
+  | 'tier-recalc'
+  | 'vendor-alert-escalate';
 
 /** The answer for a job name, including one this file has never heard of —
  *  which is refused, not assumed safe. */

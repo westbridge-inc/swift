@@ -525,6 +525,8 @@ describe('payActions — MMG_CHECKOUT is live only when it truly is, and off is 
     const prisma = {
       ...configWith(undefined),
       prepaidBalance: { findUnique: vi.fn(async () => ({ balance: new Prisma.Decimal(600) })) },
+      // [owner #62] A button is shown only when the payment fits one week ahead: the room is read too.
+      subscription: { findUnique: vi.fn(async () => ({ ...sub(), isTrialActive: false, trialEndDate: null })) },
       // [#1389] payInfo's due-now reads an issued charge first; none here.
       subscriptionPayment: { findFirst: vi.fn(async () => null) },
       tenantBillingCurrency: { findUnique: vi.fn(async () => null) },
@@ -550,7 +552,8 @@ describe('what a fee notice may say', () => {
     expect(mmgPayLine(1500)).toBe('Pay GY$1,500 with MMG in the Swift app.');
     expect(feeDueLine(2100, 'GYD', null)).toBe('The weekly fee of GY$2,100 is due now.');
     expect(feeDueLine(2100.5, 'GYD', new Date('2026-09-29T15:00:00Z'), { first: true })).toBe('Your first weekly fee of GY$2,100.50 is due on Tue 29 Sep.');
-    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your balance already covers your first weekly fee of GY$2,100.');
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] the fee is paid: never a "balance", never "paid ahead".
+    expect(feeCoveredLine(2100, 'GYD', { first: true })).toBe('Your first weekly fee of GY$2,100 is already paid.');
   });
 
   it('dates in Guyana time (UTC−4, no daylight saving)', () => {

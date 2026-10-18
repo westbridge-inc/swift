@@ -8,14 +8,19 @@ import {
 } from '@/lib/mover-api';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { LEGAL_URL } from '@/lib/api';
+import { documentLabel, isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
 
-const pretty = (docType: string) => docType.replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+// [Owner ruling 11 Oct 2026] plain names and, on a taxi checklist, what each document is.
+const pretty = documentLabel;
 
-function statusTone(s: string, expiresAt: string | null) {
-  const expiringSoon = expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
+const expiringSoonAt = (expiresAt: string | null) => !!expiresAt && new Date(expiresAt).getTime() - Date.now() < 30 * 24 * 3600 * 1000;
+
+function statusTone(s: string, expiresAt: string | null, replaced = false) {
+  const expiringSoon = expiringSoonAt(expiresAt);
   if (s === 'APPROVED' && expiringSoon) return { label: 'Expiring soon', cls: 'bg-amber-100 text-amber-700' };
   if (s === 'APPROVED') return { label: 'Approved', cls: 'bg-green-100 text-green-700' };
-  if (s === 'PENDING') return { label: 'In review', cls: 'bg-sky-100 text-sky-700' };
+  // [REPLACE-PENDING] a copy that replaced an earlier waiting one says so
+  if (s === 'PENDING') return { label: replaced ? 'Replaced — waiting for review' : 'In review', cls: 'bg-sky-100 text-sky-700' };
   if (s === 'EXPIRED') return { label: 'Expired', cls: 'bg-red-100 text-red-700' };
   return { label: 'Rejected', cls: 'bg-red-100 text-red-700' };
 }
@@ -60,12 +65,16 @@ export default function DocumentsPage() {
   return (
     <div className="max-w-3xl space-y-5">
       <div>
-        <h1 className="text-2xl font-extrabold">Documents</h1>
+        <h1 className="sw-title">Documents</h1>
         <p className="mt-1 text-sm text-[var(--swift-muted)]">
           Upload renewals on a big screen — reviews usually finish within 24 hours. An expired document takes you
           offline until it is renewed.
         </p>
       </div>
+
+      {d && isTaxiChecklist(d.checklist ?? []) && (
+        <p className="rounded-2xl bg-[var(--swift-subtle)] p-4 text-sm">{TAXI_TWO_LICENCES}</p>
+      )}
 
       {d && (
         <div className={`flex items-center gap-3 rounded-2xl p-4 ${d.roleVerified ? 'bg-green-50 text-green-800' : 'bg-amber-50 text-amber-800'}`}>
@@ -92,9 +101,11 @@ export default function DocumentsPage() {
         )}
         {(d?.checklist ?? []).map((docType) => {
           const doc = latestByType.get(docType);
-          const tone = doc ? statusTone(doc.status, doc.expiresAt) : null;
+          const tone = doc ? statusTone(doc.status, doc.expiresAt, doc.replaced === true) : null;
+          // An approved document stays locked until its renewal window; a copy waiting for review can be replaced.
+          const locked = doc?.status === 'APPROVED' && !expiringSoonAt(doc.expiresAt);
           return (
-            <div key={docType} className="rounded-2xl border border-black/5 bg-white p-5">
+            <div key={docType} className="sw-card p-5">
               <div className="flex flex-wrap items-center gap-3">
                 <p className="font-semibold">{pretty(docType)}</p>
                 {tone ? (
@@ -105,25 +116,30 @@ export default function DocumentsPage() {
                 {doc?.expiresAt && (
                   <span className="text-xs text-[var(--swift-muted)]">expires {new Date(doc.expiresAt).toLocaleDateString()}</span>
                 )}
-                <button
-                  onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
-                  className="ml-auto rounded-lg border border-black/10 px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
-                >
-                  {doc ? 'Upload renewal' : 'Upload'}
-                </button>
+                {!locked && (
+                  <button
+                    onClick={() => { setUploadFor(uploadFor === docType ? null : docType); setConsent(false); setError(null); }}
+                    className="ml-auto rounded-lg border border-[var(--swift-border)] px-3 py-1.5 text-xs font-semibold hover:bg-[var(--swift-subtle)]"
+                  >
+                    {doc?.status === 'PENDING' ? 'Replace this document' : doc?.status === 'APPROVED' ? 'Upload renewal' : doc ? 'Upload again' : 'Upload'}
+                  </button>
+                )}
               </div>
+              {taxiDocumentHint(docType, d?.checklist ?? []) && (
+                <p className="mt-1 text-xs text-[var(--swift-muted)]">{taxiDocumentHint(docType, d?.checklist ?? [])}</p>
+              )}
               {doc?.reviewNote && doc.status === 'REJECTED' && (
                 <p className="mt-2 text-sm text-[var(--swift-red)]">Reviewer: {doc.reviewNote}</p>
               )}
               {done === docType && <p className="mt-2 text-sm font-medium text-green-600">Submitted — it is in review ✓</p>}
               {uploadFor === docType && (
-                <div className="mt-3 space-y-3 border-t border-black/5 pt-3">
+                <div className="mt-3 space-y-3 border-t border-[var(--swift-border)] pt-3">
                   <label className="flex items-start gap-2 text-xs text-[var(--swift-muted)]">
                     <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--swift-red)]" />
                     <span>
                       I consent to Swift processing this document for verification, per the{' '}
                       <a href={LEGAL_URL('privacy')} target="_blank" rel="noreferrer" className="font-semibold text-[var(--swift-red)]">privacy notice</a>.
-                      It is stored encrypted and never shared.
+                      It is stored encrypted and shared only as the Privacy Policy explains.
                     </span>
                   </label>
                   <button

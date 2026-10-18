@@ -2,9 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { BellRing } from 'lucide-react';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
+import { mmgDisputePaused } from '@/lib/mmg-dispute';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1, web dashboard flavor): the moment
@@ -49,7 +51,8 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   // Detect unseen PENDING orders between polls. The FIRST poll only baselines —
   // a dashboard opened onto an old queue must not scream about stale orders.
   useEffect(() => {
-    const pending = orders.filter((o) => (o.status || '').toUpperCase() === 'PENDING');
+    // [Item 10] A disputed MMG order is paused: nothing to accept, no chime.
+    const pending = orders.filter((o) => (o.status || '').toUpperCase() === 'PENDING' && !mmgDisputePaused(o));
     if (seen === null) {
       setSeen(new Set(pending.map((o) => o.id)));
       return;
@@ -65,7 +68,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   // customer cancelled it, another device answered it, the no-response timer
   // reaped it — leaves the takeover: the chime is for an open decision.
   useEffect(() => {
-    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING').map((o) => o.id));
+    const settled = new Set(orders.filter((o) => (o.status || '').toUpperCase() !== 'PENDING' || mmgDisputePaused(o)).map((o) => o.id));
     if (settled.size === 0) return;
     setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
   }, [orders]);
@@ -120,7 +123,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/80 p-3 min-[400px]:p-6">
       <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-4 text-center shadow-2xl min-[400px]:p-8">
-        <p className="text-4xl">🔔</p>
+        <BellRing aria-hidden="true" className="mx-auto h-10 w-10 text-[var(--swift-red)]" />
         <h2 className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
           {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>

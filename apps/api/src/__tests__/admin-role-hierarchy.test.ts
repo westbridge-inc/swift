@@ -9,6 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [DS110 #12] ANY ADMIN COULD PERMANENTLY BAN OR SUSPEND THE SUPER_ADMIN.
@@ -37,7 +38,7 @@ const REASON = 'Repeated platform-control abuse after three documented warnings'
 type Actor = { token: string; userId: string };
 
 async function makeAccount(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER'): Promise<Actor> {
-  const phone = `+59241${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const privileged = role !== 'CUSTOMER';
   const user = await app.prisma.user.create({
     data: {

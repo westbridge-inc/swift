@@ -1,15 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
-import { courierEstimate, requestCourier, money } from '@/lib/customer';
-import { currentCoords } from '@/lib/geolocate';
-import { submittablePlace, type PickedPlace } from '@/lib/place';
+import { money } from '@/lib/customer';
+import { courierEstimate, requestCourier } from '@/lib/customer-courier';
+import { currentFix } from '@/lib/geolocate';
+import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place';
 // [W-18] The field moved to components/location-field.tsx and the TAXI form
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
 import { LocationField } from '@/components/location-field';
+
+// [WEB-PIN] Pinning either end on the map, as the phone does ("Set location on
+// map"). The map's code loads only when a pin is asked for.
+const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // [W-19] The text in the box IS the place, or there is no place. This form used
 // to keep the two apart — pick "42 Lamaha Street", edit the box to "9 Camp
@@ -41,24 +46,70 @@ export default function CourierPage() {
   const [size, setSize] = useState('SMALL');
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
-  const [notes, setNotes] = useState('');
+  // The server's field is `packageDescription` (what is inside); it has no
+  // `notes`, so a "notes for the rider" box was silently thrown away.
+  const [contents, setContents] = useState('');
+  // [GUARDRAILS §8 · owner #67] The sender's tick: "This parcel has no prohibited
+  // items". No courier is requested without it; the order records it.
+  const [declared, setDeclared] = useState(false);
+  const [pinning, setPinning] = useState<'pickup' | 'dropoff' | null>(null);
+  // Where focus returns when the map closes: the button that opened it.
+  const pinButtons = { pickup: useRef<HTMLButtonElement>(null), dropoff: useRef<HTMLButtonElement>(null) };
+  const returnFocus = useRef<'pickup' | 'dropoff' | null>(null);
+  useEffect(() => {
+    if (pinning || !returnFocus.current) return;
+    pinButtons[returnFocus.current].current?.focus();
+    returnFocus.current = null;
+  });
+  function closePin(end: 'pickup' | 'dropoff') { returnFocus.current = end; setPinning(null); }
   const [estimate, setEstimate] = useState<{ totalFee?: number; fare?: number } | null>(null);
+  // [PRICE-LOCK] Bumped when the server refuses a send because the fee moved:
+  // the quote is fetched again, so the new fee is what the button shows.
+  const [quoteRound, setQuoteRound] = useState(0);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [locating, setLocating] = useState(false);
+  // Any pickup the sender chooses (typed, searched or pinned) outdates a device
+  // fix still on its way: a late answer must never replace their choice.
+  const pickupChoice = useRef(0);
+  function choosePickup(text: string, place: PickedPlace | null) {
+    pickupChoice.current += 1;
+    setPickupText(text);
+    setPickup(place);
+  }
+
+  /** [review S3-1] The device is asked for its location only when the sender
+   *  taps for it, as in the pin picker — never on page load, where a surprise
+   *  prompt invites a "Block" that would also refuse every later tap. */
+  function locateMe() {
+    if (locating) return;
+    setLocating(true);
+    const ticket = pickupChoice.current;
     // [F-027-02] This one never fabricated a coordinate — it just failed
     // SILENTLY, leaving "Locating…" on screen forever with no way to know the
     // prompt had been denied. Fail closed AND say so.
-    currentCoords('set your pickup')
-      .then(({ lat, lng }) => {
+    // [WEB-PIN] A fix is only as good as the device says (lib/place.ts): past
+    // 250 m it is a neighbourhood, and a rider would be sent to a guess. The
+    // sender pins or searches the pickup instead.
+    currentFix('set your pickup')
+      .then(({ lat, lng, accuracyM }) => {
+        if (ticket !== pickupChoice.current) return;
+        if (accuracyM === null || accuracyM > MAX_ACCURACY_M) {
+          setPickup(null);
+          setPickupError(accuracyM === null
+            ? 'Your device didn’t say how accurate its location is, so Swift won’t guess your pickup.'
+            : `Your device placed you only within about ${Math.round(accuracyM)} m — too rough to send a rider to.`);
+          return;
+        }
         setPickup({ lat, lng, label: 'Current location', placeId: 'device' });
         setPickupText('Current location');
         setPickupError(null);
       })
-      .catch((e: Error) => { setPickup(null); setPickupError(e.message); });
-  }, []);
+      .catch((e: Error) => { if (ticket === pickupChoice.current) { setPickup(null); setPickupError(e.message); } })
+      .finally(() => setLocating(false));
+  }
 
   // [W-20] The estimate belongs to one exact route and size. Any change clears
   // it, so the price on screen can never describe a different parcel.
@@ -71,16 +122,24 @@ export default function CourierPage() {
       .then((r) => { if (live) { setEstimate(r); setEstimateFailed(false); } })
       .catch(() => { if (live) { setEstimate(null); setEstimateFailed(true); } });
     return () => { live = false; };
-  }, [pickup, dropoff, size]);
+  }, [pickup, dropoff, size, quoteRound]);
 
   const fee = estimate ? (estimate.totalFee ?? estimate.fare ?? null) : null;
-  // Both halves of every address agree, and there is a price for THIS parcel.
-  const readyToSend = pickup !== null && dropoff !== null && fee !== null && !busy;
+  // [WEB-PIN] The server requires who receives it (courier.routes.ts orderSchema:
+  // name 2–120, phone 5–30) — the phone app's same rule — so the button waits for both.
+  const recipientMissing = recipientName.trim().length < 2
+    ? 'Add the recipient’s name'
+    : recipientPhone.trim().length < 5
+      ? 'Add the recipient’s phone'
+      : null;
+  const declarationMissing = declared ? null : 'Tick “no prohibited items” to send';
+  // Both halves of every address agree, there is a price for THIS parcel, someone to receive it, and the sender's tick.
+  const readyToSend = pickup !== null && dropoff !== null && fee !== null && recipientMissing === null && declarationMissing === null && !busy;
 
   async function send() {
     const from = submittablePlace(pickup, pickupText);
     const to = submittablePlace(dropoff, dropoffText);
-    if (!from || !to || fee === null) return;
+    if (!from || !to || fee === null || recipientMissing !== null || !declared) return;
     setBusy(true); setError(null);
     try {
       const r = await requestCourier({
@@ -90,13 +149,20 @@ export default function CourierPage() {
         pickupAddress: from.label,
         dropoffAddress: to.label,
         packageSize: size,
-        ...(recipientName.trim() && { recipientName: recipientName.trim() }),
-        ...(recipientPhone.trim() && { recipientPhone: recipientPhone.trim() }),
-        ...(notes.trim() && { notes: notes.trim() }),
+        recipientName: recipientName.trim(),
+        recipientPhone: recipientPhone.trim(),
+        ...(contents.trim() && { packageDescription: contents.trim() }),
+        declaresNoProhibitedItems: true,
+        // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
+        expectedFee: fee,
       });
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
-    } catch (e) { setError((e as Error).message); }
+    } catch (e) {
+      setError((e as Error).message);
+      // The fee moved since the quote (nothing was sent): fetch the new one.
+      if ((e as { code?: string }).code === 'PRICE_CHANGED') setQuoteRound((n) => n + 1);
+    }
     finally { setBusy(false); }
   }
 
@@ -110,11 +176,27 @@ export default function CourierPage() {
             label="Pick up from"
             text={pickupText}
             place={pickup}
-            onChange={(t, p) => { setPickupText(t); setPickup(p); }}
+            onChange={(t, p) => choosePickup(t, p)}
             near={pickup}
           />
+          <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" disabled={locating} onClick={locateMe}>
+            {locating ? 'Finding you…' : 'Use my location as the pickup'}
+          </button>
           {pickupError && !pickup && (
-            <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above instead.</p>
+            <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above or pin it on the map instead.</p>
+          )}
+          {pinning === 'pickup' ? (
+            <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
+              <PlacePinPanel
+                title="Pin the pickup"
+                mapLabel="Pickup pin map"
+                start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
+                onUse={(place) => { choosePickup(place.label, place); setPickupError(null); closePin('pickup'); }}
+                onCancel={() => closePin('pickup')}
+              />
+            </Suspense>
+          ) : (
+            <button ref={pinButtons.pickup} type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('pickup')}>Pin pickup on the map</button>
           )}
 
           <LocationField
@@ -124,6 +206,19 @@ export default function CourierPage() {
             onChange={(t, p) => { setDropoffText(t); setDropoff(p); }}
             near={pickup}
           />
+          {pinning === 'dropoff' ? (
+            <Suspense fallback={<p role="status" className="sw-caption">Opening the map…</p>}>
+              <PlacePinPanel
+                title="Pin the drop-off"
+                mapLabel="Drop-off pin map"
+                start={dropoff ? { latitude: dropoff.lat, longitude: dropoff.lng } : null}
+                onUse={(place) => { setDropoffText(place.label); setDropoff(place); closePin('dropoff'); }}
+                onCancel={() => closePin('dropoff')}
+              />
+            </Suspense>
+          ) : (
+            <button ref={pinButtons.dropoff} type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" onClick={() => setPinning('dropoff')}>Pin drop-off on the map</button>
+          )}
 
           <h2 className="sw-heading mt-3">What are you sending?</h2>
           <div className="grid grid-cols-2 gap-2 wide:grid-cols-4">
@@ -136,14 +231,23 @@ export default function CourierPage() {
             ))}
           </div>
 
-          {/* [W-20] Who receives it. The API has always accepted these; the form
-              never asked, so a rider arrived with a parcel and no one to ask for. */}
+          {/* [W-20] Who receives it. [WEB-PIN] The server requires both (the
+              phone asks for both too); "optional" here meant a refused request. */}
           <h2 className="sw-heading mt-3">Who’s receiving it?</h2>
           <div className="grid grid-cols-1 gap-2 wide:grid-cols-2">
-            <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name (optional)" aria-label="Recipient name (optional)" className="sw-input" />
-            <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone (optional)" aria-label="Recipient phone (optional)" type="tel" className="sw-input" />
+            <input value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Recipient name" aria-label="Recipient name" autoComplete="off" maxLength={120} required className="sw-input" />
+            <input value={recipientPhone} onChange={(e) => setRecipientPhone(e.target.value)} placeholder="Recipient phone" aria-label="Recipient phone" autoComplete="off" maxLength={30} required type="tel" className="sw-input" />
           </div>
-          <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Notes for the rider (optional)" aria-label="Notes for the rider (optional)" className="sw-input" />
+          <input value={contents} onChange={(e) => setContents(e.target.value)} placeholder="What’s inside? (optional)" aria-label="What’s inside? (optional)" maxLength={500} className="sw-input" />
+          {/* [GUARDRAILS §8 · owner #67] The server also screens what is written above
+              against the same list, and refuses a banned parcel in plain words. */}
+          <label className="flex items-start gap-2 text-[15px] leading-[22px] text-[var(--swift-ink)]">
+            <input type="checkbox" checked={declared} onChange={(e) => setDeclared(e.target.checked)} aria-label="This parcel has no prohibited items" aria-describedby="parcel-banned-goods" className="mt-1 h-4 w-4 accent-[var(--swift-red)]" />
+            <span className="flex flex-col">
+              <span className="font-semibold">This parcel has no prohibited items</span>
+              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail.</span>
+            </span>
+          </label>
         </div>
 
         <aside className="flex flex-col gap-3 split:sticky split:top-4">
@@ -168,7 +272,7 @@ export default function CourierPage() {
           {error && <p role="alert" className="sw-note sw-note-error">{error}</p>}
 
           <button type="button" onClick={send} disabled={!readyToSend} className="sw-btn sw-btn-block mt-1">
-            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : `Request courier · ${money(fee)}`}
+            {busy ? 'Requesting…' : !pickup || !dropoff ? 'Set both addresses' : fee === null ? 'Waiting for a price…' : recipientMissing ?? declarationMissing ?? `Request courier · ${money(fee)}`}
           </button>
         </aside>
       </div>

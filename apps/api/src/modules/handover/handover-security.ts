@@ -10,7 +10,11 @@
 // the SAME lockout instead of each re-implementing (or forgetting) it.
 // ---------------------------------------------------------------------------
 
-/** Max wrong tries before a handover code locks and must go to support. */
+/** Five failed comparisons exhaust the proof budget. Pickup counts its
+ * successful comparison too, then becomes terminal; delivery counts failures.
+ * Check and consume under the canonical Order lock. A wrong result commits
+ * before reporting its error, and a correct sixth guess remains refused.
+ * Only support recovery may reset an exhausted budget; ordinary retries never do. */
 export const MAX_HANDOVER_ATTEMPTS = 5;
 
 /**

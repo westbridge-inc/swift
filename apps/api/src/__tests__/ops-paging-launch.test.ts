@@ -277,7 +277,7 @@ describe('[GUARDRAILS §3] an app-store reviewer\'s demo SOS never pages real op
   it('a REVIEW-tenant page reaches no SUPER_ADMIN and texts no on-call phone: a new one is never opened (the review seal); one that already exists is never texted, escalated to the platform or given a SUPER_ADMIN', async () => {
     const reviewAdmin = await makeUser(['ADMIN'], TENANT_REVIEW);
     const res = await runWithoutTenant(() => openOpsAlert(app.prisma, notifications(), { kind: 'SOS', tenantId: TENANT_REVIEW, title: `L10 review SOS ${RUN}`, body: 'Demo.', data: { kind: 'l10_test' } }), 'test:l10-paging');
-    expect(res).toEqual({ opsAlertId: '', recipients: 0, delivered: 0, oncallTexted: 0 });
+    expect(res).toEqual({ opsAlertId: '', recipients: 0, inboxed: 0, pushed: 0, oncallTexted: 0, reached: 0 });
     expect(oncallTexts()).toHaveLength(0);
     // A demo page that already exists (opened before the seal), overdue with nobody attached:
     // the sweep re-resolves its recipients and escalates it, but only inside the demo tenant.

@@ -1,3 +1,5 @@
+import { POLL } from '../lib/pollPolicy';
+import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
@@ -83,7 +85,7 @@ export function useVendorProfile() {
     queryKey: ['vendor', 'profile'],
     queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
-    refetchInterval: 20000,
+    refetchInterval: POLL.vendorProfile,
     enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
@@ -256,6 +258,13 @@ export function useAddStaff(guard: MutationGuard = passThrough) {
   });
 }
 
+/** [Row 55] Withdraw every unanswered team invite (nothing pending is listed). */
+export function useWithdrawStaffInvites() {
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<{ withdrawn: boolean; message?: string }>(vendorApi.withdrawStaffInvites()),
+  });
+}
+
 export function useRemoveStaff() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
@@ -278,7 +287,7 @@ export function useVendorOrders(enabled: boolean) {
     queryKey: ['vendor', 'orders'],
     queryFn: () => unwrap(vendorApi.orders()),
     enabled: enabled && !pv,
-    refetchInterval: enabled && !pv ? 12000 : false,
+    refetchInterval: () => enabled && !pv ? POLL.vendorOrders() : false,
   });
   return pv ? previewQuery(pv.orders) : q;
 }
@@ -288,7 +297,8 @@ export function useVendorOrders(enabled: boolean) {
  *  signal) instead of waiting out the 12s poll — the poll stays as the
  *  reconnect safety net. A new order also buzzes the phone: the board is a
  *  counter appliance, not a screen someone stares at. */
-export function useVendorOrdersLive(vendorId: string | undefined) {
+/** `ownsStore`: the server admits only the store owner to the store room. */
+export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = false) {
   const qc = useQueryClient();
   const previewType = useVendorPreview((s) => s.previewType);
   // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
@@ -301,10 +311,6 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     // Only the selected store's layer may (re)join its room: a store handoff
     // reconnects the shared socket, and a retired layer's handler can run
     // before React unmounts it.
-    const join = () => { if (useStoreSwitcher.getState().selectedStoreId === vendorId) s.emit('vendor:subscribe', { vendorId }); };
-    join();
-    s.on('connect', join); // rooms are per-connection — re-join after reconnects
-    const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     const onNew = (payload?: { orderId?: string; orderNumber?: string }) => {
       Vibration.vibrate(400);
       if (payload?.orderId) {
@@ -314,23 +320,16 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
             : [...q, { orderId: payload.orderId!, orderNumber: payload.orderNumber }],
         );
       }
-      refresh();
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     };
-    s.on('order:new', onNew);
-    s.on('order:status_changed', refresh);
-    s.on('order:prep_update', refresh);
     // Scheduling liveness nudge (spec 2.6): calendar + picker refetch the
     // moment a booking is made, moved or cancelled; the poll stays the floor.
-    const refreshBookings = () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
-    s.on('bookings:changed', refreshBookings);
-    return () => {
-      s.off('connect', join);
-      s.off('order:new', onNew);
-      s.off('order:status_changed', refresh);
-      s.off('order:prep_update', refresh);
-      s.off('bookings:changed', refreshBookings);
-    };
-  }, [vendorId, qc, previewType]);
+    return bindVendorOrderFeed(s, vendorId, () => useStoreSwitcher.getState().selectedStoreId === vendorId, {
+      onNew,
+      refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+      refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+    }, { serverAdmits: ownsStore });
+  }, [vendorId, ownsStore, qc, previewType]);
 
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
@@ -347,7 +346,7 @@ export function useVendorOrder(id: string | undefined) {
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
     enabled: !!id && !pv,
-    refetchInterval: 15000,
+    refetchInterval: POLL.vendorOrder,
   });
   return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }

@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 /** SMS credential and boot-contract tests run without the DB/Redis target lock. */
 export default defineConfig({
@@ -11,6 +12,7 @@ export default defineConfig({
       'src/__tests__/secret-canary.test.ts',
     ],
     fileParallelism: false,
-    env: { NODE_ENV: 'test', DEV_OTP_BYPASS: '0' },
+    // [AUD-G7-040] a disposable DB/Redis target, like vitest.config.ts.
+    env: { ...sideConfigTestEnv(), NODE_ENV: 'test', DEV_OTP_BYPASS: '0' },
   },
 });

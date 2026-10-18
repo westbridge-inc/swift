@@ -26,7 +26,7 @@ import { resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions'
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import { lookupDetailFrom, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
 import { FakeMmgHistory, mmgHistoryRow } from './helpers/mmg-history-fake';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
@@ -69,7 +69,7 @@ const startedAt = new Date();
 const lookups = new Map<string, MmgLookupDetail>();
 /** [7 Oct] MMG's Transaction History (helpers/mmg-history-fake.ts): it holds every payment `mmgAnswers` registers, made now. */
 const history = new FakeMmgHistory();
-const lookup: MmgLookupClient = {
+const lookup: MmgCheckoutLookupClient = {
   transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' },
   transactionHistoryRows: (query) => history.transactionHistoryRows(query),
 };

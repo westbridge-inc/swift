@@ -256,7 +256,7 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     expect((await mmg.transactionLookup({ transactionId: 't1' })).status).toBe('pending');
   });
 
-  it('reversal 200/pending reports in-flight; 422 duplicate resolves to error (no throw)', async () => {
+  it('reversal 200/pending reports in-flight; 422 duplicate resolves to declined — an answer, never a lost one (no throw)', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(AUTH_OK)
@@ -268,8 +268,16 @@ describe('MMG live adapter — merchant-initiated wire format', () => {
     expect(first).toEqual({ status: 'pending', transactionId: 'rev-1' });
 
     const dup = await mmg.reverseTransaction({ transactionId: 'tx-9' });
-    expect(dup.status).toBe('error');
+    // [MMG REVERSAL] MMG's 422 is its answer ("no"); only a missing answer is `error`.
+    expect(dup.status).toBe('declined');
     expect(dup.reason).toBe('REVERSAL_FAIL_DUPLICATE');
+  });
+
+  it('[MMG REVERSAL] a reversal with no usable answer is `error`, never `declined` and never done (no throw)', async () => {
+    const down = new LiveMmgProvider(CFG, vi.fn().mockResolvedValueOnce(AUTH_OK).mockResolvedValueOnce(jsonRes(503, { message: 'busy' })) as any);
+    expect((await down.reverseTransaction({ transactionId: 'tx-10' })).status).toBe('error');
+    const unreachable = new LiveMmgProvider(CFG, vi.fn().mockResolvedValueOnce(AUTH_OK).mockRejectedValueOnce(new Error('socket hang up')) as any);
+    expect((await unreachable.reverseTransaction({ transactionId: 'tx-11' })).status).toBe('error');
   });
 
   it('history maps TransactionList rows (external_id → reference)', async () => {
