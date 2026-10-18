@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { View } from 'react-native';
+import { View, type ViewStyle } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { Card, T, TonePill } from '../kit';
 import { Stars } from '../kit/controls';
@@ -37,11 +37,13 @@ function tagLine(tags: StandingData['topPositive']): string {
   return tags.slice(0, 3).map((t) => `${t.label} ×${t.count}`).join(' · ');
 }
 
-export function StandingCard({ data, title = 'Your standing' }: { data: StandingData; title?: string }) {
+/** `style` is the outer spacing the screen's card stack gives this card (it
+ *  defaults to the marginBottom stack); a marginTop stack passes its own. */
+export function StandingCard({ data, title = 'Your standing', style }: { data: StandingData; title?: string; style?: ViewStyle }) {
   const band = BAND[data.standing] ?? BAND['NEW']!;
   const maxBar = 28;
   return (
-    <Card style={{ marginBottom: space.md }}>
+    <Card style={{ marginBottom: space.md, ...style }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
         <T variant="label" weight="semibold">
           {title}

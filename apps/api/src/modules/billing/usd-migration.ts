@@ -310,7 +310,7 @@ export async function sweepModeB(
       out.alerts += 1;
       await notifyAdmins(prisma, notifications, {
         tenantId: tenant.tenantId,
-        title: '💱 USD migration: payers held at their old rate — notice proof missing',
+        title: 'USD migration: payers held at their old rate — notice proof missing',
         body: `${heldHere} grandfathered payer(s) passed the sunset without both T−30 and T−7 notices verifiably delivered. They stay pinned at the rate they were promised until the notices are delivered; nothing was flipped for them.`,
         data: { kind: 'billing_invariants', alert: 'usd-migration-notice-proof', held: heldHere },
       }).catch(() => {});

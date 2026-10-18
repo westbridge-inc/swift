@@ -185,7 +185,7 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
                     only a ~1 km square and carry the site's origin, never this link's
                     token. The old embedded map was a frame, which the site's security
                     policy blocks, so it never drew. */}
-                <TileMap point={coarsen(point)} label="Trip location, approximate" linkHref={mapLinkUrl(point)} linkLabel="Open approximate map ↗" />
+                <TileMap point={coarsen(point)} label="Trip location, approximate" linkHref={mapLinkUrl(point)} linkLabel="Open approximate map" />
               </div>
             ) : view.ended ? (
               <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">
