@@ -14,6 +14,7 @@ import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -166,10 +167,8 @@ export async function verificationRoutes(app: FastifyInstance) {
       // SWIFT-078: the SAME physical document already on ANOTHER account is a
       // fraud signal — one person opening several accounts, or a reused/forged
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
-      const dup = await app.prisma.encryptedObject.findFirst({
-        where: { sha256, createdBy: { not: request.user.userId } },
-        select: { sha256: true },
-      });
+      // [Row 331 (c)] Only a LIVE account counts: an erased one is never a duplicate holder.
+      const dup = (await liveDuplicateHolders(app.prisma, sha256, request.user.userId)).length > 0;
 
       const dek = generateDek();
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
