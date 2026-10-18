@@ -17,6 +17,7 @@ import { injectWithApproval } from './helpers/admin-approval';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { previousDecisions } from '../modules/verification/previous-decision';
 import { reviewerTyped } from './helpers/reviewer-typed';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [NO-DEAD-ENDS · owner, 6 Oct] "Remember the issue for them to be able to
@@ -126,7 +127,7 @@ beforeAll(async () => {
   vendorId = profile.json().data.vendors[0].id;
 
   // The reviewer is a private fixture. A super-admin role alone cannot review documents.
-  const reviewerPhone = `+592008${String(Date.now()).slice(-8)}`;
+  const reviewerPhone = testPhone();
   const reviewer = await app.prisma.user.create({ data: {
     phone: reviewerPhone, firstName: 'Synthetic', lastName: 'Reviewer', roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',
     status: 'ACTIVE', isPhoneVerified: true, syntheticRunId: 'document-resubmit-reviewer', admin: { create: { permissions: ['*'] } },

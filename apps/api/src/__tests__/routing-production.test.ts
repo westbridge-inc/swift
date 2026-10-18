@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { FareService } from '../modules/rides/fare.service';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
+import { testPhone } from './helpers/fixture-ids';
 
 const PICKUP = { lat: 6.8013, lng: -58.1551 };
 const DROPOFF = { lat: 6.8149, lng: -58.1631 };
@@ -32,7 +33,7 @@ beforeAll(async () => {
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.ready();
   const user = await app.prisma.user.create({ data: {
-    phone: `+592${String(Math.floor(Math.random() * 9000000) + 1000000)}`,
+    phone: testPhone(),
     firstName: 'Routing', lastName: 'Fixture', syntheticRunId: 'l08-routing-test',
     roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
     trustLevel: 'L2', selfieCapturedAt: new Date(), customer: { create: {} },

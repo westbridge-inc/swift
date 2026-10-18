@@ -8,6 +8,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { testControlEnabled, verifyLoadLease, mintLoadLease, testControlIdentity } from '../modules/ops/test-control';
 import { testControlRoutes } from '../modules/ops/test-control.routes';
 import { persistCheckoutReceiptInTransaction } from '../modules/order/checkout-outbox';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [SCR-003 / SCR-004] Write-load tools cannot target production; the
@@ -17,7 +18,7 @@ import { persistCheckoutReceiptInTransaction } from '../modules/order/checkout-o
 let app: FastifyInstance; const userIds: string[] = [];
 const SECRET = `tc-${nanoid(12)}`;
 async function makeUser() {
-  const user = await app.prisma.user.create({ data: { phone: `+5927${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Load', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true } });
+  const user = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Load', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true } });
   userIds.push(user.id);
   const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'tc', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });

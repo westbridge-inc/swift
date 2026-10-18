@@ -9,6 +9,7 @@ import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
+import { identitySalt } from '../modules/integrity/normalize';
 import { smtpConfigFromEnv } from '../providers/notifications/smtp-email';
 import { assertDurableStorageConfig } from '../providers/storage/storage-config';
 
@@ -257,20 +258,16 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     throw new Error('FATAL: OTP_HASH_SECRET or JWT_SECRET must be at least 32 characters in production — OTP records require a keyed HMAC. Refusing to start.');
   }
 
-  // Identity must never silently select the deterministic test adapter. Its
-  // marker URLs can approve a user, so a missing production variable is a
-  // security failure, not a reasonable default.
+  // Launch verification is human review only. Require an explicit production
+  // setting; neither external processors nor synthetic approvals are allowed.
   const kycProvider = env['KYC_PROVIDER'];
-  // [FD-DOC-3b (b) · 2026-09-07] `manual` = on-shore human review; it approves nothing, so it is
-  // as safe as a real provider here. `sandbox` self-approves and stays forbidden.
-  if (kycProvider !== 'didit' && kycProvider !== 'idanalyzer' && kycProvider !== 'manual') {
-    throw new Error('FATAL: KYC_PROVIDER must be didit, idanalyzer or manual in production; sandbox/unset can self-approve test identities. Refusing to start.');
+  if (kycProvider !== 'manual') {
+    throw new Error('FATAL: KYC_PROVIDER must be manual in production; launch verification requires human review. Refusing to start.');
   }
-  if (kycProvider === 'didit' && !env['DIDIT_API_KEY']) {
-    throw new Error('FATAL: DIDIT_API_KEY is required when KYC_PROVIDER=didit. Refusing to start.');
-  }
-  if (kycProvider === 'idanalyzer' && !env['ID_ANALYZER_API_KEY']) {
-    throw new Error('FATAL: ID_ANALYZER_API_KEY is required when KYC_PROVIDER=idanalyzer. Refusing to start.');
+  // Face matching stays OFF (owner ruling; GUARDRAILS §8): the biometric switch
+  // cannot be turned on in production, whatever engine is configured.
+  if (env['FEATURE_BIOMETRIC_FACE_MATCH'] === '1') {
+    throw new Error('FATAL: FEATURE_BIOMETRIC_FACE_MATCH=1 is refused in production; identity checks are done by a person, with no automated face matching. Refusing to start.');
   }
 
   // Subscription charges are real platform revenue. The sandbox succeeds for
@@ -478,6 +475,10 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     console.warn('WARN: CONSENT_IP_PEPPER is unset or under 32 characters — consent-ledger IP attribution is OFF (hashIp() returns null). Set a 32+ char pepper to record peppered IP evidence.');
   }
   assertQrConfig(env);
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key (phone, document
+  // number, plate, device hashes): refused at boot, not at the first identity
+  // capture. The same contract as the hasher; the value is never echoed.
+  identitySalt(env);
   assertPlacesConfig(env);
 }
 

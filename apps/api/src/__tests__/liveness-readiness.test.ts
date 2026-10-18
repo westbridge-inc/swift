@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Fastify from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import {
   evaluateReadiness, getLastReadiness, registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegradedCounter, resetReadinessForTests,
   type RuntimeReadinessState,
@@ -75,6 +76,40 @@ describe('[R048-006] liveness is dependency-free', () => {
       const ready = await app.inject({ method: 'GET', url: '/ready' });
       expect(ready.statusCode).toBe(503);
       expect(ready.json().reasons.sort()).toEqual(['boot', 'clock', 'database', 'queueConsumers', 'queueInit', 'realtime', 'redis', 'worker']);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+// [row 331 · APP-PLATFORM-GUARDS b] Liveness touches no dependency, and that
+// includes the rate limiter's Redis store: production's limiter used to answer
+// /live with a 500 the moment its store connection was gone.
+describe('[row 331] /live never consults the rate limiter', () => {
+  it('with a fail-CLOSED limiter whose store is gone, /live still answers 200 and never touches the store', async () => {
+    const calls = { n: 0 };
+    // A Redis client as the limiter's store sees it, with the connection gone:
+    // every INCR fails at once (offline queue off), as production's does.
+    const deadStore = {
+      defineCommand() {},
+      rateLimit(...args: unknown[]) {
+        calls.n += 1;
+        (args[args.length - 1] as (err: Error | null, res: unknown) => void)(new Error("Stream isn't writeable and enableOfflineQueue options is false"), null);
+      },
+    };
+    const app = Fastify({ logger: false });
+    try {
+      await app.register(rateLimit, { redis: deadStore as never, nameSpace: 'pg-test-live:', max: 200, timeWindow: '1 minute', skipOnError: false });
+      registerLivenessRoute(app);
+      app.get('/api/v1/customer/home', async () => ({ ok: true }));
+      const live = await app.inject({ method: 'GET', url: '/live', remoteAddress: '10.33.1.1' });
+      expect(live.statusCode).toBe(200);
+      expect(live.json()).toMatchObject({ status: 'alive' });
+      expect(calls.n).toBe(0);
+      // The same fail-closed limiter on an ordinary route: the store WAS consulted (the control).
+      const other = await app.inject({ method: 'GET', url: '/api/v1/customer/home', remoteAddress: '10.33.1.1' });
+      expect(other.statusCode).toBe(500);
+      expect(calls.n).toBe(1);
     } finally {
       await app.close();
     }

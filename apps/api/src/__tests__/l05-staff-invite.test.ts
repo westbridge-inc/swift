@@ -14,6 +14,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, staffInviteAcceptEnabled, deliverStaffInvite } from '../modules/vendor/staff-invites';
 import { NotificationService } from '../modules/notification/notification.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55. Adding a store team member by phone must not tell the owner whether
@@ -33,7 +34,7 @@ let vendorOwnerId: string;
 let storeName: string;
 
 async function makeUser(roles: UserRole[], activeRole: UserRole, extra: Record<string, unknown> = {}) {
-  const phone = `+59244${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Invitee', lastName: `Person${userIds.length}`, roles, activeRole,
@@ -100,7 +101,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id, name: storeName, slug: `invite-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
-      phone: `+59244${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       addressLine1: '4 Crew Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },
@@ -135,7 +136,7 @@ describe('[row 55] one reply for every number', () => {
     it(`switch ${mode}: unknown, known, already-member and already-invited numbers get byte-identical replies with no identity`, async () => {
       if (mode === 'on') process.env['STAFF_INVITE_ACCEPT'] = '1';
       const known = await makeUser(['CUSTOMER'], 'CUSTOMER');
-      const unknownPhone = `+59244${String(Math.floor(Math.random() * 90000) + 10000)}`;
+      const unknownPhone = testPhone();
 
       const first = await add(known.phone);
       const again = await add(known.phone);
