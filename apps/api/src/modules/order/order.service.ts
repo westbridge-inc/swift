@@ -2941,7 +2941,7 @@ export class OrderService {
     // Send notifications
     const riderName = order.rider?.user?.firstName || 'Your rider';
     switch (status) {
-      case 'ACCEPTED':
+      case 'ACCEPTED': {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
@@ -2949,13 +2949,15 @@ export class OrderService {
         // the customer's slot inside this transition. Kitchen words on a
         // haircut were the phone's first sign that a SERVICE booking was riding
         // the food order spine.
-        if (isUnpaidMmgAcceptance(order)) {
-          // [owner 18 Oct 2026 · REVIEW-F S2-1/S3-1b] Accepted, not yet paid by MMG (an order or a booking):
+        const mmgPayBy = mmgAcceptedPayBy(order);
+        const mmgClaimedPaid = isUnpaidMmgAcceptance(order) && order.customerMmgClaim === 'PAID';
+        if (mmgPayBy || mmgClaimedPaid) {
+          // [owner 18 Oct 2026 · REVIEW-F S2-1/S3-1b/S4-1] Accepted, not yet paid by MMG (an order or a booking):
           // nothing goes ahead until "Paid by MMG", and the 30-minute clock starts now — the customer is told to
           // pay, how much and by when; if they already said "I paid", that it waits for the store. Never the number.
           const storeName = order.vendor?.name || 'The store';
           const noun = mmgOrderNoun(order.fulfillment);
-          const payBy = mmgAcceptedPayBy(order);
+          const payBy = mmgPayBy;
           const copy = payBy
             ? mmgAcceptedPushCopy(order.orderNumber, storeName, Number(order.totalAmount), order.currencyCode, payBy, noun)
             : mmgAcceptedClaimedPushCopy(order.orderNumber, storeName, noun);
@@ -2972,6 +2974,7 @@ export class OrderService {
           await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         }
         break;
+      }
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;

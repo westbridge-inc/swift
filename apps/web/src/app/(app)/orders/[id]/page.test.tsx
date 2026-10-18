@@ -288,7 +288,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
   };
 
   it('an accepted order shows the number sentence, who confirms it, and the deadline; no link button', async () => {
-    vi.spyOn(customer, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT } as never);
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT } as never);
     render(<OrderDetailPage />);
     expect(await screen.findByText(PAYMENT.instruction, { exact: false })).toBeTruthy();
     expect(screen.getByText(/Shanta Kitchen marks your order paid when the money arrives\. Swift never holds this money\./)).toBeTruthy();
@@ -297,7 +297,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
   });
 
   it('before the store accepts: the page says the number comes after acceptance, and shows none', async () => {
-    vi.spyOn(customer, 'getOrder').mockResolvedValue({ ...ORDER, status: 'PENDING', paymentAction: null, mmgPayment: null } as never);
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'PENDING', paymentAction: null, mmgPayment: null } as never);
     render(<OrderDetailPage />);
     expect(await screen.findByText(/When the business accepts, this page shows its MMG number and the exact amount\. Pay within 30 minutes of it accepting, or the order cancels automatically\./)).toBeTruthy();
     expect(document.body.textContent).not.toContain('600 1234');
@@ -308,7 +308,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
     ['marked paid by the store', { paymentStatus: 'CLAIMED' }],
     ['cancelled', { status: 'CANCELLED' }],
   ])('a %s order never shows the number, even if one arrives', async (_label, change) => {
-    vi.spyOn(customer, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT, ...change } as never);
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT, ...change } as never);
     render(<OrderDetailPage />);
     expect(await screen.findByText('SW-2001', { exact: false })).toBeTruthy();
     expect(document.body.textContent).not.toContain('600 1234');
@@ -317,7 +317,7 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
 
   it('an order cancelled because it was not marked paid in time says why', async () => {
     const notice = "Shanta Kitchen didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Shanta Kitchen refunds you directly.";
-    vi.spyOn(customer, 'getOrder').mockResolvedValue({
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null,
       cancellationReason: 'Cancelled automatically: not marked "Paid by MMG" within 30 minutes of being accepted', cancellationNotice: notice,
     } as never);

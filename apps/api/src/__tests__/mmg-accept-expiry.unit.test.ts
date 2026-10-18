@@ -113,7 +113,8 @@ describe('[REVIEW-F S3-1b] a booking reads as a booking', () => {
     const { join } = await import('node:path');
     const src = readFileSync(join(__dirname, '..', 'modules', 'order', 'order.service.ts'), 'utf8');
     const accepted = src.slice(src.indexOf("      case 'ACCEPTED':"), src.indexOf("      case 'PREPARING':"));
-    expect(accepted.indexOf('if (isUnpaidMmgAcceptance(order))')).toBeGreaterThan(-1);
-    expect(accepted.indexOf('if (isUnpaidMmgAcceptance(order))')).toBeLessThan(accepted.indexOf("order.fulfillment === 'APPOINTMENT'"));
+    expect(accepted).toContain("const mmgClaimedPaid = isUnpaidMmgAcceptance(order) && order.customerMmgClaim === 'PAID';");
+    expect(accepted.indexOf('if (mmgPayBy || mmgClaimedPaid)')).toBeGreaterThan(-1);
+    expect(accepted.indexOf('if (mmgPayBy || mmgClaimedPaid)')).toBeLessThan(accepted.indexOf("order.fulfillment === 'APPOINTMENT'"));
   });
 });

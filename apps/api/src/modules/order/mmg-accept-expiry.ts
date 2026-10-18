@@ -157,7 +157,8 @@ export function mmgStoreSilentStorePush(orderNumber: string, amount: number, cur
 
 /** The support case the same moment opens (one per order). */
 export function mmgStoreSilentTicketMessage(orderNumber: string, minutes = MMG_ACCEPTED_PAY_WINDOW_MINUTES): string {
-  return `Order ${orderNumber}: the customer recorded that they paid by MMG, and the store has not marked it "Paid by MMG" ${minutes} minutes after accepting. The order is not cancelled; nothing is prepared or dispatched until the store confirms. Swift never holds this money.`;
+  // Filed under the customer (it is their payment report), so it reads to them as well as to support.
+  return `Order ${orderNumber}: you told us you paid by MMG, and the store has not marked it "Paid by MMG" ${minutes} minutes after accepting. Swift support is checking with the store. Your order is not cancelled; nothing is prepared or sent until the store confirms the money arrived. Swift never holds this money.`;
 }
 
 /** What the customer is told when it cancels (push + the order card). */
