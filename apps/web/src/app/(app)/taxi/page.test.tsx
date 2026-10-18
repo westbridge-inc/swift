@@ -139,7 +139,7 @@ describe('[Row 117] a signed-in customer sees the server’s real fare for the r
     await new Promise((r) => setTimeout(r, 20));
     expect(screen.queryByText(/\$1,300/)).toBeNull();
     expect(screen.getByText(/\$900/)).toBeTruthy();
-    expect(vi.mocked(rides.rideEstimate).mock.calls[1][0]).toEqual({
+    expect(rides.rideEstimate).toHaveBeenNthCalledWith(2, {
       pickup: { lat: STABROEK.lat, lng: STABROEK.lng }, dropoff: { lat: CAMP.lat, lng: CAMP.lng },
     });
   });
