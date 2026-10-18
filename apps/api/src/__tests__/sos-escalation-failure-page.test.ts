@@ -143,7 +143,7 @@ describe('a failed emergency-contact text pages on-call operations', () => {
 
     const [opsAlert, ...more] = await failurePages(alert.id);
     expect(more).toHaveLength(0);
-    expect(opsAlert!.title).toBe('🚨 SOS contact text failed — call the person now');
+    expect(opsAlert!.title).toBe('URGENT: SOS contact text failed — call the person now');
     expect(opsAlert!.body).toContain(`SOS alert ${alert.id}`);
     expect(opsAlert!.body).toContain('Swift keeps retrying.');
     expect((await prisma.sosEscalation.findUniqueOrThrow({ where: { id: sms.id } })).failurePageOpsAlertId).toBe(opsAlert!.id);
@@ -204,8 +204,8 @@ describe('a failed emergency-contact text pages on-call operations', () => {
 
 describe('ANY failed row pages, each in its own plain words', () => {
   it.each([
-    ['OPS_PAGE', '🚨 SOS page failed — open the war room now'],
-    ['WAR_ROOM', '🚨 SOS live board update failed — open the war room now'],
+    ['OPS_PAGE', 'URGENT: SOS page failed — open the war room now'],
+    ['WAR_ROOM', 'URGENT: SOS live board update failed — open the war room now'],
     ['EVIDENCE', 'SOS evidence record failed — check the alert'],
   ] as const)('%s', async (channel, title) => {
     const { alert, row } = await alertWithFailedRow({ channel, rowStatus: 'PENDING', attempts: 3, lastError: 'boom' });

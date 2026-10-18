@@ -22,6 +22,7 @@ import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { scopedPrisma as prisma, scopedClientFor } from '../plugins/prisma';
 import { runAsSystem } from '../plugins/tenant-context';
 import { drainSosEscalations, scanSosEscalations } from '../modules/safety/sos-escalation';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
@@ -43,7 +44,7 @@ beforeAll(async () => {
   logins = await createTenantProbeLogins(prisma, TEST_URL);
   await runAsSystem('test-setup', async () => {
     userId = (await prisma.user.create({ data: {
-      phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Sos', lastName: 'Posture',
+      phone: testPhone(), firstName: 'Sos', lastName: 'Posture',
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
     } })).id;
     // An ACTIVE alert, older than the watchdog threshold, whose ops page is still pending.

@@ -140,10 +140,14 @@ describe('record-only closure of store-claimed MMG orders', () => {
     expect(notices).toHaveLength(2);
     expect(new Set(notices.map((n) => n.userId))).toEqual(new Set([customerId, ownerId]));
     // The store is told exactly how much it owes back; the customer how much is coming.
-    expect(notices.find((n) => n.userId === ownerId)!.body).toContain('GY$1,300');
-    expect(notices.find((n) => n.userId === customerId)!.body).toContain('GY$1,300');
+    const storeNotice = notices.find((n) => n.userId === ownerId)!;
+    const customerNotice = notices.find((n) => n.userId === customerId)!;
+    expect(storeNotice.body).toContain('GY$1,300');
+    expect(customerNotice.body).toContain('GY$1,300');
+    expect(storeNotice.body).toMatch(/store.*refund.*within 72 hours/i);
+    // [Owner legal plan 15 Oct · R31, research E7] The customer's notice, sentence by sentence.
+    expect(customerNotice.body).toBe(`Your order ${before.orderNumber} was cancelled. Swift does not hold your money. Fixture ${RUN} received GY$1,300 by MMG and must refund it to you within 72 hours. If it does not, contact support from the order screen and we will follow up.`);
     for (const notice of notices) {
-      expect(notice.body).toMatch(/store.*refund/i);
       expect(notice.body).toMatch(/Swift.*(never|does not).*money/i);
       expect(notice.body).not.toMatch(/refund (is confirmed|has arrived)|Swift refunded/);
     }
@@ -237,9 +241,12 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const notices = await sys(() => app.prisma.notification.findMany({ where: { userId: { in: [customerId, ownerId] }, data: { path: ['orderId'], equals: o.id } } }));
     expect(notices).toHaveLength(2);
     for (const n of notices) {
-      expect(n.body).toMatch(/provider/i);
-      expect(n.body).not.toMatch(/\bstore\b/i);
+      expect(`${n.title} ${n.body}`).toMatch(/provider/i);
+      expect(`${n.title} ${n.body}`).not.toMatch(/\bstore\b/i);
     }
+    // [R31 · E7] The customer is told who received the money (the provider, by name) and by when it is refunded.
+    const customerNotice = notices.find((n) => n.userId === customerId)!;
+    expect(customerNotice.body).toBe(`Your booking ${o.orderNumber} was cancelled. Swift does not hold your money. Fixture ${RUN} received GY$1,300 by MMG and must refund it to you within 72 hours. If it does not, contact support from the order screen and we will follow up.`);
   });
 
   it('refuses a claim with no attested amount: there is nothing to record', async () => {

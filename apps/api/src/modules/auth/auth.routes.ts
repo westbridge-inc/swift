@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { scanUpload } from '../../lib/malware-scan';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
@@ -295,6 +296,7 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'avatar', log: request.log });
     const storage = getStorageProvider();
     const { url } = await storage.upload({
       buffer,

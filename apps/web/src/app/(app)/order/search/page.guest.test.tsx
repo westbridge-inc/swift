@@ -17,7 +17,10 @@ const SEARCH_URL = 'http://vendor-api.test/api/v1/search?q=Pepper&limit=30';
 function engine(vendors: unknown[], items: unknown[] = []) {
   return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
-    const data = url.includes('/api/v1/search?') ? { vendors, items } : url.includes('/market/depth') ? { visible: false, items: 0, vendors: 0 } : null;
+    // [row 110] The page also asks the engine's suggestions while you type
+    // (the phone's [B2] chips); a guest gets them from the same public engine.
+    const data = url.includes('/api/v1/search?') ? { vendors, items } : url.includes('/api/v1/search/suggestions?') ? []
+      : url.includes('/market/depth') ? { visible: false, items: 0, vendors: 0 } : null;
     return new Response(JSON.stringify({ success: data !== null, data }), { status: data === null ? 401 : 200 });
   });
 }
@@ -32,9 +35,11 @@ describe('web guest catalogue search', () => {
     // [Q7b] The shell asks once who is browsing and once whether Market is
     // open; the search itself is ONE call to the search engine (stores and
     // dishes together). Nothing else — in particular, no refresh is spent on a guest.
+    // [row 110] Plus ONE call for the engine's suggestions (the phone's chips).
     expect(fetcher.mock.calls.map(([url]) => String(url)).sort()).toEqual([
       'http://vendor-api.test/api/v1/auth/me',
       'http://vendor-api.test/api/v1/market/depth',
+      'http://vendor-api.test/api/v1/search/suggestions?q=Pepper',
       SEARCH_URL,
     ]);
     expect(fetcher).toHaveBeenCalledWith(SEARCH_URL, expect.objectContaining({ credentials: 'include' }));

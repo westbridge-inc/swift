@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { guyanaDayKey } from '../utils/guyana-day';
+import { testPhone } from './helpers/fixture-ids';
 
 // Bookable time slots for a SERVICE appointment listing, generated from
 // Item.bookingConfig. Slots must align to the duration, sit in a day-window,
@@ -51,7 +52,7 @@ beforeAll(async () => {
   regularItemId = reg!.id;
 
   const user = await app.prisma.user.create({
-    data: { phone: `+592002990${Math.floor(Math.random() * 90 + 10)}`, firstName: 'Slot', lastName: 'Tester', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
+    data: { phone: testPhone(), firstName: 'Slot', lastName: 'Tester', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date(), customer: { create: {} } },
   });
   userId = user.id;
   token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });

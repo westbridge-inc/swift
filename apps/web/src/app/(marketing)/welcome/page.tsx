@@ -71,8 +71,9 @@ const PROMISES = [
   },
   {
     icon: ShieldCheck,
-    title: 'Verified people, honest orders',
-    body: 'ID-verified partners, a six-digit code before a ride starts, and an emergency button that dials 911. Insurance is read off the policy, not ticked by an operator.',
+    // [R7 · GUARDRAILS §7(4)] A person on our team checks partners' documents (Terms ¶17); nothing is "read off" by a machine.
+    title: 'Checked partners, honest orders',
+    body: 'Partners’ documents checked by a person on our team, a six-digit code before a ride starts, and an emergency button that dials 911.',
   },
 ];
 

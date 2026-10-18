@@ -122,3 +122,18 @@ describe('account deletion confirmation', () => {
     expect(textOf(tree, 'PopupCard').join(' ')).toMatch(/cannot be undone/);
   });
 });
+
+// [Owner 16 Oct: customers take no photos · REVIEW-F #1837 S3-1] The screen is shared by every app. Only a
+// person who HAS a picture (a partner's signup selfie) is told where it came from; a customer without one is
+// never shown a line about a selfie.
+describe('the photo line', () => {
+  const SELFIE_LINE = 'Profile photo comes from your signup selfie.';
+  it('a person with no picture (a customer) is never told about a signup selfie', () => {
+    mocks.profile = { firstName: 'Synthetic', lastName: 'Subject', avatar: null };
+    expect(textOf(PersonalDataScreen(), 'T').join(' ')).not.toMatch(/selfie/i);
+  });
+  it('a person with a picture (a partner) still sees where it came from', () => {
+    mocks.profile = { firstName: 'Synthetic', lastName: 'Subject', avatar: 'https://example.invalid/a.jpg' };
+    expect(textOf(PersonalDataScreen(), 'T')).toContain(SELFIE_LINE);
+  });
+});

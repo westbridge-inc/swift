@@ -43,7 +43,10 @@ describe('driver ride handback client/server contract', () => {
 
     expect(success).toContain("if (input.action === 'handback') {");
     expect(success).toContain("void qc.invalidateQueries({ queryKey: ['mover'] });");
-    expect(success).toContain("return qc.invalidateQueries({ queryKey: ['mover'] });");
+    // [PERF partner #2] Every other step still returns (so awaits) its refresh:
+    // the active job's read; the rest refresh in the background
+    // (mover.jobStepWait.test.ts drives what that promise waits for).
+    expect(success).toContain('return refreshAfterJobStep(qc);');
     expect(success).not.toContain("await qc.invalidateQueries({ queryKey: ['mover'] })");
   });
 

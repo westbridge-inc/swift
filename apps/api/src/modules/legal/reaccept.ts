@@ -1,6 +1,7 @@
 import { Prisma, type PrismaClient, type UserRole } from '@prisma/client';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from './legal.routes';
 import { publishLegalDocumentOnce, recordConsent, type ConsentDocumentType, type ConsentSubjectType, type ConsentSurface } from './consent.service';
+import { OPERATOR } from './operator';
 
 /**
  * [Legal research G2 · R26 · owner 15 Oct 2026] A material change to the legal texts is not accepted by "continued
@@ -15,11 +16,21 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
   {
     version: '2026-10-16',
     summary: [
-      'The Terms and the Privacy Policy now name the company behind Swift — Westbridge Inc., with its registration number, address and phone — and our data protection officer.',
+      `The Terms and the Privacy Policy now name the company behind Swift — ${OPERATOR.name}, with its registration number, address and phone — and our data protection officer.`,
       'Swift never carries letters, documents or mail, and the Terms list everything Swift prohibits.',
       'Safety: Swift’s safety team is not an emergency service. In an emergency call Police 911, Fire 912 or Ambulance 913 first.',
       'Partners: Swift tells you in the app at least 14 days before a weekly-fee change, and refunds an unstarted week within 14 days when you close your account.',
       'Privacy: who processes your data and where our servers are, how a breach is handled, and that we answer a request within one month.',
+    ],
+  },
+  {
+    // [Owner rulings: identity checks by a person only, face matching off; customers take no photos (16 Oct)]
+    version: '2026-10-17',
+    summary: [
+      'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
+      'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
+      'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
     ],
   },
 ];
@@ -55,7 +66,11 @@ export function acceptanceStatus(user: { tosVersion: string | null; roles: reado
   const material = materialVersion(current);
   const accepted = user.tosVersion;
   const needsAcceptance = accepted === null || (material !== null && accepted < material);
-  const summary = accepted !== null && material !== null ? (MATERIAL_CHANGES.find((c) => c.version === material)?.summary ?? []) : [];
+  // Every material change since the version this person accepted, oldest first — someone who skipped
+  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
+  const summary = accepted !== null
+    ? MATERIAL_CHANGES.filter((c) => c.version > accepted && c.version <= current).flatMap((c) => c.summary)
+    : [];
   return {
     currentVersion: current,
     acceptedVersion: accepted,
