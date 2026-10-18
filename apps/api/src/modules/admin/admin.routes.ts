@@ -13,6 +13,7 @@ import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
+import { isCategoryIconKey } from '@swift/types';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
@@ -7174,7 +7175,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
       emoji: z.string().min(1).max(8).optional(),
-      iconKey: z.string().max(60).nullable().optional(),
+      // Owner 17 Oct: categories carry one of the app's icons, never emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list').nullable().optional(),
       aliases: z.array(z.string().trim().min(1).max(60)).max(60).optional(),
       sortWeight: z.number().int().min(0).max(10_000).optional(),
       status: z.enum(['ACTIVE', 'HIDDEN']).optional(),
@@ -7225,7 +7227,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/discovery/requests/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
-      emoji: z.string().min(1).max(8),
+      // Owner 17 Oct: a new category gets one of the app's icons, never an emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list'),
       kind: z.enum(['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL']),
       vertical: z.enum(['FOOD', 'GROCERY', 'RETAIL']),
     }).parse(request.body);

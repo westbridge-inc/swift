@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CATEGORY_ICON_OPTIONS } from '@swift/types';
 import {
   approveDiscoveryRequest,
   fetchDiscoveryCategories,
@@ -43,6 +44,11 @@ type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
 // The route validates against these enums. Offering free text would mean a
 // reviewer types something reasonable and is refused at the moment they act.
+/** The icon a category row shows: its chosen app icon, else the app's own by-slug choice. */
+function iconLabel(key: string | null): string {
+  return CATEGORY_ICON_OPTIONS.find((o) => o.key === key)?.label ?? 'App default';
+}
+
 const KINDS = ['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL'] as const;
 const VERTICALS = ['FOOD', 'GROCERY', 'RETAIL'] as const;
 
@@ -51,7 +57,7 @@ export default function DiscoveryPage() {
   const [tab, setTab] = useState<Tab>('requests');
   const [status, setStatus] = useState<RequestStatus>('PENDING');
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [emoji, setEmoji] = useState('');
+  const [iconKey, setIconKey] = useState('');
   const [kind, setKind] = useState<string>(KINDS[0]);
   const [vertical, setVertical] = useState<string>(VERTICALS[0]);
   const [mapTarget, setMapTarget] = useState('');
@@ -69,11 +75,11 @@ export default function DiscoveryPage() {
   const rows: DiscoveryRequest[] = requests.data?.data ?? [];
 
   const done = () => {
-    setActiveId(null); setEmoji(''); setReason(''); setMapTarget('');
+    setActiveId(null); setIconKey(''); setReason(''); setMapTarget('');
     queryClient.invalidateQueries({ queryKey: ['discovery'] });
   };
   const approve = useMutation({
-    mutationFn: (id: string) => approveDiscoveryRequest(id, { emoji, kind, vertical }),
+    mutationFn: (id: string) => approveDiscoveryRequest(id, { iconKey, kind, vertical }),
     onSuccess: done, onError: setMutationError,
   });
   const mapTo = useMutation({
@@ -216,7 +222,7 @@ export default function DiscoveryPage() {
                         >
                           <option value="">Choose a category…</option>
                           {cats.filter((c) => c.status === 'ACTIVE' && !c.mergedIntoId).map((c) => (
-                            <option key={c.id} value={c.slug}>{c.emoji} {c.name} ({c.slug})</option>
+                            <option key={c.id} value={c.slug}>{c.name} ({c.slug})</option>
                           ))}
                         </select>
                         <button
@@ -233,14 +239,12 @@ export default function DiscoveryPage() {
                     <div>
                       <p className="text-sm font-medium">Or create it as a new category</p>
                       <div className="mt-2 flex flex-wrap gap-2">
-                        <input
-                          value={emoji}
-                          onChange={(e) => setEmoji(e.target.value)}
-                          placeholder="Emoji"
-                          aria-label="Emoji"
-                          maxLength={8}
-                          className="w-24 rounded border border-neutral-300 px-2 py-1 text-sm"
-                        />
+                        {/* Owner 17 Oct: a category carries one of the app's icons,
+                            never an emoji. The route refuses any key not on this list. */}
+                        <select value={iconKey} onChange={(e) => setIconKey(e.target.value)} aria-label="Icon" className="rounded border border-neutral-300 px-2 py-1 text-sm">
+                          <option value="">Choose an icon…</option>
+                          {CATEGORY_ICON_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                        </select>
                         {/* Enums, never text: the route refuses anything else. */}
                         <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind" className="rounded border border-neutral-300 px-2 py-1 text-sm">
                           {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
@@ -250,14 +254,14 @@ export default function DiscoveryPage() {
                         </select>
                         <button
                           type="button"
-                          disabled={!emoji.trim() || approve.isPending}
+                          disabled={!iconKey || approve.isPending}
                           onClick={() => approve.mutate(r.id)}
                           className="rounded bg-neutral-900 px-3 py-1 text-sm text-white disabled:opacity-40"
                         >
                           Create
                         </button>
                       </div>
-                      <p className="mt-1 text-xs text-neutral-500">An emoji is required by the route — the button stays off without one.</p>
+                      <p className="mt-1 text-xs text-neutral-500">The app draws the icon you choose. The button stays off until you choose one.</p>
                     </div>
 
                     <div>
@@ -297,14 +301,15 @@ export default function DiscoveryPage() {
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-neutral-500">
               <tr>
-                <th className="py-2">Category</th><th>Slug</th><th>Kind</th><th>Vertical</th>
+                <th className="py-2">Category</th><th>Icon</th><th>Slug</th><th>Kind</th><th>Vertical</th>
                 <th>Aliases</th><th>Visible</th><th />
               </tr>
             </thead>
             <tbody>
               {cats.map((c) => (
                 <tr key={c.id} className="border-t border-neutral-100">
-                  <td className="py-2">{c.emoji} {c.name}</td>
+                  <td className="py-2">{c.name}</td>
+                  <td className="text-neutral-500">{iconLabel(c.iconKey)}</td>
                   <td className="text-neutral-500">{c.slug}</td>
                   <td className="text-neutral-500">{c.kind}</td>
                   <td className="text-neutral-500">{c.vertical}</td>
