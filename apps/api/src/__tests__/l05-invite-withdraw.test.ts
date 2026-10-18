@@ -13,7 +13,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, deliverStaffInvite, staffInviteRevocationVersion } from '../modules/vendor/staff-invites';
 import { NotificationService } from '../modules/notification/notification.service';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up (switch ON). Nothing pending is listed to the owner, which
@@ -58,7 +58,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, firstName = 'In
 async function makeStore(ownerUserId: string) {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUserId } });
   vendorOwnerIds.push(vo.id);
-  const name = `Withdraw Bistro ${nanoid(4)}`;
+  const name = `Withdraw Bistro ${wordFreeTag(4)}`;
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id, name, slug: `withdraw-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',

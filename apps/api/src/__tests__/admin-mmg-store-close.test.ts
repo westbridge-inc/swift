@@ -24,8 +24,9 @@ import { purgeAuditLogs } from '../lib/audit-immutability';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { TERMINAL_ORDER_STATUSES, MOVER_HOLDING_STATUSES } from '../modules/order/order-status';
 import { assertOrderMayProceed } from '../modules/compliance/prohibited-gate';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8);
+const RUN = wordFreeTag(8);
 const REASON = 'The store cannot fulfil this order; support is following up with the store about its direct refund.';
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test:mmg-store-close');
 let app: FastifyInstance;

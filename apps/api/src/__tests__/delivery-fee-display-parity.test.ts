@@ -10,7 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { calculateDeliveryFee, deliveryFeeFromRates, mergeDeliveryRates } from '../utils/markup';
 import { estimateDrivingDistance } from '../utils/distance';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [FUL-003b completion] The fee a customer READS must be the fee they are
@@ -106,7 +106,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `feeparity ${nanoid(5)}`,
+      name: `feeparity ${wordFreeTag(5)}`,
       slug: `feeparity-${nanoid(6).toLowerCase()}`,
       vendorType: 'RESTAURANT',
       phone: testPhone(),

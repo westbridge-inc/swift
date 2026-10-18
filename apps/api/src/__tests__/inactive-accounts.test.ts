@@ -25,9 +25,10 @@ import {
 } from '../modules/user/inactivity';
 import { gsm7Parts, isGsm7 } from '../utils/sms-text';
 import type { SmsProvider } from '../providers/notifications/channels';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 const DAY = 86_400_000;
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-6);
 let app: FastifyInstance;
 const users: string[] = [];

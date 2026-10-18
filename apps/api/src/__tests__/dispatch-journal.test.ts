@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { makeDispatchService } from '../modules/dispatch/dispatch.service';
 import { OrderService } from '../modules/order/order.service';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Dispatch search journal (availability spec §3): a record BESIDE the state
@@ -248,7 +248,7 @@ describe('checkout delivery gate (§2, flag-gated)', () => {
     // Self-contained always-open vendor at the empty corner (no hours rows).
     const owner = await app.prisma.vendorOwner.create({ data: { userId: customerId } });
     ownerId = owner.id;
-    const marker = nanoid(6).toLowerCase();
+    const marker = wordFreeTag(6);
     const vendor = await app.prisma.vendor.create({
       data: {
         ownerId: owner.id,

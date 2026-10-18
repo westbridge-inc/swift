@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // The category FEED (#17 6.3) = the existing store-list endpoint + category=.
@@ -117,7 +118,7 @@ describe('the category feed', () => {
     });
     const merged = await app.prisma.discoveryCategory.create({
       data: {
-        tenantId: 'swift-default', slug: `feed-merged-${nanoid(6).toLowerCase()}`,
+        tenantId: 'swift-default', slug: `feed-merged-${wordFreeTag(6)}`,
         name: 'Old Wok', kind: 'CUISINE', vertical: 'FOOD', emoji: '🥡',
         aliases: [], status: 'MERGED', mergedIntoId: target.id,
       },

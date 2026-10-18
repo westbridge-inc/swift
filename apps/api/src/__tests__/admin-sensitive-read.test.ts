@@ -10,7 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-007] AN ADMIN COULD READ ANYONE AND LEAVE NOTHING BEHIND.
@@ -29,7 +29,7 @@ import { testPhone } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+const RUN = wordFreeTag(6);
 const userIds: string[] = [];
 let token = '';
 

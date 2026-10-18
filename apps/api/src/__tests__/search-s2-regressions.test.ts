@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -8,6 +7,7 @@ import { socketPlugin } from '../plugins/socket';
 import { marketRoutes } from '../modules/market/market.routes';
 import { searchRoutes } from '../modules/search/search.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [S2] Guest catalogue search — the two findings PR #1264's R2 review blocked on.
@@ -27,7 +27,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+const RUN = wordFreeTag(6);
 const TENANT = `s2-guest-${RUN}`;
 const NEEDLE = `hammer-${RUN}`;
 // Unique prefix, grep-proven: no other test file uses +5920052, and it is

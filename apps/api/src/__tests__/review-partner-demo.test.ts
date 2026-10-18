@@ -62,7 +62,7 @@ import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkC
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 import { CountryConfigService } from '../modules/country/country-config.service';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 /** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
  *  behind that switch, so it is graded with advertising switched on. */
@@ -74,7 +74,7 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-partner-${RUN}`;
 const PRODUCTION = 'swift-default';
 const UPLOAD_DIR = `/tmp/review-partner-test-uploads-${RUN}`;

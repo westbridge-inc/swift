@@ -11,6 +11,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // File imports (master plan §3.1 "CSV/Excel" + "menu PDF parsed into items to
@@ -96,7 +97,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id,
-      name: `File Foods ${nanoid(4)}`,
+      name: `File Foods ${wordFreeTag(4)}`,
       slug: `file-foods-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920036900',

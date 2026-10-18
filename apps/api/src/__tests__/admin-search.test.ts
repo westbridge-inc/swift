@@ -10,6 +10,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Global ⌘K search: one query fans out across orders / users / vendors.
@@ -19,7 +20,7 @@ import { loginWithOtp } from './helpers/otp';
 let app: FastifyInstance;
 let adminToken: string;
 const userIds: string[] = [];
-const marker = `zqx${nanoid(4).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+const marker = `zqx${wordFreeTag(4)}`;
 
 async function buildTestApp() {
   const server = Fastify({ logger: false });

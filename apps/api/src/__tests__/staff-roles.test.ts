@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Staff & roles (master plan §4.1). Failure paths first: STAFF is refused on
@@ -92,7 +93,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vendorOwner.id,
-      name: `Team Bistro ${nanoid(4)}`,
+      name: `Team Bistro ${wordFreeTag(4)}`,
       slug: `team-bistro-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920029900',
@@ -123,7 +124,7 @@ beforeAll(async () => {
   const other = await app.prisma.vendor.create({
     data: {
       ownerId: otherVo.id,
-      name: `Other Store ${nanoid(4)}`,
+      name: `Other Store ${wordFreeTag(4)}`,
       slug: `other-store-${nanoid(6)}`,
       vendorType: 'STORE',
       phone: '+5920029901',

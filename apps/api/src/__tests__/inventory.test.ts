@@ -11,6 +11,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Inventory engine (master plan §4.2). Failure paths first: overselling is
@@ -123,7 +124,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vendorOwner.id,
-      name: `Inventory Mart ${nanoid(4)}`,
+      name: `Inventory Mart ${wordFreeTag(4)}`,
       slug: `inventory-mart-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920023900',

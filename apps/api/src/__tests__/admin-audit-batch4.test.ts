@@ -11,7 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { withSuiteCapability } from '../lib/test-target-lock';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE LAST THREE SELF-OWNED MONEY ROUTES.
@@ -33,7 +33,7 @@ import { testPhone } from './helpers/fixture-ids';
 let app: FastifyInstance;
 // SQL identifiers: `nanoid` draws from an alphabet with `-` and `_`; a dash breaks
 // the trigger DDL and two dashes start a comment. Alphanumeric only, always.
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const userIds: string[] = [];
 const vendorIds: string[] = [];
 const ownerIds: string[] = [];
@@ -110,7 +110,7 @@ async function freshVendor() {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
   ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `B4 Kitchen ${RUN} ${nanoid(3)}`, slug: `b4-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `B4 Kitchen ${RUN} ${wordFreeTag(3)}`, slug: `b4-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: testPhone(), addressLine1: '1 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);

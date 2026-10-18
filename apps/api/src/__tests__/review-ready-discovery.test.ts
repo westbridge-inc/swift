@@ -9,7 +9,7 @@ import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { discoveryRoutes, resetDiscoveryCacheForTests, CATEGORY_DISCOVERY_FLAG } from '../modules/discovery/discovery.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [REVIEW-READY] What an App Store reviewer abroad sees on Home.
@@ -150,7 +150,7 @@ beforeAll(async () => {
     update: { value: true },
   });
   const dc = await app.prisma.discoveryCategory.create({
-    data: { tenantId, slug: `rr-cat-${nanoid(5).toLowerCase()}`, name: 'Ready Food', kind: 'CUISINE', vertical: 'FOOD', emoji: '🍲', aliases: [] },
+    data: { tenantId, slug: `rr-cat-${wordFreeTag(5)}`, name: 'Ready Food', kind: 'CUISINE', vertical: 'FOOD', emoji: '🍲', aliases: [] },
   });
   discoveryCategoryId = dc.id;
   await app.prisma.vendorDiscoveryCategory.create({

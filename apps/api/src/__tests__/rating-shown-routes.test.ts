@@ -16,13 +16,14 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { servicesRoutes } from '../modules/services/services.routes';
 import { clearShownRatingCache } from '../modules/rating/rating-groups';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 const DAY = 86_400_000;
 let app: FastifyInstance;
 const userIds: string[] = [];
 const orderIds: string[] = [];
 const vendorIds: string[] = [];
-const MARK = nanoid(6);
+const MARK = wordFreeTag(6);
 let seq = 0;
 const phoneBase = 592_760_000_000 + Math.floor(Math.random() * 9_000_000);
 

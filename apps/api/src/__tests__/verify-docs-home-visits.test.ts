@@ -31,9 +31,10 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 const DAY = 86_400_000;
-const RUN = nanoid(6).toLowerCase().replace(/[^a-z0-9]/g, '0');
+const RUN = wordFreeTag(6);
 const phoneBase = 592_006_400_000 + Math.floor(Math.random() * 90_000);
 let app: FastifyInstance;
 let service: VerificationService;

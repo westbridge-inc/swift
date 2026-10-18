@@ -33,7 +33,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
@@ -41,7 +41,7 @@ grantSuiteCapability('ddl');
 const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
 const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const PRODUCTION = 'swift-default';
 const REVIEW = `w0-review-${RUN}`;
 const DAY = 86_400_000;
