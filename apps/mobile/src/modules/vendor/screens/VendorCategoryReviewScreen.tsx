@@ -40,7 +40,7 @@ export function VendorCategoryReviewScreen() {
     itemId: string;
     itemName: string;
     imageUrl: string | null;
-    suggestions: Array<{ id: string; slug: string; name: string; emoji: string; confidence: number; stage: string }>;
+    suggestions: Array<{ id: string; slug: string; name: string; confidence: number; stage: string }>;
   }> = Array.isArray(q.data) ? q.data : [];
 
   const act = (id: string, action: 'accept' | 'dismiss', categoryName: string) => {
@@ -116,7 +116,7 @@ export function VendorCategoryReviewScreen() {
                   }}
                 >
                   <T variant="body" style={{ flex: 1 }}>
-                    {s.emoji} {s.name}
+                    {s.name}
                   </T>
 
                   {/* Dismiss is quiet and accept is the brand action: the store

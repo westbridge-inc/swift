@@ -25,7 +25,11 @@ import { mockApi, API_ORIGIN } from '@/test/test-utils';
 // ---------------------------------------------------------------------------
 
 const SOURCE = readFileSync(join(process.cwd(), 'src', 'lib', 'auth.ts'), 'utf8');
-const CUSTOMER_SOURCE = readFileSync(join(process.cwd(), 'src', 'lib', 'customer.ts'), 'utf8');
+// lib/customer and the per-page customer modules split out of it (sign-up,
+// orders, search, courier, places, rides, market): one rule for every customer request module.
+const CUSTOMER_SOURCE = ['customer.ts', 'customer-account.ts', 'customer-orders.ts', 'customer-search.ts', 'customer-courier.ts', 'customer-places.ts', 'customer-rides.ts', 'customer-market.ts']
+  .map((file) => readFileSync(join(process.cwd(), 'src', 'lib', file), 'utf8'))
+  .join('\n');
 
 /** Source with comments removed: a claim about what the code does must not be
  *  satisfiable, or breakable, by prose that names what the code no longer has. */
@@ -42,6 +46,10 @@ async function loadAuth() {
 async function loadCustomer() {
   vi.resetModules();
   return import('@/lib/customer');
+}
+async function loadAccount() {
+  vi.resetModules();
+  return import('@/lib/customer-account');
 }
 
 const signedInAs = (id: string) => ({
@@ -88,11 +96,12 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('a customer sign-in and a brand-new sign-up write no credential either — and both are credentialed, named requests', async () => {
-    const customer = await loadCustomer();
+    vi.resetModules();
+    const { verifyCustomerLogin } = await import('@/lib/customer-login');
     const login = mockApi(() => ({
       body: { success: true, data: { isNewUser: false, user: { id: 'c1', roles: ['CUSTOMER'] }, session: 'cookie' } },
     }));
-    await customer.verifyCustomerLogin('+5926001001', '246810');
+    await verifyCustomerLogin('+5926001001', '246810');
     expect(Object.keys(localStorage)).toEqual([]);
     expect(document.cookie).toBe('');
     const [, loginInit] = login.mock.calls[0]!;
@@ -103,7 +112,8 @@ describe('[W-01] nothing a script can read', () => {
       status: 201,
       body: { success: true, data: { user: { id: 'c2', roles: ['CUSTOMER'] }, onboarding: null, session: 'cookie' } },
     }));
-    const created = await customer.registerAccount({ phone: '+5926001002', firstName: 'New', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true });
+    const { registerAccount } = await import('@/lib/customer-account');
+    const created = await registerAccount({ phone: '+5926001002', firstName: 'New', lastName: 'Customer', role: 'CUSTOMER', acceptTerms: true });
     expect(created.user.id).toBe('c2');
     expect(Object.keys(localStorage)).toEqual([]);
     expect(document.cookie).toBe('');
@@ -114,12 +124,12 @@ describe('[W-01] nothing a script can read', () => {
   });
 
   it('a sign-up the server answers with a user but no tokens still signs the person in — the body carries no credential by design', async () => {
-    const customer = await loadCustomer();
-    // the SAME module graph customer.ts bound to — a second reset would hand
+    const account = await loadAccount();
+    // the SAME module graph customer-account.ts bound to — a second reset would hand
     // back a different auth instance and the assertion would grade nothing
     const auth = await import('@/lib/auth');
     mockApi(() => ({ status: 201, body: { success: true, data: { user: { id: 'c9' }, session: 'cookie' } } }));
-    await customer.registerAccount({ phone: '+5926001009', firstName: 'A', lastName: 'B', role: 'CUSTOMER' });
+    await account.registerAccount({ phone: '+5926001009', firstName: 'A', lastName: 'B', role: 'CUSTOMER' });
     // the app's own record of who it is comes from the SERVER's user, not a token
     expect(auth.getSessionPrincipal()).toBe('c9');
   });

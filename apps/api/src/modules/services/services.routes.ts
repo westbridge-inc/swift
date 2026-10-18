@@ -22,7 +22,7 @@ import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { isServiceCategoryOperational } from './service-catalog';
+import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
 import {
@@ -147,6 +147,9 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (offersLegalServices(body.bio)) {
       throw new AppError(409, 'SERVICE_NOT_ALLOWED', 'Swift doesn\'t list legal services. Remove them from your profile to continue.');
     }
+    // [TRADES · GUARDRAILS §8] Refused before anything is written: no gas or fuel supply,
+    // no protected title the trade's checklist does not prove.
+    assertProviderProfileWording(trade, body.bio);
     const userId = request.user.userId;
     const provider = await app.prisma.$transaction(async (tx) => {
       // One profile per human is the idempotency boundary. Lock the owning user
@@ -294,7 +297,7 @@ export async function servicesRoutes(app: FastifyInstance) {
       include: {
         qualifications: {
           where: { status: 'VERIFIED', verifiedAt: { not: null }, trade },
-          select: { type: true, trade: true },
+          select: { type: true, trade: true, verifiedAt: true },
         },
       },
     });
@@ -335,6 +338,10 @@ export async function servicesRoutes(app: FastifyInstance) {
           selfSkilled: qualifications.length === 0,
           certified: qualifications.length > 0,
           badges: qualifications.map((qualification) => qualification.type),
+          // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
+          licenceCheckedOn: qualifications.reduce<Date | null>(
+            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), null,
+          )?.toISOString() ?? null,
         };
       })
       // Surface licensed (certified) providers first — strongest signal for high-risk trades.

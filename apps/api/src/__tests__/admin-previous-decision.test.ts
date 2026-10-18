@@ -8,6 +8,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { loginWithOtp } from './helpers/otp';
+import { testPhone } from './helpers/fixture-ids';
 let app: FastifyInstance;
 let token: string;
 const users: string[] = [];
@@ -29,7 +30,7 @@ afterAll(async () => {
   await app.close();
 });
 it('the real queue carries the earlier matching decision, never another lane or applicant', async () => {
-  const user = await app.prisma.user.create({ data: { phone: `+5920${String(Date.now()).slice(-6)}`, firstName: 'Synthetic', lastName: 'Applicant', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' } });
+  const user = await app.prisma.user.create({ data: { phone: testPhone(), firstName: 'Synthetic', lastName: 'Applicant', roles: ['CUSTOMER'], activeRole: 'CUSTOMER' } });
   users.push(user.id);
   const old = await app.prisma.verificationDocument.create({ data: { userId: user.id, role: 'CUSTOMER', docType: 'national_id', status: 'REJECTED', fileUrl: 'test/previous', reviewNote: 'The image was unreadable.', createdAt: new Date(Date.now() - 20_000), reviewedAt: new Date(Date.now() - 19_000) } });
   await app.prisma.verificationDocument.create({ data: { userId: user.id, role: 'MOVER', docType: 'national_id', status: 'REJECTED', fileUrl: 'test/other-lane', reviewNote: 'Different lane.', createdAt: new Date(Date.now() - 10_000) } });

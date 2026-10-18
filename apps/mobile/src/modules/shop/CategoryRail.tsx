@@ -1,14 +1,17 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { FlatList, Pressable, View } from 'react-native';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, radius, space } from '@swift/ui';
 import { T } from '../../kit';
 import type { DiscoveryRail } from '../../hooks/customer';
+import { categoryIcon } from '../../lib/categoryIcon';
 
 // ---------------------------------------------------------------------------
 // The category rail (#17 6.1) — at the founder's X: below the quick-action
 // tiles, above the promo banner. Chip anatomy per spec: blush rounded tile
-// ~64×64 (the quick-action tile language), emoji at 30pt, caption beneath,
+// ~64×64 (the quick-action tile language), the category's app icon (owner
+// 17 Oct: the app's own icon set, mapped by slug in lib/categoryIcon) at 30pt, caption beneath,
 // block ~76 wide, 12 gap. Law D upstream guarantees every chip leads to open
 // stores; fewer than CAT_RAIL_MIN_CHIPS (4) → the rail is absent entirely and
 // Home renders exactly as the flag-off baseline (CAT-G).
@@ -19,7 +22,7 @@ export const CAT_RAIL_MIN_CHIPS = 4;
 const TILE = 64;
 const BLOCK_W = 76;
 
-function ChipTile({ emoji, label, onPress }: { emoji: string; label: string; onPress: () => void }) {
+function ChipTile({ slug, label, onPress }: { slug: string; label: string; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label}>
       {({ pressed }) => (
@@ -34,8 +37,7 @@ function ChipTile({ emoji, label, onPress }: { emoji: string; label: string; onP
               justifyContent: 'center',
             }}
           >
-            {/* Emoji glyph metric, derived from the scale. */}
-            <T style={{ fontSize: fontSize.base * 2, lineHeight: fontSize.base * 2 + space.sm }}>{emoji}</T>
+            <MaterialCommunityIcons name={categoryIcon(slug)} size={fontSize.base * 2} color={color.brand[600]} />
           </View>
           <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
             {label}
@@ -84,7 +86,7 @@ export function CategoryRail({
       style={{ marginTop: space.lg }}
       contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: 12 }}
       renderItem={({ item }) => (
-        <ChipTile emoji={item.emoji} label={item.name} onPress={() => onChip(item)} />
+        <ChipTile slug={item.slug} label={item.name} onPress={() => onChip(item)} />
       )}
       ListFooterComponent={
         <Pressable onPress={onSeeAll} accessibilityRole="button" accessibilityLabel="See all categories">

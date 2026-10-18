@@ -50,6 +50,7 @@ import { offerEarnings } from './offer-earnings';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -396,6 +397,14 @@ function MoverKindChoiceScreen({
 export function MoverHomeScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const insets = useSafeAreaInsets();
+  // [STORE-ALERT] Offers ring a mover's phone: ask while the OS still can
+  // (once per app session). A preview rings nothing, so it never asks.
+  useEffect(() => {
+    if (preview) return;
+    void Promise.all([import('../../../services/notification-priming'), import('../../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('mover_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [preview]);
   const {
     kind,
     profile,
@@ -736,6 +745,9 @@ export function MoverHomeScreen({ navigation }: any) {
               </Pressable>
             ) : null}
           </View>
+
+          {/* [STORE-ALERT] Says so when this phone cannot ring for offers. */}
+          {!preview ? <PushOffStrip audience="mover" style={{ marginTop: space.lg }} /> : null}
 
           {!online && !activeJob && demandOpportunity ? (
             <DemandBand

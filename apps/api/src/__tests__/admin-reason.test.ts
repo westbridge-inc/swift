@@ -16,6 +16,7 @@ import {
   ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_REASON_MAX, ADMIN_REASON_MIN, ADMIN_ROUTE_AUTHORITY,
   reasonOf, reasonProblem, reasonRefusal,
 } from '../modules/admin/admin-authority';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-006] THE RECORD SHOWED WHAT HAPPENED AND NEVER WHY.
@@ -58,7 +59,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  const phone = `+59275${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Reason', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',

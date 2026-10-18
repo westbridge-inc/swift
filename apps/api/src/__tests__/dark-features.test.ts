@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DARK_FEATURES, darkFeatureStatus, darkFeaturesOff } from '../modules/ops/dark-features';
 import { moverPushRequired } from '../modules/notification/mover-push-authority';
@@ -114,6 +114,21 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/discovery/discovery.routes.ts'),
       read('apps/api/src/modules/order/order.service.ts'),
       read('apps/api/src/modules/notification/mover-push-authority.ts'),
+      // [row 331] the kill switches
+      read('apps/api/src/modules/safety/ops-alert.ts'),
+      read('apps/api/src/modules/safety/guardian-delivery.ts'),
+      read('apps/api/src/modules/safety/guardian.service.ts'),
+      read('apps/api/src/modules/safety/liveness.service.ts'),
+      read('apps/api/src/modules/safety/trip-share.service.ts'),
+      read('apps/api/src/utils/card-rail.ts'),
+      read('apps/api/src/modules/admin/admin.routes.ts'),
+      read('apps/api/src/modules/billing/settlement-import.ts'),
+      read('apps/api/src/modules/rides/fare-zones.ts'),
+      read('apps/api/src/modules/ads/checkout.service.ts'),
+      read('apps/api/src/modules/ads/refund.service.ts'),
+      read('apps/api/src/utils/mmg-pay-url.ts'),
+      // [row 312] the upload malware gate
+      read('apps/api/src/lib/malware-scan.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {
@@ -127,6 +142,69 @@ describe('[dark features] the registry matches the code that reads the switch', 
     const docs = [read('apps/web/.env.example'), read('apps/mobile/.env.example'), read('apps/api/.env.example')].join('\n');
     for (const f of DARK_FEATURES.filter((x) => x.source === 'env')) {
       expect(docs.includes(f.setting), `${f.setting} appears in no .env.example — nothing would tell an operator it exists`).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] A kill switch is a capability switched off by
+// SETTING a variable: <NAME>_KILL=1. It starts cleanly and says nothing, which is
+// exactly the failure this register exists for, so every one is registered and
+// a switch left at 1 is printed by the preflight before a deploy. The census
+// fails the day someone adds a *_KILL switch and does not register it.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] every kill switch the API reads is in the register', () => {
+  const API_SRC = join(ROOT, 'apps/api/src');
+  const walk = (dir: string, out: string[] = []): string[] => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        if (entry !== '__tests__' && entry !== 'node_modules') walk(full, out);
+      } else if (entry.endsWith('.ts') && !entry.endsWith('.test.ts')) out.push(full);
+    }
+    return out;
+  };
+  const sources = walk(API_SRC).map((file) => ({ file: file.slice(API_SRC.length + 1), text: readFileSync(file, 'utf8') }));
+  /** Every env read of a *_KILL variable, and how the code compares it. */
+  const reads = sources.flatMap(({ file, text }) =>
+    [...text.matchAll(/\[\s*'([A-Z][A-Z0-9_]*_KILL)'\s*\]\s*(===|!==)?\s*('[^']*')?/g)].map((m) => ({ file, name: m[1]!, op: m[2], value: m[3] })));
+  const kills = DARK_FEATURES.filter((f) => f.offWhen !== undefined);
+
+  it('the census sees the switches it is about (the scan is not blind)', () => {
+    const names = new Set(reads.map((r) => r.name));
+    for (const name of ['SOS_ESCALATION_WORKER_KILL', 'OPS_ALERT_ESCALATION_KILL', 'CARD_RAIL_KILL', 'SETTLEMENT_PUBLISH_KILL']) {
+      expect(names.has(name), `${name} is read somewhere in apps/api/src`).toBe(true);
+    }
+    expect(names.size).toBeGreaterThanOrEqual(12);
+  });
+
+  it('every *_KILL the API reads is registered, and every registered kill switch is read', () => {
+    const read = [...new Set(reads.map((r) => r.name))].sort();
+    expect(kills.map((f) => f.setting).sort()).toEqual(read);
+  });
+
+  it('the register reads each switch exactly as the code does: off at the value 1, and nowhere else', () => {
+    for (const r of reads) {
+      expect(r.op, `${r.file} reads ${r.name} without comparing it`).toBeDefined();
+      expect(r.value, `${r.file} compares ${r.name} to something other than '1'`).toBe("'1'");
+    }
+    for (const f of kills) {
+      expect(f.source, f.key).toBe('env');
+      expect(f.offWhen, f.key).toBe('1');
+      expect(f.enabledWhen, `${f.key} cannot be both a kill switch and an enable switch`).toBeUndefined();
+      expect(f.defaultedInCode, f.key).toBeUndefined();
+      const at = (value: string | undefined) => darkFeatureStatus(value === undefined ? {} : { [f.setting]: value }, {}).find((r) => r.key === f.key)!.on;
+      expect(at('1'), `${f.setting}=1 is the capability OFF`).toBe(false);
+      for (const value of [undefined, '', '0', 'true', ' 1']) expect(at(value), `${f.setting}=${JSON.stringify(value)}`).toBe(true);
+    }
+  });
+
+  it('a kill switch left on is listed as off; the SOS escalation worker is a safety entry', () => {
+    const off = darkFeaturesOff(darkFeatureStatus({ SOS_ESCALATION_WORKER_KILL: '1', CARD_RAIL_KILL: '1' }, {})).map((r) => r.setting);
+    expect(off).toEqual(expect.arrayContaining(['SOS_ESCALATION_WORKER_KILL', 'CARD_RAIL_KILL']));
+    expect(darkFeaturesOff(darkFeatureStatus({}, {})).map((r) => r.setting).filter((s) => s.endsWith('_KILL'))).toEqual([]);
+    for (const setting of ['SOS_ESCALATION_WORKER_KILL', 'OPS_ALERT_ESCALATION_KILL', 'GUARDIAN_CHECKIN_DELIVERY_KILL', 'NOT_MY_DRIVER_AUTHORITY_KILL']) {
+      expect(kills.find((f) => f.setting === setting)?.impact, setting).toBe('safety');
     }
   });
 });
