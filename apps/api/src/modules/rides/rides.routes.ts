@@ -40,7 +40,7 @@ import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
-import { enterTenant, getTenantId } from '../../plugins/prisma';
+import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
 
 // ---------------------------------------------------------------------------
@@ -97,6 +97,7 @@ async function authenticatedTenantId(app: FastifyInstance, userId: string): Prom
     throw new AppError(401, 'UNAUTHORIZED', 'Authenticated customer no longer exists');
   }
   enterTenant(user.tenantId);
+  enterOwner(userId);
   return user.tenantId;
 }
 

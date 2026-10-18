@@ -3,7 +3,7 @@ import { reviewGate } from '../modules/review/gate';
 import jwt from '@fastify/jwt';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { TenantKind } from '@prisma/client';
-import { enterTenant } from './prisma';
+import { enterOwner, enterTenant } from './prisma';
 import { runWithTenant } from './tenant-context';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { AuthService } from '../modules/auth/auth.service';
@@ -156,6 +156,8 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
       // Multi-tenancy stage 2: bind this request to the caller's tenant so
       // every tenant-owned query downstream is scoped to it.
       enterTenant(session.user.tenantId);
+      // [item 20] and to the person it acts for (the owner wall's binding).
+      enterOwner(session.user.id);
       // [R048-003] and on the request itself, so a route can name the caller's tenant without depending on async-context propagation
       request.tenantId = session.user.tenantId;
       request.tenantKind = session.user.tenant.kind;
@@ -228,6 +230,7 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
         request.authSessionId = session.id;
         request.authCredentialSource = credentialSource;
         enterTenant(session.user.tenantId);
+        enterOwner(session.user.id);
         request.tenantId = session.user.tenantId;
         request.tenantKind = session.user.tenant.kind;
         reviewTenant = session.user.tenant.kind === 'REVIEW';

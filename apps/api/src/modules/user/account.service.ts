@@ -14,6 +14,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -501,8 +502,10 @@ export class AccountService {
 
     // Sessions and push tokens were revoked atomically with authority cutoff.
 
-    // 3. Drop precise saved locations (home/work) outright.
-    await prisma.address.deleteMany({ where: { userId } });
+    // 3. Drop precise saved locations (home/work) outright. [item 20] Through
+    //    a named system capability: an admin's closure or the erasure retry job
+    //    acts for someone else, and the owner wall would let it delete nothing.
+    await runAsSystem('account:erasure-addresses', () => prisma.address.deleteMany({ where: { userId } }));
 
     // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
     //     recovery ID/selfie pointers, biometric liveness rows, public trip
