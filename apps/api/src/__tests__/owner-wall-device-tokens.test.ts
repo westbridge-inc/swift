@@ -239,3 +239,16 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
     expect(txWrites).toEqual([]);
   });
 });
+
+describe('[item 20 · S4-1] device tokens: the person binding is transaction-local', () => {
+  it('a pooled connection that served one person shows the next unbound query none of their tokens', async () => {
+    const one = prismaModule.createScopedProcessClient({ datasourceUrl: logins!.singleConnectionUrl });
+    try {
+      expect(await asPerson(ids.target, () => one.deviceToken.count({ where: { userId: ids.target } }))).toBeGreaterThan(0);
+      expect(await one.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
+      expect(await asPerson(ids.target, () => one.$transaction((tx) => tx.deviceToken.count({ where: { userId: ids.target } })))).toBeGreaterThan(0);
+      expect(await one.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
+      expect(await tenant.runWithTenant(PRODUCTION, () => one.deviceToken.count({ where: { userId: ids.target } }))).toBe(0);
+    } finally { await one.$disconnect(); }
+  });
+});
