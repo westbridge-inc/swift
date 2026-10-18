@@ -241,6 +241,29 @@ describe('[Q10] the "still waiting" push opens the order on the store desk', () 
   });
 });
 
+describe('[RINGER] the new order and the "still waiting" re-alert ring on the build that has the ring', () => {
+  it('the build-12 phone gets the job ring on both; the build-11 phone keeps today\'s push (pinned above)', async () => {
+    const ringDevice = `ExponentPushToken[ring${nanoid(12)}]`;
+    await app.prisma.deviceToken.create({ data: { userId: owner.userId, token: ringDevice, platform: 'ios', alertsVersion: 1 } });
+    try {
+      const o = await pendingOrderWithAlert();
+      const ring = { alertClass: 'ring_order', priority: 'high', sound: 'swift_job_ring.wav', channelId: 'job_offers', interruptionLevel: 'time-sensitive', deadlineMs: o.respondBy.getTime() };
+      expect(pushesTo(ringDevice).at(-1)?.options).toEqual(ring);
+      expect(pushesTo(ownerDevice).at(-1)?.options).toEqual({ alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: o.respondBy.getTime() });
+
+      expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('realerted');
+      expect(pushesTo(ringDevice).at(-1)).toMatchObject({ title: 'Order still waiting!', options: ring });
+      expect(pushesTo(ownerDevice).at(-1)).toMatchObject({
+        title: 'Order still waiting!',
+        options: { alertClass: 'ring_order', priority: 'high', sound: 'default', deadlineMs: o.respondBy.getTime() },
+      });
+      expect(pushesTo(ownerDevice).at(-1)?.options).not.toHaveProperty('channelId');
+    } finally {
+      await app.prisma.deviceToken.delete({ where: { token: ringDevice } });
+    }
+  });
+});
+
 describe('[Q10] a store cannot acknowledge another store alert', () => {
   it.each(['ack', 'accept', 'reject'] as const)('%s by another store is refused and leaves the receipt unacknowledged', async (action) => {
     const o = await pendingOrderWithAlert();
