@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -503,6 +504,7 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
@@ -1222,10 +1224,11 @@ export async function riderRoutes(app: FastifyInstance) {
         addressLine1: true, city: true,
       },
     },
+    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
     customer: {
       select: {
         id: true,
-        firstName: true, lastName: true, phone: true,
+        firstName: true, phone: true,
       },
     },
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
@@ -2228,6 +2231,8 @@ export async function riderRoutes(app: FastifyInstance) {
         ...(await payInfo(app.prisma, sub)),
         // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
         ...withCardPayAction(await mmgCheckout.feePayload(sub, request.headers, now), await cardRail.subscriptionFields(sub, request)),
+        // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+        feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, sub.id),
         isActive,
         daysRemaining: isActive
           ? Math.ceil((sub.currentPeriodEnd.getTime() - now.getTime()) / 86_400_000)

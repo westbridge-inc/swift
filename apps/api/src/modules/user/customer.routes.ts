@@ -16,7 +16,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
-import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
+import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
@@ -45,11 +45,12 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { publicStorefrontSeller } from '../verification/storefront-seller';
 import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
-import { lineOptionsAsMade, substitutionView } from '../order/substitution-view';
+import { legacySwapItemFields, lineOptionsAsMade, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -65,11 +66,10 @@ import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
-import {
-  currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
-} from '../legal/consent.service';
-import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { currentConsentDetailed } from '../legal/consent.service';
+import { LEGAL_VERSION } from '../legal/legal.routes';
 import { consentSurfaceOf } from '../legal/consent-surface';
+import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
@@ -79,6 +79,7 @@ import { shapeStoredCheckoutResult } from '../order/checkout-answer';
 import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -1679,6 +1680,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // R8: storefront header star + bucket (same mapper as every card).
     const ratingSurface = (await ratingSurfaces(app.prisma, 'VENDOR', [id])).get(id) ?? NEW_ACTOR_SURFACE;
+    // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
+    // records on every read — never hand-written prose; incomplete blocks say what is missing.
+    const disclosure = await compilePublicStorefrontDisclosure(app.prisma, id);
 
     return {
       success: true,
@@ -1721,9 +1725,10 @@ export async function customerRoutes(app: FastifyInstance) {
         operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
-        // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
-        // records on every read — never hand-written prose; incomplete blocks say what is missing.
-        disclosure: await compilePublicStorefrontDisclosure(app.prisma, id),
+        disclosure,
+        // [R3 · CAA s.70] The seller block the store screen shows: who sells, how payment works, the
+        // store's refund rule and the statutory-rights sentence (null = withheld with the block above).
+        seller: await publicStorefrontSeller(app.prisma, id, disclosure),
         distanceKm,
         deliveryFee,
         etaMin,
@@ -2596,7 +2601,7 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
-        items: { select: { name: true, quantity: true, totalCustomer: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2783,14 +2788,17 @@ export async function customerRoutes(app: FastifyInstance) {
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
           // Additions only for a permission-aware client. The flat subStatus
-          // field activates dormant swap controls in older binaries.
+          // field activates the swap card older binaries already carry, so for
+          // them it is switched on only when every word of that card is true
+          // (legacySwapItemFields); otherwise the line's name says what is
+          // happening [SUBSTITUTION · owner 17 Oct: the customer is always told].
           ...(supportsSwapDecisions ? {
             options: lineOptionsAsMade(i),
             subStatus: i.subStatus,
             substituteName: i.substituteName,
             substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
             substitution: substitutionView(i, order),
-          } : {}),
+          } : legacySwapItemFields(i, order)),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),
@@ -2828,6 +2836,9 @@ export async function customerRoutes(app: FastifyInstance) {
           && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
           ? order.ridePin
           : null,
+        // [R14 · legal research D12] The store delivers this order with its own rider: the order screen says so,
+        // verbatim (null on every other order). The server's reading of this order's current fulfilment mode.
+        ownRiderNotice: ownRiderNotice(order),
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
@@ -3465,29 +3476,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  [F-021-02]. */
   app.post('/consent/marketing', async (request: AuthRequest) => {
     const { granted } = z.object({ granted: z.boolean() }).parse(request.body);
-    const userId = request.user.userId;
-    await publishLegalDocumentOnce(app.prisma, {
-      documentType: 'marketing_consent', version: LEGAL_VERSION, renderedText: MARKETING_CONSENT,
-    });
-    const outcome = await app.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(Prisma.sql`
-        SELECT pg_advisory_xact_lock(hashtextextended(${`consent:marketing:${userId}`}, 0))`);
-      const prior = await currentConsentDetailed(tx, 'customer', userId, 'marketing_consent');
-      const effectiveAtCurrent = !!prior
-        && (prior.action === 'granted' || prior.action === 're_granted')
-        && prior.version === LEGAL_VERSION;
-      const effectiveAtAny = !!prior && (prior.action === 'granted' || prior.action === 're_granted');
-      if (granted === effectiveAtCurrent && (granted || !effectiveAtAny)) {
-        return { marketing: effectiveAtCurrent, changed: false };
-      }
-      const action: ConsentAction = granted ? (prior ? 're_granted' : 'granted') : 'withdrawn';
-      await recordConsent(tx, {
-        subjectType: 'customer', subjectId: userId,
-        documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurfaceOf(request), ip: request.ip,
-        evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
-      });
-      return { marketing: granted, changed: true };
+    const outcome = await setMarketingConsent(app.prisma, {
+      userId: request.user.userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+      evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
     });
     return { success: true, data: outcome };
   });

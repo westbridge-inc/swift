@@ -1,5 +1,6 @@
 import { screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { CATEGORY_ICON_KEYS } from '@swift/types';
 import DiscoveryPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -81,15 +82,15 @@ describe('the discovery taxonomy finally has a curator', () => {
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ targetSlug: 'hardware-tools' });
   });
 
-  it('will not create a category without the emoji the route requires', async () => {
+  it('will not create a category without the icon the route requires', async () => {
     mockApi(handler());
     const { user } = renderWithQuery(<DiscoveryPage />);
 
     await screen.findByText('Power Tools');
     await user.click(screen.getByRole('button', { name: 'Decide' }));
 
-    // The route's schema makes emoji mandatory. Disabled here rather than
-    // discovered as a 400 at the moment someone tries to approve.
+    // The route's schema makes an icon from the app's list mandatory. Disabled
+    // here rather than discovered as a 400 at the moment someone tries to approve.
     const create = screen.getByRole('button', { name: 'Create' }) as HTMLButtonElement;
     expect(create.disabled).toBe(true);
   });
@@ -104,14 +105,35 @@ describe('the discovery taxonomy finally has a curator', () => {
 
     await screen.findByText('Power Tools');
     await user.click(screen.getByRole('button', { name: 'Decide' }));
-    await user.type(screen.getByLabelText('Emoji'), '🔩');
+    await user.selectOptions(screen.getByLabelText('Icon'), 'wrench-outline');
     await user.selectOptions(screen.getByLabelText('Kind'), 'RETAIL');
     await user.selectOptions(screen.getByLabelText('Vertical'), 'RETAIL');
     await user.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const body = JSON.parse(String((requestsByMethod(fetchMock, 'POST')[0]![1] as RequestInit).body));
-    expect(body).toEqual({ emoji: '🔩', kind: 'RETAIL', vertical: 'RETAIL' });
+    expect(body).toEqual({ iconKey: 'wrench-outline', kind: 'RETAIL', vertical: 'RETAIL' });
+  });
+
+  // Owner 17 Oct: no emoji anywhere. A category is created with an app icon
+  // (never an emoji box), and a stored emoji is never printed, in the map
+  // picker or the category table.
+  it('asks for an app icon, never an emoji, and never prints a stored emoji', async () => {
+    mockApi(handler());
+    const { user } = renderWithQuery(<DiscoveryPage />);
+
+    await screen.findByText('Power Tools');
+    await user.click(screen.getByRole('button', { name: 'Decide' }));
+    expect(screen.queryByLabelText('Emoji')).toBeNull();
+    const icons = Array.from((screen.getByLabelText('Icon') as HTMLSelectElement).options).map((o) => o.value).filter(Boolean);
+    expect(icons).toEqual([...CATEGORY_ICON_KEYS]);
+    expect(document.body.textContent).toContain('Hardware & Tools (hardware-tools)');
+    expect(document.body.textContent).not.toContain('🔧');
+
+    await user.click(screen.getByRole('button', { name: 'Taxonomy' }));
+    expect(await screen.findByText('Hardware & Tools')).toBeTruthy();
+    expect(screen.getByText('App default')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('🔧');
   });
 
   it('refuses to reject until there is a reason, because the vendor reads it verbatim', async () => {

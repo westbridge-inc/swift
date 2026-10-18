@@ -338,7 +338,7 @@ describe('the live wait on the driver’s trip (Rev 2 §8.3)', () => {
 
   it('at the end, the trip fare and the waiting are itemised — never added on the phone', async () => {
     await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, waiting: { ...WAITING_LIVE, running: false, nextChargeAt: null } }));
-    expect(byTestId('driver-waiting')?.textContent).toMatch(/Collect in cash: trip fare \$2.?400 and waiting \$500\./);
+    expect(byTestId('driver-waiting')?.textContent).toMatch(/Collect cash or MMG: trip fare \$2.?400 and waiting \$500\./);
     expect(text()).not.toMatch(/\$2.?900/);
   });
 

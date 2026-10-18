@@ -118,7 +118,7 @@ describe('[AUD-L4-016] the failed-delivery pager under the production CONTRACT p
       notices: await prisma.notification.count({ where: { userId: superAdminId, data: { path: ['sosAlertId'], equals: real.alertId } } }),
     }));
     expect(effect.realPages).toHaveLength(1);
-    expect(effect.realPages[0]).toMatchObject({ title: '🚨 SOS contact text failed — call the person now', tenantId: TENANT_REAL });
+    expect(effect.realPages[0]).toMatchObject({ title: 'URGENT: SOS contact text failed — call the person now', tenantId: TENANT_REAL });
     expect(effect.row.failurePageOpsAlertId).toBe(effect.realPages[0]!.id);
     expect(effect.notices, 'SUPER_ADMIN was not told in the app').toBe(1);
     expect(devChannelLog.filter((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL), 'the on-call phone was not texted').toHaveLength(1);

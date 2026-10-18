@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 /**
  * Service-free coverage for the service-vertical separation (a SERVICE
@@ -28,6 +29,7 @@ export default defineConfig({
     fileParallelism: false,
     cache: false,
     env: {
+      ...sideConfigTestEnv(),
       NODE_ENV: 'test',
       DEV_OTP_BYPASS: '0',
       KYC_PROVIDER: 'sandbox',

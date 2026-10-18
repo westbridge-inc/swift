@@ -141,21 +141,28 @@ export async function closeMmgOrderAsStoreRefund(orderService: Pick<OrderService
 
 /** The plain-words notices, one per party. Swift is never the one who
  *  refunds. They name the amount owed back (the recorded obligation), and a
- *  booking speaks of the provider, as every booking message does [E20]. */
-export function mmgStoreCloseNotices(orderNumber: string, amount: Prisma.Decimal | number, booking = false) {
+ *  booking speaks of the provider, as every booking message does [E20].
+ *  [Owner legal plan 15 Oct · R31, research E7] The customer's notice is the
+ *  research's text: the order was cancelled, Swift does not hold the money,
+ *  the store (by name) received it by MMG and must refund it within 72 hours,
+ *  and Swift follows up if it does not. The research's "reply here" is
+ *  written as the way the app really takes a reply: support from the order
+ *  screen (an inbox notice cannot be answered). */
+export function mmgStoreCloseNotices(orderNumber: string, amount: Prisma.Decimal | number, booking = false, partyName?: string | null) {
   const gyd = `GY$${Number(amount).toLocaleString('en-US')}`;
   const noun = booking ? 'Booking' : 'Order';
   const party = booking ? 'provider' : 'store';
+  const named = partyName?.trim() || `The ${party}`;
   return {
     customer: {
-      title: `${noun} closed — the ${party} refunds you`,
-      body: `${noun} ${orderNumber} could not be completed, so Swift support closed it. You paid the ${party} by MMG, so the ${party} refunds you ${gyd} directly from its MMG account. Swift never holds your money. If the refund does not arrive, contact support from the order screen.`,
+      title: `${noun} cancelled — the ${party} refunds you`,
+      body: `Your ${noun.toLowerCase()} ${orderNumber} was cancelled. Swift does not hold your money. ${named} received ${gyd} by MMG and must refund it to you within 72 hours. If it does not, contact support from the order screen and we will follow up.`,
     },
     store: {
       title: `${noun} closed — refund the customer`,
       body: booking
-        ? `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid you by MMG: as the provider, refund them ${gyd} directly from your MMG account. Swift never holds or moves order money.`
-        : `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them ${gyd} directly from your MMG account. Swift never holds or moves order money.`,
+        ? `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid you by MMG: as the provider, refund them ${gyd} directly from your MMG account within 72 hours. Swift never holds or moves order money.`
+        : `${noun} ${orderNumber} could not be fulfilled, so Swift support closed it. The customer paid your store by MMG: refund them ${gyd} directly from your MMG account within 72 hours. Swift never holds or moves order money.`,
     },
   };
 }

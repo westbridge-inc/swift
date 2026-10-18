@@ -9,6 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 90. The admin suspend / unsuspend / ban / unban routes used to answer
@@ -24,7 +25,7 @@ const userIds: string[] = [];
 const RUN = nanoid(6).toLowerCase();
 
 async function makeAccount(role: 'SUPER_ADMIN' | 'CUSTOMER', extra: Record<string, unknown> = {}) {
-  const phone = `+59243${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const privileged = role !== 'CUSTOMER';
   const user = await app.prisma.user.create({
     data: {

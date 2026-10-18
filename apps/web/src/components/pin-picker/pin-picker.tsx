@@ -2,9 +2,11 @@
 
 import { useEffect, useId, useLayoutEffect, useRef, useState, type PointerEvent } from 'react';
 import { LocateFixed, MapPin, Minus, Plus, Search } from 'lucide-react';
-import { placeDetails, placesAutocomplete, type Place } from '@/lib/customer';
+import { placeDetails, placesAutocomplete, type Place } from '@/lib/customer-places';
 import { currentFix } from '@/lib/geolocate';
 import { MAX_ACCURACY_M } from '@/lib/place';
+import { MAP_TILES_UNAVAILABLE, mapTileSource } from '@/lib/map-tiles';
+import { MapAttribution } from '../map-attribution';
 import {
   STORE_MAP_START, mapPixel, pixelPoint, pinLookup, storePinAddress, storePinInMarket, type StorePoint,
 } from '@/lib/store-pin';
@@ -15,7 +17,7 @@ import {
 // The phone puts a fixed pin in the middle of a street map and moves the map
 // under it (LocationPickerScreen / PinConfirmScreen). The website already had
 // exactly that for a store's entrance (components/store-location-picker.tsx);
-// this is the same map — the same OpenStreetMap tiles, the same Web Mercator
+// this is the same map — the same map tiles (lib/map-tiles.ts), the same Web Mercator
 // helpers and Guyana box (lib/store-pin.ts), the same reverse lookup through
 // Swift's own API — for a customer's door and a parcel's two ends.
 //
@@ -28,7 +30,9 @@ import {
 //   - the address Swift's reverse lookup gives for THAT exact point, or null,
 //     and whether that lookup has answered yet (`named`).
 // The pin goes to Swift's API only. The tiles name the map square being
-// viewed, as the store picker's do; no key, no third-party script.
+// viewed, as the store picker's do; the only key is MapTiler's public,
+// domain-restricted browser key, and there is no third-party script. A built
+// site without that key has no tiles: the map says so and hands over no pin.
 //
 // Styled with the site's global classes (sw-*) and utilities only: a CSS file
 // of its own would make this lazy chunk carry CSS, and the runtime that loads
@@ -131,12 +135,14 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
   const left = pixel.x - size.width / 2;
   const top = pixel.y - size.height / 2;
   const count = 2 ** zoom;
+  const tileSource = mapTileSource();
   const tiles: Array<{ key: string; src: string; x: number; y: number }> = [];
   // Only the visible viewport is requested; the browser caches the rest.
-  for (let y = Math.max(0, Math.floor(top / 256)); y <= Math.min(count - 1, Math.floor((top + size.height) / 256)); y += 1) {
-    for (let x = Math.floor(left / 256); x <= Math.floor((left + size.width) / 256); x += 1) {
-      const tileX = ((x % count) + count) % count;
-      tiles.push({ key: `${zoom}/${x}/${y}`, src: `https://tile.openstreetmap.org/${zoom}/${tileX}/${y}.png`, x: x * 256 - left, y: y * 256 - top });
+  if (tileSource) {
+    for (let y = Math.max(0, Math.floor(top / 256)); y <= Math.min(count - 1, Math.floor((top + size.height) / 256)); y += 1) {
+      for (let x = Math.floor(left / 256); x <= Math.floor((left + size.width) / 256); x += 1) {
+        tiles.push({ key: `${zoom}/${x}/${y}`, src: tileSource.tileUrl(zoom, x, y), x: x * 256 - left, y: y * 256 - top });
+      }
     }
   }
   const inMarket = storePinInMarket(point);
@@ -347,9 +353,9 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
             height={256}
             alt=""
             draggable={false}
-            // OpenStreetMap's tile policy needs a Referer from browsers: the
-            // site's origin only, never the page's path (pinned here so a
-            // stricter page policy cannot strip it).
+            // The MapTiler key is restricted to the site's origins, read from
+            // the Referer: the site's origin only, never the page's path
+            // (pinned here so a stricter page policy cannot strip it).
             referrerPolicy="strict-origin-when-cross-origin"
             className="pointer-events-none absolute max-w-none select-none"
             style={{ left: tile.x, top: tile.y, width: 256, height: 256 }}
@@ -374,9 +380,7 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
           <Plus size={16} aria-hidden="true" />Zoom in
         </button>
       </div>
-      <p className="m-0 text-right text-[11px] leading-[14px] text-[var(--swift-muted)]">
-        © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline">OpenStreetMap contributors</a>
-      </p>
+      <MapAttribution source={tileSource} className="m-0 text-right text-[11px] leading-[14px] text-[var(--swift-muted)]" />
       <div id={`${id}-readout`} role="group" aria-label="Chosen pin" className="grid gap-0.5 rounded-2xl bg-[var(--swift-sunken)] px-3 py-2.5 text-[14px] font-medium leading-5 text-[var(--swift-ink)] [overflow-wrap:anywhere]">
         <span>{settled ? (line ? `Near ${line}` : 'No street name found at this pin.') : 'Finding the address…'}</span>
         <span className="text-[12px] font-normal leading-4 text-[var(--swift-muted)] tabular-nums">Latitude {point.latitude.toFixed(5)}, Longitude {point.longitude.toFixed(5)}</span>
@@ -384,7 +388,8 @@ export function PinPicker({ mapLabel, start = null, saved = [], onChange }: {
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</p>
       {!inMarket ? <p role="alert" className="sw-note sw-note-error m-0">{PIN_OUTSIDE}</p> : null}
       {inMarket && !placed && anchor?.reason === 'centre' ? <p className="sw-caption m-0">{PIN_CITY_CENTRE}</p> : null}
-      {!mapReady && !mapFailed ? <p className="sw-caption m-0">Loading map…</p> : null}
+      {!tileSource ? <p role="alert" className="sw-note sw-note-error m-0">{MAP_TILES_UNAVAILABLE} A pin can’t be placed on it.</p> : null}
+      {tileSource && !mapReady && !mapFailed ? <p className="sw-caption m-0">Loading map…</p> : null}
       {mapFailed ? (
         <>
           <p role="alert" className="sw-note sw-note-error m-0">The map couldn’t load. Retry it to check where the pin is before you use it.</p>

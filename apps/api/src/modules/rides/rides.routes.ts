@@ -16,6 +16,7 @@ import {
   type RideRequestBody,
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
+import { assertHirePassengers } from './hire-passengers';
 import { readRideItinerary } from './taxi-stops-read';
 import { hasTaxiPassengerCustody } from './passenger-custody';
 import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
@@ -38,7 +39,7 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
-import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
 
@@ -220,6 +221,8 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  the first answer (201, replayed) and never books a second ride. */
   app.post('/request', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    // [R9] No hire for more than 7 passengers: refused first, nothing read or written.
+    assertHirePassengers(body.passengerCount);
     // Judged before anything is read, priced or claimed: the switch, the
     // count, each stop and where the route lies, then the quoted fare a ride
     // with stops must carry. A malformed request never consumes a key.
@@ -336,6 +339,8 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
     // has no place for them, and the trip would be booked later without them.
     refuseQueuedStops(body.stops);
+    // [R9] No hire for more than 7 passengers, queued or not.
+    assertHirePassengers(body.passengerCount);
     if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
     assertRoadTripInMarket(body);
     const user = await assertRideGates(app, request.user.userId);
@@ -482,9 +487,11 @@ export async function ridesRoutes(app: FastifyInstance) {
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
+    // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
+    // off (the default), the passenger pays the driver directly at drop-off.
     const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
-      ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+      ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
     return { success: true, data: { ...ride, driver, ...itinerary, ...cancel, ...waiting } };
   });
@@ -514,7 +521,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // underway or done (receipt / pay-later), never during matching.
     if (ride.driver) {
       (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = ['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)
-        ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+        ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
         : null;
     }
     // [TAXI multi-stop] As /active: the stops in order, and the next one.

@@ -50,6 +50,7 @@ import {
   VendorRow,
 } from '../../../kit';
 import { touchTarget } from '../../../kit/touch-target';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '../../../lib/pricePromiseCopy';
 // Per-vertical identity colour lives in the KIT [F-263] — it was a local hex
 // map here once and the no-literal-hex-in-screens rule cleaned it away, which
 // is how the grid ended up as eight identical squares.
@@ -653,7 +654,7 @@ export function HomeScreen() {
         <CategoryRail
           data={discovery.data}
           loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
 
@@ -729,9 +730,10 @@ export function HomeScreen() {
               <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
                 <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />
                 <View style={{ flex: 1 }}>
-                  <T variant="bodyStrong">0% fees, always.</T>
+                  {/* [Legal research A12] the research's price promise; "0% fees" was not true next to a delivery fee */}
+                  <T variant="bodyStrong">{PRICE_PROMISE_TITLE}</T>
                   <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    Swift never marks up your order — pay cash when it arrives.
+                    {PRICE_PROMISE_BODY}
                   </T>
                 </View>
               </View>

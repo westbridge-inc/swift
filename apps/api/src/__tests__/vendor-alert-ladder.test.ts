@@ -11,7 +11,8 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { NotificationService, escalateVendorAlert } from '../modules/notification/notification.service';
-import { getChannels, devChannelLog } from '../providers/notifications/channels';
+import { getChannels, devChannelLog, type NotificationChannels } from '../providers/notifications/channels';
+import { isGsm7Basic } from '../modules/notification/vendor-alert-sms';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] THE STORE NEW-ORDER LADDER, fixed where it lied.
@@ -132,6 +133,7 @@ async function purgeFixtures() {
     select: { id: true },
   })).map((o) => o.id);
   await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
+  await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
   await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.deviceToken.deleteMany({ where: { userId: { in: ids } } });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
@@ -204,12 +206,14 @@ describe('[Q10] the ladder stops once nobody is waiting, whoever ended the wait'
   });
 
   it('an order still waiting keeps escalating: re-alert, then the SMS fallback', async () => {
-    const o = await pendingOrderWithAlert();
+    // 10.5 min: the floor stays 10 however slow the run (under 30 s).
+    const o = await pendingOrderWithAlert(new Date(Date.now() + 10.5 * 60_000));
     expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('realerted');
     const texts = smsTo(owner.phone).length;
     expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 1)).toBe('sms_sent');
+    // [STORE-ALERT · owner ruling 18 Oct] The store and the minutes left.
     expect(smsTo(owner.phone).map((s) => s.body).slice(texts)).toEqual([
-      `Swift: order ${o.orderNumber} is still waiting for your response. Open your dashboard now.`,
+      `Swift: new order ${o.orderNumber} at Ladder Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in 10 min.`,
     ]);
   });
 });
@@ -274,5 +278,120 @@ describe('[Q10] a store cannot acknowledge another store alert', () => {
     const own = await call('PUT', `/api/v1/vendor/orders/${o.orderId}/ack`, owner.token);
     expect(own.statusCode, own.body).toBe(200);
     expect((await receipt(o.orderId)).acknowledgedAt).toBeInstanceOf(Date);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [STORE-ALERT · owner ruling 18 Oct 2026] A store whose phones no push can
+// reach (the iPhone app never asked for notification permission, so no store
+// iPhone ever held a push token) heard nothing for two minutes: the backup SMS
+// was the ladder's LAST rung. Now, when the new-order alert reaches no phone of
+// the team by push, the SMS goes at the alert, and the ladder never texts the
+// same order twice. Stores with push are unchanged: push first, SMS at 2 min.
+// ---------------------------------------------------------------------------
+describe('[STORE-ALERT] a store no push reaches is texted at the alert, once', () => {
+  let bare: Actor;
+  let bareVendorId: string;
+
+  beforeAll(async () => {
+    bare = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
+    // A name a store could really type: curly quotes, an accent and an emoji.
+    bareVendorId = await makeStore(bare, 'Caf\u00e9 \u201cSunrise\u201d \u{1F373} Kitchen');
+  });
+
+  async function orderAtBareStore(respondBy: Date, channels?: NotificationChannels) {
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SA-${nanoid(8)}`,
+        orderType: 'FOOD_DELIVERY', customerId: customer.userId, vendorId: bareVendorId,
+        status: 'PENDING', fulfillment: 'PICKUP',
+        deliveryAddress: 'counter', deliveryLat: 6.81, deliveryLng: -58.16,
+        pickupAddress: 'counter', pickupLat: 6.81, pickupLng: -58.16,
+        subtotalBase: 900, subtotalMarkup: 0, subtotalCustomer: 900,
+        deliveryFee: 0, totalAmount: 900, paymentMethod: 'CASH',
+      },
+    });
+    const service = channels ? new NotificationService(app.prisma, ioStub, channels) : notifications;
+    await service.newOrderForVendor(bare.userId, order.orderNumber, 1, 900, order.id, respondBy);
+    return order;
+  }
+
+  it('no active push device on the team: the SMS goes AT the alert, in GSM-7, and the ladder sends no second one', async () => {
+    const before = smsTo(bare.phone).length;
+    const order = await orderAtBareStore(new Date(Date.now() + 5.5 * 60_000));
+    const texts = smsTo(bare.phone).map((s) => s.body).slice(before);
+    expect(texts).toEqual([
+      `Swift: new order ${order.orderNumber} at Caf\u00e9 "Sunrise" Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in 5 min.`,
+    ]);
+    expect(isGsm7Basic(texts[0]!)).toBe(true);
+    expect(texts[0]!.length).toBeLessThanOrEqual(160);
+
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), order.id, 0)).toBe('realerted');
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), order.id, 1)).toBe('stopped');
+    expect(smsTo(bare.phone)).toHaveLength(before + 1);
+  });
+
+  it('a store WITH a push device is unchanged: no SMS at the alert, the SMS at the 2-minute rung', async () => {
+    const before = smsTo(owner.phone).length;
+    const o = await pendingOrderWithAlert();
+    expect(smsTo(owner.phone)).toHaveLength(before);
+    expect(pushesTo(ownerDevice).at(-1)!.data).toMatchObject({ orderId: o.orderId, kind: 'vendor_order_alert' });
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 0)).toBe('realerted');
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), o.orderId, 1)).toBe('sms_sent');
+    expect(smsTo(owner.phone)).toHaveLength(before + 1);
+  });
+
+  it('a push the provider refused counts as not reached: the SMS goes at the alert', async () => {
+    const refusing: NotificationChannels = { ...getChannels(), push: { sendPush: async () => ({ sent: 0 }) } };
+    const device = `ExponentPushToken[sa-refused-${nanoid(8)}]`;
+    await app.prisma.deviceToken.create({ data: { userId: bare.userId, token: device, platform: 'ios' } });
+    try {
+      const before = smsTo(bare.phone).length;
+      const order = await orderAtBareStore(new Date(Date.now() + 8.5 * 60_000), refusing);
+      expect(smsTo(bare.phone).map((s) => s.body).slice(before)).toEqual([
+        `Swift: new order ${order.orderNumber} at Caf\u00e9 "Sunrise" Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in 8 min.`,
+      ]);
+    } finally {
+      await app.prisma.deviceToken.deleteMany({ where: { token: device } });
+    }
+  });
+
+  it('a failed SMS at the alert leaves the rows unmarked, so the 2-minute rung texts instead', async () => {
+    const failingSms: NotificationChannels = { ...getChannels(), sms: { sendSms: async () => { throw new Error('provider down'); } } };
+    const before = smsTo(bare.phone).length;
+    const order = await orderAtBareStore(new Date(Date.now() + 9.5 * 60_000), failingSms);
+    expect(smsTo(bare.phone)).toHaveLength(before);
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), order.id, 1)).toBe('sms_sent');
+    expect(smsTo(bare.phone)).toHaveLength(before + 1);
+  });
+
+  it('N is counted from the auto-cancel job itself (its outbox row), at send time', async () => {
+    // The alert claims 30 min, but the auto-cancel job was armed 2 min ago with
+    // a 10 min delay: it fires in just under 8 min, so the text says 7 (rounded
+    // down: never more time than the store has).
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `SA-${nanoid(8)}`,
+        orderType: 'FOOD_DELIVERY', customerId: customer.userId, vendorId,
+        status: 'PENDING', fulfillment: 'PICKUP',
+        deliveryAddress: 'counter', deliveryLat: 6.81, deliveryLng: -58.16,
+        pickupAddress: 'counter', pickupLat: 6.81, pickupLng: -58.16,
+        subtotalBase: 900, subtotalMarkup: 0, subtotalCustomer: 900,
+        deliveryFee: 0, totalAmount: 900, paymentMethod: 'CASH',
+      },
+    });
+    await app.prisma.orderOutbox.create({
+      data: {
+        id: `sa-${nanoid(10)}`, dedupeKey: `order:${order.id}:auto-cancel`, orderId: order.id,
+        kind: 'auto-cancel', queue: 'order', payload: { orderId: order.id }, delayMs: 10 * 60_000,
+        createdAt: new Date(Date.now() - 2 * 60_000), processedAt: new Date(),
+      },
+    });
+    await notifications.newOrderForVendor(owner.userId, order.orderNumber, 1, 900, order.id, new Date(Date.now() + 30 * 60_000));
+    const before = smsTo(owner.phone).length;
+    expect(await escalateVendorAlert(app.prisma, ioStub, getChannels(), order.id, 1)).toBe('sms_sent');
+    expect(smsTo(owner.phone).map((s) => s.body).slice(before)).toEqual([
+      `Swift: new order ${order.orderNumber} at Ladder Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in 7 min.`,
+    ]);
   });
 });

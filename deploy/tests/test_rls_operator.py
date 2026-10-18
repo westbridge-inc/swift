@@ -628,5 +628,34 @@ class OperatorUnits(unittest.TestCase):
         self.assertIsNone(operator.parse_published(url + '?sslmode=disable'))
 
 
+
+class OperatorLeavesNoBytecode(unittest.TestCase):
+    def test_the_operator_writes_no_bytecode_beside_the_deployed_checkout(self):
+        """17 Oct: a journeys run from the deployed checkout (/opt/swift) left
+        deploy/wall/__pycache__/logins.cpython-312.pyc behind (operator.py loads
+        logins.py by path), so that checkout was no longer clean. rls-logins.sh
+        runs python3 -I under env -i, which ignores PYTHONDONTWRITEBYTECODE, so the
+        operator itself must write none."""
+        tmp = Path(tempfile.mkdtemp(prefix='swift-wall-bytecode-'))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        wall = tmp / 'wall'
+        wall.mkdir()
+        for name in ('operator.py', 'logins.py'):
+            shutil.copy(DEPLOY / 'wall' / name, wall / name)
+        result = subprocess.run(['env', '-i', f'PATH={os.environ["PATH"]}', f'HOME={tmp}', 'LANG=C.UTF-8',
+                                 sys.executable, '-I', str(wall / 'operator.py'), '--help'],
+                                capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Least-privilege runtime logins', result.stdout)
+        cache = wall / '__pycache__'
+        self.assertFalse(cache.exists(), sorted(p.name for p in cache.iterdir()) if cache.exists() else None)
+        self.assertEqual(sorted(p.name for p in wall.iterdir()), ['logins.py', 'operator.py'])
+        # The flag is restored after the load: the operator does not change it for anything else.
+        probe = subprocess.run([sys.executable, '-I', '-c',
+                                'import importlib.util, sys; s = importlib.util.spec_from_file_location("op", sys.argv[1]); '
+                                'm = importlib.util.module_from_spec(s); s.loader.exec_module(m); print(sys.dont_write_bytecode)',
+                                str(wall / 'operator.py')], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+        self.assertEqual(probe.stdout.strip(), 'False', probe.stderr)
+
 if __name__ == '__main__':
     unittest.main()

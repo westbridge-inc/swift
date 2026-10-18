@@ -33,7 +33,7 @@ const CROSS_TENANT = [
   'prep-shadow-grade', 'prep-stats-nightly', 'process-billing', 'process-settlements', 'promote-sos-grace',
   'qr-attribution-purge', 'rating-actor-fold', 'rating-reminder-sweep', 'rating-stats-recompute', 'reaper-lag',
   'reconcile-dispatch', 'reconcile-earnings', 'release-held-orders', 'retention-sweep', 'rlp-reserve-provision', 'rlp-sweep',
-  'scheduler-heartbeat', 'stale-movers', 'supply-watch-scan', 'tier-recalc',
+  'scheduler-heartbeat', 'stale-movers', 'substitution-expiry', 'supply-watch-scan', 'tier-recalc', 'vat-threshold-watch',
 ] as const;
 
 describe('[L01] every job runs in a named context', () => {
