@@ -200,7 +200,9 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'devices', model: 'DeviceToken', by: ['userId'], key: 'id',
-    fields: ['id', 'userId', 'platform', 'isActive', 'createdAt'],
+    // alertsVersion (RINGER #1779): which job-alert sound the app on this device reported it can play (0 = the plain
+    // push, 1 = the job ring). The person's own device, as their app reported it: exported like platform.
+    fields: ['id', 'userId', 'platform', 'isActive', 'createdAt', 'alertsVersion'],
   },
   {
     category: 'verificationDocuments', model: 'VerificationDocument', by: ['userId'], key: 'id',
@@ -426,6 +428,9 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'MoverFeeAuthority.tenantId': { reason: 'SYSTEM', note: 'which weekly-fee subscription is in force' },
   'MoverFeeSubscription.userId': { reason: 'SYSTEM', note: 'which weekly-fee subscription is in force' },
   'MoverRevocationOutbox.userId': { reason: 'SYSTEM', note: 'queued access changes' },
+  // [S2-29] The row holds only the follow-up command an approval still owes (the trial decision), its retry
+  // clock and the system's last error; the decision itself is in verificationDocuments and its notice in notifications.
+  'VerificationDecisionOutbox.userId': { reason: 'SYSTEM', note: 'queued follow-up work after a document approval (the decision is in verificationDocuments, its notice in notifications)' },
   'StorageOrphan.userId': { reason: 'SYSTEM', note: 'cleanup of stored files' },
   'Subject.createdById': { reason: 'SYSTEM', note: 'the document register index (the documents are in verificationDocuments)' },
   'SubjectLink.accountId': { reason: 'SYSTEM', note: 'the document register index' },
