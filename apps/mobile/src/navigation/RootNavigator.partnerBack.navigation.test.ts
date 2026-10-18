@@ -147,7 +147,7 @@ vi.mock('../lib/storage', () => ({
 vi.mock('../lib/adsQueue', () => ({ retireAdEventScope: () => undefined }));
 vi.mock('../lib/analytics', () => ({ track: () => undefined }));
 vi.mock('../lib/payLink', () => ({ openPayLink: async () => false }));
-vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, preparePushTokenForLogout: async () => null }));
+vi.mock('../services/push', () => ({ registerIfGranted: async () => undefined, installPushForegroundRetry: () => () => undefined, preparePushTokenForLogout: async () => null }));
 vi.mock('../services/attribution', () => ({ ensureFirstLaunchClaim: () => undefined, flushAttributedDestination: () => undefined }));
 vi.mock('../services/socket', () => ({ connectSocket: () => undefined, getSocket: () => ({ connected: false }), disconnectSocket: () => undefined, reconnectSocketForStoreHandoff: () => undefined }));
 vi.mock('../services/backgroundLocation', () => ({ stopMoverLocation: async () => undefined }));

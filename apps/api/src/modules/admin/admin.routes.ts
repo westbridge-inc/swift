@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -4631,6 +4632,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (posterBuffer && !looksLikeImage(posterBuffer)) throw new AppError(400, 'BAD_POSTER', 'Poster must be an image.');
 
     const tenantId = await adsTenant();
+    await scanUpload(fileBuffer, { surface: 'admin', log: request.log });
+    if (posterBuffer) await scanUpload(posterBuffer, { surface: 'admin', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer: fileBuffer, filename: fileName || 'house-ad', mimeType: fileMime, folder: 'ads/house' });
     let posterUrl: string | null = null;
     if (posterBuffer) {

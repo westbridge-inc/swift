@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 /** Service-free payment-provider contract tests. The default API Vitest
  * configuration intentionally requires isolated PostgreSQL and Redis; this
@@ -10,6 +11,7 @@ export default defineConfig({
     testTimeout: 10_000,
     fileParallelism: false,
     env: {
+      ...sideConfigTestEnv(),
       NODE_ENV: 'test',
       DEV_OTP_BYPASS: '0',
     },

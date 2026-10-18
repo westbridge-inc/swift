@@ -9,7 +9,7 @@ vi.mock('../../../mobile/src/stores/authStore', () => ({ useAuthStore: () => sta
 vi.mock('../../../mobile/src/stores/moverPreview', () => ({ useMoverPreview: () => false }));
 vi.mock('../../../mobile/src/stores/vendorPreview', () => ({ useVendorPreview: () => false }));
 vi.mock('../../../mobile/src/hooks/useCustomerCountry', () => ({ useCustomerCountry: () => {} }));
-vi.mock('../../../mobile/src/services/push', () => ({ registerIfGranted: vi.fn() }));
+vi.mock('../../../mobile/src/services/push', () => ({ registerIfGranted: vi.fn(), installPushForegroundRetry: vi.fn(() => () => undefined) }));
 vi.mock('../../../mobile/src/services/notification-router', () => ({ installNotificationTapRouter: () => () => {}, flushPendingNavigation: vi.fn(), settleTapAfterSignIn: vi.fn() }));
 vi.mock('../../../mobile/src/services/deep-links', () => ({ installDeepLinkHandler: () => () => {}, flushPendingDeepLink: vi.fn() }));
 vi.mock('../../../mobile/src/services/attribution', () => ({ ensureFirstLaunchClaim: vi.fn(), flushAttributedDestination: vi.fn() }));
