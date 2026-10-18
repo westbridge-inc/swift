@@ -16,8 +16,10 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, apiFetch: fx.api }));
-vi.mock('@/lib/customer', () => ({
+vi.mock('@/lib/customer-account', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
+}));
+vi.mock('@/lib/customer-places', () => ({
   placesAutocomplete: fx.search, placeDetails: fx.details,
 }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: fx.coords }));

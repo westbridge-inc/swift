@@ -379,10 +379,21 @@ function VendorStandingSection() {
                 <T variant="caption" numberOfLines={1} style={{ flex: 1 }}>
                   {r.name}
                 </T>
-                <T variant="caption" tone="muted">
-                  👎 {r.down}
-                  {r.up > 0 ? `  ·  👍 ${r.up}` : ''}
-                </T>
+                <View
+                  accessible
+                  accessibilityLabel={`${r.down} thumbs down${r.up > 0 ? `, ${r.up} thumbs up` : ''}`}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+                >
+                  <Feather name="thumbs-down" size={12} color={color.text.muted} />
+                  <T variant="caption" tone="muted">{r.down}</T>
+                  {r.up > 0 ? (
+                    <>
+                      <T variant="caption" tone="muted">{'  ·  '}</T>
+                      <Feather name="thumbs-up" size={12} color={color.text.muted} />
+                      <T variant="caption" tone="muted">{r.up}</T>
+                    </>
+                  ) : null}
+                </View>
               </View>
             ))}
           </View>

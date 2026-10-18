@@ -64,7 +64,10 @@ export default function AccountPage() {
         </div>
       )}
 
-      {driver.data && (
+      {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+          drop-off, cash or MMG: the card shows only while the server's
+          DRIVER_MMG_PAY_LINK switch is on (mmgPayLinkEnabled), never by default. */}
+      {driver.data && driver.data['mmgPayLinkEnabled'] === true && (
         <div className="sw-card p-6">
           <p className="font-bold">Your MMG pay link (taxi)</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">

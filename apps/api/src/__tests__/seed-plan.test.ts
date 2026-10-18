@@ -3,7 +3,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PrismaClient, type UserRole } from '@prisma/client';
+import { type PrismaClient, type UserRole } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import {
@@ -35,7 +36,7 @@ grantSuiteCapability('unscoped-mutation');
 // production; and the platform seed holds no schema DDL.
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const URL_ = process.env['DATABASE_URL'] ?? 'postgresql://swift:swift@localhost:5434/swift_test';
 // [PROD-PATH] Approvers are PEOPLE with their own keys: three throwaway
 // ed25519 keys made here exactly as an approver makes theirs, two pinned.

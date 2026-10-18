@@ -19,13 +19,11 @@ import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { pointInPolygon } from '../utils/geo';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
-import { grantSuiteCapability } from '../lib/test-target-lock';
+import { moverPool, type MoverPool } from './helpers/mover-pool';
 import { readDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
-// [R048-001] this suite quiets the WHOLE driver pool between cases (an unscoped Driver.updateMany) so no leftover driver takes a trip — a stated, reviewable capability.
-grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // taxi on the same mover pool and dispatch engine. Hardest paths:
@@ -41,6 +39,8 @@ const SOUTH = { lat: 6.755, lng: -58.155 };
 const NOWHERE = { lat: 6.95, lng: -58.4 }; // outside every zone
 
 let app: FastifyInstance;
+/** [AUD-G7-042] Empties the dispatch pool by id and puts other people's drivers back in afterAll. */
+let driverPool: MoverPool;
 let fare: FareService;
 let dispatch: DispatchService;
 // [ZONE-FARES] The Central ↔ South 2,000 fare is no longer seeded: this suite plants it for itself.
@@ -197,6 +197,8 @@ beforeAll(async () => {
   await app.register(ridesRoutes, { prefix: '/api/v1/rides' });
   await app.register(driverRoutes, { prefix: '/api/v1/driver' });
   await app.ready();
+  driverPool = moverPool(app.prisma, 'driver');
+  await driverPool.begin();
 
   fare = new FareService(app.prisma);
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
@@ -208,6 +210,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await removeGeorgetownPair();
   await purgeFixtures();
+  if (driverPool) await driverPool.restore(); // undefined only when beforeAll failed before building it
   await app.close();
 });
 
@@ -486,7 +489,7 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
   it('driver go-offline while holding a ride offer releases it (no 20s zombie offer)', async () => {
     // Isolate the pool: earlier tests leave drivers online at CENTRAL, so park
     // them all — otherwise the offer could rank a leftover driver above ours.
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -559,7 +562,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   const STALE = new Date(Date.now() - 60 * 60 * 1000); // 60 min ago — past the 15-min window
 
   it('recovers a PRE-PICKUP ride: re-opens to PENDING, frees the driver, re-dispatches, tells the rider', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -595,7 +598,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 
   it('a pre-custody release rotates the PIN and zeroes the attempt budget — a burned budget never traps the next driver [REPORT-014 F-014-12]', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const first = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -632,7 +635,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 
   it('recovers a ride whose driver has a NULL location timestamp, not just a stale one [REPORT-014 F-014-11]', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -659,7 +662,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 
   it('NEVER auto-cancels an IN-PROGRESS ride: passenger aboard → ride kept, ops paged, rider warned', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -696,7 +699,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 
   it('treats a verified PIN at DRIVER_ARRIVED as custody and never recycles the ride', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -730,7 +733,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
   });
 
   it('leaves a driver with a FRESH fix alone (only GPS-dark rides are swept)', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver();
     const res = await inject('POST', '/api/v1/rides/request', {
@@ -753,7 +756,7 @@ describe('Stranded-taxi watchdog — driver goes GPS-dark after accepting', () =
 
 describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   it('a driver without location authority is offline, and dispatch excludes them', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
 
     // drivers_online_requires_location_owner (VALIDATED in the cutover
@@ -782,7 +785,7 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   });
 
   it('atomically removes an owning driver session from taxi supply on logout', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
     await app.prisma.driver.update({
       where: { id: driver.driverId },
@@ -814,7 +817,7 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   });
 
   it('excludes a suspended Driver and rejects an already-issued taxi claim', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const driver = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
     const requested = await inject('POST', '/api/v1/rides/request', {
@@ -844,7 +847,7 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   });
 
   it('never offers a booking user their OWN ride: findCandidates excludes excludeUserId', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } }); // isolate
+    await driverPool.empty({ isOnline: false, isAvailable: false }); // isolate
     const me = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });               // online driver AND a customer
     const other = await makeDriver({ lat: CENTRAL.lat + 0.001, lng: CENTRAL.lng });     // a different online driver
 
@@ -856,7 +859,7 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   });
 
   it('hides and rejects a dual-role driver account claiming its own taxi request at HTTP and DB barriers', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const me = await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng });
     const ride = await app.prisma.order.create({
       data: {
@@ -894,7 +897,7 @@ describe('Taxi dispatch S3 — self-exclusion + supply-watch hygiene', () => {
   });
 
   it('requesting a ride clears the customer’s pending supply watch (no stale "drivers are back")', async () => {
-    await app.prisma.driver.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await driverPool.empty({ isOnline: false, isAvailable: false });
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await makeDriver({ lat: CENTRAL.lat, lng: CENTRAL.lng }); // a driver online so the request is accepted
     // The customer had set a watch earlier, when drivers were absent.

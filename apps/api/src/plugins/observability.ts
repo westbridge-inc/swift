@@ -462,6 +462,31 @@ export const notificationFailuresCounter = new client.Counter({
   registers: [registry],
 });
 
+// [STORE-ALERT 18 Oct 2026] Push that did not reach a phone. Before this a
+// refused Expo ticket (InvalidCredentials, DeviceNotRegistered, ...) or a bad
+// receipt left no trace at all, and a store with no push device looked the
+// same as a store that was rung. Labels are bounded: stage = request (one
+// failed HTTP attempt to Expo) | ticket | receipt; reason = an Expo error class
+// (push-outcome.ts list, else 'other') or timeout | network | http_429 |
+// http_4xx | http_5xx | bad_response. Never a token, a user or a phone.
+export const pushFailuresCounter = new client.Counter({
+  name: 'swift_push_failures_total',
+  help: 'Push messages (or Expo request attempts) that did not reach a phone, by stage and error class',
+  labelNames: ['stage', 'reason'] as const,
+  registers: [registry],
+});
+
+// [STORE-ALERT] An urgent push (alert class ring_order | ring_offer |
+// job_update) for a person with no active push device, or with push turned
+// off: nothing left for any phone. The count says how often an alert depends
+// on the socket and SMS alone.
+export const pushNoDeviceCounter = new client.Counter({
+  name: 'swift_push_no_device_total',
+  help: 'Urgent notifications whose recipient had no active push device (or push off), by alert class',
+  labelNames: ['alert_class'] as const,
+  registers: [registry],
+});
+
 /** [L04 · SMS allowlist] Outside production, a text to a number that is not on
  *  SMS_RECIPIENT_ALLOWLIST is not sent and counted here. No label carries the
  *  number: the count is the evidence, never the recipient. */

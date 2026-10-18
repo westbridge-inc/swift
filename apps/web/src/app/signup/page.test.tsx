@@ -17,7 +17,7 @@ vi.mock('next/navigation', () => ({
 }));
 
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp }));
-vi.mock('@/lib/customer', () => ({
+vi.mock('@/lib/customer-account', () => ({
   verifyOtp: mocked.verifyOtp,
   registerAccount: mocked.registerAccount,
   becomePartner: mocked.becomePartner,

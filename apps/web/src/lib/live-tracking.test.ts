@@ -123,7 +123,7 @@ describe('[W-47] a third party never receives the precise position', () => {
     expect(link).toContain('6.801');
     // [W7] The in-page map is tiles: each names a ~1 km square (zoom/x/y), never a coordinate.
     for (const { src } of tilesAround(coarsen(precise), 15)) {
-      expect(src).toMatch(/^https:\/\/tile\.openstreetmap\.org\/15\/\d+\/\d+\.png$/);
+      expect(src).toMatch(/^https:\/\/api\.maptiler\.com\/maps\/streets-v2\/256\/15\/\d+\/\d+\.png\?key=[\w-]+$/);
     }
   });
 });
