@@ -1,4 +1,5 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
 import { CUSTODY_CASE_DIRECTABLE } from '../order/order-status';
@@ -9,6 +10,7 @@ import { withPreviousDecisions } from '../verification/previous-decision';
 import type { FastifyInstance } from 'fastify';
 import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
+import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
@@ -28,6 +30,7 @@ import { BillingService } from '../billing/billing.service';
 import { SubscriptionService } from '../subscription/subscription.service';
 import { lockFeeCollectionAuthority, moverFeeSourceSummary, resolveMoverFeeAuthority, resolveMoverFeeHold, subscriptionPayer } from '../subscription/mover-fee-authority';
 import { CashRulesService } from '../cash/cash-rules.service';
+import { resolveHeldDoorCash } from '../cash/door-cash-hold';
 import { MMG_MONEY_MOVED, OrderService, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { releaseFoodAgeHold, WAITING_STATUSES as FOOD_AGE_WAITING } from '../dispatch/rescue';
 import { DiscoveryGovernanceService } from '../discovery/admin-governance';
@@ -46,6 +49,7 @@ import {
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
 import { adminAuditRow, auditWithin, markReplayAudited, verifyInlineRow, wroteAuditInline, type AuditRequestLike } from './audit-within';
 import { completeMmgClaimNotice, mmgClaimView, resolveMmgClaimDisagreement } from '../order/mmg-claim.service';
+import { closeMmgOrderAsStoreRefund, mmgStoreCloseNotices, mmgStoreCloseRefusal, MMG_STORE_CLOSE_DISPOSITION } from '../order/mmg-store-close';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
@@ -55,6 +59,8 @@ import { computeOrderSla } from '../fulfillment/order-sla';
 import { HANDOVER_SECRETS_OMIT, handoverStatus } from '../handover/handover-security';
 import { revealPickupCode, rotatePickupCode, resetDeliveryPin, HANDOVER_REASON_MIN, HANDOVER_REASON_MAX } from '../handover/handover-reveal';
 import { requireStepUp } from '../auth/step-up';
+import { MmgFeeReversalService } from '../billing/mmg-fee-reversal';
+import { MAJOR_AMOUNT_CEILING } from '../../utils/currency-amount';
 import {
   approverRoster, cancelOwnApproval, decideSoloApproval, emailChannelConfigured, soloCoolOffHours, soloRowState,
   startSoloApproval,
@@ -74,7 +80,9 @@ import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
+import { isOutboxDeadLetterName, listOutboxDeadLetters, OUTBOX_RECOVERY, requeueOutboxDeadLetter } from '../../jobs/outbox-dead-letter';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
+import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
@@ -83,10 +91,12 @@ import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-con
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
+import { FIXTURE_MOVER, FIXTURE_ORDER, FIXTURE_USER, FIXTURE_VENDOR, excludeFixturesQuerySchema, withFixtureFilter } from '../../lib/fixture-filter';
 import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../money/evidence';
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
+import { REGISTRATION_KINDS } from '../verification/doc-registry';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -355,6 +365,10 @@ const approveDocSchema = z.object({
   // only as a blind-index identity key — and a police clearance's issue date.
   documentNumber: z.string().trim().min(1).max(40).optional(),
   issuedOn: z.coerce.date().optional(),
+  // [R15] the year printed on a licence or food certificate checked again every January
+  certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
+  // [R16] a business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation
+  registrationKind: z.enum(REGISTRATION_KINDS).optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -1109,8 +1123,10 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/users', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { role, status, search } = usersQuerySchema.parse(request.query);
+    // [MC-PR3] test data is left out unless asked for, in the query, so the total stays true
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(role && { activeRole: role }),
       ...(status && { status }),
       ...(search && {
@@ -1122,8 +1138,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_USER, excludeFixtures);
 
-    const [users, total] = await Promise.all([
+    const [users, total, hiddenTestRecords] = await Promise.all([
       app.prisma.user.findMany({
         where,
         select: {
@@ -1142,12 +1159,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.user.count({ where }),
+      hiddenWhere ? app.prisma.user.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(users, total, { page, limit, skip }) };
+    const result = paginatedResponse(users, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** [S1 response-shaping] The mover slice `GET /users/:id` needs: identity
@@ -1325,8 +1344,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/vendors', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = vendorsQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { vendorType: type }),
       ...(search && {
@@ -1336,8 +1356,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_VENDOR, excludeFixtures);
 
-    const [vendors, total] = await Promise.all([
+    const [vendors, total, hiddenTestRecords] = await Promise.all([
       app.prisma.vendor.findMany({
         where,
         include: {
@@ -1347,12 +1368,14 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.vendor.count({ where }),
+      hiddenWhere ? app.prisma.vendor.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
-    return { success: true, ...paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip }) };
+    const result = paginatedResponse(vendors.map((v) => ({ ...v, vatRegistrationNumber: undefined })), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/vendors/pending', { preHandler: [adminGuard] }, async () => {
@@ -1792,8 +1815,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1810,8 +1834,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [riders, total] = await Promise.all([
+    const [riders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.rider.findMany({
         where,
         include: {
@@ -1820,14 +1845,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.rider.count({ where }),
+      hiddenWhere ? app.prisma.rider.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, riders, 'RIDER');
-    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/riders/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -1976,8 +2003,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (!tenantId) throw new ForbiddenError('Tenant context required');
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, search } = moverFilterQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       user: {
         tenantId,
         ...(search && {
@@ -1993,8 +2021,9 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(status === 'verified' && { documentsVerified: true }),
       ...(status === 'unverified' && { documentsVerified: false }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_MOVER, excludeFixtures);
 
-    const [drivers, total] = await Promise.all([
+    const [drivers, total, hiddenTestRecords] = await Promise.all([
       app.prisma.driver.findMany({
         where,
         include: {
@@ -2003,14 +2032,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.driver.count({ where }),
+      hiddenWhere ? app.prisma.driver.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // [Owner report 8 Oct] The list shows the LIVE per-document verdict GO uses, not only the legacy flag.
     const withLive = await withLiveDocuments(app.prisma, drivers, 'DRIVER');
-    return { success: true, ...paginatedResponse(withLive, total, { page, limit, skip }) };
+    const result = paginatedResponse(withLive, total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   app.get('/drivers/:id', { preHandler: [adminGuard] }, async (request) => {
@@ -2171,8 +2202,9 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/orders', { preHandler: [adminGuard] }, async (request) => {
     const { page, limit, skip } = parsePagination(request.query as Record<string, string>);
     const { status, type, dateFrom, dateTo, search } = adminOrdersQuerySchema.parse(request.query);
+    const { excludeFixtures } = excludeFixturesQuerySchema.parse(request.query);
 
-    const where: any = {
+    const base: any = {
       ...(status && { status }),
       ...(type && { orderType: type }),
       ...(dateFrom || dateTo
@@ -2190,8 +2222,9 @@ export async function adminRoutes(app: FastifyInstance) {
         ],
       }),
     };
+    const { where, hiddenWhere } = withFixtureFilter(base, FIXTURE_ORDER, excludeFixtures);
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, hiddenTestRecords] = await Promise.all([
       app.prisma.order.findMany({
         where,
         // [A-15] The handover secrets never enter the admin DTO. `include`
@@ -2207,14 +2240,16 @@ export async function adminRoutes(app: FastifyInstance) {
         },
         skip,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       }),
       app.prisma.order.count({ where }),
+      hiddenWhere ? app.prisma.order.count({ where: hiddenWhere }) : Promise.resolve(0),
     ]);
 
     // 13 Decimal columns on the order + 7 more on every included OrderItem,
     // all of which the admin client types as `number`. Coerce at the seam.
-    return { success: true, ...paginatedResponse(coerceMoney(orders), total, { page, limit, skip }) };
+    const result = paginatedResponse(coerceMoney(orders), total, { page, limit, skip });
+    return { success: true, data: result.data, meta: { ...result.meta, hiddenTestRecords } };
   });
 
   /** Live ops snapshot for the command map: every online mover's position +
@@ -2577,12 +2612,16 @@ export async function adminRoutes(app: FastifyInstance) {
       select: { pickupCode: true, ridePin: true, pickupCodeAttempts: true, ridePinAttempts: true },
     });
 
+    // [MMGCLOSE] Whether "Close — refund handled by the store" applies: the
+    // same rule the locked write re-checks (additive field).
+    const canCloseStoreRefund = mmgStoreCloseRefusal(order) === null;
+
     // [TAXI waiting charge] A ride whose waiting charge was frozen shows it,
     // itemised and read-only (route fare + waiting = total). Any other order
     // gains no key.
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), ...(fareBreakdown ? { fareBreakdown } : {}) } };
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
   });
 
   /**
@@ -3026,6 +3065,78 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   /**
+   * [MMGCLOSE · owner 8 Oct] POST /orders/:id/close-store-refund — close a
+   * store-claimed MMG order that cannot be fulfilled as "refund handled by the
+   * store". RECORD ONLY: the order becomes CANCELLED with the refund rail's
+   * CANCELLATION obligation (OWED — the store owes the customer, from its own
+   * MMG); Swift moves, credits and charges nothing. C4: a stated reason and a
+   * second admin (the approval gate above), bound to the order and to the claim
+   * revision the admin reviewed, which the locked write checks again.
+   */
+  app.post('/orders/:id/close-store-refund', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      expectedClaimRevision: z.number().int().min(0),
+      reason: z.string().optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const { order, amount } = await closeMmgOrderAsStoreRefund(orderService, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      expectedClaimRevision: body.expectedClaimRevision,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+
+    await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', { orderId: id, status: 'CANCELLED' });
+    // Told after the commit, each on its own key (a retry of the notice cannot
+    // double it). Neither is told the refund happened — only who makes it.
+    const party = order.vendorId
+      ? await app.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true, owner: { select: { userId: true } } } })
+      : null;
+    const words = mmgStoreCloseNotices(order.orderNumber, amount ?? 0, order.fulfillment === 'APPOINTMENT', party?.name);
+    const ownerUserId = party?.owner.userId;
+    await notifications.send({
+      userId: order.customerId, type: 'ORDER_UPDATE', title: words.customer.title, body: words.customer.body,
+      audience: 'customer', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:customer:${id}`,
+    });
+    if (ownerUserId) {
+      await notifications.send({
+        userId: ownerUserId, type: 'ORDER_UPDATE', title: words.store.title, body: words.store.body,
+        audience: 'business', data: { orderId: id, status: 'CANCELLED' }, dedupeKey: `mmg-store-close:vendor:${id}`,
+      });
+    }
+    return { success: true, data: { orderId: id, status: 'CANCELLED', disposition: MMG_STORE_CLOSE_DISPOSITION } };
+  });
+
+  /**
+   * [L02 · row 34 · review S2-1] POST /orders/:id/door-cash-return/resolve —
+   * operations records partial cash a rider could not hand back at the door
+   * (HELD) as resolved: handed back later, or otherwise settled, as the stated
+   * reason says. RECORD ONLY: Swift moves, refunds and deducts nothing; the
+   * amount and the rider's original report stay as they were. C4 (a reason and
+   * a second admin, the approval gate above). Until this existed nothing could
+   * ever move HELD, so the rider holding the cash could never close their account.
+   */
+  app.post('/orders/:id/door-cash-return/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const reason = reasonOf(request.body, request.headers) ?? '';
+    const approvalId = (request as unknown as { privilegedApprovalId?: string }).privilegedApprovalId ?? null;
+    const resolved = await resolveHeldDoorCash(tenantPrisma as unknown as PrismaClient, {
+      orderId: id,
+      adminUserId: request.user.userId,
+      reason,
+      audit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: { ...facts, approvalId } }),
+    });
+    return {
+      success: true,
+      data: { orderId: resolved.orderId, doorCashReturn: { amount: resolved.amount, status: 'RESOLVED', resolvedAt: resolved.resolvedAt } },
+    };
+  });
+
+  /**
    * [A-14] PUT /orders/:id/refund-settled — the cash actually went back.
    *
    * The ONLY way an order reaches REFUNDED. The settler names the handover
@@ -3128,6 +3239,16 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ─── Finance ───────────────────────────────────────────────────────────
+
+  // [Owner legal plan 15 Oct · R10, research T1] The VAT registration tracker
+  // for this tenant: weekly fees due and received per month, the year ahead
+  // from today's partners, and how close both are to the GYD 15,000,000
+  // threshold (billing/vat-tracker.ts). Read only.
+  app.get('/finance/vat-tracker', { preHandler: [adminGuard] }, async () => {
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    return { success: true, data: await vatTracker(app.prisma, tenantId) };
+  });
 
   app.get('/finance/revenue', { preHandler: [adminGuard] }, async () => {
     // Admin authority is tenant-local. Raw SQL does not pass through Prisma's
@@ -3419,7 +3540,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const configs = await app.prisma.platformConfig.findMany({
       orderBy: { key: 'asc' },
     });
-    return { success: true, data: configs };
+    // Launch switches set in the server environment (read-only here), so the
+    // console shows what this API is actually running with.
+    return { success: true, data: configs, switches: { staffInviteAccept: staffInviteAcceptEnabled() } };
   });
 
   app.put('/config/:key', { preHandler: [platformControlGuard] }, async (request) => {
@@ -3904,6 +4027,8 @@ export async function adminRoutes(app: FastifyInstance) {
           rider: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           driver: { include: { user: { select: { id: true, firstName: true, lastName: true, phone: true } } } },
           vendor: { select: { id: true, name: true } },
+          // The unused credit a refund would pay back (the console shows the action only then).
+          prepaidBalance: { select: { balance: true, currencyCode: true } },
         },
         skip,
         take: limit,
@@ -3914,10 +4039,15 @@ export async function adminRoutes(app: FastifyInstance) {
 
     // Subscription.weeklyRate / customRate are Decimal(10,2) — this IS Swift's
     // revenue line (flat weekly fee, no commission). Coerce at the seam.
+    // A refund set aside and not yet paid or released: the console shows its
+    // next step (record the payout, or release it) instead of a new refund.
+    const setAside = await openCreditRefunds(app.prisma, subscriptions.map((sub) => sub.id));
+    const setAsideIds = await openSetAsideIds(app.prisma, [...setAside.keys()]);
+    const payoutAsks = await payoutAskStateFor(app.prisma, setAsideIds);
     const current = await Promise.all(subscriptions.map(async (sub) => {
       const payer = sub.rider?.user.id ?? sub.driver?.user.id;
       const authority = payer ? await resolveMoverFeeAuthority(app.prisma, { userId: payer, tenantId }) : null;
-      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority };
+      return { ...sub, effectiveFeeType: authority?.feeType ?? sub.type, moverFee: authority, refundSetAside: setAside.get(sub.id) ?? 0, refundSetAsideId: setAsideIds.get(sub.id) ?? null, refundPayoutReported: payoutAsks.get(sub.id) === 'ACTIVE', refundPayoutAsk: payoutAsks.get(sub.id) ?? null };
     }));
     // [OWNER 8 Oct (4)] The console hides "Record fee payment" while the hold is on.
     return { success: true, ...paginatedResponse(coerceMoney(current), total, { page, limit, skip }), manualFeeRecording: manualFeeCreditHeld() ? 'held' : 'open' };
@@ -4039,6 +4169,66 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     return { success: true, replayed, data: { balance: result.balance, currencyCode: result.currencyCode } };
+  });
+
+  /**
+   * [Owner ruling 2026-10-07] Refund unused prepaid fee credit, then the
+   * account can be deleted. Swift never moves the money. Three steps, each a
+   * money action a second admin approves (credit-refund.ts):
+   *   1. set-aside: the whole credit leaves the wallet; nothing is paid before;
+   *   2. paid: after paying it outside Swift, the set-aside amount and the
+   *      transfer reference (one reference, one refund, across every account);
+   *   3. release: a set-aside that could not be paid goes back to the wallet.
+   * Every answer carries the LIVE wallet and the open set-aside.
+   */
+  // One schema with the approval gate's ask check (credit-refund.ts): a wallet is Decimal(12,2),
+  // so any balance it can hold can be refunded whole.
+  const refundAmount = REFUND_AMOUNT;
+  const refundSetAsideId = REFUND_SET_ASIDE_ID;
+  const refundSubject = async (request: { params: unknown }) => {
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { id } = request.params as { id: string };
+    const subscription = await app.prisma.subscription.findFirst({ where: { id, ...subscriptionTenantScope(tenantId) }, select: { id: true } });
+    if (!subscription) throw new NotFoundError('Subscription', id);
+    return id;
+  };
+  const approvalOf = (request: unknown) => (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? '';
+  const refundAnswer = (r: Awaited<ReturnType<typeof setAsideCreditRefund>>) => ({
+    success: true,
+    replayed: r.replayed,
+    data: { amount: r.amount, currencyCode: r.currencyCode, balance: r.balance, refundSetAside: r.refundSetAside, billingEventId: r.billingEventId },
+  });
+
+  app.post('/subscriptions/:id/refund-credit/set-aside', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount }).parse(request.body);
+    return refundAnswer(await setAsideCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/paid', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    // [Sol r2 S1] The set-aside this payout pays is part of what the second admin approves.
+    const body = PAID_REFUND_BODY.parse(request.body);
+    const reference = refundReferenceOf(body.reference);
+    return refundAnswer(await recordCreditRefundPaid(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id,
+      amount: body.amount, method: body.method, reference, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
+  });
+
+  app.post('/subscriptions/:id/refund-credit/release', { preHandler: [adminGuard] }, async (request) => {
+    const id = await refundSubject(request);
+    const body = z.object({ amount: refundAmount, setAsideId: refundSetAsideId }).parse(request.body);
+    return refundAnswer(await releaseCreditRefund(app.prisma, {
+      adminId: request.user.userId, approvalId: approvalOf(request), subscriptionId: id, amount: body.amount, setAsideId: body.setAsideId,
+      onAudit: (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    }));
   });
 
   /** Billing audit trail for one subscription. */
@@ -4597,21 +4787,36 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: entries.map((e) => ({ ...e, amountUsd: Number(e.amountUsd) })) };
   });
 
-  /** Set a plan price (append semantics: deactivate + create keeps history;
-   *  the book is USD-only by law). */
+  /** Schedule a plan price (append semantics: every row is kept; the book is
+   *  USD-only by law). [Owner legal plan · F2 · GUARDRAILS §7] A HIGHER price
+   *  (or a first price for a plan) takes effect no sooner than 14 days from
+   *  now (an earlier effectiveFrom is refused); a LOWER one may take effect
+   *  from now, the next billing week (coordinator ruling 15 Oct). The price in
+   *  force stays in force until then, a week is priced by the book in force
+   *  when it starts, and every partner it changes is told now
+   *  (billing/price-book.ts, fx-notices.ts). */
   app.put('/billing/price-book', { preHandler: [platformControlGuard] }, async (request) => {
     const body = z.object({
       role: z.enum(['VENDOR', 'RIDER', 'DRIVER', 'SERVICE']),
       tier: z.string().trim().max(40).optional(),
       amountUsd: z.number().positive().max(10_000),
+      effectiveFrom: z.string().datetime(),
     }).parse(request.body ?? {});
+    const { activePriceBook, earliestPriceChange, PRICE_BOOK_NOTICE_DAYS, priceBookKey, bookRowsAt } = await import('../billing/price-book');
+    const now = new Date();
+    const effectiveFrom = new Date(body.effectiveFrom);
+    if (effectiveFrom.getTime() < now.getTime() - 60_000) throw new AppError(400, 'PRICE_CHANGE_IN_PAST', 'A price never takes effect in the past. Nothing changed.');
+    // Compared with the price that would otherwise be in force on that date.
+    const before = bookRowsAt(await activePriceBook(app.prisma), effectiveFrom).get(priceBookKey(body.role, body.tier ?? null));
+    const lower = !!before && body.amountUsd < before.amountUsd;
+    const earliest = earliestPriceChange(now);
+    if (!lower && effectiveFrom.getTime() < earliest.getTime()) {
+      throw new AppError(400, 'PRICE_CHANGE_TOO_SOON', `A higher weekly price (or a first price for a plan) changes no sooner than ${PRICE_BOOK_NOTICE_DAYS} days after it is set, so every partner it changes is told first. Set effectiveFrom to ${earliest.toISOString()} or later. Nothing changed.`, { earliestEffectiveFrom: earliest.toISOString() });
+    }
     const updated = await app.prisma.$transaction(async (tx) => {
-      await tx.priceBookEntry.updateMany({
-        where: { role: body.role, tier: body.tier ?? null, active: true },
-        data: { active: false },
-      });
+      // The price in force stays in force until effectiveFrom: nothing is deactivated here.
       const created = await tx.priceBookEntry.create({
-        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd },
+        data: { role: body.role, tier: body.tier ?? null, amountUsd: body.amountUsd, effectiveFrom },
       });
       // [ADM-002] The route already owned this transaction — the audit row
       // simply joins it, and names the entry it made (a create declares no
@@ -4619,7 +4824,10 @@ export async function adminRoutes(app: FastifyInstance) {
       await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { entityId: created.id });
       return created;
     });
-    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd) } };
+    // Tell every partner it changes, now (the daily notice job retries any undelivered).
+    const { announcePriceBookEntry } = await import('../billing/fx-notices');
+    const told = await announcePriceBookEntry(app.prisma, app.io, updated.id, new Date());
+    return { success: true, data: { ...updated, amountUsd: Number(updated.amountUsd), noticesQueued: told.notified } };
   });
 
   /** Part 13 reporting — one truth, two columns: USD (management view) and
@@ -4715,7 +4923,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const tenant = await app.prisma.tenantBillingCurrency.findFirst({ where: { settlementCurrency: q.quote } });
     const inc = tenant ? Number(tenant.roundingIncrement) : 1;
     const previous = await app.prisma.fxRate.findFirst({ where: { quote: q.quote }, orderBy: { effectiveFrom: 'desc' } });
-    const entries = await app.prisma.priceBookEntry.findMany({ where: { active: true }, orderBy: { role: 'asc' } });
+    // The plans in force today (a scheduled price shows once it is in force).
+    const { activePriceBook, bookRowsAt } = await import('../billing/price-book');
+    const entries = [...bookRowsAt(await activePriceBook(app.prisma), new Date()).values()].sort((a, b) => a.role.localeCompare(b.role));
     return {
       success: true,
       data: {
@@ -5251,6 +5461,75 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: detail };
   });
 
+  // ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ─────────
+  //
+  // A duplicate, over-the-cap or mistaken MMG weekly-fee payment, returned in
+  // full to the partner's MMG account (MMG reverses in full only). The ask is
+  // C4: a stated reason and a second person (or the owner in solo mode), over
+  // this payment and its whole amount. The claim and its audit row commit
+  // before MMG is asked; only MMG's lookup moves the fee balance
+  // (mmg-fee-reversal.ts). Off until MMG_FEE_REVERSAL=on.
+  const feeReversals = new MmgFeeReversalService({ prisma: app.prisma, billing, notifications });
+  const reversalOut = (row: { amount: unknown } & Record<string, unknown>) => ({
+    id: row['id'], checkoutId: row['checkoutId'], state: row['state'], amount: Number(row.amount), currencyCode: row['currencyCode'],
+    providerStatus: row['providerStatus'], lookupStatus: row['lookupStatus'], heldReason: row['heldReason'],
+    sentAt: row['sentAt'], reversedAt: row['reversedAt'], failedAt: row['failedAt'], resolution: row['resolution'],
+  });
+
+  app.get('/billing/mmg-checkouts/:id/reversal', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    return { success: true, data: await feeReversals.view({ tenantId, checkoutId: id }) };
+  });
+
+  app.post('/billing/mmg-checkouts/:id/reverse', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      // MMG reverses in full only: the admin types the whole amount, and the
+      // approval's fingerprint binds it with the payment.
+      amountGyd: z.number().positive().max(MAJOR_AMOUNT_CEILING),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const reason = reasonOf(request.body, request.headers as never) ?? body.reason ?? '';
+    const row = await feeReversals.requestReversal(
+      { tenantId, checkoutId: id, amountGyd: body.amountGyd, reason, actorId: request.user.userId,
+        approvalId: (request as { privilegedApprovalId?: string }).privilegedApprovalId ?? null },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // [DS1112] A person resolves a HELD return (C4: a reason and a second
+  // person, or solo): "MMG shows nothing was returned" (only while MMG's
+  // lookup shows the payment standing) or "returned, here is MMG's reference"
+  // (booked only if MMG's lookup proves it). Never a guess.
+  app.post('/billing/mmg-fee-reversals/:id/resolve', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const body = z.object({
+      outcome: z.enum(['NOT_RETURNED', 'RETURNED', 'RETURNED_NOT_BOOKED']),
+      // The MMG statement line or the MMG reversal reference the person read.
+      mmgReference: z.string().trim().min(3).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/, 'Use the reference exactly as MMG shows it'),
+      reason: z.string().trim().max(500).optional(),
+    }).parse(request.body ?? {});
+    const row = await feeReversals.resolveHeld(
+      { tenantId, reversalId: id, outcome: body.outcome, mmgReference: body.mmgReference, actorId: request.user.userId },
+      (tx, facts) => auditWithin(tx, request as unknown as AuditRequestLike, app.prefix, { extra: facts }),
+    );
+    return { success: true, data: reversalOut(row as never) };
+  });
+
+  // "Check with MMG": MMG's lookup settles an open return (proof debits the
+  // balance once; a refusal with the payment standing closes it). It decides
+  // nothing itself, so it is C2 — the money decision was the approved C4 ask.
+  app.post('/billing/mmg-fee-reversals/:id/check', { preHandler: [adminGuard] }, async (request) => {
+    const tenantId = requireTenantId();
+    const { id } = z.object({ id: z.string().min(1).max(64) }).parse(request.params);
+    const row = await feeReversals.check({ tenantId, reversalId: id });
+    return { success: true, data: reversalOut(row as never) };
+  });
+
   // ── Collections workbench [san spec PART 21] — the founder's call list ────
 
   /** Tabs of who to call, with tap-to-call + WhatsApp links and the promise
@@ -5369,6 +5648,22 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     });
     return { success: true, data: row };
+  });
+
+  // [Owner legal plan 15 Oct · R12] One weekly-fee receipt as the partner sees
+  // it (billing/fee-receipt.ts), by its number: support reads it out, the
+  // accountant checks it. Read only.
+  app.get('/billing/receipts/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
+    // Tenant-local like every billing read: only a receipt of this tenant's
+    // own subscriptions; another tenant's number reads as not found.
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { receiptNumber } = z.object({ receiptNumber: z.string().regex(/^[A-Z0-9-]{1,64}$/) }).parse(request.params);
+    const { feeReceiptDocument } = await import('../billing/fee-receipt');
+    const doc = await feeReceiptDocument(app.prisma, receiptNumber, { tenantId, subscriptionWhere: subscriptionTenantScope(tenantId) });
+    if (!doc) throw new NotFoundError('Receipt');
+    return { success: true, data: doc };
   });
 
   /** Daily cash journal CSV [20.4] — the accountant's export. */
@@ -5710,6 +6005,8 @@ export async function adminRoutes(app: FastifyInstance) {
       required: true,
       ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+      ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
+      ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
     });
     await audit(
       request.user.userId,
@@ -6610,7 +6907,9 @@ export async function adminRoutes(app: FastifyInstance) {
   // SWIFT-121: one entry per LIVE queue (createQueues). 'riderAssignment' was
   // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
   // jobs were invisible in the DLQ — added.
-  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'search'] as const;
+  // [row 266] 'offer' = the offer fast lane (offer timeouts only).
+  // [row 331] 'safety' = the safety lane (the SOS backstop + Trip Guardian ticks).
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'safety', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
@@ -6672,6 +6971,9 @@ export async function adminRoutes(app: FastifyInstance) {
         });
       }
     }
+    // [row 267] The durable outboxes' dead letters sit beside the dead jobs:
+    // a command whose retry budget ran out, waiting for an operator.
+    for (const row of await listOutboxDeadLetters(app.prisma)) out.push({ ...row, recovery: OUTBOX_RECOVERY });
     out.sort((a, b) => Number(b['finishedOn'] ?? 0) - Number(a['finishedOn'] ?? 0));
     return { success: true, data: out.slice(0, 200) };
   });
@@ -6780,6 +7082,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string; acknowledgedReconciled?: string };
+    // [row 267] An outbox dead letter is requeued in the database: the same row,
+    // a fresh retry budget, compare-and-set on the stamp the operator saw.
+    if (isOutboxDeadLetterName(queue)) {
+      const finishedOn = expected.expectedFinishedOn === undefined ? undefined : Number(expected.expectedFinishedOn);
+      if (finishedOn !== undefined && !Number.isSafeInteger(finishedOn)) throw new AppError(400, 'VALIDATION_ERROR', 'expectedFinishedOn must be a timestamp in milliseconds');
+      await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { outbox: queue }, async () => {
+        if (!(await requeueOutboxDeadLetter(app.prisma, queue, id, finishedOn))) throw NO_LONGER_FAILED('it was already requeued or completed');
+      });
+      return { success: true, data: { queue, id, retried: true } };
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     // [A-08] Retry-safety is a property each job class has to EARN. The page
@@ -6813,6 +7125,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    // [row 267] An outbox row is an obligation someone is owed (a dispatch, a
+    // revocation, a safety intake): it is requeued or fixed, never discarded here.
+    if (isOutboxDeadLetterName(queue)) {
+      throw new AppError(409, 'OUTBOX_DEAD_LETTER_NOT_DISCARDABLE', 'An outbox command cannot be discarded from here. Requeue it, or fix what it is waiting on.');
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     await auditedDlqAction(

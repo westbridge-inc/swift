@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import LoginPage from './page';
+import { axeViolations } from '@/test/axe';
 
 const mocked = vi.hoisted(() => ({
   query: '',
@@ -77,5 +78,14 @@ describe('[Q7b] signing in from the customer app', () => {
   it('refuses an off-site return, whatever it looks like', async () => {
     expect(await signIn(`next=${encodeURIComponent('//evil.example/')}`)).toBe('/dashboard');
     expect(mocked.verifyCustomerLogin).not.toHaveBeenCalled();
+  });
+});
+
+// [Row 111 · W8] The sign-in page, as a page.
+describe('[W8] sign-in is accessible', () => {
+  it('has no accessibility violations axe can find', async () => {
+    render(<LoginPage />);
+    await screen.findAllByRole('button');
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

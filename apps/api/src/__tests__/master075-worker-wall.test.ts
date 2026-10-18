@@ -5,6 +5,7 @@ import { nanoid } from 'nanoid';
 import type { PrismaClient } from '@prisma/client';
 import * as prismaModule from '../plugins/prisma';
 import { runWithTenant, runWithoutTenant, scopedPrisma } from '../plugins/prisma';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [MASTER-075] The standalone worker is a composition root like the API: it
@@ -64,7 +65,7 @@ describe('[MASTER-075] one client construction for every composition root', () =
     worker = createScopedProcessClient!({ datasourceUrl: process.env['DATABASE_URL'] });
     await runWithoutTenant(async () => {
       await scopedPrisma.tenant.create({ data: { id: TENANT_B, name: 'M075 B', slug: TENANT_B, isActive: false } });
-      const phone = () => `+5926${String(Math.floor(Math.random() * 9_000_000) + 1_000_000)}`;
+      const phone = () => testPhone();
       const mine = await scopedPrisma.user.create({ data: { phone: phone(), firstName: 'Mine', lastName: 'M075', roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never, tenantId: 'swift-default' } });
       const other = await scopedPrisma.user.create({ data: { phone: phone(), firstName: 'Other', lastName: 'M075', roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never, tenantId: TENANT_B } });
       mineId = mine.id; otherId = other.id;

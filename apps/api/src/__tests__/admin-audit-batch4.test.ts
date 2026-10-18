@@ -11,6 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { withSuiteCapability } from '../lib/test-target-lock';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE LAST THREE SELF-OWNED MONEY ROUTES.
@@ -103,14 +104,14 @@ async function dueReturn(refundAmount = 4500) {
  *  subscription under test gets a vendor of its own. */
 async function freshVendor() {
   const ownerUser = await app.prisma.user.create({ data: {
-    phone: `+59276${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'B4', lastName: `Owner${RUN}${nanoid(3)}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', status: 'ACTIVE', isPhoneVerified: true } });
   userIds.push(ownerUser.id);
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
   ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
     ownerId: owner.id, name: `B4 Kitchen ${RUN} ${nanoid(3)}`, slug: `b4-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
-    phone: `+59275${String(Math.floor(Math.random() * 90000) + 10000)}`, addressLine1: '1 Audit Row', city: 'Georgetown',
+    phone: testPhone(), addressLine1: '1 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);
   return vendor.id;
@@ -130,7 +131,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'B4', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });

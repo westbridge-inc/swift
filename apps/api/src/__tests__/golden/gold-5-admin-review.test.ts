@@ -21,6 +21,7 @@ import { resetKeyProviderForTests } from '../../providers/storage/envelope';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { clusterMemberIds } from '../../modules/integrity/identity.service';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
+import { uniquePng } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-5 · ADMIN-01 — partner document review, through the REAL mounted
@@ -105,8 +106,8 @@ async function makeApplicant(firstName: string) {
   return { ...owner, vendorId: vendor.id };
 }
 
-/** A real PNG: magic bytes, then a body unique to this document. */
-const documentBytes = () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`gold5-review-${nanoid(12)}`), randomBytes(64)]);
+/** [Row 108] A real PNG, unique to this document (the upload route reads every photo with the real decoder). */
+const documentBytes = () => uniquePng(`gold5-review-${nanoid(12)}-${randomBytes(16).toString('hex')}`);
 
 function upload(actor: Actor, bytes: Buffer) {
   const boundary = `----gold5${nanoid(8)}`;
@@ -375,7 +376,8 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // DECISION: approved, with a stated reason, once.
     const decideAt = Date.now();
-    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: {} });
+    // [R16] the reviewer says what the registration is (a company's never expires)
+    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: { registrationKind: 'COMPANY' } });
     expect(approved.statusCode, approved.body).toBe(200);
     const decided = await docRow(docId);
     expect({ status: decided.status, state: decided.state, by: decided.reviewedBy }).toEqual({ status: 'APPROVED', state: 'COMMITTED', by: rev1.userId });

@@ -54,6 +54,14 @@ export function TileMap({ point, label, zoom = TRACKING_ZOOM, linkHref, linkLabe
 }) {
   const [failed, setFailed] = useState(false);
   const source = mapTileSource();
+  // [Row 108] One failed tile used to blank the whole map. Each tile is fetched
+  // again once (a fresh element, so the browser asks again); only a tile that
+  // fails twice makes the map say it could not load.
+  const [retried, setRetried] = useState<ReadonlySet<string>>(() => new Set());
+  const tileFailed = (src: string) => {
+    if (retried.has(src)) setFailed(true);
+    else setRetried((seen) => new Set(seen).add(src));
+  };
   return (
     <div>
       <div role="img" aria-label={label} className="relative h-64 w-full overflow-hidden bg-[var(--swift-sunken)]">
@@ -66,14 +74,14 @@ export function TileMap({ point, label, zoom = TRACKING_ZOOM, linkHref, linkLabe
             // Raster tiles keep their exact 256 px geometry and the browser's cache.
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              key={tile.src}
+              key={retried.has(tile.src) ? `${tile.src}#retry` : tile.src}
               src={tile.src}
               alt=""
               width={TILE_SIZE}
               height={TILE_SIZE}
               draggable={false}
               referrerPolicy="strict-origin-when-cross-origin"
-              onError={() => setFailed(true)}
+              onError={() => tileFailed(tile.src)}
               className="absolute max-w-none select-none"
               style={{ left: `calc(50% + ${tile.left}px)`, top: `calc(50% + ${tile.top}px)` }}
             />

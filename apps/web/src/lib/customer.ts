@@ -49,7 +49,7 @@ export async function verifyOtp(phone: string, code: string): Promise<{ isNewUse
 }
 
 /** Register a brand-new account with the chosen role (after OTP verify). */
-export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
+export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean; ageConfirmed?: boolean }): Promise<{ user: any; roles: string[] }> {
   const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
     method: 'POST', credentials: 'include',
     headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
@@ -432,7 +432,13 @@ export async function checkout(body: CheckoutBody, idempotencyKey: string) {
   })).data;
 }
 export async function getOrders(): Promise<any[]> { return (await apiFetch('/api/v1/customer/orders')).data as any[]; }
-export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}`)).data; }
+// [SUBSTITUTION · owner 17 Oct 2026] The web renders the server's swap view (its
+// permitted answers and deadline), so it opts in to swap decisions.
+export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v1`)).data; }
+/** The customer's answer to the store's swap question (approve = take the substitute). */
+export async function decideSubstitution(orderId: string, lineId: string, approve: boolean): Promise<any> {
+  return (await apiFetch(`/api/v1/customer/orders/${orderId}/items/${lineId}/substitution`, { method: 'POST', body: JSON.stringify({ approve }) })).data;
+}
 export async function cancelOrder(id: string, reason: string) {
   return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
 }

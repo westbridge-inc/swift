@@ -9,6 +9,7 @@ import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [phone feedback P3] The emergency contact the owner adds on his phone must
@@ -32,9 +33,8 @@ const createdUserIds: string[] = [];
 const alertIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_708_000_000 + Math.floor(Math.random() * 100_000_000);
-let cseq = 0;
 /** A Guyana number exactly as the app composes it: +592 and seven local digits. */
-const contactPhone = () => `+592${String(6_000_000 + Math.floor(Math.random() * 900_000) + (cseq += 1)).padStart(7, '0')}`;
+const contactPhone = () => testPhone();
 
 async function makeUser(firstName = 'Asha') {
   seq += 1;
@@ -54,7 +54,7 @@ function req(method: 'GET' | 'POST', url: string, token: string, payload?: unkno
 /** The code out of the confirmation SMS — what the contact reads back. */
 function codeFor(phone: string): string {
   const sms = [...devChannelLog].reverse().find((e) => e.channel === 'sms' && e.to === phone);
-  const m = sms?.body.match(/code (\d{6})/);
+  const m = sms?.body.match(/[Cc]ode (\d{6})/);
   if (!m) throw new Error(`no confirmation SMS for ${phone}`);
   return m[1]!;
 }

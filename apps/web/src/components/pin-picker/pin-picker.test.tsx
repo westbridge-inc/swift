@@ -61,10 +61,22 @@ describe('[WEB-PIN] the pin picker', () => {
     // The autocomplete was biased to where the map is, through Swift's API only.
     const asked = new URL(String(calls('/api/v1/places/autocomplete')[0]![0]));
     expect(Number(asked.searchParams.get('lat'))).toBeCloseTo(STORE_MAP_START.latitude, 6);
+    // The details request having been SENT is not the map having moved: wait
+    // until the map sits on the chosen result, so the tiles loaded below are
+    // the ones around that point (loading the town-centre tiles that are
+    // about to be replaced leaves the new map unseen, and no pin is handed over).
+    await waitFor(() => expect(screen.getByText('Latitude 6.80650, Longitude -58.16020')).toBeTruthy());
+    expect(last(onChange)).toBeNull();
     loadMap();
     await waitFor(() => expect(last(onChange)).toEqual({ latitude: 6.8065, longitude: -58.1602, address: 'Sample Market, Georgetown', named: true }));
     // The chosen result already names this exact point: no second guess from the reverse lookup.
-    expect(calls('/api/v1/places/reverse')).toHaveLength(0);
+    // (On a slow runner the town centre the map opened on may settle — 350 ms —
+    // before the search answers, and naming THAT point is right; so every
+    // reverse lookup must be for the opening point, none for the chosen one.)
+    for (const [url] of calls('/api/v1/places/reverse')) {
+      const at = new URL(String(url)).searchParams;
+      expect([Number(at.get('lat')), Number(at.get('lng'))]).toEqual([STORE_MAP_START.latitude, STORE_MAP_START.longitude]);
+    }
   });
 
   it('typing a new search outdates a place still being looked up: the map does not jump to it', async () => {

@@ -30,11 +30,15 @@ type ReceiptOrder = {
   deliveryAddress: string | null;
   vendor: { name: string; addressLine1: string; city: string; phone: string } | null;
   customer: { firstName: string | null; lastName: string | null } | null;
-  items: Array<{ name: string; quantity: number; totalCustomer: unknown }>;
+  items: Array<{ name: string; quantity: number; totalCustomer: unknown; subStatus?: string | null }>;
   /** [M-36] The currency every amount on the order is in; stamped at checkout. */
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
   fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
+  /** [L02 · row 34] The cash the rider stated at the door, and how far short a
+   *  handover was made (the rider bore the difference). */
+  doorCashCollectedAmount?: unknown;
+  doorCashShortfallAmount?: unknown;
 };
 
 const esc = (s: string) =>
@@ -54,6 +58,12 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
   // "Paid in cash" there asserts a collection nobody recorded. Say what the
   // ledger can prove: captured → paid; otherwise → due.
   const cashCaptured = order.paymentStatus === 'CAPTURED';
+  // [review S3-2] A delivery handed over short is CAPTURED with less cash than
+  // the total: say the cash actually taken and what was not collected, never
+  // "paid" in full. (The sale value stays the total; the rider bore the gap.)
+  const shortfall = order.doorCashShortfallAmount == null ? 0 : Number(order.doorCashShortfallAmount);
+  const shortCash = cashCaptured && order.paymentMethod !== 'MOBILE_MONEY' && Number.isFinite(shortfall) && shortfall > 0
+    && order.doorCashCollectedAmount != null;
   const paidHow =
     order.paymentMethod === 'MOBILE_MONEY'
       ? (order.paymentStatus === 'CAPTURED'
@@ -65,12 +75,19 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
         ? (cashCaptured ? 'Paid in cash at the store' : 'Cash due at the store')
         : order.fulfillment === 'APPOINTMENT'
           ? (cashCaptured ? 'Paid at the appointment' : 'Due at the appointment')
-          : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+          : shortCash
+            ? `Paid ${formatMoney(order.doorCashCollectedAmount, currency, { whole: true })} in cash on delivery (${formatMoney(shortfall, currency, { whole: true })} not collected)`
+            : (cashCaptured ? 'Paid in cash on delivery' : 'Cash due on delivery');
+  // [SUBSTITUTION · owner 17 Oct] A line that came off the order (the store
+  // removed it, the customer declined the swap, or nobody answered in time)
+  // was never charged: the receipt says so and prices it at nothing, so the
+  // rows add up to the Items total the order actually carries.
+  const removed = (i: { subStatus?: string | null }) => i.subStatus === 'REFUNDED' || i.subStatus === 'REJECTED';
   const rows = order.items
     .map(
       (i) => `<tr>
-        <td>${i.quantity}× ${esc(i.name)}</td>
-        <td class="num">${money(i.totalCustomer)}</td>
+        <td>${i.quantity}× ${esc(i.name)}${removed(i) ? ' (removed, not charged)' : ''}</td>
+        <td class="num">${money(removed(i) ? 0 : i.totalCustomer)}</td>
       </tr>`,
     )
     .join('\n');

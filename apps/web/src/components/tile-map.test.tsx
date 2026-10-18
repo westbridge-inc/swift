@@ -72,9 +72,28 @@ describe('[W7] the tile map', () => {
     const links = Array.from(container.querySelectorAll('a'));
     expect(links.length).toBe(3);
     for (const link of links) expect(link.getAttribute('referrerpolicy')).toBe('no-referrer');
+    // [Row 108] A tile gets one retry; the map says it could not load only when the retry fails too.
+    const src = tiles[0]!.getAttribute('src');
     fireEvent.error(tiles[0]!);
+    const retried = Array.from(map.querySelectorAll('img')).find((tile) => tile.getAttribute('src') === src)!;
+    fireEvent.error(retried);
     expect(within(map).getByText(/The map couldn’t load/)).toBeTruthy();
     expect(screen.getByRole('link', { name: 'Open approximate map ↗' }).getAttribute('href')).toBe(mapLinkUrl(PRECISE));
+  });
+
+  it('[row 108] one failed tile is fetched again once, and the map stays up while it is retried', () => {
+    render(<TileMap point={coarsen(PRECISE)} label="Courier location, approximate" linkHref={mapLinkUrl(PRECISE)} linkLabel="Open approximate map ↗" />);
+    const map = screen.getByRole('img', { name: 'Courier location, approximate' });
+    const before = Array.from(map.querySelectorAll('img'));
+    const failing = before[0]!;
+    const src = failing.getAttribute('src');
+    fireEvent.error(failing);
+    expect(within(map).queryByText(/The map couldn’t load/)).toBeNull();
+    const after = Array.from(map.querySelectorAll('img'));
+    expect(after).toHaveLength(before.length);
+    const again = after.find((tile) => tile.getAttribute('src') === src)!;
+    expect(again).not.toBe(failing); // a fresh element: the browser requests the tile again
+    expect(after.filter((tile) => tile !== again).every((tile) => before.includes(tile))).toBe(true); // the others are untouched
   });
 });
 

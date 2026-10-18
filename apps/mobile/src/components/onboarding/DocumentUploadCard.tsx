@@ -42,6 +42,11 @@ const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
+  // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
+  gei_electrical_licence: 'GEI Electrical Licence',
+  pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
+  pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 /** Friendly document name for other surfaces (suspension banners etc.). */
@@ -69,7 +74,6 @@ export function DocumentUploadCard({
   reviewNote,
   isNext,
   replaced = false,
-  faceMatched = false,
   optionalHint,
   hint,
 }: {
@@ -82,8 +86,6 @@ export function DocumentUploadCard({
   isNext?: boolean;
   /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
   replaced?: boolean;
-  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
-  faceMatched?: boolean;
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
    *  "keep operating" copy and no "next step" nudge. */
   optionalHint?: string;
@@ -182,6 +184,7 @@ function explainPermissionDenied(
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      ...(upload.isError && upload.variables ? [{ text: 'Retry saved photo', onPress: () => upload.mutate(upload.variables!) }] : []),
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -244,12 +247,11 @@ function explainPermissionDenied(
             tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
-            {caption}
+            {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
-              this document. It used to show under every ID, while the
-              server's face-matching was switched off. */}
+          {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made
+              by people (face-matching is off, GUARDRAILS §8). The checklist says what really happens. */}
           {hint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {hint}
@@ -258,11 +260,6 @@ function explainPermissionDenied(
           {optionalHint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {optionalHint}
-            </T>
-          ) : null}
-          {faceMatched ? (
-            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
             </T>
           ) : null}
         </View>

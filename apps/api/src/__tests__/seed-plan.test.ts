@@ -16,6 +16,7 @@ import { parseEmergencyPolicy, serveEmergencyPolicy } from '../modules/country/e
 import { marketGate, thresholdsFrom } from '../modules/market/launch-depth';
 import { assertSafeToSeedDemo } from '../utils/seed-guard';
 import { seedPlanCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-005] this suite pins the deployment identity singleton for the whole file and restores it after
 grantSuiteCapability('unscoped-mutation');
@@ -101,8 +102,10 @@ describe('[R048-005] the plan applies once; a replay changes nothing', () => {
     // document rulings, and 2026-10-13.1 without main's 2026-10-13.3 pricing;
     // the merged values are a version of their own (2026-10-14.3), and the
     // service-business and taxi document changes carry them on top as
-    // 2026-10-14.4 and then 2026-10-14.5.
-    expect(desiredPlatformConfig().version).toBe('2026-10-14.5');
+    // 2026-10-14.4 and then 2026-10-14.5; the service trades (13 Oct) on top as 2026-10-15.1, and the
+    // trades the research marks UNSURE held again as 2026-10-15.2 (R15), and the heavy-equipment operator
+    // held too as 2026-10-16.1 (owner, 16 Oct).
+    expect(desiredPlatformConfig().version).toBe('2026-10-16.1');
   });
 
   it.each(['create', 'policy'] as const)('seeds owner-confirmed emergency numbers for the Guyana %s path', (path) => {
@@ -366,8 +369,8 @@ describe('[R048-005] a production target is a ceremony', () => {
 describe('[R048-005] the first SUPER_ADMIN is bootstrap-only; a second is break-glass', () => {
   it('bootstraps only while no SUPER_ADMIN exists; afterwards two pinned people approve this target and phone, once', async () => {
     const existing = await prisma.user.count({ where: { roles: { has: 'SUPER_ADMIN' } } });
-    const phone = `+59260099${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
-    const phone2 = `+59260098${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+    const phone = testPhone();
+    const phone2 = testPhone();
     if (existing === 0) {
       const first = await promoteBootstrapAdmin(prisma, URL_, phone, { actor: 'test' });
       userIds.push(first.userId);
@@ -514,7 +517,7 @@ describe('[R048-005] the demo seed needs an ephemeral database', () => {
 // minted only by the signed plan that names it.
 // ---------------------------------------------------------------------------
 describe('[PROD-PATH] the seed ceremony is bound to what the approvers read', () => {
-  const PHONE = `+5926155${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+  const PHONE = testPhone();
 
   it('deploy/seed-approve.sh shows the database, the FX rate, the first admin and every change before the yes', async () => {
     await setIdentity('production');

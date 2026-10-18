@@ -16,6 +16,9 @@ import { mapTilesBuildCheck } from './src/lib/map-tiles';
 // The public face of Swift — marketing + (coming) customer web + operator
 // dashboards. Same hardening posture as the admin console.
 
+/** [PERF #7] How long a browser keeps a self-hosted font file (see headers()). */
+const FONT_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=604800';
+
 // [SWX-DEV-WEB-076 · integrated] The browser API origin and the CSP that
 // permits exactly it come from ONE authority (src/lib/browser-api-origin.ts).
 // `next dev` runs in development mode; every other phase — build, start,
@@ -157,6 +160,16 @@ export default function createNextConfig(phase: string): NextConfig {
             { key: 'Content-Type', value: 'application/json' },
             { key: 'Cache-Control', value: 'public, max-age=3600' },
           ],
+        },
+        {
+          // [PERF #7] The self-hosted font files (public/fonts) used to go out
+          // with Next's default for public files, `max-age=0`, so every full
+          // page load (each QR scan) asked again about every face it used
+          // before it could draw text in it. They are kept for 30 days now
+          // (then used while re-checked in the background). Their names carry
+          // no version: a changed font must take a NEW file name.
+          source: '/fonts/:file',
+          headers: [{ key: 'Cache-Control', value: FONT_CACHE_CONTROL }],
         },
         {
           // [PWA-1] The service worker (public/sw.js). Never cached, so a fixed

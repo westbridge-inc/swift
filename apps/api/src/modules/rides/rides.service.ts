@@ -12,6 +12,7 @@ import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
+import { assertHirePassengers } from './hire-passengers';
 import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
@@ -43,7 +44,7 @@ const rideInProgress = () => new AppError(
 // for the gates and the creation path — the route and the 2-min queue scan
 // both call this. Error PRECEDENCE is preserved exactly as the route has
 // always thrown it (active → banned → availability(flag) → restricted →
-// selfie → fare → capacity → L2) and is pinned by
+// fare → capacity → L2; the customer photo gate is gone, owner 16 Oct) and is pinned by
 // taxi-characterization.test.ts.
 // ---------------------------------------------------------------------------
 
@@ -185,7 +186,6 @@ type GatedUser = {
   tenantId: string;
   countryCode: string;
   trustLevel: string;
-  selfieCapturedAt: Date | null;
 };
 
 /**
@@ -201,7 +201,7 @@ export async function assertRideGates(
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
-    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true, tenant: { select: { kind: true } } },
+    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, tenant: { select: { kind: true } } },
   });
 
   // [REVIEW-PARTNER · DL-5] The store-review fiction books no rides: its taxi
@@ -244,12 +244,10 @@ export async function assertRideGates(
     throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides need your ID on file. Add your ID in the app — a person will look at it before rides unlock.');
   }
 
-  // Universal signup selfie (master plan §3): the driver sees who they are
-  // picking up, so a live profile photo is required before booking rides.
-  if (!user.selfieCapturedAt) {
-    throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before booking rides — your driver sees it when they accept.');
-  }
-
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a
+  // photo, taxi included: a ride needs only the ID on file (assertL2, after this). Partners keep
+  // their selfie rules (go-online). Builds 9-11 show their photo door only on SELFIE_REQUIRED,
+  // which this path no longer sends, so they simply stop asking.
   return user;
 }
 
@@ -322,6 +320,7 @@ export async function createRideRequest(
     : await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, orderTenantId);
   const tiered: TieredEstimate = itineraryEstimate
     ?? await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
+  assertHirePassengers(body.passengerCount);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
   if (!tier) {
     throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');

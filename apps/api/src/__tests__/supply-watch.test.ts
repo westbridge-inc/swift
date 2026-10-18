@@ -11,6 +11,7 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 import { makeDispatchService } from '../modules/dispatch/dispatch.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { scanSupplyWatches } from '../modules/dispatch/supply-watch.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Supply watcher (availability §5): watch → scan silent while empty → drivers
@@ -44,7 +45,7 @@ beforeAll(async () => {
 
   const me = await app.prisma.user.create({
     data: {
-      phone: `+59255${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Watch', lastName: 'Er',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true,
@@ -95,7 +96,7 @@ describe('supply watcher', () => {
     // A driver comes online in range.
     const du = await app.prisma.user.create({
       data: {
-        phone: `+59254${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Back', lastName: 'Online',
         roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
         isPhoneVerified: true,
@@ -173,6 +174,11 @@ describe('struggling-delivery options (spec §4.2)', () => {
     });
     expect(note.title).toContain('trouble finding a rider');
     expect((note.data as { orderId: string }).orderId).toBe(stale.id);
+    // [row 268] The app has no switch-to-pickup button (the conversion route is unused and flag-gated), and a
+    // cancel is the server's call (free only once no mover is found): the notice promises neither. It sends the
+    // customer to the order, which shows what they can do now and the store's contact.
+    expect(note.body).not.toMatch(/switch to pickup|cancel/i);
+    expect(note.body).toContain('Open the order to see what you can do now');
 
     // Second scan: dedupe holds — nothing new.
     expect(await scanStrugglingDeliveries(app.prisma, notifications)).toBe(0);

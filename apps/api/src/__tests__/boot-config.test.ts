@@ -2,12 +2,13 @@ import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPair, type KeyObject } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
+import { identitySalt } from '../modules/integrity/normalize';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
@@ -34,8 +35,7 @@ const good: Record<string, string | undefined> = {
   TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'didit-live-key',
+  KYC_PROVIDER: 'manual',
   // [LAUNCH-LOCK] Production takes no card payment until an attorney signs
   // off (owner ruling, 13 Oct): the valid production base has cards off. The
   // live Stripe key stays so a case that switches the provider back on still
@@ -62,6 +62,8 @@ const good: Record<string, string | undefined> = {
   EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key is a boot guard too.
+  IDENTITY_SALT: 'synthetic-identity-boot-salt',
   // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
 };
@@ -196,11 +198,41 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: undefined, OTP_HASH_SECRET: 'dedicated-otp-secret-at-least-32-chars' })).not.toThrow();
   });
 
+  it.each([undefined, 'didit', 'idanalyzer'])('preflight reports refused KYC %j once and continues to the next missing setting', (provider) => {
+    const result = runPreflight({ ...good, KYC_PROVIDER: provider, PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout.match(/✗ FATAL: KYC_PROVIDER/g)).toHaveLength(1);
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).not.toContain('stubbing changed nothing');
+  });
+
+  it.each(['didit', 'idanalyzer'])('refuses external KYC %s even with credentials in production', (provider) => {
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: provider, DIDIT_API_KEY: 'synthetic-test-key', ID_ANALYZER_API_KEY: 'synthetic-test-key' })).toThrow(/KYC_PROVIDER/);
+  });
+
+  // [GUARDRAILS §8 · owner: face matching OFF, identity checks by a person only] The biometric switch
+  // cannot be turned on in production: the boot guard refuses it, so no face-matching leg can run there.
+  it('refuses production face matching (FEATURE_BIOMETRIC_FACE_MATCH=1) even on the human-review provider', () => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toThrow(/FEATURE_BIOMETRIC_FACE_MATCH/);
+  });
+
+  it.each([undefined, '', '0'])('boots with face matching off (FEATURE_BIOMETRIC_FACE_MATCH=%j)', (flag) => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: flag })).not.toThrow();
+  });
+
+  it('preflight reports production face matching once and continues to the next missing setting', () => {
+    const result = runPreflight({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1', PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout.match(/✗ FATAL: FEATURE_BIOMETRIC_FACE_MATCH/g)).toHaveLength(1);
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).not.toContain('stubbing changed nothing');
+  });
+
   it('refuses sandbox or unconfigured KYC in production', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'didit', DIDIT_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
   });
 
   it('refuses sandbox/test subscription card processors in production', () => {
@@ -627,6 +659,85 @@ describe('test-control lease secret [C2]', () => {
     expect(signed.lease.signature).toMatch(/^[0-9a-f]{64}$/);
     const inTest = await testControlIdentity(prismaDouble, { NODE_ENV: 'test', TEST_CONTROL_ENABLED: '1' });
     expect(inTest.lease.signature).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] IDENTITY_SALT keys every identity-signal hash (phone,
+// document number, plate, device). Production used to find it missing only at
+// the first identity capture, mid-signup, as a thrown 500. Now it refuses to
+// start, in the qr-config salts' style: one contract for the boot guard and the
+// hasher, and the value is never echoed.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] IDENTITY_SALT is checked at boot, not at the first identity capture', () => {
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['blank', ' \t '],
+  ] as const)('production refuses to start with IDENTITY_SALT %s', (_label, value) => {
+    expect(() => assertSafeBootConfig({ ...good, IDENTITY_SALT: value })).toThrow(/FATAL: IDENTITY_SALT .*Refusing to start/);
+  });
+
+  it('production refuses the development default printed in this public repository, without echoing it', () => {
+    let message = '';
+    try {
+      assertSafeBootConfig({ ...good, IDENTITY_SALT: 'dev-identity-salt' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/FATAL: IDENTITY_SALT .*Refusing to start/);
+    expect(message).not.toContain('dev-identity-salt');
+  });
+
+  it('a configured salt boots, and development and test keep their fixed fallback', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode })).not.toThrow();
+      expect(identitySalt({ NODE_ENV: mode })).toBe('dev-identity-salt');
+      expect(identitySalt({ NODE_ENV: mode, IDENTITY_SALT: ' ' })).toBe('dev-identity-salt');
+    }
+  });
+
+  it('the hasher keeps the same contract as the boot guard', () => {
+    expect(identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: 'synthetic-identity-boot-salt' })).toBe('synthetic-identity-boot-salt');
+    for (const value of [undefined, '', ' \t ', 'dev-identity-salt']) {
+      expect(() => identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: value }), String(value)).toThrow(/IDENTITY_SALT/);
+    }
+  });
+
+  it('the value-free preflight refuses a production file without it, and lists it by name only', () => {
+    const missing = runPreflight({ ...good, IDENTITY_SALT: undefined });
+    expect(missing.status, missing.stderr).toBe(1);
+    expect(missing.stdout).toContain('MISSING  IDENTITY_SALT');
+    expect(missing.stdout).toMatch(/REFUSED[\s\S]*IDENTITY_SALT/);
+    const present = runPreflight(good);
+    expect(present.status, present.stderr).toBe(0);
+    expect(present.stdout).toContain('PRESENT  IDENTITY_SALT');
+    expect(present.stdout).not.toContain('synthetic-identity-boot-salt');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] A kill switch left ON is printed by the preflight
+// before a deploy, in the SWITCHED OFF register, like any other capability that
+// starts fine while off. The SOS escalation worker is the case that matters.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] the preflight names every kill switch left on', () => {
+  const switchedOff = (stdout: string) => stdout.slice(stdout.indexOf('SWITCHED OFF'), stdout.indexOf('VERDICT'));
+
+  it('SOS_ESCALATION_WORKER_KILL=1 is printed under SWITCHED OFF, and the file still passes', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '1', OPS_ALERT_ESCALATION_KILL: '1' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).toContain('[SOS_ESCALATION_WORKER_KILL=1]');
+    expect(switchedOff(result.stdout)).toContain('[OPS_ALERT_ESCALATION_KILL=1]');
+  });
+
+  it('a kill switch at 0 or unset is not listed; the launch card lock (CARD_RAIL_KILL=1) always is', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '0' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).not.toContain('SOS_ESCALATION_WORKER_KILL');
+    expect(switchedOff(result.stdout)).not.toContain('OPS_ALERT_ESCALATION_KILL');
+    expect(switchedOff(result.stdout)).toContain('[CARD_RAIL_KILL=1]');
   });
 });
 
@@ -1136,4 +1247,89 @@ describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on'
     expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
     expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
   });
+});
+
+describe('[TA-S0-003 · R3] the contract posture runs on the two least-privilege logins only', () => {
+  const APP_URL = 'postgresql://swift_app_login:app-fixture-secret@postgres:5432/swift';
+  const SYSTEM_URL = 'postgresql://swift_system_login:system-fixture-secret@postgres:5432/swift';
+  const walled: Record<string, string | undefined> = {
+    ...good, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny', DATABASE_URL: APP_URL, SYSTEM_DATABASE_URL: SYSTEM_URL,
+  };
+  const refusal = (env: Record<string, string | undefined>) => {
+    try {
+      assertSafeBootConfig(env);
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
+  it('boots on swift_app_login + swift_system_login with unscoped access denied', () => {
+    expect(refusal(walled)).toBeNull();
+  });
+
+  it.each([
+    ['unscoped access only counted', { TENANT_UNSCOPED_ACCESS: 'log' }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['unscoped access unset', { TENANT_UNSCOPED_ACCESS: undefined }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['the expand declaration riding along', { TENANT_WALL_EXPAND_ATTESTED: '1' }, /TENANT_WALL_EXPAND_ATTESTED is set/],
+    ["the owner's password in the process", { POSTGRES_PASSWORD: 'owner-fixture-secret' }, /owner's password/],
+    ['no request URL', { DATABASE_URL: undefined }, /DATABASE_URL is missing/],
+    ['a request URL that is not a postgres URL', { DATABASE_URL: 'mysql://swift_app_login:x@postgres/swift' }, /DATABASE_URL is missing or not/],
+    ['no system URL', { SYSTEM_DATABASE_URL: undefined }, /SYSTEM_DATABASE_URL is missing/],
+    ['the owner as the request login', { DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /DATABASE_URL does not sign in as swift_app_login/],
+    ['postgres as the request login', { DATABASE_URL: 'postgresql://postgres:owner-fixture-secret@postgres:5432/swift' }, /does not sign in as swift_app_login/],
+    ['the system login as the request login', { DATABASE_URL: SYSTEM_URL }, /does not sign in as swift_app_login/],
+    ['the owner as the system login', { SYSTEM_DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /SYSTEM_DATABASE_URL does not sign in as swift_system_login/],
+    ['one login for both', { SYSTEM_DATABASE_URL: APP_URL }, /does not sign in as swift_system_login/],
+    ['another database', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/swift', ':5432/other') }, /different databases/],
+    ['another host', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace('@postgres:', '@elsewhere:') }, /different databases/],
+    ['another port', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/', ':5433/') }, /different databases/],
+  ])('refuses %s, naming no value', (_label, change, pattern) => {
+    const message = refusal({ ...walled, ...change });
+    expect(message).toMatch(/^FATAL: TENANT_RLS_BIND=1 in production/);
+    expect(message).toMatch(pattern);
+    for (const value of ['fixture-secret', 'elsewhere', 'mysql://', '5433']) expect(message).not.toContain(value);
+  });
+
+  it('touches nothing without TENANT_RLS_BIND=1, and nothing outside production', () => {
+    // Today's expand posture (staging, production before Phase C) is unchanged.
+    expect(refusal({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' })).toBeNull();
+    expect(refusal({ ...good, TENANT_RLS_BIND: '0', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).toBeNull();
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(() => assertWallLoginConfig({ NODE_ENV, TENANT_RLS_BIND: '1', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).not.toThrow();
+    }
+  });
+
+  it('the deploy preflight mirrors the compose overlay when it reads the store', () => {
+    // The store after Phase C holds the owner's password (postgres and migrate
+    // still use it) AND the two runtime URLs. The overlay hands the API only the
+    // URLs; without it the API gets only the owner's parts.
+    const directory = mkdtempSync(join(tmpdir(), 'swift-wall-preflight-'));
+    try {
+      const secrets = join(directory, 'secrets');
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, 'POSTGRES_PASSWORD'), 'owner-fixture-secret');
+      writeFileSync(join(secrets, 'DATABASE_URL'), APP_URL);
+      writeFileSync(join(secrets, 'SYSTEM_DATABASE_URL'), SYSTEM_URL);
+      const run = (candidate: Record<string, string | undefined>) => {
+        const file = join(directory, 'candidate.txt');
+        writeFileSync(file, Object.entries(candidate).filter((e): e is [string, string] => e[1] !== undefined)
+          .map(([name, value]) => `${name}=${value}`).join('\n'));
+        return spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [join(process.cwd(), '../../deploy/preflight.ts'), file, '--secrets-dir', secrets],
+          { encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '' } });
+      };
+      // The overlay hands the two URLs over as files from the store, never as settings.
+      const walledSettings = Object.fromEntries(Object.entries(walled)
+        .filter(([name]) => name !== 'DATABASE_URL' && name !== 'SYSTEM_DATABASE_URL'));
+      const contract = run(walledSettings);
+      expect(contract.stdout + contract.stderr).not.toMatch(/both set/);
+      expect(contract.stdout).toMatch(/PASS/);
+      const expand = run({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', POSTGRES_HOST: 'postgres', POSTGRES_USER: 'swift', POSTGRES_DB: 'swift' });
+      expect(expand.stdout + expand.stderr).not.toMatch(/both set/);
+      expect(expand.stdout).toMatch(/PASS/);
+      for (const output of [contract, expand]) expect(output.stdout + output.stderr).not.toContain('fixture-secret');
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  }, 60_000);
 });

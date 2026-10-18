@@ -3,6 +3,7 @@ import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { slotBlocked, slotFitsConfig, type ExceptionWindow, canonicalSlotStart } from './availability';
 import { guyanaWallClockParts } from '../../utils/guyana-day';
+import { emitToStoreRoom } from '../order/order-room-emission.service';
 
 /** Shape stored in Item.bookingConfig for SERVICE listings. */
 export interface BookingConfig {
@@ -51,9 +52,8 @@ export class BookingService {
 
   /** Fire-and-forget liveness nudge. */
   private nudge(vendorId: string, itemId: string): void {
-    try {
-      this.io?.to(`vendor:${vendorId}`).emit('bookings:changed', { itemId });
-    } catch { /* liveness is garnish */ }
+    // Through the store-room gate (it never throws): the current team only.
+    if (this.io) void emitToStoreRoom(this.prisma, this.io, vendorId, 'bookings:changed', { itemId });
   }
 
   /** All slot rules except the reservation itself — checkout fails fast here.

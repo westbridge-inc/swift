@@ -10,6 +10,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { PickingService, sweepSubstitutionDeadlines } from '../modules/order/picking.service';
 
 // ---------------------------------------------------------------------------
 // Grocery picking + substitution (§5.3): shelf reality beats the database.
@@ -61,18 +62,20 @@ async function makeItem(opts: { name: string; price?: number; stock?: number | n
 }
 
 /** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
- *  customer's to cancel only when it is very late (30 minutes past its
+ *  customer's to cancel only when it is very late (60 minutes (owner 17 Oct; was 30) past its
  *  promise); the customer-cancel cases below make it so before cancelling. */
 async function pastPromise(orderId: string) {
-  await app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } });
+  await app.prisma.order.update({ where: { id: orderId }, data: { promisedAt: new Date(Date.now() - 61 * 60_000) } });
 }
 
 async function makeOrderWithLines(
-  lines: Array<{ itemId: string; name: string; qty: number; price: number }>,
+  lines: Array<{ itemId: string; name: string; qty: number; price: number; options?: Array<{ group: string; name: string; price: number }> }>,
   status = 'PREPARING',
   pay: { method?: 'CASH' | 'MOBILE_MONEY'; status?: 'PENDING' | 'CAPTURED' } = {},
 ) {
-  const subtotal = lines.reduce((s, l) => s + l.qty * l.price, 0);
+  // A line's total is its unit price (item + chosen options) × quantity, as checkout writes it.
+  const unit = (l: (typeof lines)[number]) => l.price + (l.options ?? []).reduce((s, o) => s + o.price, 0);
+  const subtotal = lines.reduce((s, l) => s + l.qty * unit(l), 0);
   return app.prisma.order.create({
     data: {
       orderNumber: `PICK-${nanoid(8)}`,
@@ -90,7 +93,10 @@ async function makeOrderWithLines(
         create: lines.map((l) => ({
           itemId: l.itemId, name: l.name, quantity: l.qty,
           basePrice: l.price, markedUpPrice: l.price, markupAmount: 0,
-          totalBase: l.qty * l.price, totalMarkup: 0, totalCustomer: l.qty * l.price,
+          totalBase: l.qty * unit(l), totalMarkup: 0, totalCustomer: l.qty * unit(l),
+          ...(l.options?.length ? { selectedOptions: { create: l.options.map((o) => ({
+            optionGroupName: o.group, optionName: o.name, basePrice: o.price, markedUpPrice: o.price, markupAmount: 0,
+          })) } } : {}),
         })),
       },
     },
@@ -344,7 +350,15 @@ describe('captured MMG money is immutable in picking [REPORT-005 F-005-02]', () 
     const dearer = await makeItem({ name: 'MMG Premium Rice', price: 900 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
     const line = order.items[0]!;
-    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: dearer.id })).statusCode).toBe(200);
+    // [SUBSTITUTION 17 Oct] Such a question is no longer asked: nobody could answer it.
+    const proposed = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: dearer.id });
+    expect(proposed.statusCode).toBe(409);
+    expect(proposed.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    // One opened before that rule (fixtured directly) still fails closed at the approval.
+    await app.prisma.orderItem.update({
+      where: { id: line.id },
+      data: { subStatus: 'PENDING', substituteItemId: dearer.id, substituteName: dearer.name, substitutePrice: 900 },
+    });
     const approve = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
     expect(approve.statusCode).toBe(409);
     expect(approve.json().error?.code ?? approve.json().code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
@@ -670,5 +684,437 @@ describe('stock adjust + low stock', () => {
     const ids = res.json().data.map((i: any) => i.id);
     expect(ids).toContain(low.id);
     expect(ids.every((id: string) => id !== undefined)).toBe(true);
+  });
+});
+
+describe('[L09 · M028] the customer sees the actual substitute and decides on it', () => {
+  it('the order projection carries the original, the proposal, the price change and the state, before and after the decision', async () => {
+    const original = await makeItem({ name: `Brand-A Rice ${seq}`, price: 1000, stock: 5, group: `rice-${seq}` });
+    const substitute = await makeItem({ name: `Brand-B Rice ${seq}`, price: 1150, stock: 5, group: `rice-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 2, price: 1000 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: substitute.id })).statusCode).toBe(200);
+
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    expect(pending).toMatchObject({
+      subStatus: 'PENDING',
+      substituteName: substitute.name,
+      substitutePrice: 1150,
+      substitution: {
+        state: 'PENDING',
+        original: { name: original.name, unitPrice: 1000 },
+        proposed: { itemId: substitute.id, name: substitute.name, unitPrice: 1150 },
+        priceDelta: 300,
+      },
+    });
+
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    // Decided: the line itself is now the substitute; "original" would name the
+    // substitute (approval rewrites the line), so a decided swap carries its state only.
+    expect(decided).toMatchObject({ subStatus: 'APPROVED', substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
+  });
+
+  it('a line with paid options: the price change shown is the one approving makes, and the options do not come with the swap', async () => {
+    const original = await makeItem({ name: `Brand-A Burger ${seq}`, price: 1000, stock: 5, group: `burger-${seq}` });
+    const substitute = await makeItem({ name: `Brand-B Burger ${seq}`, price: 1150, stock: 5, group: `burger-${seq}` });
+    const chosen = [{ group: 'Size', name: 'Large', price: 300 }, { group: 'Extras', name: 'Cheese', price: 150 }];
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000, options: chosen }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: substitute.id })).statusCode).toBe(200);
+
+    // Pending: the customer is shown the line as ordered (options included) and
+    // what approving moves: 1150 replaces 1450, so the total goes DOWN by 300.
+    const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    expect(pending.substitution).toEqual({
+      state: 'PENDING',
+      original: { name: original.name, unitPrice: 1450, options: chosen },
+      proposed: { itemId: substitute.id, name: substitute.name, unitPrice: 1150 },
+      priceDelta: -300,
+      decisions: { approve: true, reject: true },
+      settlementGuidance: null,
+      // [SUBSTITUTION 17 Oct] The bounded wait and what happens without an answer.
+      decideBy: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      ifNoAnswer: 'REMOVE',
+    });
+    expect(pending.options).toEqual(chosen);
+    // The store still sees what was ordered while the customer decides.
+    const storePending = (await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token)).json().data.items[0];
+    expect(storePending.options).toEqual(expect.arrayContaining(chosen));
+
+    const totalBefore = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
+    const totalAfter = Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount);
+    expect(totalAfter - totalBefore).toBe(pending.substitution.priceDelta);
+
+    // Approved: the line is the substitute at 1150 with no options, for the
+    // customer and for the store alike, so nothing unpaid-for is made.
+    const decided = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    expect(decided).toMatchObject({ subStatus: 'APPROVED', lineTotal: 1150, options: [], substitution: { state: 'APPROVED', original: null, proposed: null, priceDelta: null } });
+    const storeDetail = (await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token)).json().data.items[0];
+    expect(storeDetail).toMatchObject({ subStatus: 'APPROVED', options: [] });
+    const board = await inject('GET', '/api/v1/vendor/orders?limit=50', owner.token);
+    const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
+    expect(row?.items[0]?.options).toEqual([]);
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token)).statusCode).toBe(200);
+    const refunded = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    expect(refunded).toMatchObject({ subStatus: 'REFUNDED', options: [] });
+    expect(await app.prisma.orderItemOption.count({ where: { orderItemId: line.id } })).toBe(2);
+  });
+
+  // [Sol S2] An MMG order's total can't change in-app, so the swap view offers
+  // only what the server accepts: a same-price approval. (A swap is proposed
+  // only once the store confirmed the MMG payment; the price is 500 here.)
+  it.each([['CAPTURED', 900, false], ['CAPTURED', 400, false], ['CLAIMED', 500, true]] as const)('MMG %s, substitute at %s: exposes only permitted decisions', async (paymentStatus, price, canApprove) => {
+    const original = await makeItem({ name: `MMG Original ${seq}`, price: 500, stock: 5, group: `mmg-${seq}` });
+    const replacement = await makeItem({ name: `MMG Replacement ${seq}`, price, stock: 5, group: `mmg-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus } });
+    const line = order.items[0]!;
+    const proposed = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id });
+    if (price === 500) {
+      expect(proposed.statusCode, proposed.body).toBe(200);
+    } else {
+      // [SUBSTITUTION 17 Oct] A different-price swap on MMG is refused when
+      // proposed (nobody could answer it); one opened before that rule is
+      // fixtured directly and must still show only the permitted decisions.
+      expect(proposed.statusCode).toBe(409);
+      expect(proposed.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+      await app.prisma.orderItem.update({
+        where: { id: line.id },
+        data: { subStatus: 'PENDING', substituteItemId: replacement.id, substituteName: replacement.name, substitutePrice: price },
+      });
+    }
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    expect(view.decisions).toEqual({ approve: canApprove, reject: false });
+    expect(view.settlementGuidance).toMatch(/store.*directly/i);
+    const rejected = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: false });
+    expect(rejected.statusCode).toBe(409);
+    expect(rejected.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+    // The card's guidance is the server's own answer to a refused decision.
+    expect(rejected.json().error.message).toBe(view.settlementGuidance);
+    const approved = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(approved.statusCode, approved.body).toBe(canApprove ? 200 : 409);
+    if (!canApprove) expect(approved.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+  });
+
+  it('a line with no substitution says so', async () => {
+    const item = await makeItem({ name: `Plain Salt ${seq}`, price: 200 });
+    const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 200 }]);
+    const line = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
+    expect(line).toMatchObject({ subStatus: 'NONE', substitution: null });
+  });
+});
+
+describe('[L09 · M026] the store sees the options the customer chose', () => {
+  it('the order board and the order detail list each line\'s chosen options with their prices', async () => {
+    const item = await makeItem({ name: `Option Burger ${seq}`, price: 1000 });
+    const order = await app.prisma.order.create({
+      data: {
+        orderNumber: `PICK-${nanoid(8)}`, orderType: 'FOOD_DELIVERY', customerId: customer.userId, vendorId,
+        status: 'ACCEPTED', fulfillment: 'PICKUP', deliveryAddress: 'x', deliveryLat: 6.8, deliveryLng: -58.15,
+        subtotalBase: 1450, subtotalMarkup: 0, subtotalCustomer: 1450, deliveryFee: 0, totalAmount: 1450, paymentMethod: 'CASH',
+        items: {
+          create: [{
+            itemId: item.id, name: item.name, quantity: 1, basePrice: 1000, markedUpPrice: 1000, markupAmount: 0,
+            totalBase: 1450, totalMarkup: 0, totalCustomer: 1450, specialInstructions: 'No onions',
+            selectedOptions: { create: [
+              { optionGroupName: 'Size', optionName: 'Large', basePrice: 300, markedUpPrice: 300, markupAmount: 0 },
+              { optionGroupName: 'Extras', optionName: 'Cheese', basePrice: 150, markedUpPrice: 150, markupAmount: 0 },
+            ] },
+          }],
+        },
+      },
+    });
+    const expected = [
+      { group: 'Size', name: 'Large', price: 300 },
+      { group: 'Extras', name: 'Cheese', price: 150 },
+    ];
+    const detail = await inject('GET', `/api/v1/vendor/orders/${order.id}`, owner.token);
+    expect(detail.statusCode, detail.body).toBe(200);
+    expect(detail.json().data.items[0].options).toEqual(expect.arrayContaining(expected));
+    expect(detail.json().data.items[0].options).toHaveLength(2);
+    const board = await inject('GET', '/api/v1/vendor/orders?limit=50', owner.token);
+    const row = (board.json().data as Array<{ id: string; items: Array<{ options: unknown[] }> }>).find((o) => o.id === order.id);
+    expect(row?.items[0]?.options).toEqual(expect.arrayContaining(expected));
+  });
+});
+
+// Ruling A: only a client that renders server decision permissions may opt in.
+describe('swap capability and current money holds', () => {
+  it.each(['', '?swapDecisions=v0', '?swapDecisions=v2', '?swapDecisions=v1&swapDecisions=v0'])(
+    'legacy/unknown capability %s preserves the old item response', async (query) => {
+      const original = await makeItem({ name: `Legacy original ${seq}`, price: 500, group: `legacy-${seq}` });
+      const replacement = await makeItem({ name: `Legacy replacement ${seq}`, price: 900, group: `legacy-${seq}` });
+      const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+      const line = order.items[0]!;
+      // An MMG different-price question is no longer proposable [SUBSTITUTION 17 Oct]; one opened
+      // before that rule is fixtured directly.
+      await app.prisma.orderItem.update({
+        where: { id: line.id },
+        data: { subStatus: 'PENDING', substituteItemId: replacement.id, substituteName: replacement.name, substitutePrice: 900 },
+      });
+      const response = await inject('GET', `/api/v1/customer/orders/${order.id}${query}`, customer.token);
+      expect(response.statusCode).toBe(200);
+      // The pre-feature fields only: build 9 and vc5 cannot activate a card whose buttons
+      // the server would refuse — but the line's name tells them the truth [owner 17 Oct].
+      expect(response.json().data.items[0]).toEqual({
+        id: line.id, itemId: original.id, name: `${original.name} (out of stock: the store will settle this item with you directly)`, quantity: 1,
+        basePrice: 500, customerPrice: 500, lineTotal: 500, specialInstructions: null,
+      });
+      const supported = await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token);
+      expect(supported.json().data.items[0]).toMatchObject({ subStatus: 'PENDING', substitution: { decisions: { approve: false, reject: false } } });
+    },
+  );
+
+  it('a discounted cash pickup disables a negative-total approval but permits the clamped rejection', async () => {
+    const original = await makeItem({ name: `Discount original ${seq}`, price: 1000, group: `discount-${seq}` });
+    const replacement = await makeItem({ name: `Discount replacement ${seq}`, price: 100, group: `discount-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillment: 'PICKUP', deliveryFee: 0, discount: 900, totalAmount: 100 } });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    const refused = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.json().error.code).toBe('SUBSTITUTE_NEGATIVE_TOTAL');
+    const unchanged = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
+    expect(Number(unchanged.totalAmount)).toBe(100);
+    expect(unchanged.items[0]!.subStatus).toBe('PENDING');
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: replacement.id } })).stockQuantity).toBe(10);
+    expect(view).toMatchObject({ priceDelta: -900, decisions: { approve: false, reject: true } });
+    expect(view.settlementGuidance).toBe(refused.json().error.message);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: false })).statusCode).toBe(200);
+    expect(Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount)).toBe(0);
+  });
+
+  it('a payment denial after a same-price proposal disables approval and explains the persisted hold', async () => {
+    const original = await makeItem({ name: `Dispute original ${seq}`, price: 500, group: `dispute-${seq}` });
+    const replacement = await makeItem({ name: `Dispute replacement ${seq}`, price: 500, group: `dispute-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgAttestedRef: 'TESTCLAIM1' } });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const before = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    expect(before.decisions.approve).toBe(true);
+    const denial = await inject('POST', `/api/v1/customer/orders/${order.id}/payment-claim`, customer.token, { paid: false });
+    expect(denial.statusCode, denial.body).toBe(200);
+    expect(denial.json().data.mismatch).toBe(true);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    const refused = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error.code).toBe('MMG_CLAIM_MISMATCH');
+    const unchanged = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
+    expect(unchanged.mmgClaimMismatchAt).not.toBeNull();
+    expect(Number(unchanged.totalAmount)).toBe(800);
+    expect(unchanged.items[0]!.subStatus).toBe('PENDING');
+    expect(view.decisions).toEqual({ approve: false, reject: false });
+    expect(view.settlementGuidance).toBe(refused.json().error.message);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SUBSTITUTION · owner live test 17 Oct 2026] "The restaurant asked for a
+// substitute but the customer didn't get it — the customer thinks the order is
+// coming, and the store can't say ready until the customer accepts."
+// The customer is ALWAYS told (builds 9/11 included), and no order waits
+// forever: past the deadline the line is REMOVED (never silently swapped).
+// ---------------------------------------------------------------------------
+describe('[SUBSTITUTION] the customer is always told; no order waits forever', () => {
+  const minutesFromNow = (m: number) => new Date(Date.now() + m * 60_000);
+
+  it('builds 9/11 (no swapDecisions=v1) get the swap card they already carry on a cash order', async () => {
+    const original = await makeItem({ name: `Legacy fried rice ${seq}`, price: 1500, group: `lg-${seq}` });
+    const replacement = await makeItem({ name: `Legacy fish ${seq}`, price: 2500, group: `lg-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const legacy = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    // Exactly what the old card reads: subStatus PENDING, the substitute's name and unit price.
+    expect(legacy).toMatchObject({ name: original.name, subStatus: 'PENDING', substituteName: replacement.name, substitutePrice: 2500, lineTotal: 1500 });
+    expect(legacy.substitution).toBeUndefined();
+    // And its buttons work: the old card posts this exact call.
+    const approved = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(approved.statusCode, approved.body).toBe(200);
+    expect(Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount)).toBe(2800);
+  });
+
+  it('the old card names chosen options that do not come with the swap', async () => {
+    const original = await makeItem({ name: `Legacy burger ${seq}`, price: 1000, group: `lo-${seq}` });
+    const replacement = await makeItem({ name: `Legacy wrap ${seq}`, price: 1200, group: `lo-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000, options: [{ group: 'Extras', name: 'Cheese', price: 150 }] }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const legacy = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(legacy.substituteName).toBe(`${replacement.name} (your chosen options don’t come with it)`);
+  });
+
+  it('a cash swap the old card could not answer truthfully (negative total) is told in the line name instead', async () => {
+    const original = await makeItem({ name: `Legacy discount ${seq}`, price: 1000, group: `ld-${seq}` });
+    const replacement = await makeItem({ name: `Legacy cheap ${seq}`, price: 100, group: `ld-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1000 }]);
+    await app.prisma.order.update({ where: { id: order.id }, data: { fulfillment: 'PICKUP', deliveryFee: 0, discount: 900, totalAmount: 100 } });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const legacy = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data.items[0];
+    expect(legacy.subStatus).toBeUndefined();
+    expect(legacy.name).toBe(`${original.name} (out of stock: it is being removed and your total will go down)`);
+  });
+
+  it('a removed line reads as removed and charges nothing on builds 9/11, so the list adds up to the total', async () => {
+    const a = await makeItem({ name: `Legacy keep ${seq}`, price: 1900 });
+    const b = await makeItem({ name: `Legacy gone ${seq}`, price: 1500, stock: 0 });
+    const order = await makeOrderWithLines([
+      { itemId: a.id, name: a.name, qty: 1, price: 1900 },
+      { itemId: b.id, name: b.name, qty: 1, price: 1500 },
+    ]);
+    const gone = order.items.find((l) => l.itemId === b.id)!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${gone.id}/refund-line`, owner.token, {})).statusCode).toBe(200);
+    const data = (await inject('GET', `/api/v1/customer/orders/${order.id}`, customer.token)).json().data;
+    const row = data.items.find((l: { id: string }) => l.id === gone.id);
+    expect(row).toMatchObject({ name: `${b.name} (removed, not charged)`, lineTotal: 0 });
+    const listed = data.items.reduce((sum: number, l: { lineTotal: number }) => sum + l.lineTotal, 0);
+    expect(listed + data.deliveryFee).toBe(data.totalAmount);
+  });
+
+  it('a proposal sets a bounded wait, says it in the push, and shows it to the customer', async () => {
+    const original = await makeItem({ name: `Deadline rice ${seq}`, price: 1500, group: `dl-${seq}` });
+    const replacement = await makeItem({ name: `Deadline fish ${seq}`, price: 2500, group: `dl-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    const before = Date.now();
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const row = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: line.id } });
+    const waitMs = row.substituteDecideBy!.getTime() - before;
+    expect(waitMs).toBeGreaterThanOrEqual(10 * 60_000 - 5_000);
+    expect(waitMs).toBeLessThanOrEqual(10 * 60_000 + 5_000);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    expect(view).toMatchObject({ decideBy: row.substituteDecideBy!.toISOString(), ifNoAnswer: 'REMOVE' });
+    const push = await app.prisma.notification.findFirstOrThrow({ where: { userId: customer.userId, data: { path: ['lineId'], equals: line.id } } });
+    expect(push.body).toContain('within 10 minutes');
+    expect(push.body).toContain('comes off your order and your total goes down');
+  });
+
+  it('past the deadline the line is REMOVED (never swapped): total drops, customer told, store can mark ready', async () => {
+    const keep = await makeItem({ name: `Sweep keep ${seq}`, price: 1900 });
+    const original = await makeItem({ name: `Sweep rice ${seq}`, price: 1500, group: `sw-${seq}` });
+    const replacement = await makeItem({ name: `Sweep fish ${seq}`, price: 2500, group: `sw-${seq}` });
+    const order = await makeOrderWithLines([
+      { itemId: keep.id, name: keep.name, qty: 1, price: 1900 },
+      { itemId: original.id, name: original.name, qty: 1, price: 1500 },
+    ]);
+    const kept = order.items.find((l) => l.itemId === keep.id)!;
+    const line = order.items.find((l) => l.itemId === original.id)!;
+    expect((await inject('PUT', `/api/v1/vendor/orders/${order.id}/items/${kept.id}/picked`, owner.token, { picked: true })).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    // Before the deadline nothing moves, and the store is still blocked.
+    expect((await sweepSubstitutionDeadlines(app.prisma, app.io)).removed).toBe(0);
+    expect((await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token, {})).json().error.code).toBe('PICKING_INCOMPLETE');
+
+    const res = await sweepSubstitutionDeadlines(app.prisma, app.io, { now: minutesFromNow(11) });
+    expect(res.removed).toBeGreaterThanOrEqual(1);
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true, statusHistory: true } });
+    const removed = after.items.find((l) => l.id === line.id)!;
+    expect(removed.subStatus).toBe('REFUNDED');
+    expect(removed.name).toBe(original.name); // never the substitute
+    expect(removed.substituteDecideBy).toBeNull();
+    expect(Number(after.totalAmount)).toBe(1900 + 300);
+    expect(after.statusHistory.some((h) => h.note === `Line removed, no answer to the swap in time: ${original.name}` && h.changedBy === 'system:substitution-expiry')).toBe(true);
+    const told = await app.prisma.notification.findMany({ where: { userId: customer.userId, data: { path: ['lineId'], equals: line.id } }, orderBy: { createdAt: 'asc' } });
+    expect(told.at(-1)).toMatchObject({ title: `${original.name} removed from your order` });
+    expect((told.at(-1)!.data as { kind?: string }).kind).toBe('line_refunded');
+    expect(told.at(-1)!.body).toContain('went down by $1,500');
+    // A second sweep finds nothing and says nothing again.
+    await sweepSubstitutionDeadlines(app.prisma, app.io, { now: minutesFromNow(12) });
+    expect(await app.prisma.notification.count({ where: { userId: customer.userId, data: { path: ['lineId'], equals: line.id } } })).toBe(told.length);
+    // The store carries on.
+    const ready = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token, {});
+    expect(ready.statusCode, ready.body).toBe(200);
+  });
+
+  it('a question still inside its wait is never removed, even when asked directly', async () => {
+    const original = await makeItem({ name: `Early rice ${seq}`, price: 1500, group: `er-${seq}` });
+    const replacement = await makeItem({ name: `Early fish ${seq}`, price: 2500, group: `er-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    expect(await new PickingService(app.prisma, app.io).expireSubstitution(line.id, minutesFromNow(9))).toBe('skipped');
+    expect((await app.prisma.orderItem.findUniqueOrThrow({ where: { id: line.id } })).subStatus).toBe('PENDING');
+    expect(Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount)).toBe(1800);
+  });
+
+  it('a customer answer that lands first wins: the sweep changes nothing', async () => {
+    const original = await makeItem({ name: `Race rice ${seq}`, price: 1500, group: `rr-${seq}` });
+    const replacement = await makeItem({ name: `Race fish ${seq}`, price: 2500, group: `rr-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
+    await sweepSubstitutionDeadlines(app.prisma, app.io, { now: minutesFromNow(11) });
+    const after = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: line.id } });
+    expect(after.subStatus).toBe('APPROVED');
+    expect(after.substituteDecideBy).toBeNull();
+    expect(Number((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).totalAmount)).toBe(2800);
+  });
+
+  it('a question opened before deadlines existed gets a full wait from the first sweep, not an instant removal', async () => {
+    const original = await makeItem({ name: `Old rice ${seq}`, price: 1500 });
+    const replacement = await makeItem({ name: `Old fish ${seq}`, price: 2500 });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    await app.prisma.orderItem.update({ where: { id: line.id }, data: { subStatus: 'PENDING', substituteItemId: replacement.id, substituteName: replacement.name, substitutePrice: 2500 } });
+    const now = new Date();
+    await sweepSubstitutionDeadlines(app.prisma, app.io, { now });
+    const started = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: line.id } });
+    expect(started.subStatus).toBe('PENDING');
+    expect(started.substituteDecideBy!.getTime()).toBe(now.getTime() + 10 * 60_000);
+  });
+
+  it('on MMG (total fixed in-app) a same-price question past its deadline is WITHDRAWN: no money moves', async () => {
+    const original = await makeItem({ name: `MMG wait rice ${seq}`, price: 500, group: `mw-${seq}` });
+    const replacement = await makeItem({ name: `MMG wait other ${seq}`, price: 500, group: `mw-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 500 }], 'PREPARING', { method: 'MOBILE_MONEY', status: 'CAPTURED' });
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const view = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0].substitution;
+    expect(view.ifNoAnswer).toBe('WITHDRAW');
+    await sweepSubstitutionDeadlines(app.prisma, app.io, { now: minutesFromNow(11) });
+    const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id }, include: { items: true } });
+    expect(after.items[0]).toMatchObject({ subStatus: 'NONE', substituteItemId: null, substituteName: null, substituteDecideBy: null, name: original.name });
+    expect(Number(after.totalAmount)).toBe(800);
+    const told = await app.prisma.notification.findMany({ where: { userId: customer.userId, data: { path: ['lineId'], equals: line.id } }, orderBy: { createdAt: 'asc' } });
+    expect(told.at(-1)!.body).toContain('settles');
+  });
+
+  it('the store can remove a line that is waiting on the customer, at any time', async () => {
+    const original = await makeItem({ name: `Store remove rice ${seq}`, price: 1500, group: `sr-${seq}` });
+    const replacement = await makeItem({ name: `Store remove fish ${seq}`, price: 2500, group: `sr-${seq}` });
+    const order = await makeOrderWithLines([{ itemId: original.id, name: original.name, qty: 1, price: 1500 }]);
+    const line = order.items[0]!;
+    expect((await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/substitute`, owner.token, { substituteItemId: replacement.id })).statusCode).toBe(200);
+    const removed = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${line.id}/refund-line`, owner.token, {});
+    expect(removed.statusCode, removed.body).toBe(200);
+    const after = await app.prisma.orderItem.findUniqueOrThrow({ where: { id: line.id } });
+    expect(after).toMatchObject({ subStatus: 'REFUNDED', substituteDecideBy: null });
+    const late = await inject('POST', `/api/v1/customer/orders/${order.id}/items/${line.id}/substitution`, customer.token, { approve: true });
+    expect(late.statusCode).toBe(409);
+  });
+
+  it('the receipt prices a removed line at nothing and says so', async () => {
+    const a = await makeItem({ name: `Receipt keep ${seq}`, price: 1900 });
+    const b = await makeItem({ name: `Receipt gone ${seq}`, price: 1500, stock: 0 });
+    // Born COMPLETED (never a one-write status jump [#1740]), the line removed
+    // during picking and the totals already lowered, as closeLine leaves them.
+    const order = await makeOrderWithLines([
+      { itemId: a.id, name: a.name, qty: 1, price: 1900 },
+      { itemId: b.id, name: b.name, qty: 1, price: 1500 },
+    ], 'COMPLETED');
+    const gone = order.items.find((l) => l.itemId === b.id)!;
+    await app.prisma.orderItem.update({ where: { id: gone.id }, data: { subStatus: 'REFUNDED' } });
+    await app.prisma.order.update({ where: { id: order.id }, data: { subtotalBase: 1900, subtotalCustomer: 1900, totalAmount: 2200 } });
+    const receipt = await inject('GET', `/api/v1/customer/orders/${order.id}/receipt`, customer.token);
+    expect(receipt.statusCode, receipt.body).toBe(200);
+    expect(receipt.body).toContain(`${b.name} (removed, not charged)`);
+    expect(receipt.body).not.toMatch(/1,500/);
   });
 });

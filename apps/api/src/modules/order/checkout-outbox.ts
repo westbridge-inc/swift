@@ -49,8 +49,14 @@ export type CheckoutOutboxQueue = 'order' | 'notification' | 'dispatch';
  *  `drainRescueNotices` (dispatch/rescue.ts) on the same terms.
  *  [L07] `rider-cancel-notice`: a customer's cancellation told to the rider
  *  who held the delivery, drained by `drainRiderCancellationNotices`
- *  (order/rider-cancel-notice.ts) until push confirms it. */
-export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice'];
+ *  (order/rider-cancel-notice.ts) until push confirms it.
+ *  [L07] `handover-completed-notice`: the customer's handover notice that
+ *  commits with the completion, drained by `drainHandoverNotices`
+ *  (handover/handover-notice.ts).
+ *  [L07] `driver-pickup-notice`: the passenger's pickup-progress notice from
+ *  the assignment-bound advance, drained by `drainDriverPickupNotices`
+ *  (rides/driver-pickup.ts). */
+export const IN_PROCESS_OUTBOX_KINDS: readonly string[] = ['mmg-claim-notice', 'rescue-notice', 'rider-cancel-notice', 'handover-completed-notice', 'driver-pickup-notice'];
 
 export interface CheckoutQueueTiming {
   /** The vendor alert ladder's first re-alert. */
@@ -64,7 +70,7 @@ export interface CheckoutQueueTiming {
 
 export interface CheckoutOutboxRuntime {
   prisma: PrismaClient;
-  queues: { orderQueue: Pick<Queue, 'add'>; notificationQueue: Pick<Queue, 'add'>
+  queues: { orderQueue?: Pick<Queue, 'add'>; notificationQueue?: Pick<Queue, 'add'>
     /** [S-13] the dispatch queue — a `dispatch` row publishes a dispatch-order job */
     dispatchQueue?: { add: (name: string, data: Record<string, unknown>, opts?: Record<string, unknown>) => Promise<unknown> };
   };
@@ -235,14 +241,22 @@ export async function persistReleaseAlertLadderInTransaction(
 export function dispatchCommandDedupeKey(orderId: string, reason: string): string {
   return `order:${orderId}:redispatch:${reason}`;
 }
+/** [Opus review 14 Oct S3-1] A dispatch command is due NOW, but its
+ *  `availableAt` is stamped with this process's clock while the claim compares
+ *  it with the database's CURRENT_TIMESTAMP. A database clock that trails the
+ *  API host would make the in-request drain skip the row until the sweep
+ *  (up to ORDER_OUTBOX_SWEEP_MS later). Back-dating an immediately-due command
+ *  by this tolerance keeps the fast path across ordinary clock differences;
+ *  it never delays anything, and rows are claimed in createdAt order. */
+export const DISPATCH_COMMAND_CLOCK_TOLERANCE_MS = 5_000;
 export async function persistDispatchCommandInTransaction(
   tx: Prisma.TransactionClient,
-  input: { orderId: string; tenantId: string; reason: string; now?: Date },
+  input: { orderId: string; tenantId: string; reason: string; priority?: number; now?: Date },
 ): Promise<{ id: string; dedupeKey: string }> {
   const dedupeKey = dispatchCommandDedupeKey(input.orderId, input.reason);
   const id = checkoutOutboxId(dedupeKey);
   await tx.orderOutbox.createMany({
-    data: [{ id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'dispatch-order', queue: 'dispatch', payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId, reason: input.reason } as Prisma.InputJsonValue, delayMs: 0, availableAt: input.now ?? new Date() }],
+    data: [{ id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'dispatch-order', queue: 'dispatch', payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId, reason: input.reason, ...(input.priority === undefined ? {} : { priority: input.priority }) } as Prisma.InputJsonValue, delayMs: 0, availableAt: new Date((input.now ?? new Date()).getTime() - DISPATCH_COMMAND_CLOCK_TOLERANCE_MS) }],
     skipDuplicates: true,
   });
   return { id, dedupeKey };
@@ -389,6 +403,9 @@ async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]
       SELECT "id"
       FROM "order_outbox"
       WHERE "processedAt" IS NULL
+        -- [row 267] A row whose retry budget is spent is a dead letter: never claimed again.
+        AND "deadLetteredAt" IS NULL
+        AND "attempts" < "maxAttempts"
         AND "availableAt" <= CURRENT_TIMESTAMP
         AND (
           "claimedAt" IS NULL
@@ -436,8 +453,11 @@ export async function drainCheckoutOutbox(
       if (!queue) throw new Error(`no ${row.queue} queue in this runtime`);
       const payload = { ...((row.payload ?? {}) as Record<string, unknown>) };
       delete payload['version'];
+      const priority = payload['priority'];
+      delete payload['priority'];
       await queue.add(row.kind, payload, {
         jobId: row.id,
+        ...(typeof priority === 'number' ? { priority } : {}),
         delay: Math.max(0, row.delayMs - Math.max(0, Date.now() - row.createdAt.getTime())),
         removeOnComplete: 100,
         removeOnFail: 50,

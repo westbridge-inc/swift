@@ -6,6 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { marketRoutes } from '../modules/market/market.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [REVIEW-READY] The Market tab bound the PUBLIC catalogue for every request,
@@ -102,7 +103,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200777${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Market', lastName: 'Reviewer',
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
       isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId: reviewTenant,

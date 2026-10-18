@@ -6,6 +6,10 @@ import axios, {
 } from 'axios';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot, RotatedAuthTokens } from '../lib/authSession';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 
 const nativePlatform = vi.hoisted(() => ({ OS: 'ios' }));
 
@@ -520,6 +524,55 @@ describe('Axios auth interceptor integration', () => {
     expect(JSON.parse(seen[2]?.data ?? '{}')).toMatchObject({ type: 'CVQ', referenceNumber: 'CVQ-1' });
   });
 
+  it('marks every service-job lifecycle command with contract v2 and sends every authority fact explicitly', async () => {
+    const seen: Array<{ url: string; contract?: string; body: Record<string, unknown> }> = [];
+    setAdapter(async (config) => {
+      const raw = typeof config.data === 'string' ? JSON.parse(config.data) : config.data;
+      seen.push({
+        url: config.url ?? '',
+        contract: config.headers.get(SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER) as string | undefined,
+        body: (raw ?? {}) as Record<string, unknown>,
+      });
+      return response(config, 200, { data: { id: 'job-a' } });
+    });
+
+    const expectedUpdatedAt = '2026-09-20T12:00:00.000Z';
+    const expectedScheduledFor = '2026-09-21T13:00:00.000Z';
+    await servicesApi.scheduleJob('job-a', {
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    await servicesApi.cancelJob('job-a', expectedUpdatedAt);
+    await servicesApi.quoteJob('job-a', 8_000, expectedUpdatedAt);
+    await servicesApi.confirmJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.declineSlot('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.startJob('job-a', expectedUpdatedAt, expectedScheduledFor);
+    await servicesApi.completeJob('job-a', expectedUpdatedAt);
+
+    expect(seen.map(({ url }) => url)).toEqual([
+      '/services/jobs/job-a/schedule',
+      '/services/jobs/job-a/cancel',
+      '/services/jobs/job-a/quote',
+      '/services/jobs/job-a/confirm',
+      '/services/jobs/job-a/decline-slot',
+      '/services/jobs/job-a/start',
+      '/services/jobs/job-a/complete',
+    ]);
+    expect(seen.every(({ contract }) => contract === SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION)).toBe(true);
+    expect(seen[0]?.body).toEqual({
+      scheduledFor: expectedScheduledFor,
+      expectedUpdatedAt,
+      expectedQuoteAmount: 8_000,
+    });
+    expect(seen[1]?.body).toEqual({ expectedUpdatedAt });
+    expect(seen[2]?.body).toEqual({ amount: 8_000, expectedUpdatedAt });
+    for (const index of [3, 4, 5]) {
+      expect(seen[index]?.body).toEqual({ expectedUpdatedAt, expectedScheduledFor });
+    }
+    expect(seen[6]?.body).toEqual({ expectedUpdatedAt });
+  });
+
   it('pins every protected multi-step API method to A while B is current', async () => {
     auth.current = { ...accountB };
     const seen: Array<{ url: string; authorization?: string; keys: string[] }> = [];
@@ -729,6 +782,64 @@ describe('weekly fee MMG transport', () => {
     await expect(request).rejects.toThrow('paying account changed');
     await expect(client.start('tap-key-2')).rejects.toThrow('paying account changed');
     auth.current = accountB; await expect(client.read('old-ref')).rejects.toThrow('paying account changed');
+  });
+});
+
+describe('weak-network uploads', () => {
+  it('gives uploads 90 seconds without extending ordinary writes', async () => {
+    const seen: number[] = [];
+    setAdapter(async (config) => {
+      seen.push(config.timeout!);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    await authApi.uploadSelfie(form, accountA);
+    await verificationApi.upload(form, accountA);
+    await courierApi.uploadProof('job', form, accountA);
+    await courierApi.uploadPickupProof('job', form, accountA);
+    await courierApi.returnProof('job', form, accountA);
+    await riderApi.uploadHandoverPhoto('job', form, accountA);
+    await driverApi.uploadHandoverPhoto('job', form, accountA);
+    await api.post('/ordinary-write', {});
+    expect(seen).toEqual([90000, 90000, 90000, 90000, 90000, 90000, 90000, 10000]);
+  });
+  it('retries a lost upload response once with the same photo', async () => {
+    const bodies: unknown[] = [];
+    setAdapter(async (config) => {
+      bodies.push(config.data);
+      if (bodies.length === 1) throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+      return response(config, 200, { data: { url: 'fixture-photo' } });
+    });
+    const form = new FormData();
+    form.append('file', 'fixture-image');
+    await verificationApi.upload(form, accountA);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+  });
+  it('does not retry under a replacement account', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      auth.current = accountB;
+      throw new AxiosError('fixture timeout', 'ECONNABORTED', config);
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it.each([400, 403, 413, 422, 500])('does not retry a server response (%i)', async (status) => {
+    let attempts = 0;
+    setAdapter(async (config) => {
+      attempts++;
+      throw new AxiosError('fixture rejection', 'ERR_BAD_RESPONSE', config, undefined, response(config, status, {}));
+    });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+  it('stops after one automatic retry', async () => {
+    let attempts = 0;
+    setAdapter(async (config) => { attempts++; throw new AxiosError('offline', 'ERR_NETWORK', config); });
+    await expect(verificationApi.upload(new FormData(), accountA)).rejects.toThrow();
+    expect(attempts).toBe(2);
   });
 });
 

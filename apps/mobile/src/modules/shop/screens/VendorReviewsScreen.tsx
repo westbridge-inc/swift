@@ -4,7 +4,8 @@ import { FlatList, Pressable, View } from 'react-native';
 import { useRoute } from '@react-navigation/native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { useReportRating, useVendorReviews } from '../../../hooks/customer';
+import { useReportContent, useReportRating, useVendorReviews } from '../../../hooks/customer';
+import { CHILD_SAFETY_REASON } from '../../../lib/reportReasons';
 import { ActionSheet, Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, Stars, T } from '../../../kit';
 import { toast } from '../../../kit/toast';
 
@@ -26,6 +27,19 @@ export function VendorReviewsScreen() {
   // existed the whole time; nothing in the app could fill it.
   const [reporting, setReporting] = useState<string | null>(null);
   const report = useReportRating();
+  // [R19] Child safety (CSAE) goes through the general report, which pages operations at once.
+  const reportContent = useReportContent();
+  const fileChildSafety = () => {
+    if (!reporting) return;
+    reportContent.mutate(
+      { targetType: 'RATING', targetId: reporting, reason: 'CSAE' },
+      {
+        onSuccess: () => toast.success('Thanks — our team will look now', 'Child-safety reports go to a person straight away.'),
+        onError: () => toast.error('Couldn’t send that report', 'Check your connection and try again.'),
+      },
+    );
+    setReporting(null);
+  };
 
   const fileReport = (reason: (typeof REPORT_REASONS)[number]['key']) => {
     if (!reporting) return;
@@ -113,10 +127,13 @@ export function VendorReviewsScreen() {
         open={!!reporting}
         onClose={() => setReporting(null)}
         title="Report this review"
-        actions={REPORT_REASONS.map((reason) => ({
-          label: reason.label,
-          onPress: () => fileReport(reason.key),
-        }))}
+        actions={[
+          ...REPORT_REASONS.map((reason) => ({
+            label: reason.label,
+            onPress: () => fileReport(reason.key),
+          })),
+          { label: CHILD_SAFETY_REASON.label, onPress: fileChildSafety },
+        ]}
       />
     </Screen>
   );

@@ -168,6 +168,26 @@ const PUBLISHED: Record<
     driver_agreement: 'b148daa56ef00e9325cd364e90b7c5f19bc262ee260c557237bcd4d517c3b4d8',
     vendor_agreement: '89b9d5525e22546b9102b56421436bb7970e66ae63192bc5e31a5886de3e8c99',
   },
+  // [V1b batch · owner 15 Oct 2026 · legal research Part 4] the operator named (reg. 17703, address, phone; one constant),
+  // the research's Terms/Privacy/Mover/Business/Child Safety wording, letters or documents never carried, the 18+ box.
+  '2026-10-16': {
+    terms: 'f9edd1cd9c5d4818226af3cb3500d200b90b0205466a69a10be5ce6db0b2a5a9',
+    privacy: '5abf3fc0bc88d5c2ea39df75b61384f6b3d3940c5c7d05081412a14388b729ed',
+    driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
+    vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
+  },
+  // [Owner rulings: identity checks by a person only + face matching off; customers take no photos (16 Oct);
+  // R28] Privacy: no outside identity-verification company and no automated document-reading or face
+  // matching (production refuses both), how partner documents and customer IDs are handled, partners-only
+  // registration selfie, a customer is never shown by photo, "confirmation records"; Terms: the taxi
+  // profile-photo sentence gone. The two agreements' words are unchanged: putting 16 October back
+  // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
+  '2026-10-17': {
+    terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
+    privacy: '4dfb9d4e5bff08df9a8f11a9c50a05255f8f2c650f757ad9fe99a220e1465c46',
+    driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
+    vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -186,7 +206,7 @@ describe('legal version binding [F-035-08]', () => {
   ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
     expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded.');
     expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
   });
 

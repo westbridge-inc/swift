@@ -37,6 +37,7 @@ vi.mock('./storeSwitcher', () => ({
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
+  getLastSignedOutUserId,
   requireAuthSessionForPrincipal,
   useAuthStore,
 } from './authStore';
@@ -647,5 +648,40 @@ describe('business-entry state never crosses a principal boundary', () => {
 
     expect(drafts.getState().draft).toMatchObject(typedForm);
     expect(useVendorPreview.getState()).toMatchObject({ preview: true, previewType: null });
+  });
+});
+
+// [row 205 · DS256 F2] A notification tapped while signed out replays after
+// sign-in only for the account whose session ended last on this device. The
+// store records that account at every real session end, and nothing else.
+describe('the account whose session ended last (owner of a tap made while signed out)', () => {
+  // Each case lets its one session's lazy teardown (GPS, socket, server
+  // revoke) finish inside the test, so no import outlives the file.
+  const teardownFinished = () => vi.waitFor(() => {
+    expect(stopMoverLocation).toHaveBeenCalledOnce();
+    expect(disconnectSocket).toHaveBeenCalledOnce();
+    expect(revokeAuthSession).toHaveBeenCalledOnce();
+  });
+
+  it('is the account a logout ended; signing in, a stale 401 and a repeat logout change nothing', async () => {
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    const a = getAuthSessionSnapshot()!;
+    useAuthStore.getState().logout();
+    expect(getLastSignedOutUserId()).toBe('a');
+    useAuthStore.getState().logout(); // already signed out: no session ends
+    expect(getLastSignedOutUserId()).toBe('a');
+
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+    expect(getLastSignedOutUserId()).toBe('a'); // signing in is not a session end
+    expect(useAuthStore.getState().logoutIfCurrent(a)).toBe(false);
+    expect(getLastSignedOutUserId()).toBe('a'); // A's stale 401 ends nothing
+    await teardownFinished();
+  });
+
+  it('is the account a 401 logout ended', async () => {
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    expect(useAuthStore.getState().logoutIfCurrent(getAuthSessionSnapshot()!)).toBe(true);
+    expect(getLastSignedOutUserId()).toBe('c');
+    await teardownFinished();
   });
 });

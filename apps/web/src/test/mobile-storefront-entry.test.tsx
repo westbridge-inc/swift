@@ -10,7 +10,7 @@ vi.mock('../../../mobile/src/stores/moverPreview', () => ({ useMoverPreview: () 
 vi.mock('../../../mobile/src/stores/vendorPreview', () => ({ useVendorPreview: () => false }));
 vi.mock('../../../mobile/src/hooks/useCustomerCountry', () => ({ useCustomerCountry: () => {} }));
 vi.mock('../../../mobile/src/services/push', () => ({ registerIfGranted: vi.fn() }));
-vi.mock('../../../mobile/src/services/notification-router', () => ({ installNotificationTapRouter: () => () => {}, flushPendingNavigation: vi.fn() }));
+vi.mock('../../../mobile/src/services/notification-router', () => ({ installNotificationTapRouter: () => () => {}, flushPendingNavigation: vi.fn(), settleTapAfterSignIn: vi.fn() }));
 vi.mock('../../../mobile/src/services/deep-links', () => ({ installDeepLinkHandler: () => () => {}, flushPendingDeepLink: vi.fn() }));
 vi.mock('../../../mobile/src/services/attribution', () => ({ ensureFirstLaunchClaim: vi.fn(), flushAttributedDestination: vi.fn() }));
 vi.mock('../../../mobile/src/navigation/navigationRef', () => ({ navigationRef: { isReady: () => false }, safeNavigate: vi.fn() }));
@@ -18,6 +18,7 @@ vi.mock('../../../mobile/src/screens/QrOutcomeScreen', () => ({ QrOutcomeScreen:
 vi.mock('../../../mobile/src/screens/auth/RolePickerScreen', () => ({ RolePickerScreen: () => null }));
 vi.mock('../../../mobile/src/screens/auth/SelfieCaptureScreen', () => ({ SelfieCaptureScreen: () => null }));
 vi.mock('../../../mobile/src/navigation/AuthStack', () => ({ AuthStack: () => null }));
+vi.mock('../../../mobile/src/components/LegalAcceptanceModal', () => ({ LegalAcceptanceModal: () => null }));
 vi.mock('../../../mobile/src/navigation/CustomerStack', () => ({ CustomerStack: () => <span>Customer menu navigator</span> }));
 vi.mock('../../../mobile/src/modules/mover/MoverStack', () => ({ MoverStack: () => null }));
 vi.mock('../../../mobile/src/modules/vendor/VendorStack', () => ({ VendorStack: () => null }));

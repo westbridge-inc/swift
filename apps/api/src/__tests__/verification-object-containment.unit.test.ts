@@ -23,6 +23,7 @@ import * as kyc from '../providers/kyc/kyc-provider';
 import { decryptBuffer, getKeyProvider } from '../providers/storage/envelope';
 import { DECLARATION_DOC_TYPE } from '../modules/verification/doc-registry';
 import { openEscrow } from '../modules/safety/deletion-hold';
+import { REAL_JPEG, REAL_PNG, REAL_WEBP } from './helpers/real-image';
 
 const storage = vi.hoisted(() => ({
   upload: vi.fn(), getObject: vi.fn(), delete: vi.fn(), getSignedUrl: vi.fn(),
@@ -38,7 +39,7 @@ const B = 'subject-b';
 const key = (owner: string, name = 'a') => `/uploads/verification/${owner}/${name.repeat(16)}.enc`;
 const avatar = (owner: string) => `/uploads/avatars/${owner}/${'s'.repeat(16)}.jpg`;
 const unavailable = { code: 'VERIFICATION_OBJECT_UNAVAILABLE' };
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+const png = REAL_PNG; // [Row 108] a real photo: the upload route reads every photo with the real decoder
 const uploadRequest = (userId: string, filename = 'image.png', mimetype = 'image/png') => ({ user: { userId }, file: async () => ({
   mimetype, filename, toBuffer: async () => png,
 }) });
@@ -343,8 +344,8 @@ describe('verification object containment at real service boundaries', () => {
       return { url: `${provider === 'local' ? '/uploads/' : ''}${folder}/${createOpaqueStorageName(storedName)}` };
     });
     const content = mimetype === 'application/pdf' ? Buffer.from('%PDF-1.7\nsynthetic document')
-      : mimetype === 'image/jpeg' ? Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 8, 0, 0, 0, 0, 0, 0])
-      : mimetype === 'image/webp' ? Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary') : png;
+      : mimetype === 'image/jpeg' ? REAL_JPEG
+      : mimetype === 'image/webp' ? REAL_WEBP : png;
     const routes = await handlers(h, verificationRoutes);
     const app = Fastify(); await app.register(multipart);
     app.post('/upload', async (request) => {
@@ -1286,7 +1287,7 @@ describe('generated declaration envelope contract', () => {
     const routes = await handlers(h, vendorRoutes);
     const reply = { code: vi.fn() };
     const invoke = () => routes.get('post /onboarding/declaration')!({ user: { userId: A }, headers: { 'x-vendor-id': vendor.id }, ip: '127.0.0.1', body: {
-      tradingName: 'Synthetic store', activityClass: 'home_cook', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
+      tradingName: 'Synthetic store', activityClass: 'snackette', declaredAddress: 'Synthetic address', attestationVersion: declaration.DECLARATION_VERSION,
     } }, reply);
     return { ...h, vendor, published, signed, render, plaintext, invoke, reply };
   }

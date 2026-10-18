@@ -3,6 +3,7 @@ import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { useAuthStore } from '../stores/authStore';
+import { LegalAcceptanceModal } from '../components/LegalAcceptanceModal';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
@@ -16,7 +17,7 @@ import { MoverStack } from '../modules/mover/MoverStack';
 import { VendorStack } from '../modules/vendor/VendorStack';
 import { AdvertiserStack } from '../modules/advertiser/AdvertiserStack';
 import { navigationRef, safeNavigate } from './navigationRef';
-import { installNotificationTapRouter, flushPendingNavigation } from '../services/notification-router';
+import { installNotificationTapRouter, flushPendingNavigation, settleTapAfterSignIn } from '../services/notification-router';
 import { installDeepLinkHandler, flushPendingDeepLink } from '../services/deep-links';
 import { ensureFirstLaunchClaim, flushAttributedDestination } from '../services/attribution';
 import { previewBypassForIntent, rootEntryGate, rootNavigatorBoundaryKey } from './rootEntryGate';
@@ -128,6 +129,21 @@ export function RootNavigator() {
     };
   }, [entryGate, isAuthenticated, resumeAuthContinuation, sessionGeneration, wantsAuth]);
 
+  // [row 205 · DS256 F2] A notification tapped while signed out opened sign-in
+  // and waits there. It lands once the same account is through every root
+  // gate; a different account or a cancelled sign-in drops it. Same post-commit
+  // attempt + one ready retry as the auth continuation above.
+  React.useEffect(() => {
+    const settle = () => { settleTapAfterSignIn({ isAuthenticated, wantsAuth, entryGate }); };
+    if (!isAuthenticated || entryGate !== 'main') { settle(); return; }
+    const firstAttempt = setTimeout(settle, 0);
+    const readyRetry = setTimeout(settle, 250);
+    return () => {
+      clearTimeout(firstAttempt);
+      clearTimeout(readyRetry);
+    };
+  }, [entryGate, isAuthenticated, sessionGeneration, wantsAuth]);
+
   return (
     <NavigationContainer
       ref={navigationRef}
@@ -167,6 +183,8 @@ export function RootNavigator() {
         />
         <Stack.Screen name="QrOutcome" component={QrOutcomeScreen} />
       </Stack.Navigator>
+      {/* [R26 · research G2] a material change to the Terms is accepted with a fresh tick (build 12) */}
+      <LegalAcceptanceModal />
     </NavigationContainer>
   );
 }

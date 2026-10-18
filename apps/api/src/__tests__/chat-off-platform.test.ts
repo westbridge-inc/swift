@@ -10,11 +10,13 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { detectOffPlatformContact } from '../modules/chat/off-platform';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
-// Off-platform contact detection (marketplace spec §2): detection, never
-// censorship — the message DELIVERS, the sender gets the nudge, the flag
-// lands for risk signals.
+// Off-platform contact detection (marketplace spec §2) supplies the nudge and
+// the risk flag. With the launch content filter OFF (the default until build
+// 10 is live in both stores) a message carrying a phone number still
+// DELIVERS; with it ON, admission refuses it before storing or delivering.
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
@@ -41,7 +43,7 @@ beforeAll(async () => {
   const mk = async (n: string) =>
     app.prisma.user.create({
       data: {
-        phone: `+59262${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: n, lastName: 'Chat',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true,
@@ -118,8 +120,41 @@ describe('detector truths', () => {
 });
 
 describe('send path', () => {
-  it('a flagged message still DELIVERS, carries the nudge, and lands the flag', async () => {
-    const res = await send('text me on 592-600-1000 when you reach');
+  it('launch filter OFF (default): a flagged message still DELIVERS, carries the nudge, and lands the flag', async () => {
+    vi.stubEnv('CHAT_CONTENT_FILTER', '0');
+    try {
+      const res = await send('text me on 592-600-1000 when you reach');
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.success).toBe(true);
+      expect(body.warning).toContain('Keep it in the app');
+
+      const row = await app.prisma.chatMessage.findUniqueOrThrow({ where: { id: body.data.id } });
+      expect(row.offPlatformFlag).toBe(true);
+      expect(row.message).toContain('592-600-1000'); // NOT censored while the switch is off
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('launch filter ON: an external phone is refused before persistence or notification', async () => {
+    vi.stubEnv('CHAT_CONTENT_FILTER', '1');
+    const before = await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } });
+    const notify = vi.spyOn(NotificationService.prototype, 'send').mockResolvedValue('notification');
+    try {
+      const res = await send('text me on 592-600-1000 when you reach');
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('CHAT_CONTENT_NOT_ALLOWED');
+      expect(await app.prisma.chatMessage.count({ where: { chatRoomId: roomId } })).toBe(before);
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      notify.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('an allowed overture still delivers with the nudge and risk flag', async () => {
+    const res = await send('whatsapp me instead');
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.success).toBe(true);
@@ -127,7 +162,7 @@ describe('send path', () => {
 
     const row = await app.prisma.chatMessage.findUniqueOrThrow({ where: { id: body.data.id } });
     expect(row.offPlatformFlag).toBe(true);
-    expect(row.message).toContain('592-600-1000'); // NOT censored
+    expect(row.message).toBe('whatsapp me instead');
   });
 
   it('a normal message carries no warning and no flag', async () => {

@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from './order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import type { Prisma, PrismaClient, SubstitutionStatus } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { NotificationService } from '../notification/notification.service';
@@ -7,6 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, MMG_SWAP_SETTLES_DIRECTLY } from './substitution-view';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
@@ -22,7 +23,7 @@ function assertMmgMoneyAdjustable(order: { paymentMethod: string | null }): void
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
-    'MMG order totals can’t change in-app — the store settles item changes with you directly until in-app MMG adjustments arrive.',
+    MMG_SWAP_SETTLES_DIRECTLY,
   );
 }
 
@@ -220,6 +221,20 @@ export class PickingService {
     if (original?.substitutionGroup && substitute.substitutionGroup !== original.substitutionGroup) {
       throw new AppError(400, 'WRONG_GROUP', 'Substitutes must come from the same substitution group');
     }
+    // [SUBSTITUTION · owner 17 Oct] A question nobody can ever answer is never
+    // asked. An MMG total can't change in-app, so on MMG a swap at a different
+    // price could be neither approved nor declined (both rewrite the total) and
+    // the order would wait forever. Only a same-price swap may be proposed
+    // there; the store settles anything else with the customer directly.
+    // (Early answer; the authority is the same check on the locked row below.)
+    const priceChange = substitutionLineChange({
+      substitutePrice: substitute.basePrice, quantity: line.quantity, totalCustomer: line.totalCustomer,
+    }).delta;
+    if (priceChange !== 0) assertMmgMoneyAdjustable(line.order);
+    // [SUBSTITUTION] The wait is bounded: past decideBy the sweep removes the
+    // line (never a silent swap) or, on MMG, withdraws the question.
+    const decideMinutes = substitutionDecideMinutes();
+    const decideBy = new Date(Date.now() + decideMinutes * 60_000);
 
     // [REPORT-006 F-006-05 · ORDER-SPINE S1-6] Proposing a substitute is
     // affirmative preparation: the MMG gate runs on the LOCKED order row, and
@@ -229,6 +244,7 @@ export class PickingService {
     await this.prisma.$transaction(async (tx) => {
       const order = await this.lockPickableOrder(tx, orderId);
       assertMmgFulfilmentAllowed(order, 'PREPARING');
+      if (priceChange !== 0) assertMmgMoneyAdjustable(order);
       const updated = await tx.orderItem.updateMany({
         where: {
           id: lineId,
@@ -242,6 +258,7 @@ export class PickingService {
           substituteItemId,
           substituteName: substitute.name,
           substitutePrice: substitute.basePrice,
+          substituteDecideBy: decideBy,
         },
       });
       if (updated.count === 0) {
@@ -260,12 +277,17 @@ export class PickingService {
       substitutePrice: Number(substitute.basePrice),
       quantity: line.quantity,
       status: 'PENDING',
+      decideBy: decideBy.toISOString(),
     });
+    // [SUBSTITUTION] The push says how long the question waits and what
+    // happens without an answer, in words true on every build.
     await this.notifications.send({
       userId: line.order.customerId,
       type: 'ORDER_UPDATE',
       title: `${line.name} is out of stock`,
-      body: `The store suggests ${substitute.name} instead for order #${line.order.orderNumber}. Approve or reject it in the app.`,
+      body: substitutionNoAnswer(line.order) === 'REMOVE'
+        ? `The store suggests ${substitute.name} instead for order #${line.order.orderNumber}. Approve or decline it in the app within ${decideMinutes} minutes. If you don't answer, it comes off your order and your total goes down.`
+        : `The store suggests ${substitute.name} instead for order #${line.order.orderNumber}. If it isn't approved in the app within ${decideMinutes} minutes, the store settles this item with you directly.`,
       data: { orderId, kind: 'substitution_pending', lineId },
     });
     return this.prisma.orderItem.findUnique({ where: { id: lineId } });
@@ -376,8 +398,10 @@ export class PickingService {
       }
 
       const substitutePrice = Number(fresh.substitutePrice ?? 0);
-      const newLineTotal = substitutePrice * fresh.quantity;
-      const delta = newLineTotal - Number(fresh.totalCustomer);
+      // [L09 · M028] The one formula, also what the customer was shown before
+      // deciding (substitution-view.ts): the substitute's price × quantity
+      // replaces the line's total, paid options included.
+      const { newLineTotal, delta } = substitutionLineChange(fresh);
 
       // [F-006-02] On MMG, a dearer substitute records money never collected
       // and a cheaper one an unrecorded refund — any payment status. Only a
@@ -396,6 +420,7 @@ export class PickingService {
         where: { id: lineId, subStatus: 'PENDING', picked: false },
         data: {
           subStatus: 'APPROVED',
+          substituteDecideBy: null,
           picked: false, // staff still has to shelf-pick the substitute
           name: `${fresh.substituteName} (sub for ${fresh.name})`,
           basePrice: substitutePrice,
@@ -479,7 +504,8 @@ export class PickingService {
     line: { id: string; itemId: string | null; substituteItemId: string | null; name: string; quantity: number; totalCustomer: unknown; subStatus: SubstitutionStatus; order: { id: string; status: string; vendorId: string | null } },
     subStatus: 'REFUNDED' | 'REJECTED',
     changedBy: string,
-  ): Promise<boolean> {
+    opts: { note?: string; decidedBefore?: Date } = {},
+  ): Promise<false | { decTotal: number }> {
     // [REPORT-006 F-006-02/05] One Order-locked transaction: live lifecycle +
     // payment-rail authority come from the LOCKED row (never the caller's
     // preview — a capture or cancellation committing after the preview is
@@ -516,8 +542,13 @@ export class PickingService {
       // the caller's observed subStatus. A lost race exits before any money,
       // float, stock, or socket effect.
       const cas = await tx.orderItem.updateMany({
-        where: { id: line.id, subStatus: line.subStatus, picked: false },
-        data: { subStatus, substituteItemId: null, substituteName: null, substitutePrice: null },
+        where: {
+          id: line.id, subStatus: line.subStatus, picked: false,
+          // [SUBSTITUTION] The deadline sweep removes only a question whose
+          // wait is over on the row it writes, not on the row it read.
+          ...(opts.decidedBefore ? { substituteDecideBy: { lte: opts.decidedBefore } } : {}),
+        },
+        data: { subStatus, substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: null },
       });
       if (cas.count === 0) return false;
       await tx.order.update({
@@ -529,7 +560,7 @@ export class PickingService {
         },
       });
       await tx.orderStatusLog.create({
-        data: { orderId: line.order.id, status: ord.status as PickableStatus, changedBy, note: `Line ${subStatus.toLowerCase()}: ${line.name}` },
+        data: { orderId: line.order.id, status: ord.status as PickableStatus, changedBy, note: opts.note ?? `Line ${subStatus.toLowerCase()}: ${line.name}` },
       });
       // Keep a CASH rider's committed float in sync with the subtotal it
       // fronts: this close shrinks subtotalBase by decBase, and the terminal
@@ -545,12 +576,80 @@ export class PickingService {
       // (possibly auto-hidden at zero) with the wrong RETURN audit row.
       const restockItemId = line.subStatus === 'APPROVED' ? line.substituteItemId : line.itemId;
       await this.restockLine({ itemId: restockItemId, quantity: line.quantity }, subStatus.toLowerCase(), tx);
-      return true;
+      return { decTotal };
     });
     if (!closed) return false;
     this.emitPickState(line.order.vendorId, line.order.id, line.id, { subStatus });
     await emitToOrderRoom(this.prisma, this.io, line.order.id, 'order:substitution', { orderId: line.order.id, lineId: line.id, status: subStatus });
-    return true;
+    return closed;
+  }
+
+  /**
+   * [SUBSTITUTION · owner 17 Oct 2026] A swap question past its deadline.
+   * The SAFE default, never a silent swap: the line is REMOVED — it comes off
+   * the order, the total drops (clamped like any removal), stock returns, the
+   * customer is told, and the store can carry on. On MMG, where the total can't
+   * change in-app, the question is WITHDRAWN instead: the line is back to the
+   * store as it was, and the customer is told the store settles it directly.
+   * A question opened before deadlines existed gets a full wait from now.
+   * Every write is a compare-and-set on the open question, so a customer's
+   * answer or a store's removal landing first wins and this does nothing.
+   */
+  async expireSubstitution(lineId: string, now: Date = new Date()): Promise<'removed' | 'withdrawn' | 'started' | 'skipped'> {
+    const line = await this.prisma.orderItem.findFirst({
+      where: { id: lineId, subStatus: 'PENDING', picked: false },
+      include: { order: { select: { id: true, status: true, customerId: true, orderNumber: true, vendorId: true, paymentMethod: true } } },
+    });
+    if (!line || !PICKABLE_STATES.includes(line.order.status)) return 'skipped';
+    if (!line.substituteDecideBy) {
+      const started = await this.prisma.orderItem.updateMany({
+        where: { id: line.id, subStatus: 'PENDING', picked: false, substituteDecideBy: null },
+        data: { substituteDecideBy: new Date(now.getTime() + substitutionDecideMinutes() * 60_000) },
+      });
+      return started.count > 0 ? 'started' : 'skipped';
+    }
+    if (line.substituteDecideBy.getTime() > now.getTime()) return 'skipped';
+    const changedBy = 'system:substitution-expiry';
+
+    if (substitutionNoAnswer(line.order) === 'WITHDRAW') {
+      const withdrawn = await this.prisma.$transaction(async (tx) => {
+        const order = await this.lockPickableOrder(tx, line.orderId);
+        const cas = await tx.orderItem.updateMany({
+          where: { id: line.id, subStatus: 'PENDING', picked: false, substituteDecideBy: { lte: now } },
+          data: { subStatus: 'NONE', substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: null },
+        });
+        if (cas.count === 0) return false;
+        await tx.orderStatusLog.create({
+          data: { orderId: line.orderId, status: order.status as PickableStatus, changedBy, note: `Substitution withdrawn, no answer in time: ${line.name} → ${line.substituteName ?? 'substitute'}` },
+        });
+        return true;
+      });
+      if (!withdrawn) return 'skipped';
+      this.emitPickState(line.order.vendorId, line.orderId, line.id, { subStatus: 'NONE' });
+      await emitToOrderRoom(this.prisma, this.io, line.orderId, 'order:substitution', { orderId: line.orderId, lineId: line.id, status: 'NONE' });
+      await this.notifications.send({
+        userId: line.order.customerId,
+        type: 'ORDER_UPDATE',
+        title: `${line.name}: the swap question closed`,
+        body: `The store's swap question on order #${line.order.orderNumber} got no answer in time. The store settles ${line.name} with you directly.`,
+        data: { orderId: line.orderId, lineId: line.id },
+      });
+      return 'withdrawn';
+    }
+
+    const closed = await this.closeLine(line, 'REFUNDED', changedBy, {
+      decidedBefore: now,
+      note: `Line removed, no answer to the swap in time: ${line.name}`,
+    });
+    if (!closed) return 'skipped';
+    await this.notifications.send({
+      userId: line.order.customerId,
+      type: 'ORDER_UPDATE',
+      title: `${line.name} removed from your order`,
+      body: `The store's swap question got no answer in time, so ${line.name} came off order #${line.order.orderNumber}. Your total went down by $${closed.decTotal.toLocaleString()}.`,
+      data: { orderId: line.orderId, kind: 'line_refunded', lineId: line.id },
+    });
+    return 'removed';
   }
 
   /** Put a line's units back on the shelf (tracked items only) + log it. */
@@ -577,6 +676,49 @@ export class PickingService {
   }
 
   private emitPickState(vendorId: string | null, orderId: string, lineId: string, patch: object) {
-    if (vendorId) this.io.to(`vendor:${vendorId}`).emit('order:pick_state', { orderId, lineId, ...patch });
+    // Fire-and-forget like before; the store-room gate never throws.
+    if (vendorId) void emitToStoreRoom(this.prisma, this.io, vendorId, 'order:pick_state', { orderId, lineId, ...patch });
   }
+}
+
+/**
+ * [SUBSTITUTION · owner 17 Oct 2026] The once-a-minute deadline sweep: every
+ * open swap question on a live order whose wait is over (or that has no
+ * deadline yet) goes through expireSubstitution, one line at a time, each in
+ * its own order's tenant (`narrow`; the job passes inTenantOf). A failure on
+ * one line never stops the rest; it is counted and retried next minute.
+ */
+export async function sweepSubstitutionDeadlines(
+  prisma: PrismaClient,
+  io: Server,
+  opts: {
+    now?: Date;
+    limit?: number;
+    narrow?: <T>(orderId: string, fn: () => Promise<T>) => Promise<T>;
+  } = {},
+): Promise<{ removed: number; withdrawn: number; started: number; failed: number }> {
+  const now = opts.now ?? new Date();
+  const narrow = opts.narrow ?? (<T>(_orderId: string, fn: () => Promise<T>) => fn());
+  const due = await prisma.orderItem.findMany({
+    where: {
+      subStatus: 'PENDING',
+      picked: false,
+      OR: [{ substituteDecideBy: { lte: now } }, { substituteDecideBy: null }],
+      order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
+    },
+    select: { id: true, orderId: true },
+    orderBy: { substituteDecideBy: 'asc' },
+    take: opts.limit ?? 200,
+  });
+  const result = { removed: 0, withdrawn: 0, started: 0, failed: 0 };
+  const picking = new PickingService(prisma, io);
+  for (const line of due) {
+    try {
+      const outcome = await narrow(line.orderId, () => picking.expireSubstitution(line.id, now));
+      if (outcome !== 'skipped') result[outcome] += 1;
+    } catch {
+      result.failed += 1;
+    }
+  }
+  return result;
 }
