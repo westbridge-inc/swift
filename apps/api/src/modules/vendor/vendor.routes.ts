@@ -2132,7 +2132,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
     if (mode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
-    } else if (!committed.riderId) {
+    } else if (!committed.riderId && !mmgDispatchBlocked(order)) {
+      // [#1848 follow-up · REVIEW-M S4-1] Like acceptance: an MMG order not yet "Paid by MMG" arms no
+      // dispatch here — "Paid by MMG" arms it. (`order` is the route's full-row read; the offer, claim and
+      // reconciler gates re-check the locked row either way.)
       await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };

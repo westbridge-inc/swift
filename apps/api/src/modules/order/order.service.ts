@@ -79,6 +79,7 @@ import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
+import { ATTESTABLE_PAYMENT_STATUSES } from '../vendor/mmg-attestation';
 import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
 
 interface CheckoutInput {
@@ -416,7 +417,8 @@ export function assertMmgFulfilmentAllowed(
   // Only an order whose payment can still happen: a store claim an operator rejected ("did not pay",
   // `mmgAttestedRef` kept on a reopened PENDING row) can never be paid on this order, so it is never
   // accepted unpaid. Not projected (undefined) fails closed: the payment gate below applies.
-  if (target === 'ACCEPTED' && order.mmgAttestedRef === null) return;
+  // [REVIEW-G S4-1 on #1848] Literally "still open": a PENDING or AUTHORIZED payment, never FAILED/REFUNDED/UNKNOWN.
+  if (target === 'ACCEPTED' && order.mmgAttestedRef === null && (ATTESTABLE_PAYMENT_STATUSES as readonly string[]).includes(order.paymentStatus)) return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,

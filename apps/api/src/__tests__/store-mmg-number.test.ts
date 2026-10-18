@@ -399,6 +399,23 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
 // no money record, no rider float, no dispatch and no earning.
 // ---------------------------------------------------------------------------
 describe('[PAYMENT-SIMPLIFY · Q1 boundary] accepting an unpaid MMG order moves nothing else', () => {
+  // [#1848 follow-up · REVIEW-M S4-1] "Get a rider instead" (the fulfillment-mode switch) arms no dispatch either
+  // while the MMG payment is unconfirmed — like acceptance; "Paid by MMG" arms it.
+  it('the "get a rider instead" switch arms no dispatch on an unpaid MMG order', async () => {
+    const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
+    try {
+      const placed = await numberOrder();
+      expect((await accept(placed.order.id)).statusCode).toBe(200);
+      arm.mockClear();
+      const toRider = await call('PUT', `/api/v1/vendor/orders/${placed.order.id}/fulfillment-mode`, owner.token, { mode: 'PLATFORM_RIDER' }, store());
+      expect(toRider.statusCode, toRider.body).toBe(200);
+      expect(arm).not.toHaveBeenCalled();
+      expect(await sys(() => app.prisma.dispatchSearch.count({ where: { subjectId: placed.order.id } }))).toBe(0);
+    } finally {
+      arm.mockRestore();
+    }
+  });
+
   it('after acceptance: no prepare, no ready, no board listing, no rider claim, no dispatch offer, no money rows; "Paid by MMG" then arms dispatch once', async () => {
     const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
     try {

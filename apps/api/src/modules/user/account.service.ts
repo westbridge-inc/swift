@@ -1,4 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -277,6 +278,7 @@ export class AccountService {
       // Marked wound down with the cutoff, so no billing repair or fee payment
       // can reopen a closed account's store (it reopens billing holds only).
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
+      await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
