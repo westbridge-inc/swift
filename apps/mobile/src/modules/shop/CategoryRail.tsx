@@ -22,7 +22,7 @@ export const CAT_RAIL_MIN_CHIPS = 4;
 const TILE = 64;
 const BLOCK_W = 76;
 
-function ChipTile({ slug, label, onPress }: { slug: string; label: string; onPress: () => void }) {
+function ChipTile({ slug, iconKey, label, onPress }: { slug: string; iconKey?: string | null; label: string; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} accessibilityRole="button" accessibilityLabel={label}>
       {({ pressed }) => (
@@ -37,7 +37,7 @@ function ChipTile({ slug, label, onPress }: { slug: string; label: string; onPre
               justifyContent: 'center',
             }}
           >
-            <MaterialCommunityIcons name={categoryIcon(slug)} size={fontSize.base * 2} color={color.brand[600]} />
+            <MaterialCommunityIcons name={categoryIcon(slug, iconKey)} size={fontSize.base * 2} color={color.brand[600]} />
           </View>
           <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
             {label}
@@ -86,7 +86,7 @@ export function CategoryRail({
       style={{ marginTop: space.lg }}
       contentContainerStyle={{ paddingHorizontal: space['2xl'], gap: 12 }}
       renderItem={({ item }) => (
-        <ChipTile slug={item.slug} label={item.name} onPress={() => onChip(item)} />
+        <ChipTile slug={item.slug} iconKey={item.iconKey} label={item.name} onPress={() => onChip(item)} />
       )}
       ListFooterComponent={
         <Pressable onPress={onSeeAll} accessibilityRole="button" accessibilityLabel="See all categories">

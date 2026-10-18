@@ -76,7 +76,7 @@ export function CategoryGridScreen() {
                             justifyContent: 'center',
                           }}
                         >
-                          <MaterialCommunityIcons name={categoryIcon(c.slug)} size={fontSize.base * 2} color={color.brand[600]} />
+                          <MaterialCommunityIcons name={categoryIcon(c.slug, c.iconKey)} size={fontSize.base * 2} color={color.brand[600]} />
                         </View>
                         <T variant="caption" center numberOfLines={2} style={{ marginTop: space.xs }}>
                           {c.name}

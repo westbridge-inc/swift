@@ -298,6 +298,12 @@ const notificationPrefsSchema = z.object({
 const deviceTokenSchema = z.object({
   token: z.string().min(8).max(512),
   platform: z.enum(['ios', 'android']),
+  /** [RINGER · continues #1367] What the installed app can ring with
+   *  (DeviceToken.alertsVersion): builds 9-11 send none, so absent = 0. A
+   *  malformed value also reads 0 rather than refusing the registration: a
+   *  refused registration is a phone that silently gets no pushes at all,
+   *  and 0 is exactly what every build can show. */
+  alertsVersion: z.number().int().min(0).max(1000).optional().catch(undefined),
 });
 
 const switchRoleSchema = z.object({
@@ -2610,8 +2616,12 @@ export async function customerRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
     const { readFareBreakdown } = await import('../rides/taxi-waiting');
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [Triage row 248 · R3] The receipt names who sold, from the ONE seller block the store page shows.
+    const { publicStorefrontSeller } = await import('../verification/storefront-seller');
+    const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
+    const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml((fareBreakdown ? { ...order, fareBreakdown } : order) as never);
+    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
@@ -3480,13 +3490,16 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** POST /notifications/devices — register this device for push. Upsert on
    *  the token: re-registering reassigns it to the CURRENT user (one phone,
-   *  new login) and reactivates it. */
+   *  new login) and reactivates it. [RINGER] It also records what the
+   *  installed app can ring with (alertsVersion, absent = 0), rewritten on
+   *  every registration: an app that reports nothing is sent only what
+   *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
-    const { token, platform } = deviceTokenSchema.parse(request.body);
+    const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
     await app.prisma.deviceToken.upsert({
       where: { token },
-      create: { userId: request.user.userId, token, platform, isActive: true },
-      update: { userId: request.user.userId, platform, isActive: true },
+      create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
+      update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
     });
     return { success: true, data: { message: 'Device registered' } };
   });

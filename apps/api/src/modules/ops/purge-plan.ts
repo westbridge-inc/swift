@@ -20,10 +20,13 @@ import { Prisma } from '@prisma/client';
  *  · execution needs two DISTINCT approvers over that digest, a backup
  *    manifest bound to the same target with tested-restore evidence, and an
  *    unchanged classification (drift invalidates the plan);
- *  · the selection is POSITIVE only — rows carrying a synthetic marker (the
- *    seed's run id or its phone range) and no admin role; anything under a
- *    legal hold is quarantined; unclassified rows are reported, never widened
- *    into a predicate;
+ *  · the selection is POSITIVE only — rows carrying a synthetic marker (a
+ *    `syntheticRunId`: the seed's run id, a test run's id) and no admin role;
+ *    anything under a legal hold is quarantined; unclassified rows are
+ *    reported, never widened into a predicate. [PLAT-3] The demo phone range
+ *    (+592600…) is NOT a marker: it is a live carrier range, so a real
+ *    person's number can sit in it. A phone prefix may only NARROW a plan
+ *    (its scope); it never makes a row deletable;
  *  · every step is an append-only audit row written BEFORE the mutation it
  *    describes, so a death at any boundary leaves a resumable record;
  *  · deletion itself goes through the canonical account-deletion path the
@@ -92,13 +95,16 @@ export function assertScope(scope: PlanScope | undefined): void {
 }
 const withinScope = (scope?: PlanScope) => (scope ? { phone: { startsWith: scope.phonePrefix } } : {});
 
+/** The synthetic marker, and nothing else. [PLAT-3] Never the demo phone range: real numbers live there. */
+const SYNTHETIC_MARKER = { syntheticRunId: { not: null } } as const;
+
 /** POSITIVE selection only: a synthetic marker, no admin role. Holds quarantine. Unclassified is a number, never a predicate. */
 export async function classify(prisma: PrismaClient, scope?: PlanScope): Promise<Classification> {
   assertScope(scope);
   const [total, admins, marked] = await Promise.all([
     prisma.user.count({ where: withinScope(scope) }),
     prisma.user.findMany({ where: { ...withinScope(scope), roles: { hasSome: ['ADMIN', 'SUPER_ADMIN'] } }, select: { id: true } }),
-    prisma.user.findMany({ where: { ...withinScope(scope), OR: [{ syntheticRunId: { not: null } }, { phone: { startsWith: DEMO_PHONE_PREFIX } }] }, select: { id: true, roles: true } }),
+    prisma.user.findMany({ where: { ...withinScope(scope), ...SYNTHETIC_MARKER }, select: { id: true, roles: true } }),
   ]);
   const adminIds = new Set(admins.map((a) => a.id));
   const candidates = marked.filter((u) => !adminIds.has(u.id));
@@ -116,7 +122,8 @@ export async function classify(prisma: PrismaClient, scope?: PlanScope): Promise
     demoCustomerIds: free.filter((u) => u.roles.every((r) => r === 'CUSTOMER')).map((u) => u.id).sort(),
     demoPartnerIds: free.filter((u) => u.roles.some((r) => r !== 'CUSTOMER')).map((u) => u.id).sort(),
     quarantinedIds: [...heldIds].sort(),
-    unclassified: total - adminIds.size - marked.length,
+    // Every row that is neither an admin nor marked; a marked admin is counted once.
+    unclassified: total - new Set([...adminIds, ...marked.map((u) => u.id)]).size,
   };
 }
 
@@ -230,5 +237,5 @@ export async function executePlan(prisma: PrismaClient, databaseUrl: string, pla
 
 /** [SCR-002] Synthetic markers are forbidden in production — a verify that boot and the purge share. */
 export async function syntheticMarkersPresent(prisma: PrismaClient): Promise<number> {
-  return prisma.user.count({ where: { OR: [{ syntheticRunId: { not: null } }, { phone: { startsWith: DEMO_PHONE_PREFIX } }] } });
+  return prisma.user.count({ where: SYNTHETIC_MARKER });
 }

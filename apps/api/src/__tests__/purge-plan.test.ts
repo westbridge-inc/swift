@@ -68,12 +68,41 @@ describe('[SCR-002] the selection is positive, never a negative classification',
     const kase = await prisma.incidentCase.create({ data: { caseNumber: `INC-${nanoid(8).toUpperCase()}`, severity: 'S1', category: 'SAFETY_THREAT', intake: 'OPS_CREATED', subjectUserId: held.id, summary: 'held', slaAckBy: new Date(), slaDecideBy: new Date(), legalHold: true } });
     caseIds.push(kase.id);
     const c = await classify(prisma, scope());
-    expect(c.demoCustomerIds).toEqual(expect.arrayContaining([demo.id, legacyRange.id]));
+    expect(c.demoCustomerIds).toContain(demo.id);
+    // [PLAT-3] the demo phone range is a live carrier range: a number in it with
+    // no synthetic marker is a person, never selected (it is unclassified)
+    expect(c.demoCustomerIds).not.toContain(legacyRange.id); expect(c.demoPartnerIds).not.toContain(legacyRange.id);
     expect(c.demoCustomerIds).not.toContain(admin.id); expect(c.demoCustomerIds).not.toContain(unclassified.id); expect(c.demoCustomerIds).not.toContain(held.id); expect(c.demoCustomerIds).not.toContain(partner.id);
     expect(c.demoPartnerIds).toContain(partner.id);
     expect(c.quarantinedIds).toContain(held.id);
     expect(c.adminIds).toContain(admin.id);
-    expect(await syntheticMarkersPresent(prisma)).toBeGreaterThanOrEqual(4);
+    expect(await syntheticMarkersPresent(prisma)).toBeGreaterThanOrEqual(3); // demo, partner, held: the marked rows this test made
+  });
+
+  it('[PLAT-3] a real number inside the demo range survives a purge: only the synthetic marker selects, and the unmarked rows are counted once', async () => {
+    // A sub-range of this suite's own scope, unique to this run, so every count is exact.
+    const sub = `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e3)).padStart(3, '0')}`;
+    const inSub = () => `${sub}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`;
+    const person = await mk({ phone: inSub() });
+    const personPartner = await mk({ phone: inSub(), roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER' });
+    const demo = await mk({ phone: inSub(), syntheticRunId: RUN });
+    const markedAdmin = await mk({ phone: inSub(), syntheticRunId: RUN, roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN' });
+    const c = await classify(prisma, { phonePrefix: sub });
+    expect(c.total).toBe(4);
+    expect(c.demoCustomerIds).toEqual([demo.id]);
+    expect(c.demoPartnerIds).toEqual([]);
+    expect(c.adminIds).toEqual([markedAdmin.id]);
+    expect(c.unclassified).toBe(2); // person + personPartner; the marked admin is not counted twice
+    const plan = await buildPlan(prisma, URL_, undefined, { phonePrefix: sub });
+    expect(plan.demoCustomerIds).toEqual([demo.id]);
+    expect(plan.counts).toMatchObject({ total: 4, admins: 1, demoCustomers: 1, demoPartners: 0, unclassified: 2 });
+    // its own record of the canonical path, so the suite-wide one the later tests count stays untouched
+    const deletedHere: string[] = [];
+    const res = await executePlan(prisma, URL_, plan, { secret: SECRET, approvals: twoApprovals(plan), backup: await goodBackup(plan), deleteUser: async (id) => { deletedHere.push(id); await prisma.user.delete({ where: { id } }); } });
+    expect(res.deleted).toEqual([demo.id]);
+    expect(deletedHere).toEqual([demo.id]);
+    const survivors = await prisma.user.findMany({ where: { id: { in: [person.id, personPartner.id, markedAdmin.id] } }, select: { id: true } });
+    expect(survivors.map((u) => u.id).sort()).toEqual([person.id, personPartner.id, markedAdmin.id].sort());
   });
 });
 

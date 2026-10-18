@@ -625,6 +625,23 @@ export async function inTenantOf<T>(
   return tenantId ? runWithTenant(tenantId, fn) : fn();
 }
 
+/** [M013] What a failed-job log line may say about the job's payload: the
+ *  top-level record ids (orderId, userId, checkoutId …) and nothing else.
+ *  Payloads carry message bodies, sign-in codes, links and provider grants;
+ *  the ids are enough to find the record. */
+const LOGGABLE_ID_KEY = /^[a-z][A-Za-z0-9]{0,40}Id$/;
+const LOGGABLE_ID_VALUE = /^[A-Za-z0-9_:-]{1,64}$/;
+function failedJobIds(data: unknown): Record<string, string | number> | undefined {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return undefined;
+  const ids: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>)) {
+    // [#1795 S4-1] payerId carries the MMG payer's phone number (billing): a key that can name a person's number is never logged.
+    if (!LOGGABLE_ID_KEY.test(key) || /token|secret|key|code|pin|password|otp|payer|msisdn|phone/i.test(key)) continue;
+    if ((typeof value === 'string' && LOGGABLE_ID_VALUE.test(value)) || (typeof value === 'number' && Number.isSafeInteger(value))) ids[key] = value;
+  }
+  return Object.keys(ids).length > 0 ? ids : undefined;
+}
+
 export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
   const connection = bullConnectionOpts(ctx.redis);
   // [#1794 S3-1] The boot grace of checkSafetyLane starts here.
@@ -641,7 +658,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
     const worker = new Worker(name, inJobContext(name, processor), { ...options, autorun: false });
     constructedWorkers.push(worker);
     worker.on('failed', (job, err) => {
-      ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, data: job?.data, err }, 'BullMQ job failed');
+      // [M013] Never the raw payload (message bodies, codes, links, grants):
+      // the job's identity, its attempt count and the record ids it names.
+      ctx.log.error({ queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade, ids: failedJobIds(job?.data), err }, 'BullMQ job failed');
       try {
         captureError(err, { queue: name, jobName: job?.name, jobId: job?.id, attempts: job?.attemptsMade });
       } catch (captureFailure) {
@@ -1340,6 +1359,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         docImagePolicyCounter.inc({ outcome: 'probe_failed' }, run.probeFailed);
         docImagePolicyCounter.inc({ outcome: 'skipped' }, run.skipped);
         ctx.log.info(`Image-policy sweep: ${run.candidates} candidates, ${run.purged} purged, ${run.probeFailed} probe failures, ${run.skipped} skipped`);
+        return;
+      }
+
+      if (job.name === 'verification-decision-outbox') {
+        // [S2-29 · KYC-DECISION-ATOMIC] Finish what committed approvals still owe — the trial
+        // decision — when the request that approved them did not: a lease-claimed, idempotent drain.
+        const { VerificationService } = await import('../modules/verification/verification.service');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+        const drained = await new VerificationService(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), getKycProvider()).processDecisionOutbox();
+        if (drained.processed > 0 || drained.failed > 0) {
+          ctx.log.info(`Verification decision outbox: ${drained.processed} processed / ${drained.failed} retried`);
+        }
         return;
       }
 
@@ -2639,6 +2671,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Verification document expiry sweep + reminders: daily at 06:00
   await queues.verificationQueue.add('expiry-sweep', {}, {
     repeat: { pattern: '0 6 * * *' },
+    removeOnComplete: 30,
+    removeOnFail: 30,
+  });
+
+  // [S2-29 · KYC-DECISION-ATOMIC] Every 5 minutes: the trial decision of any approval whose request
+  // did not finish it (a failed or interrupted tail). Most rows are drained by the request itself.
+  await queues.verificationQueue.add('verification-decision-outbox', {}, {
+    repeat: { pattern: '*/5 * * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
   });

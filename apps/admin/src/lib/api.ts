@@ -843,15 +843,15 @@ export const fetchDiscoveryRequests = (status: string) =>
 
 export const updateDiscoveryCategory = (
   id: string,
-  body: Partial<Pick<DiscoveryCategory, 'name' | 'emoji' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
+  body: Partial<Pick<DiscoveryCategory, 'name' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
 ) => apiFetch(`/api/v1/admin/discovery/categories/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 
-/** Approve a vendor's request as a NEW category. `emoji`, `kind` and `vertical`
- *  are required by the route — kind and vertical against enums, so the page
- *  offers selects and never a text box. */
+/** Approve a vendor's request as a NEW category. `iconKey`, `kind` and `vertical`
+ *  are required by the route, each against a fixed list (the icon from
+ *  CATEGORY_ICON_OPTIONS, never an emoji), so the page offers selects and never a text box. */
 export const approveDiscoveryRequest = (
   id: string,
-  body: { name?: string; emoji: string; kind: string; vertical: string },
+  body: { name?: string; iconKey: string; kind: string; vertical: string },
 ) => apiFetch(`/api/v1/admin/discovery/requests/${id}/approve`, { method: 'POST', body: JSON.stringify(body) });
 
 /** Resolve a request onto an EXISTING category instead of minting a near-duplicate. */

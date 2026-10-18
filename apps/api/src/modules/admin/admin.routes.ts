@@ -14,6 +14,7 @@ import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
+import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
@@ -1001,7 +1002,21 @@ export async function adminRoutes(app: FastifyInstance) {
     changes?: Record<string, unknown>,
     request?: any,
   ) {
-    await app.prisma.auditLog.create({
+    await auditIn(app.prisma, userId, action, entity, entityId, changes, request);
+  }
+
+  /** [S2-29 · KYC-DECISION-ATOMIC] The same row as `audit`, written through the given client — a
+   *  decision's own transaction, so the row commits with its action or not at all. */
+  async function auditIn(
+    db: Pick<Prisma.TransactionClient, 'auditLog'>,
+    userId: string,
+    action: string,
+    entity: string,
+    entityId: string,
+    changes?: Record<string, unknown>,
+    request?: any,
+  ) {
+    await db.auditLog.create({
       data: {
         userId,
         action,
@@ -6010,15 +6025,15 @@ export async function adminRoutes(app: FastifyInstance) {
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
       ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
       ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
+    }, {
+      // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction: the
+      // action row and the canonical admin row. A decision cannot commit without them.
+      within: async (tx, decided) => {
+        await auditIn(tx, request.user.userId, 'APPROVE_VERIFICATION_DOC', 'VerificationDocument', id,
+          { docType: decided.docType, ...(body.insurance ? { insurance: body.insurance } : {}) }, request);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      },
     });
-    await audit(
-      request.user.userId,
-      'APPROVE_VERIFICATION_DOC',
-      'VerificationDocument',
-      id,
-      { docType: doc.docType, ...(body.insurance ? { insurance: body.insurance } : {}) },
-      request,
-    );
 
     return { success: true, data: doc };
   });
@@ -6027,10 +6042,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = rejectDocSchema.parse(request.body);
 
-    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode);
-    // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
-    const action = doc.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
-    await audit(request.user.userId, action, 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode, {
+      // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction.
+      within: async (tx, decided) => {
+        // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
+        const action = decided.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
+        await auditIn(tx, request.user.userId, action, 'VerificationDocument', id, { docType: decided.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      },
+    });
 
     return { success: true, data: doc };
   });
@@ -7177,7 +7197,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
       emoji: z.string().min(1).max(8).optional(),
-      iconKey: z.string().max(60).nullable().optional(),
+      // Owner 17 Oct: categories carry one of the app's icons, never emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list').nullable().optional(),
       aliases: z.array(z.string().trim().min(1).max(60)).max(60).optional(),
       sortWeight: z.number().int().min(0).max(10_000).optional(),
       status: z.enum(['ACTIVE', 'HIDDEN']).optional(),
@@ -7228,7 +7249,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/discovery/requests/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
-      emoji: z.string().min(1).max(8),
+      // Owner 17 Oct: a new category gets one of the app's icons, never an emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list'),
       kind: z.enum(['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL']),
       vertical: z.enum(['FOOD', 'GROCERY', 'RETAIL']),
     }).parse(request.body);
