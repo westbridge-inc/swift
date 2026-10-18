@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -3030,6 +3031,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'store-media', log: request.log });
     const { url } = await storage.upload({
       buffer,
       filename: file.filename,

@@ -1,5 +1,6 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
+import { scanUpload } from '../../lib/malware-scan';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
@@ -60,7 +61,7 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
-import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { assertDriverMmgPayLinkWritable, driverMmgPayLinkEnabled, mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
 import { requireStepUp } from '../auth/step-up';
 import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
@@ -115,6 +116,21 @@ const driverEarningsQuerySchema = z.object({
   type: z.nativeEnum(EarningType).optional(),
   status: z.nativeEnum(EarningStatus).optional(),
 });
+
+
+/** [ALG-34 · owner 17 Oct PAYMENT-SIMPLIFY] The driver's own view of their MMG pay link.
+ *  `mmgPayLinkEnabled` tells the app whether to show the card at all (build 12+ hides it
+ *  when false). While the switch is off the stored link stays dormant and is not shown:
+ *  an older app then shows an empty card, never a link Swift does not use. */
+function driverLinkView(link: { mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null }) {
+  const enabled = driverMmgPayLinkEnabled();
+  return {
+    mmgPayLinkEnabled: enabled,
+    mmgPayUrl: enabled ? safeMmgPayUrl(link.mmgPayUrl) : null,
+    mmgPayUrlPending: enabled ? safeMmgPayUrl(link.mmgPayUrlPending) : null,
+    mmgPayUrlApplyAt: enabled ? link.mmgPayUrlApplyAt : null,
+  };
+}
 
 export async function driverRoutes(app: FastifyInstance) {
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
@@ -182,7 +198,7 @@ export async function driverRoutes(app: FastifyInstance) {
     return {
       success: true,
       // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
-      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, mmgPayUrl: safeMmgPayUrl(driver.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(driver.mmgPayUrlPending) } : driver,
+      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver) } : driver,
     };
   });
 
@@ -197,6 +213,10 @@ export async function driverRoutes(app: FastifyInstance) {
     if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') {
       throw new ReviewDemoMoneyRefusedError();
     }
+    // [owner 17 Oct · PAYMENT-SIMPLIFY] While DRIVER_MMG_PAY_LINK is off a NEW link
+    // is refused before step-up (no SMS code asked for a change that is refused)
+    // and before any money-surface command; clearing one stays open.
+    if (body.mmgPayUrl !== undefined) assertDriverMmgPayLinkWritable(body.mmgPayUrl);
     // [High #9 · DS109] Changing the plate, make, model, year or colour re-identifies the vehicle the driver operates.
     // Step-up first (the same proof as a money surface), and the old vehicle links close so
     // GO re-checks the EXACT new vehicle — a retyped plate never carries another subject's
@@ -278,7 +298,7 @@ export async function driverRoutes(app: FastifyInstance) {
       : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
     return {
       success: true,
-      data: { ...driver, ...link, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl), mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending) },
+      data: { ...driver, ...driverLinkView(link), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
     };
   });
 
@@ -310,6 +330,7 @@ export async function driverRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,

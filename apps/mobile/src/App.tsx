@@ -34,6 +34,7 @@ import { bindQueryCacheScope } from './lib/appQueryPolicy';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
+import { StoreAlertElsewhere } from './components/StoreAlertElsewhere';
 import { UpdateRequiredGate } from './components/UpdateRequiredGate';
 import { getAuthSessionSnapshot, useAuthStore } from './stores/authStore';
 import { refreshSessionAhead } from './services/api';
@@ -310,6 +311,8 @@ export default function App() {
                 </ConnectivityBoundary>
                 <ToastHost />
                 <PermissionPrimeSheet />
+                {/* [STORE-ALERT] A new order for this person's store while another app is open. */}
+                <StoreAlertElsewhere />
                 {/* [Row 3] build 12 on: a build older than the API's minimum is asked to update */}
                 <UpdateRequiredGate />
               </QueryClientProvider>

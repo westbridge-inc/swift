@@ -192,7 +192,7 @@ export function TrackClient({ token }: { token: string }) {
                     only a ~1 km square and carry the site's origin, never this link's
                     token. The old embedded map was a frame, which the site's security
                     policy blocks, so it never drew. */}
-                <TileMap point={coarsen(loc)} label="Courier location, approximate" linkHref={mapLinkUrl(loc)} linkLabel="Open approximate map ↗" />
+                <TileMap point={coarsen(loc)} label="Courier location, approximate" linkHref={mapLinkUrl(loc)} linkLabel="Open approximate map" />
               </div>
             ) : live ? (
               <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">

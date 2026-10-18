@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
-import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
+import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer-account';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';

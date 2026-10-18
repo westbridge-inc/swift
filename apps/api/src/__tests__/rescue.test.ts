@@ -34,10 +34,8 @@ import {
 } from '../modules/dispatch/rescue';
 import { ALGO_DEFAULTS, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { explainEarning } from '../utils/explain-earning';
-import { grantSuiteCapability } from '../lib/test-target-lock';
+import { moverPool, type MoverPool } from './helpers/mover-pool';
 
-// [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
-grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // [ALG-06] Rescue: the food-age cutoff and the escalating re-offer, against
@@ -60,6 +58,8 @@ const PICKUP = { lat: 6.8, lng: -58.15 };
 const UPDATED_BY = 'rescue.test';
 
 let app: FastifyInstance;
+/** [AUD-G7-042] Empties the dispatch pool by id and puts other people's riders back in afterAll. */
+let riderPool: MoverPool;
 let dispatch: DispatchService;
 let customerId: string;
 let vendorId: string;
@@ -174,11 +174,13 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.ready();
+  riderPool = moverPool(app.prisma, 'rider');
+  await riderPool.begin();
   await purge();
   await app.prisma.algoConfig.deleteMany({ where: { updatedBy: UPDATED_BY } });
   invalidateAlgoConfig();
   // Only this file's riders may be candidates (files run sequentially).
-  await app.prisma.rider.updateMany({ data: { isOnline: false, isAvailable: false } });
+  await riderPool.empty({ isOnline: false, isAvailable: false });
   dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
 
   const customer = await app.prisma.user.create({ data: { phone: `${PHONE_PREFIX}90`, firstName: 'Rescue', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, selfieCapturedAt: new Date() } });
@@ -204,6 +206,7 @@ afterAll(async () => {
   invalidateAlgoConfig();
   await purge();
   await app.prisma.tenant.deleteMany({ where: { id: TENANT_X } }).catch(() => {});
+  if (riderPool) await riderPool.restore(); // undefined only when beforeAll failed before building it
   await app.close();
 });
 
