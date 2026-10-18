@@ -2845,14 +2845,16 @@ export class VerificationService {
         if (row.command !== APPROVAL_TAIL) throw new Error(`unknown verification decision command ${row.command}`);
         const standing = await this.prisma.verificationDocument.findUnique({ where: { id: row.documentId }, select: { state: true } });
         if (standing?.state === 'COMMITTED') await this.afterApproval(row.userId);
-        await this.prisma.verificationDecisionOutbox.update({
+        // updateMany: an account erasure deletes the person's rows (account.service), so a row this drain
+        // claimed may be gone by now; there is then nothing left to close.
+        await this.prisma.verificationDecisionOutbox.updateMany({
           where: { id: row.id },
           data: { processedAt: new Date(), claimedAt: null, lastError: standing?.state === 'COMMITTED' ? null : 'approval no longer stands' },
         });
         processed += 1;
       } catch (err) {
         log().error({ err, documentId: row.documentId, attempts: row.attempts + 1 }, '[S2-29] approval tail failed; retried by the sweep');
-        await this.prisma.verificationDecisionOutbox.update({
+        await this.prisma.verificationDecisionOutbox.updateMany({
           where: { id: row.id },
           data: {
             claimedAt: null,

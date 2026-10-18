@@ -1,6 +1,6 @@
 import { publicVendorReviewId } from '../modules/rating/vendor-review-visibility';
 import { grantStepUp } from './helpers/step-up';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -18,6 +18,9 @@ import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { RatingService } from '../modules/rating/rating.service';
 import { CUSTOMER_ID_DOC_TYPE } from '../modules/verification/retention-rules';
 import { PRIVACY } from '../modules/legal/legal.routes';
+import { APPROVAL_TAIL, VerificationService } from '../modules/verification/verification.service';
+import { NotificationService } from '../modules/notification/notification.service';
+import { getKycProvider } from '../providers/kyc/kyc-provider';
 
 // ---------------------------------------------------------------------------
 // SWIFT-AUD-D9-05 — self-serve DPA rights: export (access + portability) and
@@ -184,6 +187,37 @@ describe('D9-05 — account deletion (erasure)', () => {
     expect(await app.prisma.supplyWatch.count({ where: { customerId: u.userId } })).toBe(0);
     expect(await app.prisma.cart.count({ where: { customerId: u.userId } })).toBe(0);
     expect(await app.prisma.cartMergeReceipt.count({ where: { userId: u.userId } })).toBe(0);
+  });
+
+  // [S2-29 · REVIEW-F 18 Oct] verification_decision_outbox rows name the person (userId) with no cascade: the
+  // erasure must take them, or the work an approval still owed outlives the account it was owed to.
+  it('the work an approval still owes the person (the decision outbox) goes with the account', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const tenantId = (await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { tenantId: true } })).tenantId;
+    await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId: `doc-${nanoid(8)}`, userId: u.userId, command: APPROVAL_TAIL } });
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(1);
+
+    const res = await inject('DELETE', '/api/v1/customer/account', u.token);
+    expect(res.statusCode).toBe(200);
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { userId: u.userId } })).toBe(0);
+  });
+
+  it('an outbox drain that claimed a row the erasure then deleted finishes without throwing', async () => {
+    const u = await makeUser(['CUSTOMER']);
+    const tenantId = (await app.prisma.user.findUniqueOrThrow({ where: { id: u.userId }, select: { tenantId: true } })).tenantId;
+    const documentId = `doc-${nanoid(8)}`;
+    await app.prisma.verificationDecisionOutbox.create({ data: { tenantId, documentId, userId: u.userId, command: APPROVAL_TAIL } });
+    const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    // The erasure commits between the drain's claim and its close: the row is gone when the drain writes.
+    const read = app.prisma.verificationDocument.findUnique.bind(app.prisma.verificationDocument);
+    const spy = vi.spyOn(app.prisma.verificationDocument, 'findUnique').mockImplementationOnce((async (args: Parameters<typeof read>[0]) => {
+      await app.prisma.verificationDecisionOutbox.deleteMany({ where: { userId: u.userId } });
+      return read(args);
+    }) as never);
+    try {
+      await expect(svc.processDecisionOutbox({ documentId, now: new Date(Date.now() + 1000) })).resolves.toEqual({ processed: 1, failed: 0 });
+    } finally { spy.mockRestore(); }
+    expect(await app.prisma.verificationDecisionOutbox.count({ where: { documentId } })).toBe(0);
   });
 
   it('[NR-3 gap 3] the deletion write barrier: a deactivated account cannot grow identity data back', async () => {

@@ -193,6 +193,10 @@ export class AccountService {
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
         await tx.deviceToken.deleteMany({ where: { userId } });
+        // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
+        // account, under this lock: a closed account is never given a trial, and the row's userId never
+        // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
+        await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
