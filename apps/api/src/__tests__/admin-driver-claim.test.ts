@@ -11,6 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { cleanupSecondApprovers, injectWithApproval } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [DS110 #19 · G3-F1] TAXI GUARANTEE CLAIMS WERE INVISIBLE TO ADMINS.
@@ -46,7 +47,7 @@ const DOOR = { lat: 6.8013, lng: -58.1553 };
 
 type Actor = { token: string; userId: string };
 
-const phone = () => `+59242${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = () => testPhone();
 
 async function makeUser(roles: string[], activeRole: string) {
   const user = await app.prisma.user.create({

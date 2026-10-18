@@ -455,10 +455,15 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(ladderJobs(o2.orderId)).toEqual([armed[0], { level: 1, delay: 60_000 }]);
 
     // RUNG 1 — still unread: the SMS fallback, exactly once, to the owner's phone.
+    // [STORE-ALERT · owner ruling 18 Oct] It names the store and the whole
+    // minutes left until the auto-cancel (rounded down, read at send time).
+    const left = Math.floor((Date.parse(respondBy) - Date.now()) / 60_000);
     expect(await runLadderJob(o2.orderId, 1)).toBe('sms_sent');
-    expect(smsTo(owner.phone).map((s) => s.body)).toEqual([
-      `Swift: order ${o2.orderNumber} is still waiting for your response. Open your dashboard now.`,
-    ]);
+    const texts = smsTo(owner.phone).map((s) => s.body);
+    expect(texts).toHaveLength(1);
+    expect([left, left - 1].map((n) =>
+      `Swift: new order ${o2.orderNumber} at Gold5 Ladder Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in ${n} min.`,
+    )).toContain(texts[0]);
     expect(pushesTo(vendorDevice)).toHaveLength(2);
     expect((await alertRow(o2.orderId)).isRead).toBe(false);
   });

@@ -17,7 +17,8 @@ import { LAUNCH_HIDDEN_BUSES, MOVER_VEHICLES } from '@/lib/signup-roles';
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
-vi.mock('@/lib/customer', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become, placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
+vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
+vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
 
 beforeEach(() => {

@@ -14,6 +14,7 @@ import {
   type MoneyActionOutcome,
 } from '@/lib/cashRail';
 import { reasonTooShort } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 /**
  * [SAN spec Part 4] The agent-cash rail.
@@ -55,7 +56,14 @@ export default function CashPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold mb-1">Cash rail</h1>
-      <p className={`text-sm mb-6 ${TONE[health.state]}`}>{health.line}</p>
+      {kpis.isError ? (
+        // A failed read is never "No figures yet": the rail's health is unknown.
+        <QueryFailed error={kpis.error} what="the cash rail figures" onRetry={() => void kpis.refetch()} retrying={kpis.isFetching} className="mb-6" />
+      ) : kpis.isLoading ? (
+        <p className="text-sm mb-6 text-[var(--muted)]">Loading…</p>
+      ) : (
+        <p className={`text-sm mb-6 ${TONE[health.state]}`}>{health.line}</p>
+      )}
 
       {k && (
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">

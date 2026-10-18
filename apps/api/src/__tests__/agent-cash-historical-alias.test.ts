@@ -9,6 +9,7 @@ import type { NotificationService } from '../modules/notification/notification.s
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
 import { importSettlementCsv } from '../modules/billing/settlement-import';
+import { testPhone } from './helpers/fixture-ids';
 
 const prisma = new PrismaClient();
 const migration = readFileSync(join(process.cwd(), 'prisma/migrations/20260930140000_mmg_one_live_identity/migration.sql'), 'utf8');
@@ -46,7 +47,7 @@ async function applyMigration(tx: Prisma.TransactionClient) {
 }
 async function account(db: PrismaClient) {
   const tag = nanoid(10);
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(1_000_000_000 + Math.random() * 8_000_000_000)}`, firstName: 'Alias', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
+  const user = await db.user.create({ data: { phone: testPhone(), firstName: 'Alias', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: {
     ownerId: owner.id, name: 'Alias fixture', slug: `alias-${tag.toLowerCase()}`, vendorType: 'RESTAURANT', phone: user.phone,

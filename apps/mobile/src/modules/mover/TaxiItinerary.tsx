@@ -314,7 +314,7 @@ export function DriverWaiting({ view, tripFare }: { view: WaitingView; tripFare:
           ) : null}
           {tripFare != null ? (
             <T variant="caption" weight="semibold" style={{ color: dk.text, marginTop: space.sm }}>
-              Collect in cash: trip fare {money(tripFare)} and waiting {money(view.charge)}.
+              Collect cash or MMG: trip fare {money(tripFare)} and waiting {money(view.charge)}.
             </T>
           ) : null}
         </View>

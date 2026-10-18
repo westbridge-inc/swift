@@ -13,6 +13,7 @@ import {
   ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, SIGNUP_CONTINUATION_COOKIE, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
 } from '../modules/auth/browser-session';
 import { browserSessionCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [A-01 / W-01] A browser session is credentials a script can never read.
@@ -31,7 +32,7 @@ let app: FastifyInstance;
 const ORIGIN = 'http://localhost:3001';
 const EVIL = 'https://evil.example';
 const RUN = nanoid(6).toLowerCase();
-const phone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = testPhone();
 const userIds: string[] = [];
 const BROWSER = { 'x-swift-client': 'admin-web', origin: ORIGIN } as const;
 
@@ -320,7 +321,7 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
 // Signing up and signing in must hand a browser the same thing.
 // ---------------------------------------------------------------------------
 describe('[W-01] a browser that registers is signed in by cookie, like one that logs in', () => {
-  const newPhone = `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const newPhone = testPhone();
   const WEB = { 'x-swift-client': 'web', origin: ORIGIN } as const;
 
   it('register answers a browser with the same HttpOnly cookie pair and no tokens — and the cookies authenticate immediately', async () => {
@@ -374,7 +375,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
   });
 
   it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
-    const nativePhone = `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const nativePhone = testPhone();
     const code = await requestOtp(app, nativePhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
     expect(verified.headers['cache-control']).toContain('no-store');
@@ -393,7 +394,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
   });
 
   it('an app that names its platform has its Terms and Privacy consent recorded on that platform', async () => {
-    const iosPhone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const iosPhone = testPhone();
     const code = await requestOtp(app, iosPhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: iosPhone, code } });
     const res = await app.inject({

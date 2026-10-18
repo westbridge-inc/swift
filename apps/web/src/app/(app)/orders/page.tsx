@@ -4,7 +4,8 @@ import { useCustomerSession } from '@/components/customer-session';
 import { OrdersListSkeleton, ORDER_ROW } from '@/components/customer-skeletons';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
-import { getOrders, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { getOrders } from '@/lib/customer-orders';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { Pictogram, verticalPictogram, type PictogramName } from '@/components/glyphs';
 

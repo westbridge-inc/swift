@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
-import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer';
+import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer-account';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
@@ -14,7 +14,15 @@ import { launchCity } from '@/lib/web-ordering';
 import { SwiftLogo } from '@/components/swift-logo';
 import { Pictogram, type PictogramName } from '@/components/glyphs';
 import { isHirePlate, MOVER_VEHICLES, TAXI_PLATE_ERROR, TAXI_PLATE_HINT } from '@/lib/signup-roles';
-import { StoreLocationPicker } from '@/components/store-location-picker';
+// [PERF] The map picker (with its place search and location code) is needed
+// only on a store's "Place your store on the map" step, so it no longer rides
+// in the sign-up page's first load. Its stylesheet stays in the page, so the
+// picker's code arrives alone (no stylesheet to fetch on demand). It starts
+// loading when a store reaches its business step, before the tap; a failed
+// fetch says so in place and can be tried again, the form kept as typed.
+import '@/components/store-location-picker.module.css';
+import type { StoreLocationPicker as StoreLocationPickerComponent } from '@/components/store-location-picker';
+import { loadStorePicker } from './store-picker-loader';
 import { STORE_PIN_OUTSIDE, storePinInMarket, type StorePin } from '@/lib/store-pin';
 import styles from '../auth-flow.module.css';
 import { TAXI_TWO_LICENCES } from '@/lib/taxi-documents';
@@ -88,6 +96,20 @@ export default function SignupPage() {
     }
   }, [placingStore]);
   const closeStorePicker = () => { restorePinFocus.current = true; setPlacingStore(false); };
+  // A store's business step fetches the map picker's code ahead of the tap.
+  const [StoreLocationPicker, setStoreLocationPicker] = useState<typeof StoreLocationPickerComponent | null>(null);
+  const [pickerFailed, setPickerFailed] = useState(false);
+  const pickerLoading = useRef(false);
+  const loadPicker = useCallback(() => {
+    if (pickerLoading.current) return;
+    pickerLoading.current = true;
+    setPickerFailed(false);
+    loadStorePicker()
+      .then((module) => setStoreLocationPicker(() => module.StoreLocationPicker))
+      .catch(() => setPickerFailed(true))
+      .finally(() => { pickerLoading.current = false; });
+  }, []);
+  useEffect(() => { if (step === 'business' && !StoreLocationPicker) loadPicker(); }, [step, StoreLocationPicker, loadPicker]);
   const [veh, setVeh] = useState({ vehicleType: 'MOTORCYCLE', make: '', model: '', color: '', licensePlate: '', year: '' });
   // A Driver's vehicles are taxis (car / wagon car): their plate starts with H.
   const taxiPlateWrong = !!veh.licensePlate.trim() && MOVER_VEHICLES.DRIVER.some((v) => v.value === veh.vehicleType) && !isHirePlate(veh.licensePlate);
@@ -316,10 +338,17 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>
             {placingStore ? (
-              <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
+              StoreLocationPicker ? <StoreLocationPicker current={storePin} address={[biz.addressLine1, biz.city, biz.region].filter(Boolean).join(', ')} onConfirm={(pin) => { setStorePin(pin); closeStorePicker(); setError(null); }} onClose={closeStorePicker} />
+              : pickerFailed ? (
+                <div role="alert" className={styles.stackTight}>
+                  <p className={styles.bodyCopy}>The map didn’t load. Check your connection; what you typed is kept.</p>
+                  <button type="button" className={styles.roleButton} onClick={loadPicker}>Try again</button>
+                  <button type="button" className={styles.roleButton} onClick={closeStorePicker}>Back</button>
+                </div>
+              ) : <p role="status" className={styles.bodyCopy}>Loading the map…</p>
             ) : (
               <>
-                <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
+                <button ref={storePinButton} type="button" disabled={busy || !biz.addressLine1.trim() || !biz.city.trim()} className={styles.roleButton} onClick={() => { setError(null); setPlacingStore(true); if (!StoreLocationPicker) loadPicker(); }}>{storePin ? 'Move the store pin' : 'Place your store on the map'}</button>
                 {storePin && <p role="status" className={styles.bodyCopy}>Store location confirmed: {storePin.address ?? biz.addressLine1}.</p>}
               </>
             )}

@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { unscopedAccessPolicy, rlsBindEnabled } from '../lib/rls-attestation';
 export { unscopedAccessPolicy, rlsBindEnabled };
-import { destructiveGuardExtension, isTestRuntime } from '../lib/test-target-lock';
+import { destructiveGuardExtension, isTestRuntime, refuseNonTestDatabaseInVitest } from '../lib/test-target-lock';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
 import { getTenantContext, tenantContext, type TenantMode } from './tenant-context';
@@ -233,7 +233,10 @@ let systemClient: PrismaClient | null = null;
 export function systemPrismaClient(): PrismaClient | null {
   const url = process.env['SYSTEM_DATABASE_URL'];
   if (!url) return null;
-  if (!systemClient) systemClient = systemConnection(new PrismaClient({ datasourceUrl: url }));
+  if (!systemClient) {
+    refuseNonTestDatabaseInVitest('SYSTEM_DATABASE_URL', url); // [AUD-G7-040] no-op outside vitest
+    systemClient = systemConnection(new PrismaClient({ datasourceUrl: url }));
+  }
   return systemClient;
 }
 /** Test seam: route system work to a given client (a raw client on the system
@@ -734,6 +737,7 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
  *  identically. Only the pool sizing differs, through the URL the caller
  *  resolves for its role. */
 export function createScopedProcessClient(options: { datasourceUrl: string | undefined }): PrismaClient {
+  refuseNonTestDatabaseInVitest('DATABASE_URL', options.datasourceUrl); // [AUD-G7-040] no-op outside vitest
   let self: PrismaClient | undefined;
   const wiring: ScopeWiring = { batch: () => self as unknown as BatchClient, system: () => systemPrismaClient() };
   const scoping = Object.fromEntries(

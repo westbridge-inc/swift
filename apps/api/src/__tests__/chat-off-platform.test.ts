@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { chatRoutes } from '../modules/chat/chat.routes';
 import { detectOffPlatformContact } from '../modules/chat/off-platform';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Off-platform contact detection (marketplace spec §2) supplies the nudge and
@@ -42,7 +43,7 @@ beforeAll(async () => {
   const mk = async (n: string) =>
     app.prisma.user.create({
       data: {
-        phone: `+59262${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: n, lastName: 'Chat',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true,
