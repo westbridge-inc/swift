@@ -1220,7 +1220,10 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(held).toBe(true);
     expect({ hold: h.doc.legalHoldId, purgedAt: h.doc.purgedAt, runDek: h.run.wrappedDek === null ? 'SHREDDED' : 'KEPT', fieldCt: h.field.valueCt === null ? 'SHREDDED' : 'KEPT' })
       .toEqual({ hold: 'synthetic-hold', purgedAt: null, runDek: 'KEPT', fieldCt: 'KEPT' });
-    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+    // TRANSFORMED (#1818 x #1840 merge): was `deletionReceipt.create` not called at all. With #1818 the erasure also
+    // erases the harness's now-unclaimed envelope (the image-purged document points at nothing) and writes THAT upload's
+    // own 'unclaimed_upload' receipt, correctly. What this case guards is the HELD document: no receipt for it.
+    expect(h.db.deletionReceipt.create.mock.calls.filter(([a]: any) => a.data.submissionId === h.doc.id)).toEqual([]);
   });
 
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
