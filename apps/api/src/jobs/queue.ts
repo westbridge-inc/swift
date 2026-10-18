@@ -465,6 +465,82 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   return true;
 }
 
+/** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An MMG order the store ACCEPTED but
+ *  never marked "Paid by MMG" cancels 30 minutes after acceptance. ONE
+ *  canonical locked transition ACCEPTED → CANCELLED re-decides the rule on the
+ *  locked row (requireUnpaidMmgAcceptanceExpired): the store's "Paid by MMG"
+ *  takes the same row lock, so a tap that committed first keeps the order and
+ *  this is a clean no-op; a cancel that committed first makes the tap refuse.
+ *  Idempotent: a second run (or a second worker) finds the order no longer
+ *  ACCEPTED and does nothing — no second status log, no second notice. A
+ *  system cancellation (cancelledBy unset): it never counts against the
+ *  customer. Exported so tests drive it directly. */
+export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string): Promise<boolean> {
+  const { OrderService } = await import('../modules/order/order.service');
+  const { MMG_ACCEPT_EXPIRY_REASON, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody } = await import('../modules/order/mmg-accept-expiry');
+  let order: { vendorId: string | null; customerId: string; orderNumber: string };
+  try {
+    ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
+      orderId,
+      target: 'CANCELLED',
+      allowedFrom: ['ACCEPTED'],
+      changedBy: null,
+      note: MMG_ACCEPT_EXPIRY_REASON,
+      cancellation: { by: null, reason: MMG_ACCEPT_EXPIRY_REASON },
+      requireUnpaidMmgAcceptanceExpired: true,
+      releaseStaleMoverPointer: true,
+      invalidStatus: () => new AppError(409, 'MMG_ACCEPT_EXPIRY_NOT_ELIGIBLE', 'Order is paid, no longer accepted, or still within its MMG payment window'),
+    }));
+  } catch (error) {
+    // Paid by MMG first, already cancelled, moved on, still inside its 30
+    // minutes, or gone — a clean no-op, never a BullMQ retry loop.
+    if (error instanceof AppError && (error.code === 'MMG_ACCEPT_EXPIRY_NOT_ELIGIBLE' || error.code === 'NOT_FOUND' || error.code === 'MMG_CANCEL_UNAVAILABLE')) {
+      return false;
+    }
+    throw error;
+  }
+
+  await emitToOrderRoom(ctx.prisma, ctx.io, orderId, 'order:status_changed', { orderId, status: 'CANCELLED' });
+  if (order.vendorId) await emitToStoreRoom(ctx.prisma, ctx.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
+
+  const storeName = order.vendorId
+    ? (await ctx.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true } }).catch(() => null))?.name ?? 'The store'
+    : 'The store';
+  const copy = mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName);
+  const { NotificationService } = await import('../modules/notification/notification.service');
+  const { publishUnattestedMmgCancellation } = await import('../modules/order/order.service');
+  await publishUnattestedMmgCancellation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
+    orderId,
+    orderNumber: order.orderNumber,
+    vendorId: order.vendorId,
+    storeBody: mmgAcceptExpiryStoreBody(order.orderNumber),
+    customer: { userId: order.customerId, title: copy.title, body: copy.body, data: { reason: 'MMG_NOT_PAID_IN_TIME' } },
+  });
+  ctx.log.info({ orderId }, 'Order auto-cancelled (MMG not marked paid within 30 minutes of acceptance)');
+  return true;
+}
+
+/** The sweep behind it: every accepted, unpaid MMG order whose 30 minutes ran
+ *  out, each through expireUnpaidMmgAcceptance in its own order's tenant. A
+ *  sweep (not a per-order delayed job) so a lost Redis job can never leave an
+ *  order waiting forever; the locked check re-decides every row it reads. */
+export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100): Promise<string[]> {
+  const { expiredUnpaidMmgAcceptanceWhere } = await import('../modules/order/mmg-accept-expiry');
+  const due = await ctx.prisma.order.findMany({
+    where: expiredUnpaidMmgAcceptanceWhere(new Date()),
+    select: { id: true },
+    orderBy: { acceptedAt: 'asc' },
+    take: batch,
+  });
+  const cancelled: string[] = [];
+  for (const { id } of due) {
+    const done = await inTenantOf(ctx.prisma, { order: id }, () => expireUnpaidMmgAcceptance(ctx, id))
+      .catch((err: unknown) => { ctx.log.error({ err, orderId: id }, 'MMG acceptance expiry failed — the next sweep retries'); return false; });
+    if (done) cancelled.push(id);
+  }
+  return cancelled;
+}
+
 /**
  * LIFECYCLE_V2 (spec Part A): held orders whose cancel window closed become
  * visible to the vendor + dispatchable. No-op while every order is unheld
@@ -2349,6 +2425,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'mmg-accept-expiry') {
+        await expireUnpaidMmgAcceptancesJob(ctx);
+        return;
+      }
+
       const dispatch = new DispatchService(ctx.prisma, ctx.redis, ctx.io, getMapsProvider(), scheduleOfferTimeout, scheduleRedispatch);
 
       if (job.name === 'dispatch-order') {
@@ -2915,6 +2996,15 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // (The precise fix — a per-order delayed job at holdExpiresAt — is noted in
   // the Total Audit; the sweep stays either way as the crash-proof backstop.)
   await queues.dispatchQueue.add('release-held-orders', {}, {
+    repeat: { every: 10_000 },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order not marked
+  // "Paid by MMG" within 30 minutes cancels. Every 10 s, so it cancels within
+  // seconds of 30:00; a sweep, so a Redis loss can never strand one.
+  await queues.dispatchQueue.add('mmg-accept-expiry', {}, {
     repeat: { every: 10_000 },
     removeOnComplete: 20,
     removeOnFail: 20,

@@ -79,6 +79,7 @@ import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
+import { isExpiredUnpaidMmgAcceptance } from './mmg-accept-expiry';
 
 interface CheckoutInput {
   userId: string;
@@ -635,6 +636,12 @@ export interface CanonicalOrderTransitionInput {
   /** Queue-only guard: the worker may cancel PENDING work only after its
    * checkout hold has elapsed. Revalidated from the locked source row. */
   requireHoldExpired?: boolean;
+  /** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] Queue-only guard: the sweep may
+   * cancel an ACCEPTED MMG order only while it is still unpaid (never marked
+   * "Paid by MMG", no rejected claim, no open disagreement) AND its 30 minutes
+   * from acceptance have run out. Re-decided on the locked source row — the
+   * store's "Paid by MMG" takes the same row lock, so the first commit wins. */
+  requireUnpaidMmgAcceptanceExpired?: boolean;
   /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
@@ -2321,6 +2328,10 @@ export class OrderService {
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    if (input.requireUnpaidMmgAcceptanceExpired && !isExpiredUnpaidMmgAcceptance(source, now)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', 'Order is paid, or still within its MMG payment window');
     }
     if (input.handover) {
       const failure = await verifyHandoverDecision(tx, source, input.handover);

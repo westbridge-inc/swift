@@ -65,6 +65,7 @@ import { AccountService, closesByRequest } from './account.service';
 import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgAcceptedPayBy, mmgAcceptExpiryNotice, mmgPayByCustomerLine } from '../order/mmg-accept-expiry';
 import { displayMmgNumber, safeMmgNumber } from '../../utils/mmg-number';
 import { formatMoney } from '../../utils/currency-amount';
 import { validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
@@ -2728,6 +2729,7 @@ export async function customerRoutes(app: FastifyInstance) {
       && !isRejectedMmgAttempt(order)
       ? safeMmgNumber(order.mmgNumberSnapshot)
       : null;
+    const payBy = mmgAcceptedPayBy(order);
     const mmgPayment = shownMmgNumber
       ? (() => {
           const recipientName = order.mmgRecipientNameSnapshot ?? order.vendor?.name ?? 'the store';
@@ -2743,6 +2745,8 @@ export async function customerRoutes(app: FastifyInstance) {
             amount,
             currencyCode: order.currencyCode,
             instruction: `Pay ${formatMoney(amount, order.currencyCode, { whole: true })} by MMG to ${recipientName}'s MMG number ${numberDisplay}.`,
+            // [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled.
+            ...(payBy ? { payBy: payBy.toISOString(), deadline: mmgPayByCustomerLine(payBy, order.vendor?.name ?? 'the store') } : {}),
           };
         })()
       : null;
@@ -2946,6 +2950,8 @@ export async function customerRoutes(app: FastifyInstance) {
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
         cancellationReason: order.cancellationReason,
+        // [owner 18 Oct 2026] Why an unpaid MMG order closed, in the customer's words (null otherwise).
+        cancellationNotice: mmgAcceptExpiryNotice(order, order.vendor?.name ?? 'The store'),
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,

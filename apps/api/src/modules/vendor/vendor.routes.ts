@@ -1,3 +1,4 @@
+import { mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
@@ -707,6 +708,14 @@ function storeMoneySurfaceView(row: {
     mmgNumberPending: safeMmgNumber(row.mmgNumberPending),
     mmgNumberApplyAt: row.mmgNumberPending ? row.mmgNumberApplyAt : null,
   };
+}
+
+
+/** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order waiting for "Paid by MMG"
+ *  cancels 30 minutes after acceptance: the store sees when (server clock, the sweep's rule). */
+function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
+  const payBy = mmgAcceptedPayBy(order);
+  return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
 }
 
 export async function vendorRoutes(app: FastifyInstance) {
@@ -1778,6 +1787,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
       items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
+      ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
 
@@ -1796,7 +1806,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
