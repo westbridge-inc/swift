@@ -527,12 +527,10 @@ export class LiveMmgProvider implements MmgMerchantProvider {
     private fetchFn: typeof fetch = fetch,
   ) {}
 
-  private async call(path: string, init: NonNullable<Parameters<typeof fetch>[1]>): Promise<Response> {
-    return this.callReading(path, init, async (response) => response);
-  }
-
-  /** Keep the deadline active through the response body, including transports
-   * that do not settle their body promise when the signal is aborted. */
+  /** Every MMG call: the deadline stays active through the response body,
+   * including transports that do not settle their body promise when the
+   * signal is aborted. `read` consumes the body; nothing reads a body outside
+   * it (a body awaited after the deadline cleared could stall a poll forever). */
   private async callReading<T>(path: string, init: NonNullable<Parameters<typeof fetch>[1]>, read: (response: Response) => Promise<T>): Promise<T> {
     const ac = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -600,7 +598,7 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   async initiatePayment(req: MmgInitiateRequest): Promise<MmgTxResult> {
     try {
       const headers = await this.wssHeaders(req.reference);
-      const res = await this.call(
+      const read = await this.callReading(
         `/e-merchant-initiated-transactions/payment?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}`,
         {
           method: 'POST',
@@ -614,19 +612,23 @@ export class LiveMmgProvider implements MmgMerchantProvider {
             creditParty: [{ key: 'accountid', value: this.cfg.merchantMsisdn }],
           }),
         },
+        async (res) => {
+          // Terminal business rejection (e.g. INVALID_* / limit codes).
+          if (res.status === 422) return { kind: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { kind: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { kind: 'ok' as const, body: (await res.json()) as any };
+        },
       );
-      if (res.status === 422) {
-        // Terminal business rejection (e.g. INVALID_* / limit codes).
-        const body: any = await res.json().catch(() => ({}));
+      if (read.kind === 'declined') {
+        const body = read.body;
         return { status: 'declined', transactionId: String(body?.transactionId ?? ''), reason: String(body?.message ?? 'MMG rejected the payment') };
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        return { status: 'error', transactionId: '', reason: `MMG payment HTTP ${res.status}: ${detail.slice(0, 200)}` };
+      if (read.kind === 'http') {
+        return { status: 'error', transactionId: '', reason: `MMG payment HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
       // 200 → { status: "pending", pendingReason: "approvalrequired",
       //         notificationMethod: "polling", executionId, expiryTime }
-      const body: any = await res.json();
+      const body: any = read.body;
       // A successful response without a usable provider id is still an
       // affirmative observation. The billing intent must hold it for history
       // reconciliation, never look up a coerced object or whitespace token.
@@ -647,21 +649,24 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   async reverseTransaction(req: { transactionId: string; reason?: string }): Promise<MmgTxResult> {
     try {
       const headers = await this.wssHeaders(`rev-${req.transactionId}`);
-      const res = await this.call(
+      const read = await this.callReading(
         `/e-merchant-initiated-transactions/reversal?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}&transactionId=${encodeURIComponent(req.transactionId)}`,
         { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' },
+        async (res) => {
+          if (res.status === 422) return { kind: 'declined' as const, body: (await res.json().catch(() => ({}))) as any };
+          if (!res.ok) return { kind: 'http' as const, status: res.status, detail: await res.text().catch(() => '') };
+          return { kind: 'ok' as const, body: (await res.json()) as any };
+        },
       );
-      if (res.status === 422) {
+      if (read.kind === 'declined') {
         // [MMG REVERSAL] MMG's business refusal: an ANSWER ("no"), unlike a
         // transport failure. The lookup still decides what Swift records.
-        const body: any = await res.json().catch(() => ({}));
-        return { status: 'declined', transactionId: req.transactionId, reason: String(body?.message ?? 'MMG reversal rejected') };
+        return { status: 'declined', transactionId: req.transactionId, reason: String(read.body?.message ?? 'MMG reversal rejected') };
       }
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        return { status: 'error', transactionId: req.transactionId, reason: `MMG reversal HTTP ${res.status}: ${detail.slice(0, 200)}` };
+      if (read.kind === 'http') {
+        return { status: 'error', transactionId: req.transactionId, reason: `MMG reversal HTTP ${read.status}: ${read.detail.slice(0, 200)}` };
       }
-      const body: any = await res.json();
+      const body: any = read.body;
       const mmgStatus = String(body?.transactionStatus ?? '').toLowerCase();
       return {
         // A 200 means MMG accepted the reversal; "pending" is it working
@@ -677,12 +682,14 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   /** GET /lookup — poll target for the initiate flow. Throws on transport. */
   async transactionLookup(req: { transactionId: string }): Promise<MmgTransaction> {
     const headers = await this.wssHeaders(`lkp-${req.transactionId}`);
-    const res = await this.call(
+    const body: any = await this.callReading(
       `/e-merchant-initiated-transactions/lookup?transactionId=${encodeURIComponent(req.transactionId)}`,
       { method: 'GET', headers },
+      async (res) => {
+        if (!res.ok) throw new Error(`MMG lookup failed (HTTP ${res.status})`);
+        return await res.json();
+      },
     );
-    if (!res.ok) throw new Error(`MMG lookup failed (HTTP ${res.status})`);
-    const body: any = await res.json();
     return {
       // Settlement evidence must be exactly what MMG returned on the wire.
       // Falling back to our request id or the platform currency would turn an
@@ -700,19 +707,20 @@ export class LiveMmgProvider implements MmgMerchantProvider {
    *  400/404/422 mean MMG does not know the id; only an HTTP 200 object is an
    *  answer (owner, 1 Oct); anything else is an error to retry, never a verdict. */
   async transactionLookupDetail(transactionId: string): Promise<MmgLookupDetail> {
-    let res: Response;
+    let read: { status: number; body: unknown };
     try {
       const headers = await this.wssHeaders(`lkp-${transactionId}`);
-      res = await this.call(
+      read = await this.callReading(
         `/e-merchant-initiated-transactions/lookup?transactionId=${encodeURIComponent(transactionId)}`,
         { method: 'GET', headers },
+        async (res) => ({ status: res.status, body: res.status === 200 ? await res.json().catch(() => null) : null }),
       );
     } catch (err) {
       return { outcome: 'error', reason: `MMG lookup unreachable: ${(err as Error).message}` };
     }
-    if (res.status === 400 || res.status === 404 || res.status === 422) return { outcome: 'not_found' };
-    if (res.status !== 200) return { outcome: 'error', reason: `MMG lookup HTTP ${res.status}` };
-    const body: unknown = await res.json().catch(() => null);
+    if (read.status === 400 || read.status === 404 || read.status === 422) return { outcome: 'not_found' };
+    if (read.status !== 200) return { outcome: 'error', reason: `MMG lookup HTTP ${read.status}` };
+    const body = read.body;
     if (!body || typeof body !== 'object' || Array.isArray(body)) return { outcome: 'error', reason: 'MMG lookup answered with no object' };
     return lookupDetailFrom(body as Record<string, unknown>, transactionId);
   }
@@ -745,9 +753,10 @@ export class LiveMmgProvider implements MmgMerchantProvider {
       todate: to.toISOString(),
       msisdn: this.cfg.merchantMsisdn,
     });
-    const res = await this.call(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers });
-    if (!res.ok) throw new Error(`MMG history failed (HTTP ${res.status})`);
-    const body: any = await res.json();
+    const body: any = await this.callReading(`/e-merchant-initiated-transactions/txn-history?${qs}`, { method: 'GET', headers }, async (res) => {
+      if (!res.ok) throw new Error(`MMG history failed (HTTP ${res.status})`);
+      return await res.json();
+    });
     const list: any[] = Array.isArray(body?.TransactionList) ? body.TransactionList : [];
     const mapped = list.map((t) => ({
       transactionId: String(t?.transactionReference ?? ''),
@@ -763,12 +772,14 @@ export class LiveMmgProvider implements MmgMerchantProvider {
   /** GET /balance — the collection account's available balance. Throws on transport. */
   async accountBalance(): Promise<MmgBalance> {
     const headers = await this.wssHeaders(`bal-${this.cfg.merchantMsisdn}`);
-    const res = await this.call(
+    const body: any = await this.callReading(
       `/e-merchant-initiated-transactions/balance?merchant_msisdn=${encodeURIComponent(this.cfg.merchantMsisdn)}`,
       { method: 'GET', headers },
+      async (res) => {
+        if (!res.ok) throw new Error(`MMG balance failed (HTTP ${res.status})`);
+        return await res.json();
+      },
     );
-    if (!res.ok) throw new Error(`MMG balance failed (HTTP ${res.status})`);
-    const body: any = await res.json();
     const wallet = Array.isArray(body?.accounts) ? body.accounts[0] : null;
     return {
       currencyCode: String(wallet?.accountBalance?.currency ?? 'GYD'),

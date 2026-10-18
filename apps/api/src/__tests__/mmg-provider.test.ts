@@ -439,6 +439,46 @@ describe('MMG live adapter — Transaction History for the checkout payment time
     }
   });
 
+  // [Sol S2 class, 18 Oct] Every live call reads its body inside the deadline:
+  // the checkout lookup and a weekly-fee reversal (never throw) answer an error
+  // so the serial poll moves on; the throwing reads reject. 200 reads the JSON,
+  // 422 MMG's refusal body, 503 the error text: each body may stall.
+  const STALLING: ReadonlyArray<[string, number, (mmg: LiveMmgProvider) => Promise<unknown>, 'answer' | 'throws']> = [
+    ['checkout lookup', 200, (mmg) => mmg.transactionLookupDetail('20402048536279'), 'answer'],
+    ['reversal', 200, (mmg) => mmg.reverseTransaction({ transactionId: 'tx-stall' }), 'answer'],
+    ['reversal', 422, (mmg) => mmg.reverseTransaction({ transactionId: 'tx-stall' }), 'answer'],
+    ['reversal', 503, (mmg) => mmg.reverseTransaction({ transactionId: 'tx-stall' }), 'answer'],
+    ['payment', 200, (mmg) => mmg.initiatePayment({ reference: 'ref-stall', amountMinor: 50_000, currencyCode: 'GYD', payerId: 'payer-stall' }), 'answer'],
+    ['payment', 422, (mmg) => mmg.initiatePayment({ reference: 'ref-stall', amountMinor: 50_000, currencyCode: 'GYD', payerId: 'payer-stall' }), 'answer'],
+    ['payment', 503, (mmg) => mmg.initiatePayment({ reference: 'ref-stall', amountMinor: 50_000, currencyCode: 'GYD', payerId: 'payer-stall' }), 'answer'],
+    ['poll lookup', 200, (mmg) => mmg.transactionLookup({ transactionId: 'tx-stall' }), 'throws'],
+    ['history list', 200, (mmg) => mmg.transactionHistory(), 'throws'],
+    ['balance', 200, (mmg) => mmg.accountBalance(), 'throws'],
+  ];
+  it.each(STALLING)('bounds a stalled %s body (HTTP %i) within the deadline', async (_name, status, run, shape) => {
+    vi.useFakeTimers();
+    try {
+      let stalledSignal: AbortSignal | null | undefined;
+      const fetchMock = vi.fn(async (url: string, init?: Parameters<typeof fetch>[1]) => {
+        if (url.includes('/e-commerce-login/mer')) return AUTH_OK;
+        stalledSignal = init?.signal;
+        const never = () => new Promise(() => {});
+        return { ok: status >= 200 && status < 300, status, json: never, text: never };
+      });
+      let result: unknown = 'pending';
+      void run(new LiveMmgProvider(CFG, fetchMock as any)).then((answer) => { result = answer; }, (err: Error) => { result = { thrown: err.message }; });
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(result).toBe('pending');
+      await vi.advanceTimersByTimeAsync(1);
+      if (shape === 'throws') expect(result).toEqual({ thrown: 'MMG request timed out' });
+      else expect(result).toMatchObject(_name === 'checkout lookup' ? { outcome: 'error' } : { status: 'error' });
+      expect(stalledSignal?.aborted).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reads the answer whole: a missing or non-list TransactionList, or any row that is not an object, is an error, never a shorter list', () => {
     expect(historyAnswerFrom(200, UAT_ANSWER)).toEqual({ outcome: 'rows', rows: [OTHER_ROW, UAT_ROW] });
     expect(historyAnswerFrom(200, { executionId: 'E', TransactionList: [] })).toEqual({ outcome: 'rows', rows: [] });
