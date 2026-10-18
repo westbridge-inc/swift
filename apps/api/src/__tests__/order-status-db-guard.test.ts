@@ -4,6 +4,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { OrderStatus, PrismaClient, type Prisma } from '@prisma/client';
 import { ORDER_TRANSITIONS, RECOVERY_TRANSITIONS } from '../modules/order/order-status';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import {
   ORDER_STATUS_GUARD,
   ORDER_STATUS_LOG_GUARD,
@@ -33,7 +34,8 @@ import {
 // connections) and cleans up after itself.
 // ---------------------------------------------------------------------------
 
-const db = new PrismaClient();
+// testPrismaClient() refuses any database that is not a disposable test one (AUD-G7-040 ratchet).
+const db = testPrismaClient();
 const RUN = randomUUID().replace(/-/g, '').slice(0, 10);
 const PHONE = `+592264${String(Number.parseInt(RUN.slice(0, 6), 16) % 100000).padStart(5, '0')}`;
 const STATUSES = Object.values(OrderStatus) as OrderStatus[];
