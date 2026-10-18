@@ -39,6 +39,8 @@ export const TENANT_TABLES = [
   'mmg_refund_obligations',
   'mmg_refund_sends',
   'rating_outbox',
+  // [S2-29] A document approval's owed work belongs to the document's tenant.
+  'verification_decision_outbox',
   'privileged_approvals',
   'sensitive_read_logs',
   // [STA-1 Part 4] The reviewer fiction is walled like every other tenant's rows.

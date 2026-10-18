@@ -128,7 +128,7 @@ export function VendorBillingSuspended({ store, stores, myRole }: { store: any; 
         <HeldStoreOrders canFinishAccepted navigation={navigation} />
 
         <T variant="caption" tone="muted" center>
-          Swift never takes commission. The weekly fee is separate from customer order money.
+          Swift takes no commission on orders. The weekly fee is separate from customer order money.
         </T>
       </ScrollView>
     </Screen>

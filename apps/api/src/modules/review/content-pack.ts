@@ -344,10 +344,11 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
         latitude: LAUNCH_CITY.lat + store.offset.lat, longitude: LAUNCH_CITY.lng + store.offset.lng,
         cuisineTypes: store.cuisineTypes, tags: store.tags,
       };
-      // Live inside the fiction, and only there; no MMG link, no public phone.
+      // Live inside the fiction, and only there; no MMG link, no MMG number, no public phone.
       const live = {
         status: 'ACTIVE' as const, isVerified: true, acceptingOrders: true, isCurrentlyOpen: true,
         mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null, publicPhone: null,
+        mmgNumber: null, mmgNumberPending: null, mmgNumberPendingAt: null, mmgNumberApplyAt: null,
       };
       await prisma.vendor.upsert({
         where: { id, tenantId },

@@ -140,8 +140,24 @@ describe('[R3] every store page carries the seller block', () => {
     expect((await webView(slug)).seller).toEqual(bare);
   });
 
-  it('MMG is named only while the store has a working MMG link of its own', async () => {
+  it('[PAYMENT-SIMPLIFY] switch off (default): MMG is named for a store with a valid MMG NUMBER, never for a pay link alone', async () => {
     vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '');
+    const { vendorId, slug } = await store(3001); // own index: main's row-248 receipt test uses 9
+    await setStore(vendorId, { mmgPayUrl: LINK });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+    await setStore(vendorId, { mmgNumber: '+5926001234' });
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });
+    const web = await webView(slug);
+    expect(web.seller.payment).toEqual({ cash: true, storeMmg: true });
+    expect(JSON.stringify(web)).not.toContain('6001234'); // the number is never on the storefront
+    await setStore(vendorId, { mmgNumber: '+5922251234' }); // a landline row: re-checked on read
+    expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: false });
+  });
+
+  it('MMG is named only while the store has a working MMG link of its own (the dormant link, STORE_MMG_PAY_LINK=1)', async () => {
+    vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+    vi.stubEnv('STORE_MMG_PAY_LINK', '1');
     const { vendorId, slug } = await store(3);
     await setStore(vendorId, { mmgPayUrl: LINK });
     expect((await appView(vendorId)).seller.payment).toEqual({ cash: true, storeMmg: true });
@@ -194,13 +210,17 @@ describe('[R3] the refund rule is the store owner\'s own words, checked on write
     expect((await appView(vendorId)).seller.refundRule).toBeNull();
   });
 
-  it.each([
+  // Each case has its own fixed store index (REFUSAL_BASE + its row), clear of every other
+  // store index in this file; storefront-seller-block-indexes.test.ts keeps them unique.
+  const REFUSAL_BASE = 4001;
+  const REFUSALS = [
     ['a link', 'Refunds: see https://example.com/refunds', 'REFUND_RULE_INVALID'],
     ['a web address without a scheme', 'Read www.example.com first', 'REFUND_RULE_INVALID'],
     ['more than 300 characters', `Refunds ${'x'.repeat(300)}`, 'REFUND_RULE_INVALID'],
     ['goods Swift never carries', 'No refunds on rum or cigarettes once opened.', 'REFUND_RULE_INVALID'],
-  ])('refuses %s, and keeps the rule on file as it was', async (_what, text, code) => {
-    const { userId, vendorId } = await store(8 + Math.floor(Math.random() * 1000));
+  ] as const;
+  it.each(REFUSALS.map(([what, text, code], row) => [what, text, code, REFUSAL_BASE + row] as const))('refuses %s, and keeps the rule on file as it was', async (_what, text, code, n) => {
+    const { userId, vendorId } = await store(n);
     await setStore(vendorId, { refundRule: 'Exchanges only.' });
     const res = await saveRefundRule(await tokenFor(userId), vendorId, text);
     expect(res.statusCode).toBe(400);
@@ -218,5 +238,54 @@ describe('[R3] the refund rule is the store owner\'s own words, checked on write
     const res = await saveRefundRule(await tokenFor(manager.id, 'CUSTOMER'), vendorId, 'Anything goes.');
     expect(res.statusCode).toBe(403);
     expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { refundRule: true } }))).refundRule).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [Triage row 248 · R3 · CAA s.70] The order receipt names who sold, from the SAME seller block the store page shows:
+// the legal name, address and published phone on file. With nothing on file it names the store by its trading name
+// and address (never a guess). Synthetic store, customer and order.
+// ---------------------------------------------------------------------------
+describe('[row 248] the order receipt says who sold', () => {
+  const orderIds: string[] = [];
+  afterAll(async () => {
+    await system(() => app.prisma.order.deleteMany({ where: { id: { in: orderIds } } }));
+  });
+
+  async function deliveredOrderFrom(vendorId: string, n: number) {
+    const customer = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
+      phone: `+59269${NUM}${n}`, firstName: 'Rita', lastName: `Receipt${n}`, activeRole: 'CUSTOMER', roles: ['CUSTOMER'], countryCode: 'GY',
+      isPhoneVerified: true, customer: { create: {} },
+    } }));
+    users.push(customer.id);
+    const order = await system(() => app.prisma.order.create({ data: {
+      orderNumber: `SOLD-${RUN}-${n}`, orderType: 'FOOD_DELIVERY' as never, customerId: customer.id, vendorId,
+      status: 'DELIVERED' as never, fulfillment: 'DELIVERY' as never,
+      deliveryAddress: '5 Receipt Row', deliveryLat: 6.8, deliveryLng: -58.15,
+      subtotalBase: 2500, subtotalMarkup: 0, subtotalCustomer: 2500, deliveryFee: 600, tipAmount: 0, discount: 0, totalAmount: 3100,
+      paymentMethod: 'CASH' as never,
+      items: { create: [{ itemId: 'x1', name: 'Pepperpot', quantity: 1, basePrice: 2500, markedUpPrice: 2500, markupAmount: 0, totalBase: 2500, totalMarkup: 0, totalCustomer: 2500 }] },
+    } }));
+    orderIds.push(order.id);
+    const res = await app.inject({
+      method: 'GET', url: `/api/v1/customer/orders/${order.id}/receipt`,
+      headers: { authorization: `Bearer ${await tokenFor(customer.id, 'CUSTOMER')}` },
+    });
+    expect(res.statusCode).toBe(200);
+    return res.body;
+  }
+
+  it('names the seller’s legal name, address and published phone, as on the store page', async () => {
+    const { userId, vendorId } = await store(9);
+    await approved(userId, 'owner_national_id');
+    const html = await deliveredOrderFrom(vendorId, 9);
+    expect(html).toContain(`Sold by Asha Ramdin9 trading as Asha's Bakery ${RUN}9 — 9 Robb Street, Lacytown · +5926001300`);
+  });
+
+  it('with no legal name on file it names the store by its trading name and address, never a guess', async () => {
+    const { vendorId } = await store(2002, { publicPhone: null });
+    const html = await deliveredOrderFrom(vendorId, 2002);
+    expect(html).toMatch(new RegExp(`Sold by Asha's Bakery ${RUN}2002 — 2002 Robb Street, (Lacytown|Georgetown)`));
+    expect(html).not.toContain('trading as');
   });
 });

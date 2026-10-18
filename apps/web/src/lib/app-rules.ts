@@ -15,9 +15,13 @@
 export { isHomeFeed, marketTabVisible } from '../../../mobile/src/lib/homeReliability';
 export {
   cartPaymentOptions,
+  checkoutPaymentFields,
   checkoutPaymentMethod,
+  mmgOffered,
   normalizeCartPaymentCapabilities,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../../../mobile/src/modules/cart/cartPayment';
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The accepted order's "Pay $X by MMG to <store>'s MMG number": one parser.
+export { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../mobile/src/lib/mmgStorePayment';

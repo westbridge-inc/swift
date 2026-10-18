@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { legacyCategoryMark } from './legacy-category-mark';
 import { CAT_MAX_ITEM_TAGS, suggestCategories, type MatchableCategory } from './matcher';
 import { reconcileVendorDerived } from './derivation';
 import { assertCategoryAllowed } from '../compliance/prohibited-gate';
@@ -57,7 +58,7 @@ export class DiscoveryService {
     const byId = new Map(categories.map((c) => [c.id, c]));
     const shape = (r: (typeof rows)[number]) => {
       const c = byId.get(r.categoryId);
-      return c ? { slug: c.slug, name: c.name, emoji: c.emoji, kind: c.kind } : null;
+      return c ? { slug: c.slug, name: c.name, emoji: legacyCategoryMark(c), kind: c.kind } : null;
     };
     return {
       primary: rows.filter((r) => r.role === 'PRIMARY' && r.source !== 'DERIVED').map(shape).find(Boolean) ?? null,
@@ -177,7 +178,7 @@ export class DiscoveryService {
     return rows
       .map((r) => {
         const c = byId.get(r.categoryId);
-        return c ? { slug: c.slug, name: c.name, emoji: c.emoji, source: r.source, confidence: r.confidence ? Number(r.confidence) : null } : null;
+        return c ? { slug: c.slug, name: c.name, emoji: legacyCategoryMark(c), source: r.source, confidence: r.confidence ? Number(r.confidence) : null } : null;
       })
       .filter(Boolean);
   }
@@ -194,7 +195,7 @@ export class DiscoveryService {
     return rows
       .map((r) => {
         const c = byId.get(r.categoryId);
-        return c ? { id: r.id, slug: c.slug, name: c.name, emoji: c.emoji, confidence: Number(r.confidence), stage: r.stage } : null;
+        return c ? { id: r.id, slug: c.slug, name: c.name, emoji: legacyCategoryMark(c), confidence: Number(r.confidence), stage: r.stage } : null;
       })
       .filter(Boolean);
   }
@@ -241,7 +242,7 @@ export class DiscoveryService {
       if (!item || !cat) continue; // a merged/retired category is not offered
       const entry = grouped.get(item.id) ?? { itemId: item.id, itemName: item.name, imageUrl: item.imageUrl, suggestions: [] };
       entry.suggestions.push({
-        id: r.id, slug: cat.slug, name: cat.name, emoji: cat.emoji,
+        id: r.id, slug: cat.slug, name: cat.name, emoji: legacyCategoryMark(cat),
         confidence: Number(r.confidence), stage: r.stage,
       });
       grouped.set(item.id, entry);

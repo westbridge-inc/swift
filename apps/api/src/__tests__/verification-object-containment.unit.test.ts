@@ -55,9 +55,12 @@ function referencePage(rows: any[], query: any, column: string) {
 
 function rawSecurityCensus(people: Map<string, any>, orphans: Map<string, any>, query: unknown, values: unknown[]) {
   const sql = String(query);
-  if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')) {
+  if (sql.includes('avatar-global-census-visibility') || sql.includes('avatar-obligation-global-census-visibility')
+    || sql.includes('upload-erasure-global-visibility')) {
     return [{ active: false }];
   }
+  // [Row 331] The upload/liveness erasure census: no other row in this harness references a subject's upload.
+  if (sql.includes('upload-erasure-object-references') || sql.includes('upload-erasure-liveness-references')) return [];
   if (sql.includes('avatar-global-census-page')) {
     const after = String(values[0] ?? '');
     const take = Number(values[1]);
@@ -184,6 +187,10 @@ function harness() {
   for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
     db[name] = { deleteMany: vi.fn() };
   }
+  // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
+  // and an unclaimed upload is kept while the person is under a legal hold (none here).
+  db.livenessCheck.findMany = vi.fn(async () => []);
+  db.docLegalHold = { count: vi.fn(async () => 0) };
   // The synthetic route session is not a fresh code sign-in, so deletion
   // falls through to the step-up grant the route harness holds in Redis.
   db.session.findUnique = vi.fn(async () => null);
@@ -763,7 +770,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.auditLog.create.mockResolvedValue({});
     vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
       deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1,
-      pendingAvatarObjects: 1, message: 'Personal-data erasure pending.',
+      pendingAvatarObjects: 1, pendingUploads: 1, message: 'Personal-data erasure pending.',
     });
     const routes = await handlers(h, customerRoutes);
     const reply = { code: vi.fn() };
@@ -772,7 +779,24 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(reply.code).toHaveBeenCalledWith(202);
     expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
       action: 'ACCOUNT_SELF_DELETION_PENDING',
-      changes: expect.objectContaining({ pendingDocuments: 1, pendingAvatarObjects: 1 }),
+      changes: expect.objectContaining({ pendingDocuments: 1, pendingAvatarObjects: 1, pendingUploads: 1 }),
+    }) }));
+  });
+
+  it('[Row 331] HTTP deletion under a legal hold records what the hold keeps on the audit row', async () => {
+    const h = harness();
+    h.db.auditLog.create.mockResolvedValue({});
+    vi.spyOn(AccountService.prototype, 'deleteAccount').mockResolvedValue({
+      deleted: false, status: 'PENDING_LEGAL_HOLD', heldDocuments: 1, heldMoverObjects: 0, heldUploads: 2,
+      pendingDocuments: 0, pendingAvatarObjects: 0, pendingUploads: 0, message: 'Held.',
+    });
+    const routes = await handlers(h, customerRoutes);
+    const result = await routes.get('delete /account')!({ user: { userId: A }, authSessionId: 'verified-synthetic-session' }, { code: vi.fn() });
+    // This harness speaks as build 9 (no modern receipts): its own word, with the real reason beside it.
+    expect(result).toMatchObject({ success: true, data: { deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingReason: 'PENDING_LEGAL_HOLD', heldUploads: 2 } });
+    expect(h.db.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      action: 'ACCOUNT_SELF_DELETION_PENDING',
+      changes: expect.objectContaining({ status: 'PENDING_LEGAL_HOLD', heldDocuments: 1, heldMoverObjects: 0, heldUploads: 2 }),
     }) }));
   });
 
@@ -858,6 +882,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
 
   it('account deletion stays pending when avatar absence cannot be proved', async () => {
     const h = accountHarness();
+    h.objects.delete(key(A)); // [Row 331] no uploads: this case is about the avatar alone
     storage.delete.mockResolvedValue(undefined);
     storage.getObject.mockResolvedValue(Buffer.from('avatar-still-present'));
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({
@@ -1150,6 +1175,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
 
   it('F-220-01: early tombstoning preserves the original phone in the already-authorized safety escrow', async () => {
     const h = accountHarness(); h.person.avatar = '';
+    // [Row 331] This subject never uploaded a file (an unclaimed upload would now be owed too).
+    h.objects.delete(key(A));
     vi.stubEnv('MASTER_KEK', Buffer.alloc(32, 7).toString('base64')); resetKeyProviderForTests();
     h.db.sosAlert.findMany.mockResolvedValue([{ id: 'synthetic-alert' }]);
     h.db.emergencyContact.findMany = vi.fn(async () => []);
@@ -1175,9 +1202,35 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
   });
 
+  // [Row 243 / #1840, REVIEW-M S2-1 — probe written by the independent reviewer, adopted as is] A document whose image
+  // R24 already purged (fileUrl '') never enters the fence; the erasure's close must still re-check the hold under the
+  // person's lock, or a hold that lands after the census loses the record and its extracted values.
+  it('an image-purged document held after the erasure census keeps its record and values', async () => {
+    const h = erasureRaceHarness();
+    Object.assign(h.doc, { fileUrl: '', imagePurgedAt: new Date(0) });
+    const census = h.db.verificationDocument.findMany.getMockImplementation()!;
+    let held = false;
+    h.db.verificationDocument.findMany.mockImplementation(async (query: any) => {
+      const rows = await census(query);
+      const w = query?.where ?? {};
+      if (!held && w.userId === A && w.purgedAt === null && w.legalHoldId === null) { held = true; Object.assign(h.doc, { legalHoldId: 'synthetic-hold' }); }
+      return rows;
+    });
+    await h.account.deleteAccount(A).catch(() => undefined);
+    expect(held).toBe(true);
+    expect({ hold: h.doc.legalHoldId, purgedAt: h.doc.purgedAt, runDek: h.run.wrappedDek === null ? 'SHREDDED' : 'KEPT', fieldCt: h.field.valueCt === null ? 'SHREDDED' : 'KEPT' })
+      .toEqual({ hold: 'synthetic-hold', purgedAt: null, runDek: 'KEPT', fieldCt: 'KEPT' });
+    // TRANSFORMED (#1818 x #1840 merge): was `deletionReceipt.create` not called at all. With #1818 the erasure also
+    // erases the harness's now-unclaimed envelope (the image-purged document points at nothing) and writes THAT upload's
+    // own 'unclaimed_upload' receipt, correctly. What this case guards is the HELD document: no receipt for it.
+    expect(h.db.deletionReceipt.create.mock.calls.filter(([a]: any) => a.data.submissionId === h.doc.id)).toEqual([]);
+  });
+
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
     const h = accountHarness(); const doc = h.poison();
     doc.fileUrl = fault === 'legacy' ? `/uploads/verification/${A}/legacy.jpg` : key(A);
+    // [Row 331] A legacy pointer leaves no envelope of the subject's own behind (else it would be an unclaimed upload, now owed too).
+    if (fault === 'legacy') h.objects.delete(key(A));
     doc.retentionExpiresAt = null; doc.user = h.person;
     if (fault === 'metadata-missing') h.objects.delete(key(A));
     if (fault === 'metadata-outage') h.db.encryptedObject.findMany.mockRejectedValue(new Error('metadata offline'));
@@ -1251,7 +1304,13 @@ describe('review corrections: deletion obligations and retry progress', () => {
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingDocuments: 1 });
     expect(doc).toMatchObject({ purgedAt: null, fileUrl: key(A) });
     expect(h.db.deletionReceipt.create).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ data: expect.objectContaining({ verificationProbeResult: 'FAILED' }) }));
-    expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();
+    // TRANSFORMED (row 243 / #1840, REVIEW-G S2-1): was `not.toHaveBeenCalled()`. The key is now shredded under the
+    // person's row lock BEFORE any storage call (no storage I/O under a lock, so a held document can never be destroyed
+    // late); an unreachable store leaves only unreadable bytes and the document still due, and the next run finishes
+    // the purge (legal-hold-purge-fence.test.ts). Still: exactly one shred, of this person's own object, and nothing else.
+    expect(h.db.encryptedObject.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: { fileKey: key(A), createdBy: A }, data: { wrappedDek: null, shreddedAt: expect.any(Date) },
+    });
     expect(h.db.session.deleteMany).toHaveBeenCalledOnce();
     expect(h.db.user.update).toHaveBeenLastCalledWith(expect.objectContaining({ data: expect.objectContaining({ phone: `deleted:${A}` }) }));
   });

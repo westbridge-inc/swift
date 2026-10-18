@@ -240,6 +240,8 @@ async function allRedisKeys(): Promise<Set<string>> {
 
 beforeAll(async () => {
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', PAY_HOST);
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);

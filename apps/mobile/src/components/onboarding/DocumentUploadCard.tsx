@@ -76,6 +76,7 @@ export function DocumentUploadCard({
   replaced = false,
   optionalHint,
   hint,
+  consented = false,
 }: {
   role: string;
   docType: string;
@@ -91,6 +92,8 @@ export function DocumentUploadCard({
   optionalHint?: string;
   /** [Owner ruling 11 Oct 2026] What this document is, in plain words (taxi checklist). */
   hint?: string;
+  /** [R17] The checklist's consent tick is given: only then can a document be uploaded. */
+  consented?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -200,7 +203,9 @@ function explainPermissionDenied(
     ? ((upload.error as any)?.response?.data?.error?.message ?? 'Upload failed — tap to try again')
     : null;
 
-  const caption = uploadErr
+  const caption = !consented && !approved && !pending && !uploadErr
+    ? 'Tick the box above to upload'
+    : uploadErr
     ? uploadErr
     : approved
       ? daysLeft != null
@@ -225,7 +230,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
+    <Pressable disabled={approved || upload.isPending || !consented} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
