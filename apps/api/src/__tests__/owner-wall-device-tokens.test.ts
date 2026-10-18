@@ -19,7 +19,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
@@ -70,7 +71,7 @@ const active = (userId: string) => owner.deviceToken.count({ where: { userId, is
 
 beforeAll(async () => {
   for (const k of ENV_KEYS) priorEnv[k] = process.env[k];
-  owner = new PrismaClient({ datasourceUrl: TEST_URL });
+  owner = testPrismaClient(TEST_URL);
   logins = await createTenantProbeLogins(owner, TEST_URL);
   requestRole = decodeURIComponent(new URL(logins.requestUrl).username);
   await owner.$executeRawUnsafe(`GRANT swift_owner_wall TO ${requestRole}`);
@@ -144,7 +145,7 @@ const asPerson = <T>(userId: string, fn: () => PromiseLike<T>): Promise<T> =>
 
 describe('[item 20] device tokens: the owner wall fails closed', () => {
   it('unbound, and another person\'s request, see none of a person\'s tokens', async () => {
-    const raw = new PrismaClient({ datasourceUrl: logins!.requestUrl });
+    const raw = testPrismaClient(logins!.requestUrl);
     try {
       expect(await raw.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
     } finally { await raw.$disconnect(); }
@@ -247,6 +248,8 @@ describe('[item 20 · S4-1] device tokens: the person binding is transaction-loc
       expect(await asPerson(ids.target, () => one.deviceToken.count({ where: { userId: ids.target } }))).toBeGreaterThan(0);
       expect(await one.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
       expect(await asPerson(ids.target, () => one.$transaction((tx) => tx.deviceToken.count({ where: { userId: ids.target } })))).toBeGreaterThan(0);
+      expect(await one.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
+      expect((await asPerson(ids.target, () => one.$transaction([one.deviceToken.count({ where: { userId: ids.target } })])))[0]).toBeGreaterThan(0);
       expect(await one.deviceToken.count({ where: { userId: ids.target } })).toBe(0);
       expect(await tenant.runWithTenant(PRODUCTION, () => one.deviceToken.count({ where: { userId: ids.target } }))).toBe(0);
     } finally { await one.$disconnect(); }
