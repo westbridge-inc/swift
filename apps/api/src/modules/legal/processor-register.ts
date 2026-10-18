@@ -191,7 +191,9 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
   {
     ref: 'MMG', party: 'Mobile Money Guyana (GTT)', service: 'Merchant subscription payments',
     modelBacked: false,
-    providerDirs: ['mmg'], hosts: ['mmg.gy', 'mmgtest.net'],
+    // Production is reached under *.mymmg.gy (merchant API ecommerce.mymmg.gy, checkout page mmgpg.mymmg.gy), UAT under
+    // *.mmgtest.net; mmg.gy is MMG's public site and developer docs. The production URLs are env-configured.
+    providerDirs: ['mmg'], hosts: ['mmg.gy', 'mymmg.gy', 'mmgtest.net'],
     payload: ['PAYMENT', 'CONTACT'], lawfulBasis: 'CONTRACT',
     country: 'GY', leavesCountry: false, transferBasis: 'IN_COUNTRY', contractEnv: null,
     note: 'Merchant agreement. Phone number + amount + reference; no documents.',
@@ -231,7 +233,7 @@ export const NON_PROCESSOR_HOSTS: Readonly<Record<string, string>> = {
   'wa.me': 'link rendered to users; no server call (a support chat a person starts on WhatsApp reaches Swift\'s public support line through Meta; see POLICY_NAMED_WITHOUT_EGRESS)',
   'maps.google.com': 'map link inside SOS messages to emergency contacts; no server call',
   // The MMG checkout SANDBOX's placeholder page (providers/mmg/mmg-checkout.ts). A .invalid name never
-  // resolves (RFC 2606): nothing is sent anywhere; the live page is MMG's own, under mmgtest.net / mmg.gy.
+  // resolves (RFC 2606): nothing is sent anywhere; the live page is MMG's own, under mmgtest.net (UAT) / mymmg.gy (production).
   'mmg-checkout.sandbox.invalid': 'sandbox placeholder page; a .invalid name never resolves, no server call',
 };
 
