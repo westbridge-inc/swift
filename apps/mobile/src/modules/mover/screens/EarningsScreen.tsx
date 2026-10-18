@@ -579,7 +579,7 @@ export function EarningsScreen({ navigation }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.surface.sunken, padding: space.md, marginTop: space.lg }}>
             <MaterialCommunityIcons name="calendar-check" size={fontSize.base} color={color.text.secondary} />
             <T variant="caption" weight="semibold" tone="muted" style={{ flex: 1 }}>
-              You keep every cent — Swift only charges the flat weekly fee. No commission, ever.
+              You keep every cent — Swift only charges the flat weekly fee. No commission on orders.
             </T>
           </View>
         </ScrollView>
