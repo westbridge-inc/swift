@@ -33,7 +33,8 @@ describe('the order screen follows a substitution as it happens', () => {
   });
 
   it('the customer reads what approving changes before the buttons, and decides through the hook bound to this order', () => {
-    expect(SCREEN).toContain("import { swapChangeText, swapDecisionPermissions } from '../substitutionCopy';");
+    // [TRANSFORMED 17 Oct: the import gains swapDeadlineText.]
+    expect(SCREEN).toContain("import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';");
     expect(CARD.indexOf('swapChangeText(it.substitution, o.paymentMethod)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
     // [TRANSFORMED after #1707: the order travels with each decision, never the render's closure.]
     expect(SCREEN).toContain('const decideSub = useDecideSubstitution();');
@@ -46,4 +47,12 @@ it('both decision controls follow the permitted decisions, and MMG settlement gu
   expect(SCREEN).toContain('disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}');
   expect(SCREEN).toContain('disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}');
   expect(CARD).toContain('swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance');
+});
+
+// [SUBSTITUTION · owner 17 Oct 2026] The card says how long the question waits and what happens
+// without an answer, from the server's deadline (the sentence runs in ../substitutionCopy.test.ts),
+// and says it before the buttons.
+it('the swap card states the deadline and the no-answer outcome before the buttons', () => {
+  expect(CARD).toContain('{swapDeadlineText(it.substitution) ? (');
+  expect(CARD).toContain('{swapDeadlineText(it.substitution)}');
 });
