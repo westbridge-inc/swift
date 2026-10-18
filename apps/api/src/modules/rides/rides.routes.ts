@@ -39,7 +39,7 @@ import { makeDispatchService } from '../dispatch/dispatch.service';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
-import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
 import { enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
 
@@ -487,9 +487,11 @@ export async function ridesRoutes(app: FastifyInstance) {
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
+    // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
+    // off (the default), the passenger pays the driver directly at drop-off.
     const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
-      ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+      ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
     return { success: true, data: { ...ride, driver, ...itinerary, ...cancel, ...waiting } };
   });
@@ -519,7 +521,7 @@ export async function ridesRoutes(app: FastifyInstance) {
     // underway or done (receipt / pay-later), never during matching.
     if (ride.driver) {
       (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = ['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)
-        ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+        ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
         : null;
     }
     // [TAXI multi-stop] As /active: the stops in order, and the next one.

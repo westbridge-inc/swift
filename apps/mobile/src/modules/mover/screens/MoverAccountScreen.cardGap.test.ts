@@ -8,6 +8,10 @@ import { describe, expect, it, vi } from 'vitest';
 // screen's marginBottom with no marginTop. This renders the screen with every
 // optional card on and measures the space between each pair of cards.
 
+// [PAYMENT-SIMPLIFY #1825] The server sends mmgPayLinkEnabled (DRIVER_MMG_PAY_LINK, default OFF); the card shows
+// only when it is exactly true. Both ways are measured below.
+const server = vi.hoisted(() => ({ payLinkEnabled: false as boolean | undefined }));
+
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
   const useState = (init: unknown) => [typeof init === 'function' ? (init as () => unknown)() : init, () => undefined];
@@ -41,7 +45,7 @@ const STANDING = { standing: 'GOOD', displayRating: 4.8, ratingBucket: '4.5+', r
 vi.mock('../../../hooks', () => ({
   useMoverKind: () => ({
     kind: 'DRIVER',
-    profile: { vehicleColor: 'Black', vehicleMake: 'Toyota', vehicleModel: 'Allion', licensePlate: 'HC1234', averageRating: 4.8, mmgPayUrl: null },
+    profile: { vehicleColor: 'Black', vehicleMake: 'Toyota', vehicleModel: 'Allion', licensePlate: 'HC1234', averageRating: 4.8, mmgPayUrl: null, ...(server.payLinkEnabled === undefined ? {} : { mmgPayLinkEnabled: server.payLinkEnabled }) },
   }),
   useMoverStanding: () => ({ data: STANDING }),
   useVerificationStatus: () => ({ data: { roleVerified: true } }),
@@ -101,31 +105,52 @@ function find(el: El, type: string): El | null {
   return null;
 }
 
-describe('driver Account screen: every card has the same gap above it', () => {
+function render(payLinkEnabled: boolean | undefined) {
+  server.payLinkEnabled = payLinkEnabled;
   const screen = MoverAccountScreen({ navigation: { navigate: vi.fn() } }) as El;
-  const stack = find(screen, 'ScrollView')!;
-  const cards = kids(stack).filter(isCard);
+  const cards = kids(find(screen, 'ScrollView')!).filter(isCard);
   const label = (el: El): string => {
     const t = JSON.stringify(host(el).props, (k, v) => (k === '_owner' || k === '_store' ? undefined : v)) ?? '';
     return t.includes('Your MMG pay link') || (el.props as any).who === 'rides' ? 'MMG pay link' : t.includes('photo of your vehicle') ? 'vehicle' : t.includes('standing') ? 'standing' : String(host(el).type);
   };
+  const gaps = () => cards.slice(1).map((c, i) => `${label(cards[i]!)} -> ${label(c)}: ${edge(cards[i]!, 'marginBottom') + edge(c, 'marginTop')}`);
+  const expected = () => cards.slice(1).map((c, i) => `${label(cards[i]!)} -> ${label(c)}: ${space.md}`);
+  return { cards, names: cards.map(label), gaps, expected };
+}
 
-  it('renders the cards the owner saw (profile, standing, vehicle, MMG pay link, ops rows, the model)', () => {
-    expect(cards.length).toBeGreaterThanOrEqual(6);
-    const names = cards.map(label);
-    const v = names.indexOf('vehicle');
-    expect(v, names.join(' | ')).toBeGreaterThan(0);
-    expect(names[v + 1]).toBe('MMG pay link');
-  });
+// [PAYMENT-SIMPLIFY #1825 · owner 17 Oct] Switch OFF (the default, and any server that does not send the field):
+// the driver Account has no MMG pay-link card, and the cards that remain keep the same gap.
+describe.each([['off (false)', false], ['absent (older server)', undefined]] as const)('driver Account, pay link %s: no pay-link card, every gap the same', (_label, flag) => {
+  const view = render(flag);
 
-  it('the vehicle card and the MMG pay link card do not touch', () => {
-    const names = cards.map(label);
-    const v = names.indexOf('vehicle');
-    expect(edge(cards[v]!, 'marginBottom') + edge(cards[v + 1]!, 'marginTop')).toBe(space.md);
+  it('renders the cards the owner saw, without the MMG pay link (profile, standing, vehicle, ops rows, the model)', () => {
+    expect(view.cards.length).toBeGreaterThanOrEqual(5);
+    expect(view.names).not.toContain('MMG pay link');
+    expect(view.names.indexOf('vehicle'), view.names.join(' | ')).toBeGreaterThan(0);
   });
 
   it('every pair of consecutive cards is space.md apart (none touch, none doubled)', () => {
-    const gaps = cards.slice(1).map((c, i) => `${label(cards[i]!)} -> ${label(c)}: ${edge(cards[i]!, 'marginBottom') + edge(c, 'marginTop')}`);
-    expect(gaps).toEqual(cards.slice(1).map((c, i) => `${label(cards[i]!)} -> ${label(c)}: ${space.md}`));
+    expect(view.gaps()).toEqual(view.expected());
+  });
+});
+
+// [OWNER 17 Oct · #1821] With the switch ON the card is back right after the vehicle card, with the same gap.
+describe('driver Account, pay link on: every card has the same gap above it', () => {
+  const view = render(true);
+
+  it('renders the cards the owner saw (profile, standing, vehicle, MMG pay link, ops rows, the model)', () => {
+    expect(view.cards.length).toBeGreaterThanOrEqual(6);
+    const v = view.names.indexOf('vehicle');
+    expect(v, view.names.join(' | ')).toBeGreaterThan(0);
+    expect(view.names[v + 1]).toBe('MMG pay link');
+  });
+
+  it('the vehicle card and the MMG pay link card do not touch', () => {
+    const v = view.names.indexOf('vehicle');
+    expect(edge(view.cards[v]!, 'marginBottom') + edge(view.cards[v + 1]!, 'marginTop')).toBe(space.md);
+  });
+
+  it('every pair of consecutive cards is space.md apart (none touch, none doubled)', () => {
+    expect(view.gaps()).toEqual(view.expected());
   });
 });
