@@ -12,7 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { expireUnpaidMmgAcceptance, expireUnpaidMmgAcceptancesJob, type JobContext } from '../jobs/queue';
-import { MMG_ACCEPT_EXPIRY_REASON } from '../modules/order/mmg-accept-expiry';
+import { MMG_ACCEPT_EXPIRY_REASON, MMG_STORE_SILENT_SUBJECT } from '../modules/order/mmg-accept-expiry';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
@@ -85,8 +85,12 @@ async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH') {
   expect(res.statusCode, res.body).toBe(200);
   return (res.json().data as { order: { id: string } }).order.id;
 }
+const preparing = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/preparing`, owner.token, undefined, store());
 const accept = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/accept`, owner.token, undefined, store());
 const paidByMmg = (orderId: string) => call('POST', `/api/v1/vendor/orders/${orderId}/confirm-payment`, owner.token, { reference: `MP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, '7')}` }, store());
+const paidWith = (orderId: string, reference: string) => call('POST', `/api/v1/vendor/orders/${orderId}/confirm-payment`, owner.token, { reference }, store());
+const customerSaysPaid = (orderId: string, reference: string) => call('POST', `/api/v1/customer/orders/${orderId}/payment-claim`, customer.token, { paid: true, reference });
+const cases = (orderId: string) => sys(() => app.prisma.supportTicket.findMany({ where: { orderId } }));
 const customerView = async (orderId: string) => {
   const res = await call('GET', `/api/v1/customer/orders/${orderId}`, customer.token);
   expect(res.statusCode, res.body).toBe(200);
@@ -124,6 +128,7 @@ async function purgeFixtures() {
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...vendorIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
     await purgeAuditLogs(app.prisma, { OR: [{ entityId: { in: [...orderIds, ...vendorIds] } }, { userId: { in: ids } }] }, 'PAYMENT-SIMPLIFY accept-expiry fixture cleanup');
+    await app.prisma.supportTicket.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { userId: { in: ids } }] } });
     await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
     await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
@@ -295,6 +300,42 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
       }
       expect((await statusLogs(orderId)).filter((l) => l.status === 'CANCELLED').length).toBe(cancelled ? 1 : 0);
     }
+  });
+
+  // [owner 18 Oct 2026 · COORD ruling] The customer recorded "I paid": never auto-cancelled. At 30:00 the store is
+  // asked once to check its MMG, and one support case opens; nothing moves until the store taps "Paid by MMG".
+  it('a customer who said "I paid" at 10 minutes is not cancelled at 30:00: the store is asked once, one case opens', async () => {
+    const orderId = await placeOrder('MOBILE_MONEY');
+    await acceptedAgo(orderId, 10 * MIN);
+    const reference = `MP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, '7')}`;
+    const claim = await customerSaysPaid(orderId, reference);
+    expect(claim.statusCode, claim.body).toBe(200);
+    // It no longer shows a cancel deadline to either side.
+    expect((await customerView(orderId)).mmgPayment?.['payBy']).toBeUndefined();
+    expect((await storeView(orderId))['mmgPayBy']).toBeNull();
+
+    await backdate(orderId, 30 * MIN);
+    expect(await sweep()).not.toContain(orderId);
+    expect(await expireOne(orderId)).toBe(false); // even a direct run refuses to cancel it
+    expect((await orderRow(orderId)).status).toBe('ACCEPTED');
+    const opened = await cases(orderId);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, status: 'OPEN', userId: customer.userId });
+    const asked = (await notices(owner.userId, orderId)).filter((n) => n.title.startsWith('Check your MMG for order'));
+    expect(asked).toHaveLength(1);
+    expect(asked[0]!.body).toMatch(/^The customer says they paid GY\$[\d,]+ to your MMG number\. Check your MMG and tap Paid by MMG\.$/);
+    expect(asked[0]!.body).not.toContain('6001234');
+
+    // Idempotent: more sweeps open no second case and send no second push.
+    await sweep(); await sweep();
+    expect(await cases(orderId)).toHaveLength(1);
+    expect((await notices(owner.userId, orderId)).filter((n) => n.title.startsWith('Check your MMG for order'))).toHaveLength(1);
+    // Still locked until the store confirms; the store's tap (same reference) lets it go ahead.
+    expect((await preparing(orderId)).statusCode).toBe(409);
+    const tap = await paidWith(orderId, reference);
+    expect(tap.statusCode, tap.body).toBe(200);
+    expect((await orderRow(orderId)).mmgClaimMismatchAt).toBeNull();
+    expect((await preparing(orderId)).statusCode).toBe(200);
   });
 
   it('only accepted, unpaid MMG orders expire: a waiting (not yet accepted) MMG order and an accepted CASH order are left alone', async () => {

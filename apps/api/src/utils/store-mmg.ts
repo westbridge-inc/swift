@@ -58,3 +58,12 @@ export const MMG_UPDATE_APP_MESSAGE = 'Paying by MMG needs the latest Swift app.
 export function storeTakesMmgNumber(vendor: { mmgNumber: string | null | undefined }): boolean {
   return safeMmgNumber(vendor.mmgNumber) !== null;
 }
+
+/** [PAYMENT-SIMPLIFY · REVIEW-G S3-1 · COORD 18 Oct 2026] Closing a partner's account (deletion cutoff or
+ *  wind-down) clears the store's MMG payee details — its number, a staged number, and the dormant pay link —
+ *  the way a driver's link already is. Each order keeps its own committed number (orders.mmgNumberSnapshot):
+ *  that order's payee, needed for disputes, kept under the order retention rule. */
+export const VENDOR_MMG_DESTINATION_CLEARED = {
+  mmgNumber: null, mmgNumberPending: null, mmgNumberPendingAt: null, mmgNumberApplyAt: null,
+  mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null,
+} as const;

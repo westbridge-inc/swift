@@ -65,7 +65,7 @@ import { AccountService, closesByRequest } from './account.service';
 import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
 import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
-import { mmgAcceptedPayBy, mmgAcceptExpiryNotice, mmgPayByCustomerLine } from '../order/mmg-accept-expiry';
+import { mmgAcceptedPayBy, mmgAcceptExpiryNotice, mmgOrderNoun, mmgPayByCustomerLine } from '../order/mmg-accept-expiry';
 import { displayMmgNumber, safeMmgNumber } from '../../utils/mmg-number';
 import { formatMoney } from '../../utils/currency-amount';
 import { validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
@@ -2746,7 +2746,7 @@ export async function customerRoutes(app: FastifyInstance) {
             currencyCode: order.currencyCode,
             instruction: `Pay ${formatMoney(amount, order.currencyCode, { whole: true })} by MMG to ${recipientName}'s MMG number ${numberDisplay}.`,
             // [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled.
-            ...(payBy ? { payBy: payBy.toISOString(), deadline: mmgPayByCustomerLine(payBy, order.vendor?.name ?? 'the store') } : {}),
+            ...(payBy ? { payBy: payBy.toISOString(), deadline: mmgPayByCustomerLine(payBy, order.vendor?.name ?? 'the store', mmgOrderNoun(order.fulfillment)) } : {}),
           };
         })()
       : null;

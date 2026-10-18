@@ -39,6 +39,19 @@ export interface UnpaidMmgAcceptanceFacts {
   mmgAttestedRef?: string | null;
   /** An open disagreement is support's to decide, never auto-cancelled. */
   mmgClaimMismatchAt?: Date | null;
+  /** [owner 18 Oct 2026] The customer's recorded "I paid": such an order is never auto-cancelled — at 30:00 the
+   *  store is asked to check its MMG and a support case opens instead. Unread (undefined) = never expires. */
+  customerMmgClaim?: string | null;
+}
+
+/** Accepted, an MMG store order, and nothing says the money moved: the base of both 30-minute outcomes. */
+export function isUnpaidMmgAcceptance(order: UnpaidMmgAcceptanceFacts): boolean {
+  if (order.status !== 'ACCEPTED') return false;
+  if (order.paymentMethod !== 'MOBILE_MONEY') return false;
+  if (order.orderType === 'TAXI' || !order.vendorId) return false;
+  if (MONEY_MOVED.has(order.paymentStatus)) return false;
+  if (order.mmgAttestedRef !== null || order.mmgClaimMismatchAt !== null) return false;
+  return order.acceptedAt != null;
 }
 
 /**
@@ -47,14 +60,19 @@ export interface UnpaidMmgAcceptanceFacts {
  * never taken as "no claim": the order is left alone (fail closed).
  */
 export function mmgAcceptedPayBy(order: UnpaidMmgAcceptanceFacts): Date | null {
-  if (order.status !== 'ACCEPTED') return null;
-  if (order.paymentMethod !== 'MOBILE_MONEY') return null;
-  if (order.orderType === 'TAXI' || !order.vendorId) return null;
-  if (MONEY_MOVED.has(order.paymentStatus)) return null;
-  if (order.mmgAttestedRef !== null || order.mmgClaimMismatchAt !== null) return null;
-  if (!order.acceptedAt) return null;
-  return new Date(order.acceptedAt.getTime() + MMG_ACCEPTED_PAY_WINDOW_MS);
+  if (!isUnpaidMmgAcceptance(order)) return null;
+  if (order.customerMmgClaim === undefined || order.customerMmgClaim === 'PAID') return null;
+  return new Date(order.acceptedAt!.getTime() + MMG_ACCEPTED_PAY_WINDOW_MS);
 }
+
+/** [owner 18 Oct 2026] The customer says they paid and the store has been silent for 30 minutes: ask the store, open a case. */
+export function isStoreSilentOnClaimedMmgPayment(order: UnpaidMmgAcceptanceFacts, now: Date = new Date()): boolean {
+  if (!isUnpaidMmgAcceptance(order) || order.customerMmgClaim !== 'PAID') return false;
+  return order.acceptedAt!.getTime() + MMG_ACCEPTED_PAY_WINDOW_MS <= now.getTime();
+}
+
+/** The support case's fixed subject: one per order (the sweep and the locked check both look for it). */
+export const MMG_STORE_SILENT_SUBJECT = 'MMG payment the customer reported is not confirmed by the store';
 
 /** True once the 30 minutes have run out (at exactly 30:00 the order cancels). */
 export function isExpiredUnpaidMmgAcceptance(order: UnpaidMmgAcceptanceFacts, now: Date = new Date()): boolean {
@@ -72,7 +90,17 @@ export function expiredUnpaidMmgAcceptanceWhere(now: Date = new Date()): Prisma.
     paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
     mmgAttestedRef: null,
     mmgClaimMismatchAt: null,
+    customerMmgClaim: { not: 'PAID' },
     acceptedAt: { lte: new Date(now.getTime() - MMG_ACCEPTED_PAY_WINDOW_MS) },
+  };
+}
+
+/** The second sweep filter: claimed "I paid", store silent 30 minutes, and no case opened yet. */
+export function storeSilentOnClaimedMmgWhere(now: Date = new Date()): Prisma.OrderWhereInput {
+  return {
+    ...expiredUnpaidMmgAcceptanceWhere(now),
+    customerMmgClaim: 'PAID',
+    supportTickets: { none: { category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT } },
   };
 }
 
@@ -84,9 +112,17 @@ function clock(at: Date): string {
   return formatGuyanaTime(at, { hour: 'numeric', minute: '2-digit', hour12: true }, 'en-US');
 }
 
+/** [REVIEW-F S3-1b] A booking is a booking in every line, never an "order". */
+export type MmgOrderNoun = 'order' | 'booking';
+export function mmgOrderNoun(fulfillment: string | null | undefined): MmgOrderNoun {
+  return fulfillment === 'APPOINTMENT' ? 'booking' : 'order';
+}
+const cap = (noun: MmgOrderNoun) => (noun === 'booking' ? 'Booking' : 'Order');
+const gyd = (amount: number, currencyCode: string) => formatMoney(amount, currencyCode, { whole: true });
+
 /** The customer's line under "Pay $X by MMG to …", while the order waits. */
-export function mmgPayByCustomerLine(payBy: Date, storeName: string): string {
-  return `If ${storeName} hasn't marked it paid by ${clock(payBy)}, the order is cancelled automatically.`;
+export function mmgPayByCustomerLine(payBy: Date, storeName: string, noun: MmgOrderNoun = 'order'): string {
+  return `If ${storeName} hasn't marked it paid by ${clock(payBy)}, the ${noun} is cancelled automatically.`;
 }
 
 /** The store's line on an accepted order that waits for its MMG payment. */
@@ -96,31 +132,52 @@ export function mmgPayByStoreLine(payBy: Date): string {
 
 /** [REVIEW-F S2-1] The customer's push when the store ACCEPTS an unpaid MMG order: pay, how much, by when.
  *  Never "preparing" (nothing is prepared before "Paid by MMG"), and never the number (a push shows on the lock screen). */
-export function mmgAcceptedPushCopy(orderNumber: string, storeName: string, amount: number, currencyCode: string, payBy: Date): { title: string; body: string } {
+export function mmgAcceptedPushCopy(orderNumber: string, storeName: string, amount: number, currencyCode: string, payBy: Date, noun: MmgOrderNoun = 'order'): { title: string; body: string } {
   return {
-    title: 'Pay by MMG to confirm your order',
-    body: `${storeName} accepted order ${orderNumber}. Pay ${formatMoney(amount, currencyCode, { whole: true })} by MMG — open your order for the number — by ${clock(payBy)}, or it cancels automatically.`,
+    title: `Pay by MMG to confirm your ${noun}`,
+    body: `${storeName} accepted ${noun} ${orderNumber}. Pay ${gyd(amount, currencyCode)} by MMG — open your ${noun} for the number — by ${clock(payBy)}, or it cancels automatically.`,
   };
 }
 
-/** What the customer is told when it cancels (push + the order card). */
-export function mmgAcceptExpiryCustomerCopy(orderNumber: string, storeName: string): { title: string; body: string; notice: string } {
-  const notice = `${storeName} didn't mark your MMG payment as received within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, ${storeName} refunds you directly.`;
+/** Accepted after the customer already said "I paid": it waits for the store, and is never "being prepared". */
+export function mmgAcceptedClaimedPushCopy(orderNumber: string, storeName: string, noun: MmgOrderNoun = 'order'): { title: string; body: string } {
   return {
-    title: 'Order cancelled — MMG payment not confirmed',
-    body: `Order ${orderNumber}: ${notice}`,
+    title: 'Waiting for the store to confirm your MMG payment',
+    body: `${storeName} accepted ${noun} ${orderNumber}. It goes ahead once ${storeName} marks your MMG payment received.`,
+  };
+}
+
+/** [owner 18 Oct 2026] At 30:00 on an order the customer says they paid: the store is asked to check (never the number). */
+export function mmgStoreSilentStorePush(orderNumber: string, amount: number, currencyCode: string, noun: MmgOrderNoun = 'order'): { title: string; body: string } {
+  return {
+    title: `Check your MMG for ${noun} ${orderNumber}`,
+    body: `The customer says they paid ${gyd(amount, currencyCode)} to your MMG number. Check your MMG and tap Paid by MMG.`,
+  };
+}
+
+/** The support case the same moment opens (one per order). */
+export function mmgStoreSilentTicketMessage(orderNumber: string, minutes = MMG_ACCEPTED_PAY_WINDOW_MINUTES): string {
+  return `Order ${orderNumber}: the customer recorded that they paid by MMG, and the store has not marked it "Paid by MMG" ${minutes} minutes after accepting. The order is not cancelled; nothing is prepared or dispatched until the store confirms. Swift never holds this money.`;
+}
+
+/** What the customer is told when it cancels (push + the order card). */
+export function mmgAcceptExpiryCustomerCopy(orderNumber: string, storeName: string, noun: MmgOrderNoun = 'order'): { title: string; body: string; notice: string } {
+  const notice = `${storeName} didn't mark your MMG payment as received within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of accepting, so this ${noun} was cancelled automatically. If you already sent the MMG payment, ${storeName} refunds you directly.`;
+  return {
+    title: `${cap(noun)} cancelled — MMG payment not confirmed`,
+    body: `${cap(noun)} ${orderNumber}: ${notice}`,
     notice,
   };
 }
 
 /** What the store is told when it cancels. */
-export function mmgAcceptExpiryStoreBody(orderNumber: string): string {
-  return `Order ${orderNumber} was cancelled automatically: it was not marked "Paid by MMG" within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of being accepted. If the customer's MMG transfer arrived, refund them directly.`;
+export function mmgAcceptExpiryStoreBody(orderNumber: string, noun: MmgOrderNoun = 'order'): string {
+  return `${cap(noun)} ${orderNumber} was cancelled automatically: it was not marked "Paid by MMG" within ${MMG_ACCEPTED_PAY_WINDOW_MINUTES} minutes of being accepted. If the customer's MMG transfer arrived, refund them directly.`;
 }
 
 /** The customer's order-card notice for an order this rule cancelled (null for every other order). */
-export function mmgAcceptExpiryNotice(order: { status: string; cancellationReason: string | null; cancelledBy?: string | null; orderNumber: string }, storeName: string): string | null {
+export function mmgAcceptExpiryNotice(order: { status: string; cancellationReason: string | null; cancelledBy?: string | null; orderNumber: string; fulfillment?: string | null }, storeName: string): string | null {
   if (order.status !== 'CANCELLED' || order.cancellationReason !== MMG_ACCEPT_EXPIRY_REASON) return null;
   if (order.cancelledBy != null) return null;
-  return mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName).notice;
+  return mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName, mmgOrderNoun(order.fulfillment)).notice;
 }

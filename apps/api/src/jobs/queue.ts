@@ -477,8 +477,8 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
  *  customer. Exported so tests drive it directly. */
 export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string): Promise<boolean> {
   const { OrderService } = await import('../modules/order/order.service');
-  const { MMG_ACCEPT_EXPIRY_REASON, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody } = await import('../modules/order/mmg-accept-expiry');
-  let order: { vendorId: string | null; customerId: string; orderNumber: string };
+  const { MMG_ACCEPT_EXPIRY_REASON, mmgAcceptExpiryCustomerCopy, mmgAcceptExpiryStoreBody, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  let order: { vendorId: string | null; customerId: string; orderNumber: string; fulfillment: string | null };
   try {
     ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
       orderId,
@@ -506,26 +506,87 @@ export async function expireUnpaidMmgAcceptance(ctx: JobContext, orderId: string
   const storeName = order.vendorId
     ? (await ctx.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { name: true } }).catch(() => null))?.name ?? 'The store'
     : 'The store';
-  const copy = mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName);
+  const noun = mmgOrderNoun(order.fulfillment);
+  const copy = mmgAcceptExpiryCustomerCopy(order.orderNumber, storeName, noun);
   const { NotificationService } = await import('../modules/notification/notification.service');
   const { publishUnattestedMmgCancellation } = await import('../modules/order/order.service');
   await publishUnattestedMmgCancellation(ctx.prisma, new NotificationService(ctx.prisma, ctx.io), {
     orderId,
     orderNumber: order.orderNumber,
     vendorId: order.vendorId,
-    storeBody: mmgAcceptExpiryStoreBody(order.orderNumber),
+    storeBody: mmgAcceptExpiryStoreBody(order.orderNumber, noun),
     customer: { userId: order.customerId, title: copy.title, body: copy.body, data: { reason: 'MMG_NOT_PAID_IN_TIME' } },
   });
   ctx.log.info({ orderId }, 'Order auto-cancelled (MMG not marked paid within 30 minutes of acceptance)');
   return true;
 }
 
+/** [owner 18 Oct 2026] The customer recorded "I paid" and the store stayed
+ *  silent 30 minutes after accepting: the order is NOT cancelled. Instead the
+ *  store is asked once to check its MMG ("The customer says they paid $X to
+ *  your MMG number. Check your MMG and tap Paid by MMG.") and one support case
+ *  opens for the order (category PAYMENT, admins paged). Decided and written
+ *  under the orders row lock, so two sweeps open one case; PREPARING and
+ *  dispatch stay locked until "Paid by MMG", exactly as before. The case is a
+ *  support ticket, not the claim-dispute latch: that latch would keep holding
+ *  the order after the store's tap, which the owner's flow does not want. */
+export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: string): Promise<boolean> {
+  const { isStoreSilentOnClaimedMmgPayment, MMG_STORE_SILENT_SUBJECT, mmgStoreSilentStorePush, mmgStoreSilentTicketMessage, mmgOrderNoun } = await import('../modules/order/mmg-accept-expiry');
+  const { bindTenantTransaction } = await import('../plugins/prisma');
+  const opened = await ctx.prisma.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
+    const order = await tx.order.findUnique({ where: { id: orderId } });
+    if (!order || !isStoreSilentOnClaimedMmgPayment(order, new Date())) return null;
+    const existing = await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
+    if (existing) return null;
+    const ticket = await tx.supportTicket.create({
+      data: { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) },
+    });
+    return { ticketId: ticket.id, order };
+  });
+  if (!opened) return false;
+
+  const { order, ticketId } = opened;
+  const { NotificationService, notifyAdmins } = await import('../modules/notification/notification.service');
+  const notifications = new NotificationService(ctx.prisma, ctx.io);
+  const owner = order.vendorId
+    ? (await ctx.prisma.vendor.findUnique({ where: { id: order.vendorId }, select: { owner: { select: { userId: true } } } }).catch(() => null))?.owner?.userId ?? null
+    : null;
+  if (owner) {
+    const push = mmgStoreSilentStorePush(order.orderNumber, Number(order.totalAmount), order.currencyCode, mmgOrderNoun(order.fulfillment));
+    await notifications.send({
+      userId: owner, type: 'ORDER_UPDATE', audience: 'business', title: push.title, body: push.body,
+      data: { orderId, kind: 'mmg_customer_says_paid' }, dedupeKey: `mmg-store-silent:${orderId}`,
+    }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'store MMG check push failed after the case opened'));
+  }
+  await notifyAdmins(ctx.prisma, notifications, {
+    tenantId: order.tenantId ?? null,
+    title: 'MMG payment not confirmed by the store',
+    body: `Order ${order.orderNumber}: the customer says they paid; the store has not confirmed 30 minutes after accepting.`,
+    data: { kind: 'support_ticket', ticketId, orderId },
+  }).catch((err: unknown) => ctx.log.warn({ err, orderId }, 'admin page for the MMG case failed; the ticket is open'));
+  ctx.log.info({ orderId, ticketId }, 'MMG store-silent case opened (customer says paid; not cancelled)');
+  return true;
+}
+
 /** The sweep behind it: every accepted, unpaid MMG order whose 30 minutes ran
- *  out, each through expireUnpaidMmgAcceptance in its own order's tenant. A
- *  sweep (not a per-order delayed job) so a lost Redis job can never leave an
+ *  out, each through expireUnpaidMmgAcceptance in its own order's tenant — and
+ *  every one the customer says they paid, through escalateStoreSilentMmgClaim.
+ *  A sweep (not a per-order delayed job) so a lost Redis job can never leave an
  *  order waiting forever; the locked check re-decides every row it reads. */
 export async function expireUnpaidMmgAcceptancesJob(ctx: JobContext, batch = 100): Promise<string[]> {
-  const { expiredUnpaidMmgAcceptanceWhere } = await import('../modules/order/mmg-accept-expiry');
+  const { expiredUnpaidMmgAcceptanceWhere, storeSilentOnClaimedMmgWhere } = await import('../modules/order/mmg-accept-expiry');
+  const claimed = await ctx.prisma.order.findMany({
+    where: storeSilentOnClaimedMmgWhere(new Date()),
+    select: { id: true },
+    orderBy: { acceptedAt: 'asc' },
+    take: batch,
+  });
+  for (const { id } of claimed) {
+    await inTenantOf(ctx.prisma, { order: id }, () => escalateStoreSilentMmgClaim(ctx, id))
+      .catch((err: unknown) => { ctx.log.error({ err, orderId: id }, 'MMG store-silent case failed — the next sweep retries'); return false; });
+  }
   const due = await ctx.prisma.order.findMany({
     where: expiredUnpaidMmgAcceptanceWhere(new Date()),
     select: { id: true },
