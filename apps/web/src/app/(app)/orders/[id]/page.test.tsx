@@ -276,6 +276,56 @@ describe('[owner #46/#50] cancel: free, or contact the store — never a fee', (
   });
 });
 
+// [owner 17-18 Oct 2026 · PAYMENT-SIMPLIFY] MMG goes to the store's NUMBER: shown only on the customer's own
+// accepted order, with who confirms it and when the order cancels if it is not marked paid (30 minutes).
+describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
+  const PAYMENT = {
+    payTo: 'STORE_NUMBER', provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', recipientName: 'Shanta Kitchen',
+    number: '+5926001234', numberDisplay: '+592 600 1234', amount: 3500, currencyCode: 'GYD',
+    instruction: "Pay $3,500 by MMG to Shanta Kitchen's MMG number +592 600 1234.",
+    payBy: '2026-10-18T19:45:00.000Z',
+    deadline: "If Shanta Kitchen hasn't marked it paid by 3:45 PM, the order is cancelled automatically.",
+  };
+
+  it('an accepted order shows the number sentence, who confirms it, and the deadline; no link button', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(PAYMENT.instruction, { exact: false })).toBeTruthy();
+    expect(screen.getByText(/Shanta Kitchen marks your order paid when the money arrives\. Swift never holds this money\./)).toBeTruthy();
+    expect(screen.getByText(PAYMENT.deadline)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /by MMG/ })).toBeNull();
+  });
+
+  it('before the store accepts: the page says the number comes after acceptance, and shows none', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'PENDING', paymentAction: null, mmgPayment: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/When the business accepts, this page shows its MMG number and the exact amount\. Pay within 30 minutes of it accepting, or the order cancels automatically\./)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('600 1234');
+  });
+
+  // [REVIEW-F S4-1] The page's own gate, behind the server's: a paid or closed order never shows a number.
+  it.each([
+    ['marked paid by the store', { paymentStatus: 'CLAIMED' }],
+    ['cancelled', { status: 'CANCELLED' }],
+  ])('a %s order never shows the number, even if one arrives', async (_label, change) => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, paymentAction: null, mmgPayment: PAYMENT, ...change } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('SW-2001', { exact: false })).toBeTruthy();
+    expect(document.body.textContent).not.toContain('600 1234');
+    expect(document.body.textContent).not.toContain(PAYMENT.deadline);
+  });
+
+  it('an order cancelled because it was not marked paid in time says why', async () => {
+    const notice = "Shanta Kitchen didn't mark your MMG payment as received within 30 minutes of accepting, so this order was cancelled automatically. If you already sent the MMG payment, Shanta Kitchen refunds you directly.";
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({
+      ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null,
+      cancellationReason: 'Cancelled automatically: not marked "Paid by MMG" within 30 minutes of being accepted', cancellationNotice: notice,
+    } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(notice)).toBeTruthy();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // [SUBSTITUTION · owner live test 17 Oct 2026] A store's swap question never
 // reached the customer. On the web the customer now sees it, from the server's

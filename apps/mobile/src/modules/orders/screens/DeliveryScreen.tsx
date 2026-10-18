@@ -25,6 +25,8 @@ import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
+import { copyText } from '../../../lib/clipboard';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
 import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
@@ -710,6 +712,8 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's number, sent only after the store accepts.
+  const mmgStorePayment = parseMmgStorePayment(o.mmgPayment);
   const mmgClaim = parseMmgClaimView(o.mmgClaim);
   const custodyRecovery = parsePartyCaseView(o.custodyRecovery);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
@@ -1218,6 +1222,7 @@ export function DeliveryScreen() {
                   {failed
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
+                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null) /* [owner 18 Oct 2026] why an unpaid MMG order closed by itself */
                       ?? (mmgCancellationAmbiguous
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
@@ -1421,6 +1426,38 @@ export function DeliveryScreen() {
                   if (!(await openMmgPaymentAction(mmgPaymentAction))) {
                     toast.show(`Couldn't open MMG — open the MMG app and pay ${mmgPaymentAction.recipientName} directly.`);
                   }
+                }}
+                style={{ marginTop: space.md }}
+              />
+            </View>
+          ) : null}
+
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store has accepted: pay it directly, by MMG, to its
+              number. The server sends this ONLY to this order's customer and only until the store marks the
+              order "Paid by MMG"; the app opens no payment page and Swift never touches the money. */}
+          {mmgStorePayment && !cancelled && !failed ? (
+            <View testID="mmg-store-number" style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.lg, marginTop: space.xl }}>
+              <T variant="body" weight="bold" tone="deep">
+                Pay by MMG
+              </T>
+              <T variant="body" style={{ marginTop: space.xs }}>
+                {mmgStorePayment.instruction}
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {mmgStorePaymentNote(mmgStorePayment)}
+              </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {mmgStorePaymentDeadline(mmgStorePayment) ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {mmgStorePaymentDeadline(mmgStorePayment)}
+                </T>
+              ) : null}
+              <PillButton
+                label="Copy MMG number"
+                icon="copy"
+                variant="soft"
+                onPress={() => {
+                  toast.show(copyText(mmgStorePayment.number) ? 'MMG number copied' : `The number is ${mmgStorePayment.numberDisplay}`);
                 }}
                 style={{ marginTop: space.md }}
               />

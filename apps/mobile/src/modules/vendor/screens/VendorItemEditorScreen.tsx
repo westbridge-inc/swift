@@ -42,6 +42,7 @@ import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { mediaUrl } from '../../../lib/images';
+import { STORE_PICK } from '../../../lib/storePick';
 
 /**
  * Modifiers editor (master plan §4.2): size / add-ons / toppings on an item.
@@ -619,7 +620,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
 
         <View style={{ flexDirection: 'row', gap: space.md, marginBottom: space.lg }}>
           <Chip label={available ? 'Available' : 'Sold out'} selected={available} onPress={() => setAvailable((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
-          <Chip label="★ Popular" selected={popular} onPress={() => setPopular((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
+          <Chip label={`★ ${STORE_PICK}`} selected={popular} onPress={() => setPopular((v) => !v)} style={{ height: 38, paddingHorizontal: space.md }} />
         </View>
 
         {save.isError ? (

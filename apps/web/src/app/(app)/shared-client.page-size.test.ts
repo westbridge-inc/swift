@@ -51,7 +51,10 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
   'lib/customer-rides.ts': {
     calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide'],
     imports: ["import { apiFetch } from './auth';"],
-    users: { 'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide } from '@/lib/customer-rides';" },
+    users: {
+      'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide } from '@/lib/customer-rides';",
+      'app/(app)/taxi/taxi-fare-estimate.tsx': "import { rideEstimate } from '@/lib/customer-rides';",
+    },
   },
   'lib/customer-market.ts': {
     calls: ['getMarketItems', 'getMarketCategories'],

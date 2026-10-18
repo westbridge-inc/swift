@@ -48,11 +48,11 @@ describe('a document waiting for review', () => {
     expect(pendingDocumentLabel(true, '2026-10-08T12:00:00.000Z')).toBe('Replaced — waiting for review · tap to replace again');
   });
 
-  it('the card stays tappable while waiting (asks first), and only an approved document is locked', async () => {
+  it('the card stays tappable while waiting (asks first); only an approved document, or a missing consent tick (R17), locks it', async () => {
     const { readFileSync } = await import('node:fs');
     const { join } = await import('node:path');
     const card = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentUploadCard.tsx'), 'utf8');
-    expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending\} onPress=\{pending \? confirmReplace : pick\}>/);
+    expect(card).toMatch(/<Pressable disabled=\{approved \|\| upload\.isPending \|\| !consented\} onPress=\{pending \? confirmReplace : pick\}>/);
     expect(card).toMatch(/Replace this document\?/);
     const list = readFileSync(join(process.cwd(), 'src/components/onboarding/DocumentChecklist.tsx'), 'utf8');
     // Required AND optional documents both say "Replaced — waiting for review" (a police clearance can be replaced too).

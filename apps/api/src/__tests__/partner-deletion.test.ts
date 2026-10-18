@@ -227,13 +227,14 @@ describe('[5.1.1v] a partner deletes their own account', () => {
   // A store already on a billing hold when its owner closes the account must
   // stay closed: a later fee payment, or the nightly billing heal, reopens only
   // a store whose suspension billing itself recorded.
-  async function billingHeldStore() {
+  async function billingHeldStore(extra: Record<string, unknown> = {}) {
     const p = await makePartner(['CUSTOMER', 'VENDOR_OWNER']);
     const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
     const vendor = await app.prisma.vendor.create({ data: {
       ownerId: owner.id, name: 'Synthetic billing-held store', slug: `held-${nanoid(12)}`, vendorType: 'RESTAURANT',
       phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic', latitude: 0, longitude: 0,
       status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false, isCurrentlyOpen: false, isVerified: true,
+      ...extra,
     } });
     vendorIds.push(vendor.id);
     return { p, vendorId: vendor.id };
@@ -246,6 +247,41 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
     expect(await billingReopens(vendorId)).toBe(false);
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+  });
+
+  // [PAYMENT-SIMPLIFY · REVIEW-G S3-1 · COORD 18 Oct] The store's MMG payee details are personal payment
+  // destinations: closing the account clears them (the driver's link already is). Each order keeps its own
+  // committed number (orders.mmgNumberSnapshot) under the order retention rule — it is that order's payee.
+  const MMG_DESTINATION = {
+    mmgNumber: '+5926000001', mmgNumberPending: '+5926000002', mmgNumberPendingAt: new Date(), mmgNumberApplyAt: new Date(Date.now() + 86_400_000),
+    mmgPayUrl: 'https://pay.example.com/pay/synthetic', mmgPayUrlPending: 'https://pay.example.com/pay/synthetic-2', mmgPayUrlPendingAt: new Date(), mmgPayUrlApplyAt: new Date(Date.now() + 86_400_000),
+  };
+  const MMG_CLEARED = {
+    mmgNumber: null, mmgNumberPending: null, mmgNumberPendingAt: null, mmgNumberApplyAt: null,
+    mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null,
+  };
+  const mmgDestination = (vendorId: string) => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: Object.fromEntries(Object.keys(MMG_CLEARED).map((k) => [k, true])) });
+
+  it("winding a store down clears its MMG number, staged number and pay link", async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await windDownPartner(app.prisma, p.userId);
+    expect(await mmgDestination(vendorId)).toEqual(MMG_CLEARED);
+  });
+
+  it("the deletion cutoff itself clears the store's MMG payee details", async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let atCutoff: unknown;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      const result = await realTransaction(work, options);
+      if (atCutoff === undefined) atCutoff = await mmgDestination(vendorId);
+      return result;
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    } finally { spy.mockRestore(); }
+    expect(atCutoff).toEqual(MMG_CLEARED);
+    expect(await mmgDestination(vendorId)).toEqual(MMG_CLEARED);
   });
 
   it('the deletion cutoff itself marks owned stores wound down, before any later cleanup can fail', async () => {

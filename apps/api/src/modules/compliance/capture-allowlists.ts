@@ -39,6 +39,9 @@ export const CAPTURE_ALLOWLISTS = {
     'business.name', 'business.address', 'business.phone',
     'documents.ownerId', 'documents.registration', 'documents.operating',
     'mmgPayUrl', 'staff.invitePhone',
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] the store's MMG number (a +592 mobile), shown only to
+    // that order's customer after the store accepts, so the customer can pay the store directly.
+    'mmgNumber',
   ],
   advertiser: [
     'companyName', 'registrationNo', 'contactName', 'contactPhone',

@@ -286,6 +286,10 @@ describe('Ride request — fare shown first, dispatch shared, PIN issued', () =>
     // Driver accepts through the shared atomic claim
     const accept = await inject('POST', `/api/v1/driver/rides/${ride.id}/accept`, {}, driver.token);
     expect(accept.statusCode).toBe(200);
+    // [COORD 18 Oct, option S] The driver's own row comes back without its live rating totals.
+    expect(accept.json().data.driver).toBeDefined();
+    expect(accept.json().data.driver).not.toHaveProperty('averageRating');
+    expect(accept.json().data.driver).not.toHaveProperty('totalRatings');
     const assigned = await app.prisma.order.findUniqueOrThrow({ where: { id: ride.id } });
     expect(assigned.status).toBe('DRIVER_ASSIGNED');
     expect(assigned.driverId).toBe(driver.driverId);

@@ -4,6 +4,7 @@ import Constants from 'expo-constants';
 import axios from 'axios';
 import { color } from '@swift/ui';
 import { API_URL } from './api';
+import { JOB_OFFERS_CHANNEL, JOB_RING_SOUND, hasJobRing, jobAlertsVersion } from './jobRingCapability';
 import { getAuthSessionSnapshot } from '../stores/authStore';
 import {
   samePrincipalBoundary,
@@ -80,6 +81,25 @@ async function registerForSession(session: AuthSessionSnapshot, mayPrompt: boole
         // notification LED silently forks the palette.
         lightColor: color.brand[500],
       });
+      // [RINGER · owner ruling 15 Oct] Job offers ring on their own channel:
+      // the loudest importance, Swift's tone, a strong buzz. Android never
+      // lets an app change a channel's sound once it exists, so the channel
+      // is created ONLY by a binary that bundles the tone (build 12): this JS
+      // reaching an older binary over the air must not create it soundless.
+      // Do Not Disturb is the partner's choice (bypassDnd false; they can
+      // let it through in the channel's settings, see openJobAlertSettings).
+      if (hasJobRing()) {
+        await Notifications.setNotificationChannelAsync(JOB_OFFERS_CHANNEL, {
+          name: 'Job offers',
+          description: 'New orders and job offers that need your answer',
+          importance: Notifications.AndroidImportance.MAX,
+          sound: JOB_RING_SOUND,
+          vibrationPattern: [0, 500, 250, 500, 250, 500],
+          enableVibrate: true,
+          bypassDnd: false,
+          lightColor: color.brand[500],
+        });
+      }
     }
 
     const projectId = (Constants.expoConfig?.extra as { eas?: { projectId?: string } } | undefined)?.eas?.projectId;
@@ -100,7 +120,10 @@ async function registerForSession(session: AuthSessionSnapshot, mayPrompt: boole
     const send = (accessToken: string) =>
       axios.post(
         `${API_URL}/api/v1/customer/notifications/devices`,
-        { token, platform: Platform.OS === 'ios' ? 'ios' : 'android' },
+        // [RINGER] alertsVersion tells the server whether THIS binary has
+        // the job ring (1, build 12) or not (0): only a binary that has it is
+        // sent the job_offers channel, the tone and time-sensitive.
+        { token, platform: Platform.OS === 'ios' ? 'ios' : 'android', alertsVersion: jobAlertsVersion() },
         {
           timeout: 10000,
           headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },

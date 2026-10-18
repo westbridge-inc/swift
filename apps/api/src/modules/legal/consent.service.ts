@@ -26,6 +26,9 @@ export type ConsentDocumentType =
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
   | 'unregistered_trader_declaration'
+  /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
+  | 'document_processing_consent'
+  | 'customer_id_consent'
   /** [Owner ruling 15 Oct 2026] the sign-up's "I am 18 or older" tick (auth/age-declaration.ts) */
   | 'age_declaration';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
