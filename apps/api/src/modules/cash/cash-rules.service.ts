@@ -13,6 +13,7 @@ import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
 import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
+import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
 import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
 import { type HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
@@ -510,6 +511,11 @@ export class CashRulesService {
         expectedDriverId: mover.driverId,
         withinTransaction: async (tx, source) => {
           assertFailureSource(source, mover);
+          // [TAXI multi-stop 4/8] A trip with a stop still open ends unpaid only
+          // when the passenger did not come back to the car at that stop, after
+          // its grace; a refusal waits for the destination. Read on the locked
+          // row, before anything is filed. A ride without stops reads one empty list.
+          if (isRide) await assertTripMayEndUnpaidOn(tx, orderId, input.outcome as 'no_show' | 'refused');
           const rules = await this.configFor(order.customer.countryCode);
           const filing = await captureHandoverEvidence(tx, source, {
             actorId: moverUserId, sessionId: input.sessionId, outcome: input.outcome as 'no_show' | 'refused',
