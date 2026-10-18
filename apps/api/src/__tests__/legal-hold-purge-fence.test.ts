@@ -18,6 +18,7 @@ import { LocalStorageProvider } from '../providers/storage/storage-provider';
 import { placeDocLegalHold, placeDocLegalHoldIn } from '../modules/verification/legal-hold';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
+import { AccountService } from '../modules/user/account.service';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 
 const storage = new LocalStorageProvider();
@@ -187,5 +188,55 @@ describe('the fence never runs without its lock', () => {
     expect(await shredUnlessHeld(db as never, storage, { fileKey: 'verification/u-1/x.enc', userId: 'u-1', documentId: 'doc-1' })).toBeNull();
     expect(updated).toEqual([]);
     expect(del).not.toHaveBeenCalled();
+  });
+});
+
+describe('the account-erasure close re-checks the hold under the person lock (REVIEW-M S2-1)', () => {
+  /** A hold placement that has taken the person's lock but not yet touched the document row. */
+  async function lockThenHold(userId: string) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let locked!: () => void;
+    const ready = new Promise<void>((r) => { locked = r; });
+    const done = app.prisma.$transaction(async (t) => {
+      await t.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE`;
+      locked(); await gate;
+      await placeDocLegalHoldIn(t, holdInput(userId));
+    }, { timeout: 20_000 });
+    await ready;
+    return { release, done };
+  }
+
+  it('an image-purged document held after the census: the close waits for the hold, then keeps the record', async () => {
+    const { userId, docId } = await personWithDocument({ status: 'APPROVED', state: 'COMMITTED', fileUrl: '', imagePurgedAt: new Date(Date.now() - 86_400_000) });
+    let hold: Awaited<ReturnType<typeof lockThenHold>> | undefined;
+    // The hold lands right after the erasure's census of unheld documents (the window the close must cover).
+    const docs = app.prisma.verificationDocument;
+    const census = new Proxy(docs, { get(target, prop) {
+      const value = Reflect.get(target, prop) as unknown;
+      if (prop !== 'findMany') return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      return async (args: { where?: Record<string, unknown> }) => {
+        const rows = await docs.findMany(args as never);
+        const w = args?.where ?? {};
+        if (!hold && w['userId'] === userId && w['purgedAt'] === null && w['legalHoldId'] === null) hold = await lockThenHold(userId);
+        return rows;
+      };
+    } });
+    const prisma = new Proxy(app.prisma, { get(target, prop) {
+      if (prop === 'verificationDocument') return census;
+      const value = Reflect.get(target, prop) as unknown;
+      return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+    } });
+    const account = new AccountService({ prisma: prisma as never, log: app.log, io: { in: () => ({ disconnectSockets: () => undefined }) } as never });
+    const erasure = runWithTenant('swift-default', () => account.deleteAccount(userId));
+    for (let i = 0; i < 100 && !hold; i++) await new Promise((r) => setTimeout(r, 50));
+    expect(hold).toBeDefined();
+    expect(await settles(erasure)).toBe(false); // the close waits on the person's lock the hold placement holds
+    hold!.release(); await hold!.done;
+    await erasure.catch(() => undefined);
+    const d = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: docId } }));
+    expect(d.legalHoldId).not.toBeNull();
+    expect(d.purgedAt).toBeNull();
+    expect(await system(() => app.prisma.deletionReceipt.count({ where: { submissionId: docId } }))).toBe(0);
   });
 });

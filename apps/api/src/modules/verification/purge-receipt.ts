@@ -81,22 +81,22 @@ export async function shredUnlessHeld(
   ref: VerificationObjectReference & { documentId: string },
   still: Prisma.VerificationDocumentWhereInput = {},
 ): Promise<PurgeEvidence | null> {
-  const meta = await db.$transaction(async (fence) => {
-    await bindTenantTransaction(fence);
-    const person = await fence.$queryRaw<Array<{ id: string }>>`
+  const meta = await db.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    const person = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT "id" FROM "users" WHERE "id" = ${ref.userId} FOR UPDATE /* verification-document-purge-authority */
     `;
     if (person.length !== 1) return null;
-    const live = await fence.verificationDocument.findMany({
+    const live = await tx.verificationDocument.findMany({
       where: { id: ref.documentId, userId: ref.userId, legalHoldId: null, ...still }, select: { id: true },
     });
     if (!live.some((d) => d.id === ref.documentId)) return null;
     // A purge that shredded this key and then could not finish (store unreachable, probe failed)
     // left the person's own envelope keyless: finish destroying it rather than strand it.
-    const prior = await fence.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });
+    const prior = await tx.encryptedObject.findUnique({ where: { fileKey: ref.fileKey } });
     if (prior && prior.createdBy === ref.userId && prior.shreddedAt !== null && prior.wrappedDek === null) return prior;
-    const object = await resolveVerificationObject(fence, ref);
-    await fence.encryptedObject.updateMany({
+    const object = await resolveVerificationObject(tx, ref);
+    await tx.encryptedObject.updateMany({
       where: { fileKey: ref.fileKey, createdBy: ref.userId }, data: { wrappedDek: null, shreddedAt: new Date() },
     });
     return object;

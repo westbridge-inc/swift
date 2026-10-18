@@ -1175,6 +1175,27 @@ describe('review corrections: deletion obligations and retry progress', () => {
     expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
   });
 
+  // [Row 243 / #1840, REVIEW-M S2-1 — probe written by the independent reviewer, adopted as is] A document whose image
+  // R24 already purged (fileUrl '') never enters the fence; the erasure's close must still re-check the hold under the
+  // person's lock, or a hold that lands after the census loses the record and its extracted values.
+  it('an image-purged document held after the erasure census keeps its record and values', async () => {
+    const h = erasureRaceHarness();
+    Object.assign(h.doc, { fileUrl: '', imagePurgedAt: new Date(0) });
+    const census = h.db.verificationDocument.findMany.getMockImplementation()!;
+    let held = false;
+    h.db.verificationDocument.findMany.mockImplementation(async (query: any) => {
+      const rows = await census(query);
+      const w = query?.where ?? {};
+      if (!held && w.userId === A && w.purgedAt === null && w.legalHoldId === null) { held = true; Object.assign(h.doc, { legalHoldId: 'synthetic-hold' }); }
+      return rows;
+    });
+    await h.account.deleteAccount(A).catch(() => undefined);
+    expect(held).toBe(true);
+    expect({ hold: h.doc.legalHoldId, purgedAt: h.doc.purgedAt, runDek: h.run.wrappedDek === null ? 'SHREDDED' : 'KEPT', fieldCt: h.field.valueCt === null ? 'SHREDDED' : 'KEPT' })
+      .toEqual({ hold: 'synthetic-hold', purgedAt: null, runDek: 'KEPT', fieldCt: 'KEPT' });
+    expect(h.db.deletionReceipt.create).not.toHaveBeenCalled();
+  });
+
   it.each(['legacy', 'metadata-missing', 'metadata-outage'])('keeps %s as a pending obligation and completes independent cleanup after real deactivation', async (fault) => {
     const h = accountHarness(); const doc = h.poison();
     doc.fileUrl = fault === 'legacy' ? `/uploads/verification/${A}/legacy.jpg` : key(A);
