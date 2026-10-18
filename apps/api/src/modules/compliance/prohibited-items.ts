@@ -218,6 +218,8 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'weed spray', 'weed control', 'weed preventer', 'weed and feed', 'rat poison', 'rat poisons', 'rat bait', 'rodent bait',
     'mouse poison', 'roach poison', 'ant poison', 'poison bait', 'insect killer', 'insect spray', 'bug spray', 'bug killer',
     'roach killer', 'ant killer', 'fly spray', 'mosquito coil', 'mosquito coils', 'toxic chemical', 'toxic chemicals',
+    // [#1805 S4-2] a termiticide is a professional chemical: held for a person whatever it is called
+    'termite killer', 'termite killers', 'termite spray', 'termite sprays', 'termite treatment',
     // the active ingredients and brands on Guyanese farm and shop shelves
     'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin',
     'lambda cyhalothrin', 'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane',
@@ -279,8 +281,9 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
  * brands on a Guyanese shop shelf (Baygon, Mortein) are listed without a person's check, and carried in a parcel.
  * Agricultural and garden pesticides stay banned (R4, Cap. 68:09): a generic insecticide ("Insecticide 1L"), the
  * active ingredients, weed killers and poisons are judged exactly as before, and cutting these phrases never hides
- * them ("Mosquito coils + weed killer 1L" is still refused). Any of the item's or store's own texts that says farm,
- * garden or bulk use (NOT_HOUSEHOLD_USE) takes these exemptions away, so the household word is held for a person.
+ * them ("Mosquito coils + weed killer 1L" is still refused). The exemption fails closed (notHouseholdText below):
+ * anything but a plain household form, or a farm, garden, livestock or bulk word anywhere around it, and the household
+ * word is held for a person.
  */
 const HOUSEHOLD_INSECTICIDE_EXEMPTIONS: readonly string[] = [
   'baygon', 'mortein', 'baygon insecticide', 'mortein insecticide',
@@ -289,10 +292,81 @@ const HOUSEHOLD_INSECTICIDE_EXEMPTIONS: readonly string[] = [
   'household insecticide', 'household insecticides', 'aerosol insecticide', 'aerosol insecticides', 'insecticide aerosol',
   'insecticide aerosols', 'insecticide coil', 'insecticide coils', 'mosquito insecticide', 'mosquito insecticides',
 ];
-/** [owner 16 Oct] Farm, garden, livestock, professional or bulk use: never a household insecticide. Read on the text as
- *  written — a disguised word ("f@rm") would only hide what leaving the word out hides too. Grocery words ("rice",
- *  "poultry") are not here: a shop's bundle or menu names them beside its bug spray. */
-const NOT_HOUSEHOLD_USE = /\b(?:agricultur\w*|agro\w*|farm\w*|crops?|gardens?|gardening|lawns?|fields?|plantations?|orchards?|paddy|sugar\s*cane|livestock|cattle|concentrates?|concentrated|emulsifiable|wettable|knapsack|hectares?|acres?|commercial|industrial|professional|termites?|gallons?|drums?|bulk)\b/i;
+/**
+ * [owner 16 Oct · #1805 REVIEW-F S2-1] The exemption FAILS CLOSED. A household phrase is cut (allowed with no person)
+ * only when the text positively reads as a sealed retail household product, and nothing around it says otherwise:
+ *  1. HOUSEHOLD FORM: every clause of the text that carries a household phrase holds nothing but household-form words
+ *     (HOUSEHOLD_FORM_WORDS: the pests, the retail forms and packs, home/kitchen/indoor, a scent) and pack sizes.
+ *     Any other word beside it ("for plants", "for the pig pen", "granules", "for grandma") is a use or a form this
+ *     list does not know, so the phrase stays and is judged as before: held for a person.
+ *  2. NO HOUSEHOLD-SIZE BREACH: a volume over 1 litre, any gallon or kilogram (LARGE_PACK) is not a household pack.
+ *  3. NO FARM, GARDEN, LIVESTOCK OR BULK WORD (FARM_GARDEN_USE) in any of the item's texts, its platform categories,
+ *     or its store's own words (name, description, tags); and no plant or animal use (PLANT_ANIMAL_USE) in any of
+ *     the item's own texts. Grocery words ("rice", "chicken", "vegetables" in a store's description) are kept out
+ *     of what a STORE's words are read for: a grocery sells Baygon beside them.
+ * Read on the text as written; a disguised word is not a household-form word, so it holds too.
+ */
+const FARM_GARDEN_USE = /\b(?:agricultur\w*|agri|agro\w*|farm\w*|crops?|gardens?|gardening|lawns?|fields?|plantations?|orchards?|paddy|sugar\s*cane|livestock|cattle|concentrates?|concentrated|emulsifiable|wettable|granules?|granular|knapsacks?|sprayers?|fertili[sz]ers?|hectares?|acres?|commercial|industrial|professional|termites?|gallons?|drums?|bulk|wholesale)\b/i;
+const PLANT_ANIMAL_USE = /\b(?:plants?|vegetables?|veg|veggies|flowers?|trees?|shrubs?|hedges?|yards?|backyards?|soil|seedlings?|nurser(?:y|ies)|cows?|goats?|sheep|pigs?|piggery|pigpens?|horses?|poultry|coops?|barns?|stables?|kennels?|(?:pig|poultry|chicken|animal|goat)\s+pens?)\b/i;
+const LARGE_PACK = /(\d+(?:[.,]\d+)?)\s*(ml|millilit(?:er|re)s?|l|lt|ltr|lit(?:er|re)s?|gal|gals|kg|kgs|kilos?|kilograms?)\b/gi;
+function largePack(text: string): boolean {
+  for (const m of text.matchAll(LARGE_PACK)) {
+    const amount = Number(m[1]!.replace(',', '.'));
+    const unit = m[2]!.toLowerCase();
+    if (/^(?:gal|gals|kg|kgs|kilo|kilos|kilogram|kilograms)$/.test(unit)) return true;
+    if (/^(?:ml|millilit)/.test(unit) ? amount > 1000 : amount > 1) return true;
+  }
+  return false;
+}
+/** What may stand beside a household phrase in its clause: the pests, the retail forms and packs, the room, a scent. */
+const HOUSEHOLD_FORM_WORDS: ReadonlySet<string> = new Set([
+  'baygon', 'mortein', 'insect', 'insects', 'insecticide', 'insecticides', 'bug', 'bugs', 'fly', 'flies', 'mosquito', 'mosquitos',
+  'mosquitoes', 'roach', 'roaches', 'cockroach', 'cockroaches', 'ant', 'ants', 'spider', 'spiders', 'crawling', 'flying',
+  'multi', 'killer', 'killers', 'spray', 'sprays', 'aerosol', 'aerosols', 'coil', 'coils', 'refill', 'refills', 'can', 'cans',
+  'pack', 'packs', 'pk', 'pkt', 'packet', 'packets', 'pc', 'pcs', 'piece', 'pieces', 'box', 'boxes', 'bottle', 'bottles', 'tin',
+  'tins', 'each', 'x', 'twin', 'value', 'family', 'size', 'ml', 'l', 'litre', 'liter', 'g', 'gm', 'gms', 'grams', 'oz', 'fl',
+  'ct', 'count', 'household', 'home', 'house', 'kitchen', 'indoor', 'indoors', 'room', 'rooms', 'bedroom', 'pest', 'pests',
+  'control', 'original', 'new', 'fresh', 'scent', 'scented', 'lavender', 'citrus', 'lemon', 'odourless', 'odorless', 'fast',
+  'action', 'acting', 'max', 'extra', 'ultra', 'plus', 'advanced', 'formula', 'repellent', 'for', 'the', 'a', 'an', 'of', 'in',
+  'with', 'your',
+]);
+const PACK_TOKEN = /^(?:\d+(?:ml|l|g|gm|gms|oz|ct|pk|pc|pcs|s|x)?|x\d+)$/;
+const HOUSEHOLD_CLAUSE_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}.!?&+\n]|\s(?:and|or)\s/iu;
+/** Rule 1: every clause carrying a household phrase is a household form. */
+function householdFormOnly(text: string): boolean {
+  // Most texts carry no household phrase at all: nothing to read clause by clause.
+  if (!normalize(undisguise(text)).split(' ').some((w) => HOUSEHOLD_HEADS.has(w))) return true;
+  for (const clause of undisguise(text).split(HOUSEHOLD_CLAUSE_BREAK)) {
+    let words = normalize(clause).split(' ').filter(Boolean);
+    let carried = false;
+    for (const phrase of HOUSEHOLD_LONGEST_FIRST) {
+      const kept: string[] = [];
+      for (let i = 0; i < words.length;) {
+        if (phrase.every((w, k) => words[i + k] === w)) { carried = true; i += phrase.length; continue; }
+        kept.push(words[i]!);
+        i += 1;
+      }
+      words = kept;
+    }
+    if (carried && !words.every((w) => HOUSEHOLD_FORM_WORDS.has(w) || PACK_TOKEN.test(w))) return false;
+  }
+  return true;
+}
+/** Rules 1-3 on ONE text: true when its household phrases must NOT be cut. Store words: rules 1, 2 and FARM_GARDEN_USE. */
+function notHouseholdText(text: string): boolean {
+  return FARM_GARDEN_USE.test(text) || largePack(text) || !householdFormOnly(text);
+}
+/** [#1805 S2-1] A household word held for a person (the exemption is off) never names the hold when the same text
+ *  carries certain goods of another class ("Baygon w/ x-m"): the person is told what else it carries. */
+function heldPesticideBehind(hit: { prohibitedClass: ProhibitedClass; term: string }, behind: () => { prohibitedClass: ProhibitedClass; term: string } | null): { prohibitedClass: ProhibitedClass; term: string } | null {
+  if (hit.prohibitedClass !== 'PESTICIDES') return null;
+  const goods = behind();
+  return goods && goods.prohibitedClass !== 'PESTICIDES' ? goods : null;
+}
+/** [#1805 S3-1] A store's own words that say farm, garden or bulk supply: none of its items' household words is cut. */
+export function storeWordsNotHousehold(store: StoreWords): boolean {
+  return [store.name, store.description, ...(store.tags ?? []), ...(store.cuisineTypes ?? [])].some((text) => !!text && FARM_GARDEN_USE.test(text));
+}
 
 /**
  * Phrases that contain a listed word but name something else entirely. They
@@ -300,6 +374,9 @@ const NOT_HOUSEHOLD_USE = /\b(?:agricultur\w*|agro\w*|farm\w*|crops?|gardens?|ga
  * and rum punch" is still alcohol). Kept short on purpose: a hold is cheap,
  * and the owner's own examples ("beer batter fish", "gas stove") are holds.
  */
+const HOUSEHOLD_LONGEST_FIRST: ReadonlyArray<readonly string[]> = [...HOUSEHOLD_INSECTICIDE_EXEMPTIONS].sort((x, y) => y.length - x.length).map((p) => p.split(' '));
+const HOUSEHOLD_HEADS: ReadonlySet<string> = new Set(HOUSEHOLD_LONGEST_FIRST.map((p) => p[0]!));
+
 export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   ...HOUSEHOLD_INSECTICIDE_EXEMPTIONS,
   'ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales',
@@ -895,7 +972,7 @@ export interface ClassifyOptions {
 export function classifyText(text: string | null | undefined, options: ClassifyOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
-  const notHousehold = options.notHousehold ?? NOT_HOUSEHOLD_USE.test(text);
+  const notHousehold = options.notHousehold === true || notHouseholdText(text);
   const judged = readings(text, noSoftDrinks, notHousehold, options.householdCut);
   if (judged.length === 0) return null;
   // The spelling as written names the term first ("rolling papers"); the other readings only when it names none.
@@ -1114,7 +1191,7 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
   if (!text) return null;
   const sameText = STATES_A_STRENGTH.test(text);
   // [owner 16 Oct] household insecticide is judged on this text alone too: farm use written here takes it away
-  const notHousehold = NOT_HOUSEHOLD_USE.test(text);
+  const notHousehold = notHouseholdText(text);
   const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part), notHousehold).map((r) => r.split(' ')));
   // A brand or product phrase: certain — unless an ALCOHOL one names a dish ("Hennessy wings"). [DS1109 S2-3]
   const present = new Set(parts.flat(2));
@@ -1284,6 +1361,9 @@ export interface CatalogueFacts extends ItemWords {
   reviewApprovedHash?: string | null;
   /** The verdict on the item's STORE's own words (`checkStore`): a store held for a person holds every item it sells. */
   store?: StoreCheck;
+  /** [#1805 S3-1] The store's own words say farm, garden or bulk supply (`storeWordsNotHousehold`): no household word
+   *  of its items is allowed without a person. */
+  storeNotHousehold?: boolean;
 }
 
 export type BanSource = 'category' | 'store' | 'removed' | 'word';
@@ -1296,7 +1376,7 @@ export type CatalogueCheck =
  * The partner's text judged: the first word hit, in the order a partner reads
  * it — or, when the name or an option IS the banned goods, that, as certain.
  */
-export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+export function judgeItemWords(item: ItemWords, storeNotHousehold = false): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
   const fields: Array<[JudgedField, string | null | undefined]> = [
     ['name', item.name],
     ['section', item.sectionName],
@@ -1305,8 +1385,11 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
   ];
   // A strength or a qualifier in ANY of the item's own texts takes the soft-drink exemptions away in all of them. [DS1105 S3]
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
-  // [owner 16 Oct] Farm, garden or bulk use in ANY of the item's own texts takes the household-insecticide exemptions away.
-  const notHousehold = fields.some(([, text]) => !!text && NOT_HOUSEHOLD_USE.test(text));
+  // [owner 16 Oct · #1805 S2-1] The household-insecticide exemptions fail closed for the whole item: ANY of its own texts
+  // that is not a plain household form, names a plant or animal use, a large pack, or farm/garden/bulk use takes them
+  // away in all of them — and so do its store's own words or its platform categories (storeNotHousehold, checkItem).
+  const notHousehold = storeNotHousehold
+    || fields.some(([, text]) => !!text && (notHouseholdText(text) || PLANT_ANIMAL_USE.test(text)));
   let first: { prohibitedClass: ProhibitedClass; field: JudgedField; term: string } | null = null;
   for (const [field, text] of fields) {
     const product = field === 'name' || field === 'option';
@@ -1323,7 +1406,7 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
     }
     const certain = product ? certainGoods(text) : null;
     if (certain) return { ...certain, field, certain: true };
-    first ??= { ...hit, field };
+    first ??= { ...(heldPesticideBehind(hit, () => certainGoods(text)) ?? hit), field };
   }
   if (!first) {
     // A phrase written across fields ("Captain" named, "Morgan" as the option): the item's own words read together
@@ -1334,18 +1417,18 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
   }
   return first ? { ...first, certain: false } : null;
 }
-const itemWordsJudge = rememberedJudge(
-  (item: ItemWords) => JSON.stringify([item.name, item.sectionName ?? null, item.description ?? null, (item.optionNames ?? []).map((name) => name ?? null)]),
-  judgeItemWords,
-);
+const itemWordsKey = (item: ItemWords) => JSON.stringify([item.name, item.sectionName ?? null, item.description ?? null, (item.optionNames ?? []).map((name) => name ?? null)]);
+const itemWordsJudge = rememberedJudge(itemWordsKey, (item: ItemWords) => judgeItemWords(item));
+/** [#1805 S3-1] The same words, for an item whose store's words or platform categories say farm, garden or bulk supply. */
+const itemWordsJudgeNotHousehold = rememberedJudge(itemWordsKey, (item: ItemWords) => judgeItemWords(item, true));
 
 /**
  * The partner's text judged: the first word hit, in the order a partner reads
  * it — or, when the name or an option IS the banned goods, that, as certain.
  * Remembered for these exact words (see "Remembered verdicts").
  */
-export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
-  return itemWordsJudge.judge(item);
+export function wordHit(item: ItemWords, storeNotHousehold = false): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+  return (storeNotHousehold ? itemWordsJudgeNotHousehold : itemWordsJudge).judge(item);
 }
 
 /**
@@ -1384,7 +1467,10 @@ export function checkItem(item: CatalogueFacts): CatalogueCheck {
     const hit = classifyCategory(category);
     if (hit) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'store', term: hit.term, reason: storeCategoryReason(category.name) };
   }
-  const hit = wordHit(item);
+  // [#1805 S3-1] farm, garden or bulk supply in the store's own words or in a platform category the item or its store is
+  // filed under: the household-insecticide exemptions are off for the item.
+  const farmFiled = [...(item.categories ?? []), ...(item.storeCategories ?? [])].some((c) => FARM_GARDEN_USE.test(`${c.slug.replace(/-/g, ' ')} ${c.name}`));
+  const hit = wordHit(item, item.storeNotHousehold === true || farmFiled);
   if (hit?.certain) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'word', term: hit.term, reason: null, field: hit.field };
   // [owner 14 Oct, store names] A store whose own words are held for a person holds every item it sells, whatever the
   // item's words — an approval of the item's words does not show it while its store waits.
@@ -1429,13 +1515,13 @@ export function judgeStoreWords(store: StoreWords): StoreWordHit | null {
     ...labels.map((label): [StoreField, string | null | undefined, boolean] => ['tags', label, false]),
   ];
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
-  // [owner 16 Oct] A store that sells Baygon beside garden or farm supplies sells an allowed good: its own words are not
-  // held for it (each of its items is judged on its own texts).
-  const notHousehold = false;
+  // [owner 16 Oct · #1805 S2-1/S3-1] A store whose own words say farm, garden or bulk supply: its household words are held
+  // for a person (and its items' too, storeNotHousehold). Grocery words are not read here (a grocery sells Baygon).
+  const notHousehold = storeWordsNotHousehold(store);
   for (const [field, text, brandFirst] of fields) {
     const cut: HouseholdCut = { household: false };
     const hit = classifyText(text, { noSoftDrinks, notHousehold, brandFirst, skipTerms: STORE_SKIPPED_PAYMENT_WORDS, householdCut: cut });
-    if (hit) return { ...hit, field };
+    if (hit) return { ...(heldPesticideBehind(hit, () => certainGoods(text, { skipTerms: STORE_SKIPPED_PAYMENT_WORDS })) ?? hit), field };
     // [owner 16 Oct] the certain goods behind an allowed household word still hold the store (as in judgeItemWords)
     const behind = cut.household ? certainGoods(text, { skipTerms: STORE_SKIPPED_PAYMENT_WORDS }) : null;
     if (behind) return { ...behind, field };
