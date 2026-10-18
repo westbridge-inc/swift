@@ -1,6 +1,6 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
-import { reanchorAtReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
+import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
@@ -2195,6 +2195,14 @@ export class BillingService {
     // An issued instruction keeps its own week (billing_confirmation_source_immutable):
     // the return reaches this point as fee credit spent on the return week (below).
     const returnAt = !settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status) ? await reanchorAtReturnInTx(tx, sub.id, now) : null;
+    // [REVIEW-M #1832 S3-1] An issued instruction reaching here for a suspended
+    // partner did not prove a return (a proven one is banked and spent above): it
+    // pays its own week as it stands, and finance reviews it. Nothing below
+    // returns without booking (a failure throws and rolls this back with it).
+    if (settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status)) {
+      const method = (await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId }, select: { paymentMethod: true } }))?.paymentMethod;
+      await recordUnprovenReturnInTx(tx, sub.id, now, { rail: method === 'CARD' ? 'CARD' : method === 'MOBILE_MONEY' ? 'MMG_PUSH' : 'INSTRUCTION', paymentId: settlePaymentId });
+    }
     if (returnAt) {
       periodStart = returnAt;
       periodKey = returnAt.toISOString().slice(0, 10);

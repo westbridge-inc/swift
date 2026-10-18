@@ -549,6 +549,32 @@ export async function returnReanchorProof(db: Tx | PrismaClient, sub: Subscripti
   return 'suspension' in check ? check.suspension : null;
 }
 
+/** [REVIEW-M #1832 S3-1] A SUSPENDED or CHURNED partner's payment that cannot
+ *  re-anchor pays the obligation as it stands (the week that fell due, as
+ *  before re-anchoring existed), so the time suspended may have been billed.
+ *  Each such payment is one finance review row on the payment-confirmations
+ *  queue (confirmation-finance.ts): never silent. */
+export type ReanchorReviewSource = { rail: 'WALLET' } | { rail: 'MMG_PUSH' | 'CARD' | 'INSTRUCTION'; paymentId: string };
+async function writeReanchorReview(
+  tx: Tx, previous: { id: string; tenantId: string; epoch: number; dueAt: Date }, sub: Subscription, reason: string, source: ReanchorReviewSource,
+) {
+  await tx.auditLog.create({ data: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entity: 'BillingDunningClock', entityId: previous.id,
+    changes: { clockId: previous.id, tenantId: previous.tenantId, subscriptionId: sub.id, status: sub.status,
+      epoch: previous.epoch, dueAt: previous.dueAt.toISOString(), reason, ...source } } });
+}
+
+/** An issued MMG or card instruction keeps the week it was issued for (its
+ *  identity is immutable); when it brings a SUSPENDED or CHURNED partner back
+ *  and the return could not be proven, it pays that week as it stands. Called
+ *  inside that settlement, at the point it is certain to book: finance is told. */
+export async function recordUnprovenReturnInTx(tx: Tx, subscriptionId: string, now: Date, source: Exclude<ReanchorReviewSource, { rail: 'WALLET' }>): Promise<void> {
+  const sub = await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } });
+  if (!RETURN_REANCHOR_STATUSES.includes(sub.status)) return;
+  const previous = await clockRow(tx, subscriptionId, now);
+  const check = await returnReanchorCheck(tx, sub, now);
+  await writeReanchorReview(tx, previous, sub, check.reason ?? 'INSTRUCTION_KEEPS_ITS_WEEK', source);
+}
+
 /** Inside the settlement transaction, with the payer and subscription locked
  *  and every confirmation of this obligation already resolved: move the
  *  obligation on by the time suspended. Returns its new due date (the start of
@@ -563,10 +589,7 @@ export async function reanchorAtReturnInTx(tx: Tx, subscriptionId: string, now: 
   const held = previous.authorityHoldReason || previous.pausedAt
     || await tx.paymentConfirmationHold.count({ where: { clockId: previous.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
   if (!suspension || held || previous.subscriptionId !== sub.id || previous.dueAt.getTime() !== sub.nextBillingDate.getTime()) {
-    await tx.auditLog.create({ data: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entity: 'BillingDunningClock', entityId: previous.id,
-      changes: { clockId: previous.id, tenantId: previous.tenantId, subscriptionId: sub.id, status: sub.status,
-        epoch: previous.epoch, dueAt: previous.dueAt.toISOString(),
-        reason: 'reason' in check ? check.reason : held ? 'OBLIGATION_HELD' : 'OBLIGATION_SOURCE_MISMATCH' } } });
+    await writeReanchorReview(tx, previous, sub, check.reason ?? (held ? 'OBLIGATION_HELD' : 'OBLIGATION_SOURCE_MISMATCH'), { rail: 'WALLET' });
     return null;
   }
   const resume = returnWeekStart(sub, now);

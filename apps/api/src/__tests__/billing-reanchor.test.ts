@@ -12,6 +12,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { sandboxSetTxStatus } from '../providers/mmg/mmg-provider';
 import { reanchorAtReturnInTx, suspensionKey } from '../modules/billing/dunning-clock';
+import { confirmationReviewQueue } from '../modules/billing/confirmation-finance';
 import { bookAt, priceBookNoticeKey, type PriceBookRow } from '../modules/billing/price-book';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
@@ -149,6 +150,24 @@ async function expectReturnedAt(subId: string, due: Date, from: number, to: numb
   expect(clock.epoch).toBe(paidAdvance.toEpoch);
   expect(await app.prisma.auditLog.count({ where: { action: 'BILLING_CLOCK_RETURN_REANCHOR', entityId: clock.id } })).toBe(1);
   return { s, reanchor, paidAdvance };
+}
+
+/** A card instruction for the unpaid week, as the card rail leaves it before the provider answers. */
+const cardInstruction = (subId: string, due: Date, amount: number) => app.prisma.subscriptionPayment.create({ data: {
+  subscriptionId: subId, amount, status: 'UNKNOWN', paymentMethod: 'CARD', periodStart: due, periodEnd: new Date(due.getTime() + 7 * DAY),
+} });
+/** The card settlement entry the rail calls once the provider reports the capture. */
+async function applyCardCapture(subId: string, paymentId: string, amount: number, at: Date): Promise<boolean> {
+  const payment = await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: paymentId } });
+  const internals = billing as unknown as { applySuccessfulCharge(s: unknown, amount: number, ref: string, now: Date, periodKey: string, settlePaymentId?: string): Promise<boolean> };
+  return internals.applySuccessfulCharge(await subWithRelations(subId), amount, `card-capture-${paymentId}`, at, day(payment.periodStart), paymentId);
+}
+/** [REVIEW-M #1832 S3-1] Finance's queue shows the payment that could not re-anchor: read-only, one row. */
+async function expectFinanceRow(subId: string, want: { sourceId: string; reason: string; partner: string }) {
+  const clock = await clockOf(subId);
+  const rows = (await confirmationReviewQueue(app.prisma, clock.tenantId)).filter((r) => r.subscriptionId === subId && r.source === 'RETURN_REANCHOR');
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ ...want, status: 'REVIEW_REQUIRED', resolvable: false, settlementPayments: [] });
 }
 
 beforeAll(async () => {
@@ -297,6 +316,81 @@ describe('BILLING-REANCHOR — a returning partner pays from the week they retur
     expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: v.subId, kind: 'RETURN_REANCHOR' } })).toBe(0);
     const review = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } });
     expect(review.map((r) => (r.changes as Record<string, unknown>)['reason'])).toEqual(['CLOCK_DISAGREES']);
+    expect(review[0]!.changes).toMatchObject({ rail: 'WALLET' });
+    // [REVIEW-M #1832 S3-1] ...and finance sees it: one read-only row on the payment-confirmations queue.
+    await expectFinanceRow(v.subId, { sourceId: v.subId, reason: 'RETURN_NOT_REANCHORED_CLOCK_DISAGREES', partner: `Anchor Vendor ${seq}` });
+    // The row stays for REANCHOR_REVIEW_DAYS (30), then leaves the queue; the audit itself is append-only.
+    const later = await confirmationReviewQueue(app.prisma, (await clockOf(v.subId)).tenantId, new Date(Date.now() + 31 * DAY));
+    expect(later.filter((r) => r.subscriptionId === v.subId && r.source === 'RETURN_REANCHOR')).toHaveLength(0);
+  });
+
+  // [REVIEW-M #1832 S3-1] An issued instruction keeps its own week: when the
+  // return it brings cannot be proven it pays that week as it stands (the
+  // time suspended may be billed). That is never silent: each such payment
+  // writes the review record and is one row on the finance queue.
+  it('[REVIEW-M S3-1] an MMG approval that cannot prove the return pays the week as it stands, and finance sees that payment', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    await billing.setBillingRail(v.subId, 'MOBILE_MONEY', '5926001235');
+    expect(await billing.billSubscription(await subWithRelations(v.subId) as never)).toBe('pending');
+    const request = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: v.subId, paymentMethod: 'MOBILE_MONEY' } });
+    sandboxSetTxStatus(request.externalRef!, 'approved');
+    // A poll batch dated 10 minutes away from the database clock (a long batch, or a skewed host).
+    await billing.pollPendingMmgCharges(new Date(Date.now() + 10 * 60_000));
+    const s = await sub(v.subId);
+    expect(s.status).toBe('ACTIVE');
+    expect(s.currentPeriodStart.getTime()).toBe(due.getTime()); // the week it was issued for, as before re-anchoring
+    expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: v.subId, kind: 'RETURN_REANCHOR' } })).toBe(0);
+    const review = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } });
+    expect(review.map((r) => r.changes)).toEqual([expect.objectContaining({ reason: 'CLOCK_DISAGREES', rail: 'MMG_PUSH', paymentId: request.id, subscriptionId: v.subId, status: 'SUSPENDED' })]);
+    await expectFinanceRow(v.subId, { sourceId: request.id, reason: 'RETURN_NOT_REANCHORED_CLOCK_DISAGREES', partner: `Anchor Vendor ${seq}` });
+  });
+
+  it('[REVIEW-M S3-1] a card capture that cannot prove the return pays the week as it stands, and finance sees that payment', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    const capture = await cardInstruction(v.subId, due, RATE);
+    // Applied on a clock an hour away from the database's.
+    expect(await applyCardCapture(v.subId, capture.id, RATE, new Date(Date.now() + HOUR))).toBe(true);
+    const s = await sub(v.subId);
+    expect(s.status).toBe('ACTIVE');
+    expect(s.currentPeriodStart.getTime()).toBe(due.getTime());
+    expect(await app.prisma.billingObligationTransition.count({ where: { subscriptionId: v.subId, kind: 'RETURN_REANCHOR' } })).toBe(0);
+    const review = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } });
+    expect(review.map((r) => r.changes)).toEqual([expect.objectContaining({ reason: 'CLOCK_DISAGREES', rail: 'CARD', paymentId: capture.id })]);
+    await expectFinanceRow(v.subId, { sourceId: capture.id, reason: 'RETURN_NOT_REANCHORED_CLOCK_DISAGREES', partner: `Anchor Vendor ${seq}` });
+  });
+
+  // [REVIEW-M #1832 S3-2] The card rail's return (dormant until CARD_RAIL_V2):
+  // a capture for the unpaid week from a suspended partner is credited once,
+  // buys the return week through the prepaid path at that week's own price and
+  // never more than was captured, and the rest stays the partner's fee credit.
+  it('[REVIEW-M S3-2] a card capture that brings a suspended partner back is their return: one credit, the return week at its own price, the rest kept', async () => {
+    const due = new Date(Date.now() - 10 * DAY);
+    const v = await brokeVendorSub(due);
+    await suspendFrom(v.subId, due);
+    const capture = await cardInstruction(v.subId, due, RATE);
+    // A cut in force by the return week: that week costs 15,000; 20,000 was captured.
+    await app.prisma.subscription.update({ where: { id: v.subId }, data: { weeklyRate: 15_000 } });
+    const from = Date.now();
+    expect(await applyCardCapture(v.subId, capture.id, RATE, new Date())).toBe(true);
+    const { s } = await expectReturnedAt(v.subId, due, from, Date.now());
+    expect(await app.prisma.subscriptionPayment.findUniqueOrThrow({ where: { id: capture.id } })).toMatchObject({ status: 'CAPTURED', periodStart: due });
+    const credit = await app.prisma.billingEvent.findUniqueOrThrow({ where: { idempotencyKey: `bank:${capture.id}` } });
+    expect([credit.type, Number(credit.amount)]).toEqual(['PREPAID_TOPUP', RATE]);
+    expect(credit.note).toContain('their return');
+    const week = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: v.subId, periodStart: s.currentPeriodStart } });
+    expect(week).toMatchObject({ status: 'CAPTURED', externalRef: 'prepaid', periodEnd: s.currentPeriodEnd });
+    expect(Number(week.amount)).toBe(15_000);
+    expect(await balance(v.subId)).toBe(RATE - 15_000);
+    expect(await app.prisma.auditLog.count({ where: { action: 'BILLING_REANCHOR_REVIEW_REQUIRED', entityId: (await clockOf(v.subId)).id } })).toBe(0);
+    // A repeated capture report changes nothing: one credit, one week.
+    expect(await applyCardCapture(v.subId, capture.id, RATE, new Date())).toBe(false);
+    expect(await app.prisma.billingEvent.count({ where: { idempotencyKey: `bank:${capture.id}` } })).toBe(1);
+    expect(await successes(v.subId)).toHaveLength(1);
+    expect(await balance(v.subId)).toBe(RATE - 15_000);
   });
 
   it('a repeated top-up key credits once and reinstates once', async () => {
