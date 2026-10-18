@@ -63,6 +63,8 @@ export interface PlaceOpts {
   key?: string;
   tip?: number;
   extraItems?: Array<{ vendorId: string; itemId: string; qty?: number }>;
+  /** [PAYMENT-SIMPLIFY #1848] MMG to the store's NUMBER (build 12 / web). Absent = the old pay-link shape builds 9-11 send. */
+  mmgPayTo?: 'STORE_NUMBER';
 }
 
 /** The latest LIFECYCLE_V2 hold expiry seen on any order this run placed (epoch ms). */
@@ -91,6 +93,7 @@ export async function placeOrder(c: Session, vendorId: string, itemId: string, l
     body.fulfillmentSelections = Object.fromEntries([vendorId, ...(o.extraItems ?? []).map((x) => x.vendorId)].map((v) => [v, 'PICKUP']));
   }
   if (o.tip !== undefined) body.tipAmount = o.tip;
+  if (o.mmgPayTo) body.mmgPayTo = o.mmgPayTo;
   const res = await req('POST', '/customer/checkout', { token: c.token, body, headers: o.key ? { 'Idempotency-Key': o.key } : undefined });
   for (const ord of (res.json?.data?.orders ?? [res.json?.data?.order]) as any[]) noteHold(ord?.holdExpiresAt);
   return res;

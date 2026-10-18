@@ -366,6 +366,12 @@ model DeviceToken {
   platform  String
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  /// [RINGER · loud alerts 3/4] What the app installed on this device can
+  /// ring with, as the app reported it when it registered this token: 0 =
+  /// builds 9-11 and anything that reported nothing (sent exactly today's
+  /// push); 1 = the build with the job ring (the 'job_offers' Android
+  /// channel, the bundled ring tone, the iOS time-sensitive entitlement).
+  alertsVersion Int @default(0)
 
   @@map("device_tokens")
 }
@@ -1562,6 +1568,18 @@ model Vendor {
   mmgPayUrlPendingAt DateTime?
   mmgPayUrlApplyAt   DateTime?
 
+  /// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's OWN MMG number (a +592 mobile,
+  /// checked by utils/mmg-number.ts): where a customer who chose MMG pays the order
+  /// directly, in MMG's own app. Shown ONLY to that order's customer, ONLY after the
+  /// store accepts; never on the storefront. Replaces the pay link for stores (the
+  /// link columns above stay, dormant, behind STORE_MMG_PAY_LINK). null = no MMG.
+  /// [ALG-34 parity] A change is staged in the three columns below, behind the same
+  /// cool-off as the link, with the live number paying the store until then.
+  mmgNumber          String?
+  mmgNumberPending   String?
+  mmgNumberPendingAt DateTime?
+  mmgNumberApplyAt   DateTime?
+
   /// [E02 · refund rail 1/8] The store's MMG checkout is paused (cash only)
   /// while `mmgCheckoutHeldAt` is set: the owner-approved consequence of
   /// missing the MMG refund deadline too often. Announced, reasoned and
@@ -1616,6 +1634,7 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  @@index([mmgNumberApplyAt])
   /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
@@ -2033,6 +2052,10 @@ model Order {
   /// Immutable direct-payment destination committed under the vendor row lock.
   /// Never fall back to the vendor's mutable profile URL for an existing order.
   mmgPayUrlSnapshot       String?
+  /// [PAYMENT-SIMPLIFY] The store's MMG number committed under the vendor row lock at
+  /// checkout (pay-to-number orders). Shown to this order's customer only after the
+  /// store accepts; never the vendor's mutable profile number.
+  mmgNumberSnapshot       String?
   mmgRecipientNameSnapshot String?
   /// [W-25] A capture on this rail rests on the STORE's word: Swift holds no
   /// money and has no provider feed here. These three say so out loud — the
@@ -3282,6 +3305,8 @@ model Subscription {
 model BillingEvent {
   obligationTransitions BillingObligationTransition[] @relation("ObligationSuccess")
   voluntaryResumes BillingObligationTransition[] @relation("ObligationLapse")
+  /// [BILLING-REANCHOR] The return re-anchor this SUSPENDED record authorized (used once).
+  returnReanchors BillingObligationTransition[] @relation("ObligationSuspension")
   id             String           @id @default(cuid())
   subscriptionId String
   subscription   Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
@@ -3350,7 +3375,8 @@ model BillingDunningClock {
 }
 
 /// Immutable consumed coverage. The database binds each epoch change to its
-/// original captured payment, successful charge, audit, and voluntary lapse.
+/// original captured payment, successful charge, audit, and voluntary lapse —
+/// or, for a RETURN_REANCHOR, to the suspension the partner returned from.
 model BillingObligationTransition {
   id String @id @default(cuid())
   tenantId String
@@ -3366,12 +3392,20 @@ model BillingObligationTransition {
   fromDue DateTime
   toDue DateTime
   effectiveAt DateTime
-  paymentId String
-  payment SubscriptionPayment @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
-  successEventId String
-  successEvent BillingEvent @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// Null only for RETURN_REANCHOR: a return re-anchor moves the obligation
+  /// with no payment (billing_obligation_reanchor_shape; proof in SQL).
+  paymentId String?
+  payment SubscriptionPayment? @relation(fields: [paymentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  successEventId String?
+  successEvent BillingEvent? @relation("ObligationSuccess", fields: [successEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   lapseEventId String? @unique
   lapseEvent BillingEvent? @relation("ObligationLapse", fields: [lapseEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  /// [BILLING-REANCHOR · board row 151] RETURN_REANCHOR only: the immutable
+  /// SUSPENDED billing record of the unpaid obligation the partner returned
+  /// from. No arrears: the time suspended is not billed, the operated grace is
+  /// (owner/coordinator 4 Oct; coordinator 17 Oct).
+  suspensionEventId String? @unique
+  suspensionEvent BillingEvent? @relation("ObligationSuspension", fields: [suspensionEventId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   auditId String @unique
   audit AuditLog @relation(fields: [auditId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   amount Decimal @db.Decimal(10, 2)
@@ -7339,6 +7373,35 @@ model RatingOutbox {
   @@index([tenantId])
   @@index([processedAt, availableAt])
   @@map("rating_outbox")
+}
+
+/// [S2-29 · KYC-DECISION-ATOMIC] The work a committed document approval still owes once its
+/// transaction has committed: the trial decision (and the rest of afterApproval). It must follow
+/// the reviewer-typed identity capture, which runs on the system login in its own transaction, so
+/// it cannot be part of the decision transaction; this row is written IN that transaction instead,
+/// drained right after commit and by the sweep, and the drain is idempotent.
+model VerificationDecisionOutbox {
+  id          String    @id @default(cuid())
+  tenantId    String    @default("swift-default")
+  documentId  String
+  userId      String
+  command     String
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  claimedAt   DateTime?
+  processedAt DateTime?
+  lastError   String?
+  /// Retried at most this many times; then a dead letter: never claimed again, paged
+  /// (ops_dlq_non_empty) and listed on the admin Background jobs page until requeued.
+  maxAttempts    Int       @default(25)
+  deadLetteredAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([documentId, command])
+  @@index([tenantId])
+  @@index([processedAt, availableAt])
+  @@map("verification_decision_outbox")
 }
 
 // ─── [DOC-1 §4.1–4.2] The document registry — data, not code ────────────────

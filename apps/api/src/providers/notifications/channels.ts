@@ -42,8 +42,16 @@ export interface PushOptions {
   /** high = delivered at once, even to a dozing Android; normal = the
    *  platform may hold it for its next batch. */
   priority: 'high' | 'normal';
-  /** 'default' plays the device notification sound; absent = silent. */
-  sound?: 'default';
+  /** 'default' plays the device notification sound; absent = silent. The
+   *  job ring's tone file (JOB_RING_SOUND) is set only for a device whose
+   *  app bundles it (alert-class.ts pushOptionsForDevice). */
+  sound?: 'default' | 'swift_job_ring.wav';
+  /** [RINGER] The Android channel to post to. Absent = the app's default
+   *  channel; set only for a device whose app created the channel. */
+  channelId?: 'job_offers';
+  /** [RINGER] iOS: time-sensitive breaks through a Focus the user allows it
+   *  in. Set only for a device whose app has the entitlement. */
+  interruptionLevel?: 'time-sensitive';
   /** Ceiling, in seconds, on how long an undelivered push may be held. */
   ttlSeconds?: number;
   /** Epoch ms after which the push means nothing (an offer expired, a
@@ -255,11 +263,13 @@ class TwilioSmsProvider implements SmsProvider {
  * One Expo push message. The field names are Expo's documented push API
  * (docs.expo.dev/push-notifications/sending-notifications): `priority` is
  * default | normal | high, `sound` is iOS-only (default plays the device
- * sound, omitted plays none), `ttl` is seconds. Expo also documents
- * `channelId` (Android) and `interruptionLevel` (iOS); neither is sent. The
- * installed builds only create the default channel, and time-sensitive needs
- * an entitlement they do not have, so both wait for the new build (loud
- * alerts 3/4).
+ * sound, a file name with its extension plays that sound bundled in the app,
+ * omitted plays none), `ttl` is seconds, `channelId` is the Android channel
+ * and `interruptionLevel` the iOS level. [RINGER] The last two, and the
+ * bundled tone, are present only when the options carry them, which only
+ * pushOptionsForDevice does, for a device whose app has the job ring: builds
+ * 9-11 create only the default channel and have no time-sensitive
+ * entitlement, so their message is exactly what it was.
  */
 function expoMessage(
   to: string,
@@ -276,6 +286,8 @@ function expoMessage(
     data,
     priority: options.priority,
     ...(options.sound ? { sound: options.sound } : {}),
+    ...(options.channelId ? { channelId: options.channelId } : {}),
+    ...(options.interruptionLevel ? { interruptionLevel: options.interruptionLevel } : {}),
     ...(window.ttl !== undefined ? { ttl: window.ttl } : {}),
   };
 }

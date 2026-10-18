@@ -41,7 +41,9 @@ import { photo } from '@/lib/media';
 import { ApiRequestError } from '@/lib/auth';
 import {
   cartPaymentOptions,
+  checkoutPaymentFields,
   checkoutPaymentMethod,
+  mmgOffered,
   normalizeCartPaymentCapabilities,
   reconcileCartPaymentSelection,
   selectCartPaymentMethod,
@@ -421,8 +423,10 @@ export function CheckoutPanel() {
       });
       // [W5] Pickup: the same choices that priced the quote go in the order.
       const pickupOrder = pickup ? pickupChoices(quoteStoreIds(liveCart.items)) : null;
+      // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG goes to the store's NUMBER when the server offers it (the
+      // shared phone rule): the server is told, so it never answers with the old pay-link flow.
       const body = {
-        paymentMethod,
+        ...checkoutPaymentFields(effectivePaySelection, liveCapabilities),
         tipAmount: pickupOrder ? pickupOrder.tipAmount : tip,
         ...(pickupOrder ? { fulfillmentSelections: pickupOrder.fulfillmentSelections } : {}),
         // [W5 · review S2] A web order never names a promotion.
@@ -647,7 +651,7 @@ export function CheckoutPanel() {
 
         <section className={styles.panel} aria-labelledby="payment-title">
           <h2 id="payment-title" className={styles.panelTitle}>Payment</h2>
-          {paymentCapabilities.mmg.available ? (
+          {mmgOffered(paymentCapabilities) ? (
             <div role="radiogroup" aria-labelledby="payment-title" className={styles.payOptions}>
               {paymentOptions.map((option) => (
                 <label key={option.key} className={styles.payOption}>

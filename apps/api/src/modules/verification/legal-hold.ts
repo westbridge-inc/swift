@@ -14,6 +14,7 @@
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isUuid } from '../../utils/uuid';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import { docLegalHoldGauge } from '../../plugins/observability';
 
@@ -86,6 +87,8 @@ export async function placeDocLegalHoldIn(tx: Prisma.TransactionClient, input: P
 }
 
 export async function releaseDocLegalHold(prisma: PrismaClient, input: { holdId: string; releasedBy: string; reason: string }, now = new Date()) {
+  // An id that is not a UUID names no hold (doc_legal_holds.id is a uuid column): 404, not a failed query.
+  if (!isUuid(input.holdId)) throw new NotFoundError('DocLegalHold', input.holdId);
   return prisma.$transaction(async (tx) => {
     const hold = await tx.docLegalHold.findUnique({ where: { id: input.holdId } });
     if (!hold) throw new NotFoundError('DocLegalHold', input.holdId);

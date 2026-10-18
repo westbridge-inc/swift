@@ -69,6 +69,7 @@ import {
   shortStores,
 } from '../cartQuote';
 import {
+  checkoutPaymentFields,
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
   paymentActionForCheckout,
@@ -217,6 +218,8 @@ export function CartScreen() {
   const [placedHeld, setPlacedHeld] = useState(false);
   const [placedSubmittedMethod, setPlacedSubmittedMethod] = useState<'CASH' | 'MOBILE_MONEY'>('CASH');
   const [placedPaymentAction, setPlacedPaymentAction] = useState<MmgDirectPaymentAction | null>(null);
+  // [PAYMENT-SIMPLIFY] The placed order pays the store's MMG number (shown on the order once it accepts).
+  const [placedMmgPayTo, setPlacedMmgPayTo] = useState<'STORE_NUMBER' | undefined>(undefined);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
   // The chevron only renders when there is somewhere to go: Cart is a tab, so
@@ -390,9 +393,12 @@ export function CartScreen() {
     // pickup retry has no rider either.
     const submittedTip = pickupRetry ? 0 : pricedTip(pricing, c);
     const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG goes to the store's number when the server offers it.
+    const paymentFields = checkoutPaymentFields(effectivePaySelection, paymentCapabilities);
+    const submittedMmgPayTo = 'mmgPayTo' in paymentFields ? paymentFields.mmgPayTo : undefined;
     placeOrder.mutate(
       {
-        paymentMethod: submittedMethod,
+        ...paymentFields,
         // [E01-B] The applied promo code — the charge must carry the code the
         // quote discounted with, and only while one is applied (removal drops
         // it from this same `pricing` object).
@@ -420,6 +426,7 @@ export function CartScreen() {
           setPlacedAppt(apptPayload.length > 0);
           setPlacedSubmittedMethod(submittedMethod);
           setPlacedPaymentAction(paymentAction);
+          setPlacedMmgPayTo(submittedMmgPayTo);
           if (apptPayload.length) clearAppointments();
           // First order = the first moment notifications are obviously useful
           // [first-open SO-5]; primes once, never at boot.
@@ -1189,6 +1196,7 @@ export function CartScreen() {
             held: placedHeld,
             submittedMethod: placedSubmittedMethod,
             paymentAction: placedPaymentAction,
+            mmgPayTo: placedMmgPayTo,
           })}
         </T>
         {placedPaymentAction ? (

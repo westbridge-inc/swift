@@ -130,6 +130,16 @@ describe('[DGP-1] the register is complete for what the code can reach', () => {
     expect(PRIVACY).toMatch(/Routes and travel estimates run on Swift's own servers/);
   });
 
+  // [REVIEW-MMGLOAD G2] Production MMG is reached under *.mymmg.gy (merchant API ecommerce.mymmg.gy, checkout page
+  // mmgpg.mymmg.gy), which does not end in '.mmg.gy'. The production URLs are env-configured, so the source census never
+  // sees them: the register itself must cover them, or the register under-declares the live payment egress.
+  it('MMG: the production hosts (*.mymmg.gy) and the UAT hosts resolve to the MMG row; a look-alike does not', () => {
+    for (const host of ['ecommerce.mymmg.gy', 'mmgpg.mymmg.gy', 'mymmg.gy', 'api.mmg.gy', 'mwallet.mmgtest.net', 'mmgpg.mmgtest.net']) {
+      expect(coverageOfHost(host), host).toEqual({ kind: 'PROCESSOR', ref: 'MMG' });
+    }
+    expect(coverageOfHost('notmymmg.gy')).toBeNull();
+  });
+
   it('the live verification path calls the gate at both send sites (doc submission and the L1→L2 identity check)', () => {
     const svc = readFileSync(join(SRC, 'modules/verification/verification.service.ts'), 'utf8');
     expect(svc.match(/assertExternalProcessingPermitted\(/g)?.length ?? 0).toBeGreaterThanOrEqual(2);

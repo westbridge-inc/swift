@@ -1,5 +1,5 @@
 import type { Vendor } from '@prisma/client';
-import { safeMmgPayUrl } from './mmg-pay-url';
+import { offeredStoreMmgPayUrl } from './store-mmg';
 import { publishedStorePhone } from './vendor-public-phone';
 
 // ---------------------------------------------------------------------------
@@ -101,6 +101,7 @@ export function vendorCardView(vendor: VendorCardSource): VendorCardView {
     cuisineTypes: vendor.cuisineTypes,
     tags: vendor.tags,
     publicPhone: publishedStorePhone(vendor),
-    mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
+    // [PAYMENT-SIMPLIFY] null while STORE_MMG_PAY_LINK is off: the store's number is never on a public card.
+    mmgPayUrl: offeredStoreMmgPayUrl(vendor.mmgPayUrl),
   };
 }
