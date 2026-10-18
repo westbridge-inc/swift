@@ -245,7 +245,7 @@ describe('[DOC-1 §5.1] the real path walks the machine', () => {
     expect((await admin('POST', `/verification/cases/${kase.id}/release`)).statusCode).toBe(200);
     expect((await read(doc.id)).state).toBe('REVIEW_QUEUED');
 
-    const approve = await admin('PUT', `/verification/${doc.id}/approve`);
+    const approve = await admin('PUT', `/verification/${doc.id}/approve`, { registrationKind: 'COMPANY' }); // [R16]
     expect(approve.statusCode).toBe(200);
     expect(await read(doc.id)).toMatchObject({ state: 'COMMITTED', status: 'APPROVED' });
     const decisions = await system(() => app.prisma.reviewDecision.findMany({ where: { case: { submissionId: doc.id } } }));

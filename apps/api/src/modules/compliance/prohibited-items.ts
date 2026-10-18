@@ -11,6 +11,20 @@
  * offence; a druggist's licence is needed even for over-the-counter medicines;
  * LPG and fuel need a GEA licence.)
  *
+ * Owner, 15 Oct 2026 (research A6/A8, R4): the same permanent rule for
+ * fireworks, squibs and other explosives (Explosives Act s.13), pesticides and
+ * toxic chemicals (Cap. 68:09), raw gold, diamonds and precious stones (a GGMC
+ * trading licence), firearms, ammunition and replicas, protected wildlife,
+ * counterfeit goods, currency and payment cards — and legal services (Rule VI
+ * of the Legal Practitioners' Code: advertising them is barred to "any person
+ * whatsoever"). Lottery and gambling products and adult material were already
+ * the 18+ class.
+ *
+ * Owner, 16 Oct 2026: sealed retail HOUSEHOLD insecticide is allowed — aerosol
+ * insect sprays, mosquito coils and the household brands on a shop shelf are
+ * listed without a person's check (HOUSEHOLD_INSECTICIDE_EXEMPTIONS).
+ * Agricultural and garden pesticides stay banned under the rule above.
+ *
  * TWO KINDS OF EVIDENCE, TWO ANSWERS (owner, 13 Oct; #55/#56, 14 Oct):
  *
  *   · CERTAIN — refused outright: "Swift doesn't allow this item: <what>."
@@ -45,11 +59,16 @@
 import { createHash } from 'node:crypto';
 import { normalize } from '../discovery/matcher';
 
-export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL';
+export type ProhibitedClass = 'ALCOHOL' | 'TOBACCO' | 'VAPES' | 'DRUGS' | 'MEDICINE' | 'AGE_RESTRICTED' | 'LPG' | 'FUEL'
+  // [R4 · owner 15 Oct, research A6/A8] the expanded permanent list
+  | 'EXPLOSIVES' | 'PESTICIDES' | 'PRECIOUS_MINERALS' | 'WEAPONS' | 'WILDLIFE' | 'COUNTERFEIT' | 'CURRENCY' | 'LEGAL_SERVICES';
 /** Where a word was found: the item's own text, or ('store') its STORE's own words, which hold every item it sells. */
 export type JudgedField = 'name' | 'description' | 'section' | 'option' | 'store';
 
-export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+export const PROHIBITED_CLASSES: readonly ProhibitedClass[] = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+];
 
 /** Plain words for each class — the end of "Swift doesn't allow this item: …". */
 export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> = {
@@ -61,6 +80,14 @@ export const PROHIBITED_CLASS_LABELS: Readonly<Record<ProhibitedClass, string>> 
   AGE_RESTRICTED: '18+ items',
   LPG: 'cooking gas (LPG)',
   FUEL: 'fuel',
+  EXPLOSIVES: 'fireworks and explosives',
+  PESTICIDES: 'pesticides and toxic chemicals',
+  PRECIOUS_MINERALS: 'raw gold, diamonds and precious stones',
+  WEAPONS: 'firearms, ammunition and replicas',
+  WILDLIFE: 'protected wildlife',
+  COUNTERFEIT: 'counterfeit goods',
+  CURRENCY: 'currency and payment cards',
+  LEGAL_SERVICES: 'legal services',
 };
 
 /**
@@ -156,6 +183,11 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'lottery', 'lotto', 'lottery ticket', 'lottery tickets', 'lotto ticket', 'lotto tickets', 'betting', 'gambling', 'casino',
     'sex toy', 'sex toys', 'adult toy', 'adult toys', 'vibrator', 'vibrators', 'dildo', 'dildos', 'porn', 'pornographic',
     'erotic', 'adults only', 'xxx',
+    // [R4 · research A6] more lottery, gambling and adult goods by name
+    'raffle ticket', 'raffle tickets', 'scratch off', 'scratch offs', 'slot machine', 'slot machines', 'sports betting',
+    'bet slip', 'bet slips', 'pornography', 'porno', 'sex doll', 'sex dolls', 'adult magazine', 'adult magazines',
+    'adult movie', 'adult movies', 'adult video', 'adult videos', 'adult dvd', 'adult dvds', 'butt plug', 'butt plugs',
+    'cock ring', 'cock rings', 'fleshlight', 'escort service', 'escort services',
   ],
   LPG: [
     'lpg', 'gas', 'cooking gas', 'gas cylinder', 'gas cylinders', 'gas bottle', 'gas bottles', 'gas refill', 'gas refills',
@@ -166,7 +198,175 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
     'fuel', 'fuels', 'gasoline', 'petrol', 'diesel', 'kerosene', 'kero', 'kero oil', 'paraffin', 'lamp oil', 'avgas', 'jet fuel',
     'lighter fluid', 'methylated spirit', 'methylated spirits',
   ],
+  // ── [R4 · owner 15 Oct, research A6/A8] The expanded permanent list. Left out because they mean something ordinary
+  // far more often than not: bomb (bath bombs), flare (jeans), cartridge (ink, filters), magazine (reading), silencer
+  // (an exhaust), mercury alone (outboard engines), ivory alone (a colour, a soap), turtle alone (a neckline), monkey
+  // (bread, wrench), poison alone (a perfume), gold and diamond alone (jewellery), coin (chocolate, purses), fake
+  // (flowers, lashes), imitation (costume jewellery), dupe, prepaid card (phone credit). Jewellery made of gold or
+  // set with stones is not "raw" gold or stones; a store's own gift card is held for a person, not refused.
+  EXPLOSIVES: [
+    'firework', 'fireworks', 'firecracker', 'firecrackers', 'fire cracker', 'fire crackers', 'squib', 'squibs',
+    'explosive', 'explosives', 'dynamite', 'gunpowder', 'gun powder', 'blasting powder',
+    'detonator', 'detonators', 'blasting cap', 'blasting caps', 'tnt', 'm80', 'pyrotechnic', 'pyrotechnics',
+    'roman candle', 'roman candles', 'skyrocket', 'skyrockets', 'sky rocket', 'sky rockets', 'bottle rocket', 'bottle rockets',
+    'cherry bomb', 'cherry bombs', 'smoke bomb', 'smoke bombs', 'sparkler', 'sparklers',
+  ],
+  PESTICIDES: [
+    'pesticide', 'pesticides', 'insecticide', 'insecticides', 'herbicide', 'herbicides', 'fungicide', 'fungicides',
+    'rodenticide', 'rodenticides', 'termiticide', 'termiticides', 'larvicide', 'larvicides', 'acaricide', 'acaricides',
+    'miticide', 'miticides', 'nematicide', 'nematicides', 'weedkiller', 'weedkillers', 'weed killer', 'weed killers',
+    'weed spray', 'weed control', 'weed preventer', 'weed and feed', 'rat poison', 'rat poisons', 'rat bait', 'rodent bait',
+    'mouse poison', 'roach poison', 'ant poison', 'poison bait', 'insect killer', 'insect spray', 'bug spray', 'bug killer',
+    'roach killer', 'ant killer', 'fly spray', 'mosquito coil', 'mosquito coils', 'toxic chemical', 'toxic chemicals',
+    // [#1805 S4-2] a termiticide is a professional chemical: held for a person whatever it is called
+    'termite killer', 'termite killers', 'termite spray', 'termite sprays', 'termite treatment',
+    // the active ingredients and brands on Guyanese farm and shop shelves
+    'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin',
+    'lambda cyhalothrin', 'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane',
+    'ddt', 'fipronil', 'imidacloprid', 'abamectin', 'aldicarb', 'temik', 'phostoxin', 'roundup', 'aluminium phosphide',
+    'aluminum phosphide', 'zinc phosphide', 'brodifacoum', 'bromadiolone', 'klerat', 'racumin', 'baygon', 'mortein',
+    'cyanide', 'sodium cyanide', 'arsenic', 'strychnine', 'liquid mercury', 'elemental mercury', 'metallic mercury',
+  ],
+  PRECIOUS_MINERALS: [
+    'raw gold', 'gold dust', 'gold nugget', 'gold nuggets', 'gold bar', 'gold bars', 'gold bullion', 'bullion', 'gold ore',
+    'alluvial gold', 'unrefined gold', 'scrap gold', 'gold scrap', 'gold concentrate', 'raw diamond', 'raw diamonds',
+    'rough diamond', 'rough diamonds', 'uncut diamond', 'uncut diamonds', 'loose diamond', 'loose diamonds',
+    'precious stone', 'precious stones', 'semi precious stones', 'gemstone', 'gemstones', 'raw gemstone', 'raw gemstones',
+    'rough gemstone', 'rough gemstones', 'uncut gemstone', 'uncut gemstones', 'loose gemstone', 'loose gemstones',
+    'raw emerald', 'raw emeralds', 'rough emerald', 'rough emeralds', 'uncut emerald', 'uncut emeralds', 'raw minerals',
+    'mineral ore', 'manganese ore',
+  ],
+  WEAPONS: [
+    'firearm', 'firearms', 'gun', 'guns', 'handgun', 'handguns', 'pistol', 'pistols', 'revolver', 'revolvers', 'rifle', 'rifles',
+    'shotgun', 'shotguns', 'ammunition', 'ammo', 'bullets', 'shotgun shell', 'shotgun shells', 'shotgun cartridge',
+    'shotgun cartridges', 'rifle cartridge', 'rifle cartridges', 'airsoft', 'bb gun', 'bb guns', 'pellet gun', 'pellet guns',
+    'air gun', 'air guns', 'air rifle', 'air rifles', 'air pistol', 'air pistols', 'replica gun', 'replica guns',
+    'replica pistol', 'replica pistols', 'replica firearm', 'replica firearms', 'imitation firearm', 'imitation firearms',
+    'toy gun', 'toy guns', 'stun gun', 'stun guns', 'taser', 'tasers', 'pepper spray', 'gun parts', 'gun barrel', 'gun silencer',
+  ],
+  WILDLIFE: [
+    'protected wildlife', 'wild animal', 'wild animals', 'exotic pet', 'exotic pets', 'exotic animal', 'exotic animals',
+    'exotic bird', 'exotic birds', 'wild bird', 'wild birds', 'songbird', 'songbirds', 'twa twa', 'twatwa', 'towa towa',
+    'seed finch', 'seed finches', 'bullfinch', 'bullfinches', 'picolet', 'picolets', 'parrot', 'parrots', 'macaw', 'macaws',
+    'toucan', 'toucans', 'harpy eagle', 'ocelot', 'ocelots', 'manatee', 'manatees', 'arapaima', 'giant otter', 'giant otters',
+    'sea turtle', 'sea turtles', 'turtle egg', 'turtle eggs', 'turtle meat', 'turtle shell', 'caiman', 'caimans', 'sloth',
+    'sloths', 'anteater', 'anteaters', 'jaguar skin', 'jaguar pelt', 'jaguar teeth', 'jaguar tooth', 'jaguar claw',
+    'jaguar claws', 'elephant ivory', 'ivory tusk', 'ivory tusks', 'raw ivory', 'rhino horn', 'shark fin', 'shark fins',
+    'live monkey', 'pet monkey', 'baby monkey',
+  ],
+  COUNTERFEIT: [
+    'counterfeit', 'counterfeits', 'knockoff', 'knockoffs', 'knock off', 'knock offs', 'bootleg', 'bootlegs', 'pirated',
+    'pirate copy', 'first copy', 'master copy', 'super copy', 'mirror quality', 'aaa replica', 'replica', 'replicas',
+  ],
+  CURRENCY: [
+    'banknote', 'banknotes', 'bank note', 'bank notes', 'foreign currency', 'currency exchange', 'money exchange',
+    'foreign exchange', 'cambio', 'us dollars', 'us dollar', 'usd cash', 'prop money', 'fake money', 'counterfeit money',
+    'credit card', 'credit cards', 'debit card', 'debit cards', 'prepaid visa', 'prepaid mastercard', 'visa gift card',
+    'visa gift cards', 'mastercard gift card', 'mastercard gift cards', 'prepaid debit card', 'prepaid credit card',
+    'virtual card', 'virtual cards', 'cloned card', 'cloned cards', 'gift card', 'gift cards', 'money order', 'money orders',
+    'bitcoin', 'bitcoins', 'cryptocurrency', 'crypto',
+  ],
+  // A service, not goods: "Swift doesn't allow this item: legal services." A parcel is never refused for these words.
+  LEGAL_SERVICES: [
+    'legal service', 'legal services', 'legal advice', 'legal consultation', 'legal consultations', 'legal representation',
+    'legal aid', 'law firm', 'law firms', 'law office', 'attorney at law', 'attorneys at law', 'attorney services',
+    'lawyer services', 'lawyer consultation', 'attorney consultation', 'hire a lawyer', 'hire an attorney', 'notary public',
+    'conveyancing', 'conveyancer', 'solicitor', 'solicitors', 'barrister', 'barristers', 'lawyer', 'lawyers', 'attorney',
+    'attorneys',
+  ],
 };
+
+/**
+ * [owner 16 Oct 2026] Sealed retail HOUSEHOLD insecticide: aerosol insect sprays, mosquito coils and the household
+ * brands on a Guyanese shop shelf (Baygon, Mortein) are listed without a person's check, and carried in a parcel.
+ * Agricultural and garden pesticides stay banned (R4, Cap. 68:09): a generic insecticide ("Insecticide 1L"), the
+ * active ingredients, weed killers and poisons are judged exactly as before, and cutting these phrases never hides
+ * them ("Mosquito coils + weed killer 1L" is still refused). The exemption fails closed (notHouseholdText below):
+ * anything but a plain household form, or a farm, garden, livestock or bulk word anywhere around it, and the household
+ * word is held for a person.
+ */
+const HOUSEHOLD_INSECTICIDE_EXEMPTIONS: readonly string[] = [
+  'baygon', 'mortein', 'baygon insecticide', 'mortein insecticide',
+  'insect spray', 'insect sprays', 'insect killer', 'insect killers', 'bug spray', 'bug sprays', 'bug killer', 'bug killers',
+  'fly spray', 'fly sprays', 'roach killer', 'roach killers', 'ant killer', 'ant killers', 'mosquito coil', 'mosquito coils',
+  'household insecticide', 'household insecticides', 'aerosol insecticide', 'aerosol insecticides', 'insecticide aerosol',
+  'insecticide aerosols', 'insecticide coil', 'insecticide coils', 'mosquito insecticide', 'mosquito insecticides',
+];
+/**
+ * [owner 16 Oct · #1805 REVIEW-F S2-1] The exemption FAILS CLOSED. A household phrase is cut (allowed with no person)
+ * only when the text positively reads as a sealed retail household product, and nothing around it says otherwise:
+ *  1. HOUSEHOLD FORM: every clause of the text that carries a household phrase holds nothing but household-form words
+ *     (HOUSEHOLD_FORM_WORDS: the pests, the retail forms and packs, home/kitchen/indoor, a scent) and pack sizes.
+ *     Any other word beside it ("for plants", "for the pig pen", "granules", "for grandma") is a use or a form this
+ *     list does not know, so the phrase stays and is judged as before: held for a person.
+ *  2. NO HOUSEHOLD-SIZE BREACH: a volume over 1 litre, any gallon or kilogram (LARGE_PACK) is not a household pack.
+ *  3. NO FARM, GARDEN, LIVESTOCK OR BULK WORD (FARM_GARDEN_USE) in any of the item's texts, its platform categories,
+ *     or its store's own words (name, description, tags); and no plant or animal use (PLANT_ANIMAL_USE) in any of
+ *     the item's own texts. Grocery words ("rice", "chicken", "vegetables" in a store's description) are kept out
+ *     of what a STORE's words are read for: a grocery sells Baygon beside them.
+ * Read on the text as written; a disguised word is not a household-form word, so it holds too.
+ */
+const FARM_GARDEN_USE = /\b(?:agricultur\w*|agri|agro\w*|farm\w*|crops?|gardens?|gardening|lawns?|fields?|plantations?|orchards?|paddy|sugar\s*cane|livestock|cattle|concentrates?|concentrated|emulsifiable|wettable|granules?|granular|knapsacks?|sprayers?|fertili[sz]ers?|hectares?|acres?|commercial|industrial|professional|termites?|gallons?|drums?|bulk|wholesale)\b/i;
+const PLANT_ANIMAL_USE = /\b(?:plants?|vegetables?|veg|veggies|flowers?|trees?|shrubs?|hedges?|yards?|backyards?|soil|seedlings?|nurser(?:y|ies)|cows?|goats?|sheep|pigs?|piggery|pigpens?|horses?|poultry|coops?|barns?|stables?|kennels?|(?:pig|poultry|chicken|animal|goat)\s+pens?)\b/i;
+const LARGE_PACK = /(\d+(?:[.,]\d+)?)\s*(ml|millilit(?:er|re)s?|l|lt|ltr|lit(?:er|re)s?|gal|gals|kg|kgs|kilos?|kilograms?)\b/gi;
+function largePack(text: string): boolean {
+  for (const m of text.matchAll(LARGE_PACK)) {
+    const amount = Number(m[1]!.replace(',', '.'));
+    const unit = m[2]!.toLowerCase();
+    if (/^(?:gal|gals|kg|kgs|kilo|kilos|kilogram|kilograms)$/.test(unit)) return true;
+    if (/^(?:ml|millilit)/.test(unit) ? amount > 1000 : amount > 1) return true;
+  }
+  return false;
+}
+/** What may stand beside a household phrase in its clause: the pests, the retail forms and packs, the room, a scent. */
+const HOUSEHOLD_FORM_WORDS: ReadonlySet<string> = new Set([
+  'baygon', 'mortein', 'insect', 'insects', 'insecticide', 'insecticides', 'bug', 'bugs', 'fly', 'flies', 'mosquito', 'mosquitos',
+  'mosquitoes', 'roach', 'roaches', 'cockroach', 'cockroaches', 'ant', 'ants', 'spider', 'spiders', 'crawling', 'flying',
+  'multi', 'killer', 'killers', 'spray', 'sprays', 'aerosol', 'aerosols', 'coil', 'coils', 'refill', 'refills', 'can', 'cans',
+  'pack', 'packs', 'pk', 'pkt', 'packet', 'packets', 'pc', 'pcs', 'piece', 'pieces', 'box', 'boxes', 'bottle', 'bottles', 'tin',
+  'tins', 'each', 'x', 'twin', 'value', 'family', 'size', 'ml', 'l', 'litre', 'liter', 'g', 'gm', 'gms', 'grams', 'oz', 'fl',
+  'ct', 'count', 'household', 'home', 'house', 'kitchen', 'indoor', 'indoors', 'room', 'rooms', 'bedroom', 'pest', 'pests',
+  'control', 'original', 'new', 'fresh', 'scent', 'scented', 'lavender', 'citrus', 'lemon', 'odourless', 'odorless', 'fast',
+  'action', 'acting', 'max', 'extra', 'ultra', 'plus', 'advanced', 'formula', 'repellent', 'for', 'the', 'a', 'an', 'of', 'in',
+  'with', 'your',
+]);
+const PACK_TOKEN = /^(?:\d+(?:ml|l|g|gm|gms|oz|ct|pk|pc|pcs|s|x)?|x\d+)$/;
+const HOUSEHOLD_CLAUSE_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}.!?&+\n]|\s(?:and|or)\s/iu;
+/** Rule 1: every clause carrying a household phrase is a household form. */
+function householdFormOnly(text: string): boolean {
+  // Most texts carry no household phrase at all: nothing to read clause by clause.
+  if (!normalize(undisguise(text)).split(' ').some((w) => HOUSEHOLD_HEADS.has(w))) return true;
+  for (const clause of undisguise(text).split(HOUSEHOLD_CLAUSE_BREAK)) {
+    let words = normalize(clause).split(' ').filter(Boolean);
+    let carried = false;
+    for (const phrase of HOUSEHOLD_LONGEST_FIRST) {
+      const kept: string[] = [];
+      for (let i = 0; i < words.length;) {
+        if (phrase.every((w, k) => words[i + k] === w)) { carried = true; i += phrase.length; continue; }
+        kept.push(words[i]!);
+        i += 1;
+      }
+      words = kept;
+    }
+    if (carried && !words.every((w) => HOUSEHOLD_FORM_WORDS.has(w) || PACK_TOKEN.test(w))) return false;
+  }
+  return true;
+}
+/** Rules 1-3 on ONE text: true when its household phrases must NOT be cut. Store words: rules 1, 2 and FARM_GARDEN_USE. */
+function notHouseholdText(text: string): boolean {
+  return FARM_GARDEN_USE.test(text) || largePack(text) || !householdFormOnly(text);
+}
+/** [#1805 S2-1] A household word held for a person (the exemption is off) never names the hold when the same text
+ *  carries certain goods of another class ("Baygon w/ x-m"): the person is told what else it carries. */
+function heldPesticideBehind(hit: { prohibitedClass: ProhibitedClass; term: string }, behind: () => { prohibitedClass: ProhibitedClass; term: string } | null): { prohibitedClass: ProhibitedClass; term: string } | null {
+  if (hit.prohibitedClass !== 'PESTICIDES') return null;
+  const goods = behind();
+  return goods && goods.prohibitedClass !== 'PESTICIDES' ? goods : null;
+}
+/** [#1805 S3-1] A store's own words that say farm, garden or bulk supply: none of its items' household words is cut. */
+export function storeWordsNotHousehold(store: StoreWords): boolean {
+  return [store.name, store.description, ...(store.tags ?? []), ...(store.cuisineTypes ?? [])].some((text) => !!text && FARM_GARDEN_USE.test(text));
+}
 
 /**
  * Phrases that contain a listed word but name something else entirely. They
@@ -174,7 +374,11 @@ export const PROHIBITED_TERMS: Readonly<Record<ProhibitedClass, readonly string[
  * and rum punch" is still alcohol). Kept short on purpose: a hold is cheap,
  * and the owner's own examples ("beer batter fish", "gas stove") are holds.
  */
+const HOUSEHOLD_LONGEST_FIRST: ReadonlyArray<readonly string[]> = [...HOUSEHOLD_INSECTICIDE_EXEMPTIONS].sort((x, y) => y.length - x.length).map((p) => p.split(' '));
+const HOUSEHOLD_HEADS: ReadonlySet<string> = new Set(HOUSEHOLD_LONGEST_FIRST.map((p) => p[0]!));
+
 export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
+  ...HOUSEHOLD_INSECTICIDE_EXEMPTIONS,
   'ginger beer', 'ginger beers', 'root beer', 'root beers', 'birch beer', 'ginger ale', 'ginger ales',
   'wine gum', 'wine gums', 'wine colour', 'wine color', 'wine coloured', 'wine colored',
   'rubbing alcohol', 'isopropyl alcohol', 'alcohol swab', 'alcohol swabs', 'alcohol wipe', 'alcohol wipes',
@@ -189,8 +393,40 @@ export const PROHIBITED_EXEMPT_PHRASES: readonly string[] = [
   'bristol board', 'bristol boards', 'bristol paper',
   // [DS1109] a non-alcoholic malt; empty fuel containers are hardware
   'malta guinness', 'guinness malta', 'gas can', 'gas cans', 'fuel can', 'fuel cans', 'jerry can', 'jerry cans',
-  'weed killer', 'weed killers', 'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
-  'weed control', 'weed spray', 'weed barrier', 'weed preventer', 'weed puller', 'weed and feed', 'weed block',
+  // [R4] weed killers, sprays and preventers are herbicides now (PESTICIDES); the tools and the fabric stay ordinary
+  'weed eater', 'weed eaters', 'weed whacker', 'weed wacker', 'weed trimmer',
+  'weed barrier', 'weed puller', 'weed block', 'weed control fabric', 'weed control mat', 'weed control membrane',
+  // [R4] dishes, teas, tools, toys, fittings and payment wording named after a word of the expanded list
+  'gunpowder tea', 'gunpowder green tea', 'gun powder tea', 'firecracker chicken', 'firecracker shrimp', 'dynamite shrimp',
+  'dynamite roll', 'dynamite rolls',
+  'glue gun', 'glue guns', 'hot glue gun', 'hot glue guns', 'glue gun stick', 'glue gun sticks', 'nail gun', 'nail guns',
+  'staple gun', 'staple guns', 'heat gun', 'heat guns', 'spray gun', 'spray guns', 'paint gun', 'paint guns', 'paint spray gun',
+  'caulking gun', 'caulking guns', 'caulk gun', 'caulk guns', 'grease gun', 'grease guns', 'massage gun', 'massage guns',
+  'water gun', 'water guns', 'squirt gun', 'squirt guns', 'bubble gun', 'bubble guns', 'soldering gun', 'temperature gun',
+  'thermometer gun', 'price gun', 'tag gun', 'label gun', 'rivet gun', 'rivet guns', 'blow gun', 'air blow gun', 'foam gun',
+  'silicone gun', 'sealant gun', 'washer gun', 'pressure washer gun', 'impact gun', 'inflator gun', 'tyre inflator gun',
+  'tire inflator gun', 'air duster gun', 'sandblasting gun', 'sand blasting gun', 'nerf gun', 'nerf guns', 'water pistol',
+  'water pistols', 'squirt pistol', 'spray pistol', 'glue pistol', 'pistol grip', 'gun metal', 'gun grey', 'gun gray',
+  'shotgun microphone', 'shotgun mic',
+  'bullion cube', 'bullion cubes', 'bullion fringe', 'bullion embroidery',
+  'parrot fish', 'parrot fishes', 'shark fin antenna',
+  'counterfeit detector', 'counterfeit detector pen', 'counterfeit pen', 'counterfeit money detector', 'counterfeit bill detector',
+  'anti counterfeit', 'bootleg jeans', 'bootleg pants', 'bootleg trousers', 'bootleg leggings', 'bootleg cut',
+  'credit card holder', 'credit card holders', 'credit card wallet', 'credit card wallets', 'credit card case',
+  'credit card cases', 'credit card sleeve', 'credit card sleeves', 'credit card reader', 'credit card readers',
+  'credit card machine', 'credit card size', 'credit card sized', 'credit card knife', 'credit card tool', 'debit card holder',
+  'gift card holder', 'gift card holders', 'gift card box', 'gift card boxes', 'gift card envelope', 'gift card envelopes',
+  'accept credit cards', 'accept credit card', 'accept debit cards', 'accept debit card', 'accepts credit cards',
+  'accepts debit cards', 'credit cards accepted', 'debit cards accepted', 'credit card accepted', 'debit card accepted',
+  'pay by credit card', 'pay by debit card', 'pay with credit card', 'pay with debit card', 'credit card payment',
+  'credit card payments', 'debit card payment', 'debit card payments',
+  'power of attorney', 'no solicitors',
+  // [R4 · REVIEW-F S3-1] toy ammunition, empty ammunition boxes, money-counting and collecting supplies
+  'nerf bullets', 'nerf bullet', 'gel bullets', 'gel bullet', 'gel blaster', 'gel blasters', 'gel blaster bullets', 'water bullets',
+  'water bullet', 'foam bullets', 'foam bullet', 'toy bullets', 'toy bullet', 'banknote counter', 'banknote counters',
+  'bank note counter', 'bank note counters', 'banknote counting', 'bank note counting', 'banknote album', 'banknote albums',
+  'bank note album', 'bank note albums', 'banknote holder', 'banknote holders', 'banknote sleeve', 'banknote sleeves',
+  'banknote detector', 'banknote detectors',
 ];
 
 /**
@@ -288,6 +524,39 @@ export const PROHIBITED_NEVER_APPROVABLE: readonly string[] = [
   'cough syrup', 'cough mixture', 'cough medicine', 'cold and flu', 'flu tablets', 'sleeping pills', 'morning after pill',
   'headache tablets', 'headache pills', 'fever reducer', 'cough and cold', 'gripe water', 'deep heat', 'bengay', 'icy hot',
   'liver salts', 'milk of magnesia', 'tiger balm',
+  // [R4] adult goods by name
+  'sex doll', 'sex dolls', 'pornography', 'porno', 'butt plug', 'butt plugs', 'cock ring', 'cock rings', 'fleshlight',
+  // [R4] explosives that are nothing else
+  'squib', 'squibs', 'detonator', 'detonators', 'blasting cap', 'blasting caps', 'blasting powder', 'm80',
+  // [R4] pesticides and poisons by name ([owner 16 Oct] a household insect spray or coil is allowed — HOUSEHOLD_INSECTICIDE_EXEMPTIONS)
+  'paraquat', 'gramoxone', 'glyphosate', 'diquat', 'atrazine', 'malathion', 'cypermethrin', 'deltamethrin', 'lambda cyhalothrin',
+  'chlorpyrifos', 'diazinon', 'carbofuran', 'furadan', 'methomyl', 'lannate', 'mancozeb', 'dithane', 'ddt', 'fipronil',
+  'imidacloprid', 'abamectin', 'aldicarb', 'temik', 'phostoxin', 'aluminium phosphide', 'aluminum phosphide', 'zinc phosphide',
+  'brodifacoum', 'bromadiolone', 'klerat', 'racumin', 'cyanide', 'sodium cyanide', 'strychnine', 'rat poison', 'rat poisons',
+  'weedkiller', 'weedkillers', 'weed killer', 'weed killers',
+  // [R4] raw gold, raw stones and ores (jewellery is not here)
+  'raw gold', 'gold ore', 'alluvial gold', 'unrefined gold', 'scrap gold', 'gold scrap', 'gold concentrate', 'gold bullion',
+  'raw diamond', 'raw diamonds', 'rough diamond', 'rough diamonds', 'uncut diamond', 'uncut diamonds', 'loose diamond',
+  'loose diamonds', 'raw gemstone', 'raw gemstones', 'rough gemstone', 'rough gemstones', 'uncut gemstone', 'uncut gemstones',
+  'loose gemstone', 'loose gemstones', 'raw emerald', 'raw emeralds', 'rough emerald', 'rough emeralds', 'uncut emerald',
+  'uncut emeralds', 'manganese ore', 'mineral ore',
+  // [R4] firearms, ammunition and replicas by name ("air gun" is also a workshop blow gun: held, not here)
+  'firearm', 'firearms', 'handgun', 'handguns', 'ammunition', 'airsoft', 'bb gun', 'bb guns', 'pellet gun', 'pellet guns',
+  'air rifle', 'air rifles', 'air pistol', 'air pistols', 'replica gun', 'replica guns', 'replica pistol', 'replica pistols',
+  'replica firearm', 'replica firearms', 'imitation firearm', 'imitation firearms', 'stun gun', 'stun guns', 'taser', 'tasers',
+  'shotgun shell', 'shotgun shells', 'shotgun cartridge', 'shotgun cartridges', 'rifle cartridge', 'rifle cartridges', 'gun silencer',
+  // [R4] parts of protected animals
+  'turtle egg', 'turtle eggs', 'turtle meat', 'jaguar skin', 'jaguar pelt', 'jaguar teeth', 'jaguar tooth', 'jaguar claw',
+  'jaguar claws', 'elephant ivory', 'ivory tusk', 'ivory tusks', 'raw ivory', 'rhino horn',
+  // [R4] counterfeits that say so
+  'counterfeit', 'counterfeits', 'knockoff', 'knockoffs', 'super copy', 'aaa replica', 'pirated', 'pirate copy',
+  // [R4] currency and payment cards
+  'banknote', 'banknotes', 'bank note', 'bank notes', 'foreign currency', 'prop money', 'fake money', 'counterfeit money',
+  'prepaid visa', 'prepaid mastercard', 'visa gift card', 'visa gift cards', 'mastercard gift card', 'mastercard gift cards',
+  'prepaid debit card', 'prepaid credit card', 'cloned card', 'cloned cards',
+  // [R4 · A8] legal services offered as such
+  'legal service', 'legal services', 'legal consultation', 'legal consultations', 'legal representation',
+  'attorney services', 'lawyer services', 'lawyer consultation', 'attorney consultation', 'conveyancing',
   // (No gas or fuel word is here: hardware stores sell "LPG regulators", "gas stoves" and "fuel cans" — held for a person.)
 ];
 const NEVER_APPROVABLE: ReadonlySet<string> = new Set(PROHIBITED_NEVER_APPROVABLE);
@@ -326,13 +595,32 @@ export const PROHIBITED_GOODS_NOUNS: readonly string[] = [
   'tabaco', 'cigarro', 'cigarros', 'cigarrillo', 'cigarrillos',
   // [DS1109] sold with a size only ("Marsala 750ml"; "Chicken Marsala" and "Madeira cake" are dishes) — see SIZED_ONLY
   'rosewines', 'cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream',
+  // [R4] the expanded list, sold as such ("Fireworks 10 pack", "Insecticide 1L", "Toy pistol", "Twa twa"); elsewhere
+  // they hold ("Firecracker popsicle", "Rifle scope", "Pistol grip" is ordinary)
+  'pornography', 'porno', 'sex doll', 'sex dolls', 'adult magazine', 'adult magazines', 'adult movie', 'adult movies',
+  'adult video', 'adult videos', 'adult dvd', 'adult dvds', 'slot machine', 'slot machines',
+  'firework', 'fireworks', 'firecracker', 'firecrackers', 'fire cracker', 'fire crackers', 'squib', 'squibs', 'explosives',
+  'dynamite', 'gunpowder', 'gun powder', 'detonator', 'detonators', 'blasting caps', 'tnt', 'pyrotechnics', 'roman candle',
+  'roman candles', 'skyrocket', 'skyrockets', 'sky rocket', 'sky rockets', 'bottle rocket', 'bottle rockets', 'cherry bomb',
+  'cherry bombs', 'sparklers', 'smoke bomb', 'smoke bombs',
+  'pesticide', 'pesticides', 'insecticide', 'insecticides', 'herbicide', 'herbicides', 'fungicide', 'fungicides', 'rodenticide',
+  'rodenticides', 'termiticide', 'termiticides', 'larvicide', 'larvicides', 'weedkiller', 'weedkillers', 'weed killer',
+  'weed killers', 'rat poison', 'rat poisons', 'rat bait', 'rodent bait', 'poison bait', 'toxic chemicals',
+  'gold nugget', 'gold nuggets', 'precious stone', 'precious stones',
+  'pistol', 'pistols', 'revolver', 'revolvers', 'rifle', 'rifles', 'shotgun', 'shotguns', 'ammo', 'bullets',
+  'twa twa', 'twatwa', 'towa towa', 'seed finch', 'seed finches', 'picolet', 'picolets',
 ];
 /** Goods nouns that are also a colour or a cut ("Dress — Wine", "Heels - Champagne", a "Stout" fit): certain only with
  *  another word in front ("Red wine", "House wine") or a size after ("Wine 750ml"); alone they hold. */
-const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine', 'rosewines', 'vino', 'vinos', 'vinho']);
+const AMBIGUOUS_ALONE: ReadonlySet<string> = new Set(['wine', 'wines', 'champagne', 'cognac', 'stout', 'stouts', 'sherry', 'brandy', 'bourbon', 'rosewine', 'rosewines', 'vino', 'vinos', 'vinho',
+  // [R4 · REVIEW-F S3-1] a shade or a flavour as often as the goods: a lip gloss "Cherry bomb", a popsicle "Firecracker",
+  // a hot sauce "Dynamite", an energy drink "TNT", a nail polish "Smoke bomb", a candle "Sparklers" — held alone
+  'cherry bomb', 'cherry bombs', 'firecracker', 'firecrackers', 'fire cracker', 'fire crackers', 'dynamite', 'tnt',
+  'smoke bomb', 'smoke bombs', 'sparklers']);
 /** Goods nouns that name a dish or a flavour as often as the drink ("Chicken Marsala", "Madeira cake", "Amaretto
  *  biscotti", "Irish cream coffee creamer", sparkling apple cider): certain only with a drink measure after them. [DS1109] */
 const SIZED_ONLY: ReadonlySet<string> = new Set(['cider', 'ciders', 'madeira', 'marsala', 'amaretto', 'limoncello', 'pisco', 'irish cream', 'wine coolers']);
+const PRECIOUS_STONE_NOUNS: ReadonlySet<string> = new Set(['precious stone', 'precious stones']);
 /** Certain only as the whole name: "Vibrator" is the 18+ good; a "Concrete vibrator" is a building tool. [DS1110] */
 const ALONE_ONLY: ReadonlySet<string> = new Set(['vibrator', 'vibrators']);
 /** Cannabis is sold by the gram or the ounce ("Weed 3.5g"); a "weed killer" is not. [DS1110 S3-2] */
@@ -382,6 +670,13 @@ const isDish = (words: readonly string[]) => {
     || ends(words, ['ice', 'cream']);
 };
 const GOODS_LONGEST_FIRST = [...PROHIBITED_GOODS_NOUNS].sort((a, b) => b.split(' ').length - a.split(' ').length).map((p) => p.split(' '));
+/** [R4] The same list by its LAST word, in the same order: a noun that ends a name ends with the name's last word, so
+ *  headGoods only tries those. */
+const GOODS_BY_LAST: ReadonlyMap<string, ReadonlyArray<readonly string[]>> = GOODS_LONGEST_FIRST.reduce((m, phrase) => {
+  const last = phrase[phrase.length - 1]!;
+  m.set(last, [...(m.get(last) ?? []), phrase]);
+  return m;
+}, new Map<string, Array<readonly string[]>>());
 
 /** Words that follow a goods noun without changing what it is: sizes, packs, strengths, ages, styles. */
 const TRAILING_SIZE = /^(\d+[a-z]{0,6}(\d+[a-z]{0,6})?|ml|cl|dl|l|lt|ltr|ltrs|litre|litres|liter|liters|oz|floz|fl|lb|lbs|kg|g|gm|mg|mcg|gal|gallon|gallons|pint|pints|quart|quarts|pk|pack|packs|ct|count|pc|pcs|piece|pieces|x|s|case|cases|carton|cartons|crate|crates|bottle|bottles|btl|can|cans|tin|tins|nip|nips|flask|flasks|mini|minis|miniature|magnum|jumbo|single|singles|each|puff|puffs|pouch|pouches|refill|refills|no|number|anos|ano|year|years|yr|yrs|yo|old|aged|proof|abv|percent|pct|vol|alc|zero|free|non|alcoholic|alcohol|by|per|the|a|an|of|in|only)$/;
@@ -395,13 +690,27 @@ const TRAILING_STYLE: ReadonlySet<string> = new Set([
 const SEGMENT_BREAK = /\s+[-–—|]\s+|[,;:|/()[\]{}]/u;
 
 /** The order a mixed text reports its classes in. */
-const CLASS_ORDER: readonly ProhibitedClass[] = ['ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'];
+// [R4] PESTICIDES reads before DRUGS: a "weed killer" is a herbicide, not cannabis. WEAPONS before COUNTERFEIT: a
+// "replica gun" is a replica firearm. LEGAL_SERVICES last: a service, never a reason to refuse a parcel.
+const CLASS_ORDER: readonly ProhibitedClass[] = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'PESTICIDES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  'EXPLOSIVES', 'WEAPONS', 'PRECIOUS_MINERALS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+];
 const CLASS_OF: ReadonlyMap<string, ProhibitedClass> = new Map(
   [...CLASS_ORDER].reverse().flatMap((c) => PROHIBITED_TERMS[c].map((t): [string, ProhibitedClass] => [t, c])),
 );
 
 const hasPhrase = (haystack: string, phrase: string): boolean => ` ${haystack} `.includes(` ${phrase} `);
+/** [R4] A phrase can only be in a text whose words include the phrase's first word: the term loops below skip every
+ *  term whose first word the text does not carry, so their cost no longer grows with the length of the list. The
+ *  verdict is the same — this only skips a search that cannot match. */
+const TERM_HEAD: ReadonlyMap<string, string> = new Map(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).map((t) => [t, t.split(' ')[0]!]));
+const wordsOf = (texts: readonly string[]): ReadonlySet<string> => new Set(texts.flatMap((t) => t.split(' ')));
 const EXEMPT_LONGEST_FIRST = [...PROHIBITED_EXEMPT_PHRASES].sort((a, b) => b.length - a.length).map((p) => p.split(' '));
+/** [owner 16 Oct] Set when a household-insecticide phrase was cut from a text (see judgeItemWords: what it held is read). */
+export interface HouseholdCut { household: boolean }
+/** [owner 16 Oct] The household-insecticide phrases among them, by identity (no join per call). */
+const HOUSEHOLD_PHRASES: ReadonlySet<readonly string[]> = new Set(EXEMPT_LONGEST_FIRST.filter((p) => HOUSEHOLD_INSECTICIDE_EXEMPTIONS.includes(p.join(' '))));
 
 /**
  * A word in front of an exempt phrase that makes it the restricted thing after
@@ -471,6 +780,16 @@ function undisguise(text: string): string {
 }
 
 /** "r u m" → "rum": runs of single letters, joined. Judged beside the text, never instead of it. */
+/**
+ * [owner 16 Oct · disguise] Letters spelled out with ONE separator ("m-a-l-a-t-h-i-o-n", "R.U.M", "p a r a q u a t")
+ * are joined where they stand, so a single letter written beside them with another separator ("w/", "x", "&") is not
+ * glued on ("w/ m-a-l-a-t-h-i-o-n" reads "w/ malathion", where joinSingleLetters reads "wmalathion"). Before the
+ * household-insecticide exemption, a household word beside such a run held the item and the run was found by
+ * certainGoods; now the run itself is read.
+ */
+const SPELLED_RUN = /(?<![\p{L}\p{N}])\p{L}([^\p{L}\p{N}]+)\p{L}(?:\1\p{L})+(?![\p{L}\p{N}])/gu;
+const joinSpelledRuns = (text: string): string => text.replace(SPELLED_RUN, (run) => run.replace(/[^\p{L}\p{N}]+/gu, ''));
+
 function joinSingleLetters(normalized: string): string {
   const out: string[] = [];
   let run: string[] = [];
@@ -491,14 +810,22 @@ function qualifiesSoftDrinks(text: string): boolean {
   return [plain, ...leetSpellings(plain)].some((t) => STATES_A_STRENGTH.test(t) || normalize(t).split(' ').some((w) => EXEMPTION_BREAKERS.has(w)));
 }
 
-function stripExempt(normalized: string, noSoftDrinks: boolean): string {
+function stripExempt(normalized: string, noSoftDrinks: boolean, notHousehold = false, cut?: HouseholdCut): string {
   let words = normalized.split(' ').filter(Boolean);
+  // [R4] Cutting only ever removes words, so a phrase whose first word the text never carried cannot be cut.
+  const carried = new Set(words);
   for (const phrase of EXEMPT_LONGEST_FIRST) {
+    if (!carried.has(phrase[0]!)) continue;
     if (noSoftDrinks && SOFT_DRINK_EXEMPTIONS.has(phrase.join(' '))) continue;
+    if (notHousehold && HOUSEHOLD_PHRASES.has(phrase)) continue;
     const kept: string[] = [];
     for (let i = 0; i < words.length;) {
       const here = phrase.every((w, k) => words[i + k] === w);
-      if (here && !(i > 0 && EXEMPTION_BREAKERS.has(words[i - 1]!))) { i += phrase.length; continue; }
+      if (here && !(i > 0 && EXEMPTION_BREAKERS.has(words[i - 1]!))) {
+        if (cut && HOUSEHOLD_PHRASES.has(phrase)) cut.household = true;
+        i += phrase.length;
+        continue;
+      }
       kept.push(words[i]!);
       i += 1;
     }
@@ -584,23 +911,24 @@ const digitsApart = (normalized: string): string => normalized.split(' ').map((w
 /** Every reading of a text that is judged: as written and in its l33t spellings, each label spelling, normalized,
  *  with spelled-out letters joined and plurals dropped, exemptions cut — and with joined words read apart. The text
  *  is undisguised once, here. */
-function readings(text: string, noSoftDrinks: boolean): string[] {
+function readings(text: string, noSoftDrinks: boolean, notHousehold = false, cut?: HouseholdCut): string[] {
   const out = new Set<string>();
   const plain = undisguise(text);
   // "R0sé" reads "Rosé" only once its l33t is read, so "rosé" is spelled out again after it. [DS1112 S3-1]
-  const spelled = [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))];
+  // [owner 16 Oct] …and each with its spelled-out runs joined where they stand ("w/ m-a-l-a-t-h-i-o-n").
+  const spelled = [plain, ...leetSpellings(plain).map((t) => t.replace(ROSE, 'rosewine'))].flatMap((t) => [t, joinSpelledRuns(t)]);
   // [joined spellings] Each, with its words apart where the case changes, is a base of its own ("H3nn3ssyVS").
   for (const base of new Set(spelled.flatMap((b) => [b, camelApart(b)]))) {
     for (const spelling of labelSpellings(base)) {
       const n = normalize(spelling);
       for (const variant of [n, joinSingleLetters(n), digitsApart(n)]) {
-        const judged = stripExempt(variant, noSoftDrinks);
+        const judged = stripExempt(variant, noSoftDrinks, notHousehold, cut);
         if (judged) out.add(judged);
       }
       // the plural dropped AFTER the exemptions are cut ("diesel jeans" stays exempt) — joined words apart too
       // ("Heinekens6pack")
       for (const variant of new Set([n, digitsApart(n)])) {
-        const dropped = singular(stripExempt(variant, noSoftDrinks));
+        const dropped = singular(stripExempt(variant, noSoftDrinks, notHousehold));
         if (dropped) out.add(dropped);
       }
     }
@@ -611,8 +939,9 @@ function readings(text: string, noSoftDrinks: boolean): string[] {
 /** "Hen nessy", "Vod ka": two adjacent words that join into a listed word of four letters or more. Read from the
  *  plain spelling only (the database pre-filter joins the same pairs), and only ever HOLDS. [evasion] */
 const SPLIT_TERMS_MIN = 4;
-function splitWordHit(text: string): { prohibitedClass: ProhibitedClass; term: string } | null {
-  const words = normalize(undisguise(text)).split(' ').filter(Boolean);
+function splitWordHit(text: string, noSoftDrinks = false, notHousehold = false): { prohibitedClass: ProhibitedClass; term: string } | null {
+  // [R4 · REVIEW-F S3-1] judged after the exemptions, like every other reading ("Bank note counting machine")
+  const words = stripExempt(normalize(undisguise(text)), noSoftDrinks, notHousehold).split(' ').filter(Boolean);
   for (let i = 0; i + 1 < words.length; i += 1) {
     const joined = words[i]! + words[i + 1]!;
     if (joined.length >= SPLIT_TERMS_MIN && SINGLE_WORD_TERMS.has(joined)) return { prohibitedClass: CLASS_OF.get(joined)!, term: joined };
@@ -624,23 +953,35 @@ export interface ClassifyOptions {
   /** Take the soft-drink exemptions away whatever this text says: another of the item's own texts states a
    *  strength or a qualifier ("Ginger Beer" named, "8 proof" in its description). [DS1105 S3] */
   noSoftDrinks?: boolean;
+  /** [owner 16 Oct] Whether the household-insecticide exemptions are taken away: true when another of the item's own
+   *  texts says farm, garden or bulk use; false when the caller has decided they apply (a store's own words). Left out,
+   *  this text decides by itself. */
+  notHousehold?: boolean;
+  /** [owner 16 Oct] Told whether a household-insecticide phrase was cut from this text. */
+  householdCut?: HouseholdCut;
   /** Judge the brand-first words (default true: a name, an option, a line on an order). */
   brandFirst?: boolean;
   /** Judge words split in two ("Hen nessy") — default true; a hold only. */
   splitWords?: boolean;
+  /** [R4 · REVIEW-F S3-2] Hold words this caller does not judge: a parcel has no reviewer, so an ambiguous hold word
+   *  would refuse it; a store's payment wording is not goods. Certain words are never skipped (certainGoods). */
+  skipTerms?: ReadonlySet<string>;
 }
 
 /** One text → the first banned class and word it carries, or null. */
 export function classifyText(text: string | null | undefined, options: ClassifyOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const noSoftDrinks = options.noSoftDrinks === true || qualifiesSoftDrinks(text);
-  const judged = readings(text, noSoftDrinks);
+  const notHousehold = options.notHousehold === true || notHouseholdText(text);
+  const judged = readings(text, noSoftDrinks, notHousehold, options.householdCut);
   if (judged.length === 0) return null;
   // The spelling as written names the term first ("rolling papers"); the other readings only when it names none.
-  const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks)));
+  const asWritten = new Set(labelSpellings(undisguise(text)).map((sp) => stripExempt(normalize(sp), noSoftDrinks, notHousehold)));
   for (const pool of [judged.filter((j) => asWritten.has(j)), judged]) {
+    const present = wordsOf(pool);
     for (const prohibitedClass of CLASS_ORDER) {
       for (const term of PROHIBITED_TERMS[prohibitedClass]) {
+        if (!present.has(TERM_HEAD.get(term)!) || options.skipTerms?.has(term)) continue;
         if (pool.some((j) => hasPhrase(j, term))) return { prohibitedClass, term };
       }
     }
@@ -654,12 +995,14 @@ export function classifyText(text: string | null | undefined, options: ClassifyO
     }
     // Anywhere else, with a measure of its kind in either order ("Pack of Camel 20s", "20s Camel"), it is held for a
     // person too. [DS1261 S2, DS1263 S3]
-    for (const reading of measureReadings(text, noSoftDrinks)) {
+    for (const reading of measureReadings(text, noSoftDrinks, notHousehold)) {
       const hit = brandWithMeasure(reading.split(' '));
       if (hit) return hit;
     }
   }
-  return options.splitWords === false ? null : splitWordHit(text);
+  if (options.splitWords === false) return null;
+  const split = splitWordHit(text, noSoftDrinks, notHousehold);
+  return split && !options.skipTerms?.has(split.term) ? split : null;
 }
 
 /** The goods noun heading one part of a name or option, if any ("red wine 750ml" → "wine"). */
@@ -691,12 +1034,16 @@ function headGoods(words: readonly string[]): string | null {
   if (words.includes('empty')) return null;
   const { core, measured, grams } = stripTrailing(words);
   const match = (candidate: readonly string[], medicineOnly: boolean): string | null => {
-    for (const phrase of GOODS_LONGEST_FIRST) {
+    for (const phrase of GOODS_BY_LAST.get(candidate[candidate.length - 1] ?? '') ?? []) {
       const start = candidate.length - phrase.length;
       if (start < 0 || !ends(candidate, phrase)) continue;
       const noun = phrase.join(' ');
       if (medicineOnly && CLASS_OF.get(noun) !== 'MEDICINE') continue;
       if (SIZED_ONLY.has(noun) && !measured) return null;
+      // [R4 · REVIEW-F S3-1] "Semi precious stones" are craft beads as often as raw stones: held, never refused.
+      if (PRECIOUS_STONE_NOUNS.has(noun) && candidate[start - 1] === 'semi') return null;
+      // [R4 · security review] "Ammo can", "Ammo box 2-pack": storage, held for a person (see isAmmunitionContainer).
+      if (noun === 'ammo' && AMMUNITION_CONTAINERS.has(words[candidate.length] ?? '')) return null;
       if (AMBIGUOUS_ALONE.has(noun) && start === 0 && !measured) return null;
       if (ALONE_ONLY.has(noun) && start !== 0) return null;
       if (GRAMS_ONLY.has(noun) && !grams) return null;
@@ -743,9 +1090,9 @@ function asciiDigits(text: string): string {
  *  letter o in a number as a zero, digits of any script as ASCII, a brand joined to its measure apart ("Camel20s", a
  *  zero-width space between), and a number with its unit written apart together ("20 ct" → "20ct"). [DS1263 S3,
  *  DS1264 S3] */
-function measureReadings(text: string, noSoftDrinks: boolean): string[] {
+function measureReadings(text: string, noSoftDrinks: boolean, notHousehold = false): string[] {
   const out = new Set<string>();
-  for (const reading of readings(asciiDigits(text).replace(/(\d)\$/g, '$1s'), noSoftDrinks)) {
+  for (const reading of readings(asciiDigits(text).replace(/(\d)\$/g, '$1s'), noSoftDrinks, notHousehold)) {
     const spaced = reading.replace(/([a-z])(\d)/g, '$1 $2').split(' ').map(numberLeet).join(' ');
     out.add(spaced);
     out.add(spaced.replace(/\b(\d+) (s|ct|pk|pc|pcs|pack|packs)\b/g, '$1$2'));
@@ -827,6 +1174,9 @@ function pillsOnly(rest: readonly string[]): boolean {
 export interface GoodsOptions {
   /** No person reviews this text (a parcel's description): a measured brand held elsewhere for a person is refused. */
   noReviewer?: boolean;
+  /** [R4 · security review] Words this caller does not judge at all (a parcel: the legal-services words): skipped, so
+   *  the goods beside them are still found — never answered and then dropped. */
+  skipTerms?: ReadonlySet<string>;
 }
 
 /**
@@ -840,12 +1190,15 @@ export interface GoodsOptions {
 export function certainGoods(text: string | null | undefined, options: GoodsOptions = {}): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
   const sameText = STATES_A_STRENGTH.test(text);
-  const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part)).map((r) => r.split(' ')));
+  // [owner 16 Oct] household insecticide is judged on this text alone too: farm use written here takes it away
+  const notHousehold = notHouseholdText(text);
+  const parts = undisguise(text).split(SEGMENT_BREAK).map((part) => readings(part, sameText || STATES_A_STRENGTH.test(part), notHousehold).map((r) => r.split(' ')));
   // A brand or product phrase: certain — unless an ALCOHOL one names a dish ("Hennessy wings"). [DS1109 S2-3]
+  const present = new Set(parts.flat(2));
   for (const prohibitedClass of CLASS_ORDER) {
     for (const term of PROHIBITED_TERMS[prohibitedClass]) {
-      if (!NEVER_APPROVABLE.has(term)) continue;
-      const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term) && !words.includes('empty'));
+      if (!NEVER_APPROVABLE.has(term) || !present.has(TERM_HEAD.get(term)!) || options.skipTerms?.has(term)) continue;
+      const carriers = parts.flat().filter((words) => hasPhrase(words.join(' '), term) && !words.includes('empty') && !isAmmunitionContainer(words, term));
       if (carriers.length === 0) continue;
       if (prohibitedClass === 'ALCOHOL' && carriers.every((words) => isDish(stripTrailing(words).core))) continue;
       return { prohibitedClass, term };
@@ -862,6 +1215,14 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
   return null;
 }
 
+/** [R4 · security review] "Ammunition box", "Ammunition cans x2": storage that may be empty — or not. Never certain by
+ *  the word alone, never cleared either: the hold word keeps it for a person. "Box of ammunition" is the goods. */
+const AMMUNITION_CONTAINERS: ReadonlySet<string> = new Set(['box', 'boxes', 'can', 'cans', 'case', 'cases', 'crate', 'crates', 'tin', 'tins']);
+function isAmmunitionContainer(words: readonly string[], term: string): boolean {
+  if (term !== 'ammunition') return false;
+  return words.some((w, i) => w === 'ammunition' && AMMUNITION_CONTAINERS.has(words[i + 1] ?? ''));
+}
+
 /**
  * A parcel's description (owner #67): no reviewer stands behind it, so any listed word refuses it, and so does a
  * brand-first word with a measure — a lozenge brand's too ("Halls 9 pack": #58 holds it for a person, and a parcel
@@ -869,8 +1230,43 @@ export function certainGoods(text: string | null | undefined, options: GoodsOpti
  */
 export function parcelProhibited(text: string | null | undefined): { prohibitedClass: ProhibitedClass; term: string } | null {
   if (!text) return null;
-  return classifyText(text, { brandFirst: false }) ?? certainGoods(text, { noReviewer: true }) ?? parcelBrandWithMeasure(text);
+  // [R4] Legal services are a listing rule, not goods: "Papers for my lawyer" is judged by the goods words alone.
+  const goods = (hit: { prohibitedClass: ProhibitedClass; term: string } | null) => (hit && !PARCEL_EXEMPT_CLASSES.has(hit.prohibitedClass) ? hit : null);
+  // [R4 · security review] The legal-services words are SKIPPED (not answered and then dropped): an answer of that class
+  // would end the search before the goods beside it ("lawyer gift: v0dka for dad") were read.
+  return goods(classifyText(text, { brandFirst: false, skipTerms: PARCEL_SKIPPED_TERMS })) ?? goods(certainGoods(text, { noReviewer: true, skipTerms: PARCEL_SKIPPED_TERMS })) ?? parcelBrandWithMeasure(text);
 }
+/** Classes that judge listings only: never a reason to refuse a parcel. */
+const PARCEL_EXEMPT_CLASSES: ReadonlySet<ProhibitedClass> = new Set(['LEGAL_SERVICES']);
+/**
+ * [R4 · REVIEW-F S3-2] Hold words of the expanded list that a person would clear in a listing, but that nobody reviews in a
+ * parcel: there they would refuse "Parrot food for my bird", "Gemstone bracelet", "Gold bar chocolate", "Replica jersey",
+ * "Bug spray and sunscreen", "Crypto hardware wallet" or "Gift card for my niece".
+ * A parcel is still refused for these classes' certain words (fireworks, rat poison, ammunition, banknotes, raw gold…).
+ */
+const PARCEL_SKIPPED_HOLD_WORDS: ReadonlySet<string> = new Set([
+  'parrot', 'parrots', 'macaw', 'macaws', 'toucan', 'toucans', 'sloth', 'sloths', 'anteater', 'anteaters', 'caiman', 'caimans',
+  'manatee', 'manatees', 'ocelot', 'ocelots', 'arapaima', 'exotic pet', 'exotic pets', 'exotic bird', 'exotic birds',
+  'wild bird', 'wild birds', 'songbird', 'songbirds',
+  'gemstone', 'gemstones', 'precious stone', 'precious stones', 'semi precious stones', 'gold bar', 'gold bars', 'bullion',
+  'replica', 'replicas', 'bootleg', 'bootlegs', 'first copy', 'master copy', 'mirror quality',
+  'bug spray', 'insect spray', 'fly spray', 'mosquito coil', 'mosquito coils', 'insect killer', 'bug killer', 'ant killer',
+  'roach killer',
+  // [owner 16 Oct] the household brands too: a household insecticide is allowed, wherever the parcel goes
+  'baygon', 'mortein',
+  'crypto', 'cryptocurrency', 'gift card', 'gift cards',
+  // Kept refusing in a parcel on purpose: 'gun', 'rifle' (a firearm is described that way and no person reads a parcel),
+  // payment cards ('credit card', 'debit card') and currency ('us dollars'): carrying them is the risk itself.
+]);
+/** Everything a parcel does not judge: the legal-services words (a listing rule) and the hold words above. */
+const PARCEL_SKIPPED_TERMS: ReadonlySet<string> = new Set([...PROHIBITED_TERMS.LEGAL_SERVICES, ...PARCEL_SKIPPED_HOLD_WORDS]);
+/**
+ * [R4 · REVIEW-F S3-2] Payment wording is not goods: "We accept US dollars and credit cards", "Gift cards available".
+ * A store's own words are not judged for it (its items still are).
+ */
+const STORE_SKIPPED_PAYMENT_WORDS: ReadonlySet<string> = new Set([
+  'us dollar', 'us dollars', 'credit card', 'credit cards', 'debit card', 'debit cards', 'gift card', 'gift cards',
+]);
 
 /** No person reviews a parcel: it is read whole, so a brand-first word with a measure of its kind anywhere in it, in
  *  any part and either order, is the goods ("Camel, 20s", "20s Camel", "Camel 20$"). [DS1261 S2, DS1263 S2/S3] */
@@ -880,6 +1276,20 @@ function parcelBrandWithMeasure(text: string): { prohibitedClass: ProhibitedClas
     if (hit) return hit;
   }
   return null;
+}
+
+/**
+ * [R4 · research A8] Words that OFFER legal services. Advertising legal services is barred to "any person whatsoever"
+ * (Rule VI, Legal Practitioners Act), so a service provider's own profile may not offer them, whatever trade it
+ * names. The bare titles ("lawyer", "attorney") are left out: a profile may mention one without offering a service
+ * ("my brother is a lawyer"); the catalogue still holds them for a person.
+ */
+const LEGAL_SERVICE_OFFERS: readonly string[] = PROHIBITED_TERMS.LEGAL_SERVICES
+  .filter((t) => !['lawyer', 'lawyers', 'attorney', 'attorneys', 'solicitor', 'solicitors', 'barrister', 'barristers', 'conveyancer'].includes(t));
+export function offersLegalServices(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const judged = readings(text, false);
+  return LEGAL_SERVICE_OFFERS.find((term) => judged.some((j) => hasPhrase(j, term))) ?? null;
 }
 
 // ── Remembered verdicts [PERF] ───────────────────────────────────────────────
@@ -951,6 +1361,9 @@ export interface CatalogueFacts extends ItemWords {
   reviewApprovedHash?: string | null;
   /** The verdict on the item's STORE's own words (`checkStore`): a store held for a person holds every item it sells. */
   store?: StoreCheck;
+  /** [#1805 S3-1] The store's own words say farm, garden or bulk supply (`storeWordsNotHousehold`): no household word
+   *  of its items is allowed without a person. */
+  storeNotHousehold?: boolean;
 }
 
 export type BanSource = 'category' | 'store' | 'removed' | 'word';
@@ -963,7 +1376,7 @@ export type CatalogueCheck =
  * The partner's text judged: the first word hit, in the order a partner reads
  * it — or, when the name or an option IS the banned goods, that, as certain.
  */
-export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+export function judgeItemWords(item: ItemWords, storeNotHousehold = false): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
   const fields: Array<[JudgedField, string | null | undefined]> = [
     ['name', item.name],
     ['section', item.sectionName],
@@ -972,36 +1385,50 @@ export function judgeItemWords(item: ItemWords): { prohibitedClass: ProhibitedCl
   ];
   // A strength or a qualifier in ANY of the item's own texts takes the soft-drink exemptions away in all of them. [DS1105 S3]
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  // [owner 16 Oct · #1805 S2-1] The household-insecticide exemptions fail closed for the whole item: ANY of its own texts
+  // that is not a plain household form, names a plant or animal use, a large pack, or farm/garden/bulk use takes them
+  // away in all of them — and so do its store's own words or its platform categories (storeNotHousehold, checkItem).
+  const notHousehold = storeNotHousehold
+    || fields.some(([, text]) => !!text && (notHouseholdText(text) || PLANT_ANIMAL_USE.test(text)));
   let first: { prohibitedClass: ProhibitedClass; field: JudgedField; term: string } | null = null;
   for (const [field, text] of fields) {
     const product = field === 'name' || field === 'option';
-    const hit = classifyText(text, { noSoftDrinks, brandFirst: product });
-    if (!hit) continue;
+    const cut: HouseholdCut = { household: false };
+    const hit = classifyText(text, { noSoftDrinks, notHousehold, brandFirst: product, householdCut: cut });
+    if (!hit) {
+      // [owner 16 Oct] A household word used to hold this text for a person, who then saw what else it carried, and a
+      // name or option was searched for certain goods behind it ("Baygon w/ x-m"). It still is: a household word is
+      // allowed, never a cover — the certain goods refuse a name or an option and hold any other field.
+      const behind = cut.household ? certainGoods(text) : null;
+      if (behind && product) return { ...behind, field, certain: true };
+      if (behind) first ??= { ...behind, field };
+      continue;
+    }
     const certain = product ? certainGoods(text) : null;
     if (certain) return { ...certain, field, certain: true };
-    first ??= { ...hit, field };
+    first ??= { ...(heldPesticideBehind(hit, () => certainGoods(text)) ?? hit), field };
   }
   if (!first) {
     // A phrase written across fields ("Captain" named, "Morgan" as the option): the item's own words read together
     // hold it for a person. Never certain, no brand-first word, no split word. [evasion]
     const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
-    const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
+    const hit = classifyText(together, { noSoftDrinks, notHousehold, brandFirst: false, splitWords: false });
     if (hit) first = { ...hit, field: 'name' };
   }
   return first ? { ...first, certain: false } : null;
 }
-const itemWordsJudge = rememberedJudge(
-  (item: ItemWords) => JSON.stringify([item.name, item.sectionName ?? null, item.description ?? null, (item.optionNames ?? []).map((name) => name ?? null)]),
-  judgeItemWords,
-);
+const itemWordsKey = (item: ItemWords) => JSON.stringify([item.name, item.sectionName ?? null, item.description ?? null, (item.optionNames ?? []).map((name) => name ?? null)]);
+const itemWordsJudge = rememberedJudge(itemWordsKey, (item: ItemWords) => judgeItemWords(item));
+/** [#1805 S3-1] The same words, for an item whose store's words or platform categories say farm, garden or bulk supply. */
+const itemWordsJudgeNotHousehold = rememberedJudge(itemWordsKey, (item: ItemWords) => judgeItemWords(item, true));
 
 /**
  * The partner's text judged: the first word hit, in the order a partner reads
  * it — or, when the name or an option IS the banned goods, that, as certain.
  * Remembered for these exact words (see "Remembered verdicts").
  */
-export function wordHit(item: ItemWords): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
-  return itemWordsJudge.judge(item);
+export function wordHit(item: ItemWords, storeNotHousehold = false): { prohibitedClass: ProhibitedClass; field: JudgedField; term: string; certain: boolean } | null {
+  return (storeNotHousehold ? itemWordsJudgeNotHousehold : itemWordsJudge).judge(item);
 }
 
 /**
@@ -1040,7 +1467,10 @@ export function checkItem(item: CatalogueFacts): CatalogueCheck {
     const hit = classifyCategory(category);
     if (hit) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'store', term: hit.term, reason: storeCategoryReason(category.name) };
   }
-  const hit = wordHit(item);
+  // [#1805 S3-1] farm, garden or bulk supply in the store's own words or in a platform category the item or its store is
+  // filed under: the household-insecticide exemptions are off for the item.
+  const farmFiled = [...(item.categories ?? []), ...(item.storeCategories ?? [])].some((c) => FARM_GARDEN_USE.test(`${c.slug.replace(/-/g, ' ')} ${c.name}`));
+  const hit = wordHit(item, item.storeNotHousehold === true || farmFiled);
   if (hit?.certain) return { state: 'BANNED', prohibitedClass: hit.prohibitedClass, source: 'word', term: hit.term, reason: null, field: hit.field };
   // [owner 14 Oct, store names] A store whose own words are held for a person holds every item it sells, whatever the
   // item's words — an approval of the item's words does not show it while its store waits.
@@ -1085,12 +1515,19 @@ export function judgeStoreWords(store: StoreWords): StoreWordHit | null {
     ...labels.map((label): [StoreField, string | null | undefined, boolean] => ['tags', label, false]),
   ];
   const noSoftDrinks = fields.some(([, text]) => !!text && qualifiesSoftDrinks(text));
+  // [owner 16 Oct · #1805 S2-1/S3-1] A store whose own words say farm, garden or bulk supply: its household words are held
+  // for a person (and its items' too, storeNotHousehold). Grocery words are not read here (a grocery sells Baygon).
+  const notHousehold = storeWordsNotHousehold(store);
   for (const [field, text, brandFirst] of fields) {
-    const hit = classifyText(text, { noSoftDrinks, brandFirst });
-    if (hit) return { ...hit, field };
+    const cut: HouseholdCut = { household: false };
+    const hit = classifyText(text, { noSoftDrinks, notHousehold, brandFirst, skipTerms: STORE_SKIPPED_PAYMENT_WORDS, householdCut: cut });
+    if (hit) return { ...(heldPesticideBehind(hit, () => certainGoods(text, { skipTerms: STORE_SKIPPED_PAYMENT_WORDS })) ?? hit), field };
+    // [owner 16 Oct] the certain goods behind an allowed household word still hold the store (as in judgeItemWords)
+    const behind = cut.household ? certainGoods(text, { skipTerms: STORE_SKIPPED_PAYMENT_WORDS }) : null;
+    if (behind) return { ...behind, field };
   }
   const together = fields.map(([, text]) => text).filter(Boolean).join(' . ');
-  const hit = classifyText(together, { noSoftDrinks, brandFirst: false, splitWords: false });
+  const hit = classifyText(together, { noSoftDrinks, notHousehold, brandFirst: false, splitWords: false, skipTerms: STORE_SKIPPED_PAYMENT_WORDS });
   return hit ? { ...hit, field: 'name' } : null;
 }
 const storeWordsJudge = rememberedJudge(
@@ -1175,6 +1612,11 @@ const ORDINARY_WORDS: ReadonlySet<string> = new Set([
   'paper', 'papers', 'throat', 'lemonade', 'mall', 'e', 'roll', 'rolls',
   'black', 'martin', 'old', 'lost', 'tablets', 'pills', 'relief', 'reducer', 'refill', 'cylinder', 'lighter', 'sapphire',
   'friend', 'crown', 'famous', 'balm',
+  // [R4] the ordinary half of the expanded list's phrases
+  'gold', 'raw', 'rough', 'loose', 'uncut', 'scrap', 'concentrate', 'mineral', 'cracker', 'crackers', 'candle', 'candles',
+  'rocket', 'rockets', 'bottle', 'cherry', 'killer', 'spray', 'aluminium', 'aluminum', 'zinc', 'sodium', 'giant', 'ivory',
+  'copy', 'first', 'quality', 'gift', 'card', 'cards', 'service', 'services', 'advice', 'office', 'machine', 'machines',
+  'doll', 'dolls', 'magazine', 'magazines', 'movie', 'movies', 'video', 'videos', 'dvd', 'dvds', 'pepper',
 ]);
 const SINGLE_WORD_TERMS: ReadonlySet<string> = new Set(CLASS_ORDER.flatMap((c) => PROHIBITED_TERMS[c]).filter((t) => !t.includes(' ')));
 const longest = (words: readonly string[]): string => words.reduce((a, b) => (b.length > a.length ? b : a));

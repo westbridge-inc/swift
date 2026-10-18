@@ -36,10 +36,19 @@ export const MAX_HANDOVER_ATTEMPTS = 5;
 // generic fall back to an index signature, which silently degrades every
 // downstream result type to `string | number | Decimal | ... | undefined`.
 // Plain `true` literals keep inference exact.
-export const HANDOVER_SECRETS_OMIT: { ridePin: true; pickupCode: true; pickupCodeAttempts: true } = {
+//
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's committed MMG destination rides the same list: the MMG
+// NUMBER (and the dormant pay link) is shown ONLY to that order's customer, by the customer order read's own
+// explicit projection, and only after the store accepts. A wholesale row serialisation (a mover's job, a
+// claim answer, a socket payload) never carries it.
+export const HANDOVER_SECRETS_OMIT: {
+  ridePin: true; pickupCode: true; pickupCodeAttempts: true; mmgNumberSnapshot: true; mmgPayUrlSnapshot: true;
+} = {
   ridePin: true,
   pickupCode: true,
   pickupCodeAttempts: true,
+  mmgNumberSnapshot: true,
+  mmgPayUrlSnapshot: true,
 };
 
 /**

@@ -290,6 +290,8 @@ async function purgeRedis(ids: string[], velocityActors: string[]) {
 
 beforeAll(async () => {
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', PAY_HOST);
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -439,14 +441,17 @@ describe('GOLD-2 · VEND-03 / MONEY-02 / CUST-02 — an MMG order end to end', (
     expect({ status: placed.status, paymentStatus: placed.paymentStatus, mmgPayUrlSnapshot: placed.mmgPayUrlSnapshot, mmgRecipientNameSnapshot: placed.mmgRecipientNameSnapshot })
       .toEqual({ status: 'PENDING', paymentStatus: 'PENDING', mmgPayUrlSnapshot: DINER_LINK, mmgRecipientNameSnapshot: 'Gold MMG Diner' });
 
-    // Unpaid MMG never moves: not at the store, not on the rider board.
+    // [PAYMENT-SIMPLIFY · COORD Q1, 17 Oct] The store may ACCEPT unpaid; nothing after acceptance moves:
+    // not the kitchen, not a rider.
     const acceptUnpaid = await storeStep(order.id, 'accept');
-    expect(acceptUnpaid.statusCode).toBe(409);
-    expect(acceptUnpaid.json().error.code).toBe('MMG_PAYMENT_PENDING');
+    expect(acceptUnpaid.statusCode, acceptUnpaid.body).toBe(200);
+    const prepUnpaid = await storeStep(order.id, 'preparing');
+    expect(prepUnpaid.statusCode).toBe(409);
+    expect(prepUnpaid.json().error.code).toBe('MMG_PAYMENT_PENDING');
     const grabUnpaid = await call('POST', `/api/v1/rider/orders/${order.id}/accept`, rider.token, {});
-    expect(grabUnpaid.statusCode).toBe(400);
-    expect(grabUnpaid.json().error.code).toBe('INVALID_STATUS');
-    expect(await claimFacts(order.id)).toMatchObject({ status: 'PENDING', paymentStatus: 'PENDING' });
+    expect(grabUnpaid.statusCode).toBe(409);
+    expect(grabUnpaid.json().error.code).toBe('MMG_PAYMENT_PENDING');
+    expect(await claimFacts(order.id)).toMatchObject({ status: 'ACCEPTED', paymentStatus: 'PENDING' });
 
     // The customer's word (their device), then strangers who try to speak for this order.
     const claimed = await call('POST', `/api/v1/customer/orders/${order.id}/payment-claim`, customer.token, { paid: true, reference: ref });
@@ -482,7 +487,7 @@ describe('GOLD-2 · VEND-03 / MONEY-02 / CUST-02 — an MMG order end to end', (
     expect(await sys(() => app.prisma.auditLog.count({ where: { entityId: order.id, action: 'ATTEST_MMG_PAYMENT' } }))).toBe(1);
 
     // Fulfilment, then the rider carries it.
-    for (const [step, expected] of [['accept', 'ACCEPTED'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']] as const) {
+    for (const [step, expected] of [['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']] as const) {
       const moved = await storeStep(order.id, step);
       expect(moved.statusCode, moved.body).toBe(200);
       expect(moved.json().data.status).toBe(expected);
@@ -797,9 +802,16 @@ describe('GOLD-2 · VEND-03 — grocery substitution on an MMG order', () => {
 
     beforeAll(async () => {
       ({ orderId, riceLineId } = await marketBag());
+      // [SUBSTITUTION 17 Oct · #1830] A dearer swap on MMG is no longer proposed: nobody could
+      // answer it, so the order would wait forever. The stock-out itself is still not resolvable
+      // in-app; this pin keeps proving that on a question opened before the rule (fixtured).
       const proposed = await call('POST', `/api/v1/vendor/orders/${orderId}/items/${riceLineId}/substitute`, marketOwner.token, { substituteItemId: market.riceLarge }, asStore(marketId));
-      expect(proposed.statusCode, proposed.body).toBe(200);
-      expect(proposed.json().data.subStatus).toBe('PENDING');
+      expect(proposed.statusCode, proposed.body).toBe(409);
+      expect(proposed.json().error.code).toBe('MMG_ADJUSTMENT_UNAVAILABLE');
+      await sys(() => app.prisma.orderItem.update({
+        where: { id: riceLineId },
+        data: { subStatus: 'PENDING', substituteItemId: market.riceLarge, substituteName: 'Rice 10kg', substitutePrice: 3000 },
+      }));
       lineTotal = Number((await sys(() => app.prisma.orderItem.findUniqueOrThrow({ where: { id: riceLineId } }))).totalCustomer);
       expect(lineTotal).toBe(3600);
       totalBefore = Number((await orderRow(orderId)).totalAmount);

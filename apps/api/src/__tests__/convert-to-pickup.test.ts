@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Delivery→pickup conversion (availability spec §4.2): the ONE additive
@@ -61,7 +62,7 @@ beforeAll(async () => {
 
   const me = await app.prisma.user.create({
     data: {
-      phone: `+59253${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Con', lastName: 'Vert',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true,
@@ -84,7 +85,7 @@ beforeAll(async () => {
 
   const riderUser = await app.prisma.user.create({
     data: {
-      phone: `+59252${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Busy', lastName: 'Rider',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,
@@ -186,8 +187,8 @@ describe('conversion and rider claims are mutually exclusive on one locked money
     process.env['DISPATCH_EXHAUSTION'] = '1';
     const order = await makeOrder();
     // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
-    // cancel only when it is very late — 30 minutes past its promise.
-    await app.prisma.order.update({ where: { id: order.id }, data: { promisedAt: new Date(Date.now() - 31 * 60_000) } });
+    // cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise.
+    await app.prisma.order.update({ where: { id: order.id }, data: { promisedAt: new Date(Date.now() - 61 * 60_000) } });
     const cancel = await app.inject({
       method: 'POST',
       url: `/api/v1/customer/orders/${order.id}/cancel`,

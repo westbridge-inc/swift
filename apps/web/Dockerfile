@@ -44,6 +44,10 @@ ARG SWIFT_WEB_CHANNEL
 # Unset or empty keeps src/site.config.ts refusing to build while a company
 # detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
 ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
+# [WEB-TILES] The MapTiler browser key: public by design (inlined into the
+# bundle) and restricted in MapTiler to the site's own origins. Empty: the
+# site draws no map tiles (apps/web/src/lib/map-tiles.ts), never OpenStreetMap's.
+ARG NEXT_PUBLIC_MAPTILER_KEY
 # [Item 7 · S1] The pre-launch switch is NOT a build argument: the site reads
 # SWIFT_WEB_ORDERING from its environment while it runs (deploy/docker-compose.yml).
 # next.config.ts: the standalone server, and the type check and lint stay
@@ -64,6 +68,8 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
+COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
 # [W6] The store page judges an item's choices with the API's own validator
 # (src/lib/menu-options.ts imports it by path, never a second copy). It is a
 # pure module with no imports of its own, so exactly this file.

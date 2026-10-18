@@ -17,8 +17,12 @@ import {
   Truck,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { activeRide, cancelOrder, getOrder, getRide, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { activeRide, getRide } from '@/lib/customer-rides';
+import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
+import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
 
 const POLL_INTERVAL_MS = 8_000;
@@ -29,6 +33,11 @@ type OrderLine = {
   quantity: number;
   lineTotal?: number;
   customerPrice?: number;
+  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v1). */
+  subStatus?: string | null;
+  substituteName?: string | null;
+  substitutePrice?: number | null;
+  substitution?: SwapView | null;
 };
 
 type TimelineEvent = {
@@ -66,6 +75,8 @@ type OrderDetail = {
   pickupCode?: string | null;
   /** [MKT-F057] The customer-held delivery door PIN (holder-side only). */
   ridePin?: string | null;
+  /** [R14] Set (verbatim) while the store delivers this order with its own rider; null otherwise. */
+  ownRiderNotice?: string | null;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
@@ -90,6 +101,11 @@ type OrderDetail = {
   /** [owner #46/#50] Why there is no Cancel, and who to contact instead. */
   cancelUnavailable?: { code: string; message: string; contactPhone?: string | null } | null;
   cancellationReason?: string | null;
+  /** [owner 18 Oct 2026] Why an unpaid MMG order closed by itself, in the customer's words (null otherwise). */
+  cancellationNotice?: string | null;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Where to send MMG on an ACCEPTED order: the store's number and the
+   *  exact total (only this customer, only until the store marks it "Paid by MMG"). Parsed, never trusted raw. */
+  mmgPayment?: unknown;
 };
 
 type Stage = { label: string; statuses: string[] };
@@ -232,6 +248,8 @@ export default function OrderDetailPage() {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [openingPayment, setOpeningPayment] = useState(false);
+  const [swapBusy, setSwapBusy] = useState<string | null>(null);
+  const [swapError, setSwapError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const expiredHold = useRef<string | null>(null);
   const loadSequence = useRef(0);
@@ -280,6 +298,21 @@ export default function OrderDetailPage() {
       if (loadInFlight.current === request) loadInFlight.current = null;
     }
   }, [id]);
+
+  // [SUBSTITUTION · owner 17 Oct 2026] The customer answers the store's swap
+  // question here too; the page then reloads the server's truth either way.
+  const decideSwap = useCallback(async (lineId: string, approve: boolean) => {
+    setSwapBusy(lineId);
+    setSwapError(null);
+    try {
+      await decideSubstitution(id, lineId, approve);
+    } catch (decideError) {
+      setSwapError(decideError instanceof Error ? decideError.message : 'That did not go through. Try again.');
+    } finally {
+      setSwapBusy(null);
+      await load();
+    }
+  }, [id, load]);
 
   useEffect(() => {
     setOrder(null);
@@ -371,6 +404,10 @@ export default function OrderDetailPage() {
   const mmgAction = verifiedMmgAction(order);
   const payableMmgAction = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
     ? mmgAction
+    : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number, on the same terms as the server sends it.
+  const storeMmgPayment = !trackingError && !stopped && !paymentCaptured && !paymentRefunded && order.paymentStatus === 'PENDING'
+    ? parseMmgStorePayment(order.mmgPayment)
     : null;
 
   // [W-32] The refetch is a positive control, and it was only half of one: it
@@ -470,7 +507,7 @@ export default function OrderDetailPage() {
           <p className={styles.eyebrow}>{vendorName} · {order.orderNumber}</p>
           <h1 ref={statusHeadingRef} tabIndex={-1} id="order-status-heading" className={styles.title}>{statusHeading(order)}</h1>
           <p className={styles.updateNote}>
-            {stopped ? cancelResult ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
+            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>
@@ -484,6 +521,11 @@ export default function OrderDetailPage() {
           <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
           <OpenSwiftApp />
         </section>
+      ) : null}
+
+      {/* [R14 · legal research D12] The server's words, shown while the store delivers with its own rider. */}
+      {order.ownRiderNotice ? (
+        <div className={styles.moneyNotice} role="note">{order.ownRiderNotice}</div>
       ) : null}
 
       {trackingError ? (
@@ -525,6 +567,40 @@ export default function OrderDetailPage() {
           </div>
         </section>
       ) : null}
+
+      {/* [SUBSTITUTION · owner 17 Oct 2026] The store's swap question: the
+          customer is always told, and answers from the server's own permitted
+          decisions, price change and deadline. */}
+      {!stopped ? (order.items ?? []).filter((item) => item.subStatus === 'PENDING' && item.id).map((item) => {
+        const view = item.substitution;
+        const allowed = swapPermissions(view);
+        const change = swapChangeText(view);
+        const deadline = swapDeadlineText(view);
+        const lineId = item.id as string;
+        return (
+          <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
+            <div>
+              <p className={styles.eyebrow}>The store asks</p>
+              <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>Swap {item.name} for {item.substituteName ?? 'another item'}?</h2>
+              <p className={styles.mutedCopy}>
+                {item.name} is out of stock. {vendorName} suggests {item.substituteName ?? 'another item'} ({money(Number(item.substitutePrice ?? 0))}{item.quantity > 1 ? ` × ${item.quantity}` : ''}) instead.{allowed.reject ? ' Declining removes the item and lowers your total.' : ''}
+              </p>
+              {change ? <p className={styles.mutedCopy}><strong>{change}</strong></p> : null}
+              {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
+              {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
+              {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
+              <div className={styles.confirmActions}>
+                <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                  Approve swap
+                </button>
+                <button type="button" className={styles.secondaryButton} disabled={swapBusy !== null || !allowed.reject} onClick={() => void decideSwap(lineId, false)}>
+                  Decline
+                </button>
+              </div>
+            </div>
+          </section>
+        );
+      }) : null}
 
       {!stopped ? (
         <section className={styles.progressCard} aria-labelledby="progress-title">
@@ -637,8 +713,8 @@ export default function OrderDetailPage() {
           <div className={styles.orderLines}>
             {(order.items ?? []).map((item, index) => (
               <div key={item.id ?? `${item.name}-${index}`} className={styles.line}>
-                <span>{item.quantity}× {item.name}</span>
-                <strong>{money(lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
+                <span>{item.quantity}× {item.name}{lineRemoved(item) ? ' (removed, not charged)' : ''}</span>
+                <strong>{money(lineRemoved(item) ? 0 : lineDisplayAmount(item.lineTotal, item.customerPrice, item.quantity))}</strong>
               </div>
             ))}
           </div>
@@ -691,9 +767,13 @@ export default function OrderDetailPage() {
                         ? 'Swift records the MMG payment as received and the order as refunded. The business handles that refund directly; Swift never held the money.'
                         : paymentCaptured
                           ? 'The business confirmed it received your MMG transfer directly. No additional payment is due through Swift.'
+                          : storeMmgPayment
+                            ? `${storeMmgPayment.instruction} ${mmgStorePaymentNote(storeMmgPayment)}`
                           : payableMmgAction
                             ? `Swift does not hold this payment. This verified link sends ${money(payableMmgAction.amount)} directly to ${payableMmgAction.recipientName}.`
-                            : 'Swift does not hold this payment. No verified MMG payment link is available on this order; do not pay from unverified details.'
+                          : order.status === 'PENDING'
+                            ? 'When the business accepts, this page shows its MMG number and the exact amount. Pay within 30 minutes of it accepting, or the order cancels automatically. Swift does not hold this payment.'
+                            : 'Swift does not hold this payment. No verified MMG payment details are on this order; do not pay from unverified details.'
                       : order.paymentMethod === 'CASH'
                         ? paymentCaptured
                           ? refunded
@@ -708,6 +788,9 @@ export default function OrderDetailPage() {
                             : `Pay ${isTaxi ? 'the driver' : order.fulfillment === 'DELIVERY' ? 'the rider' : 'the business'} directly. Swift does not hold your money.`
                         : 'Swift can’t show this order’s payment status. Check again shortly.'}
                 </p>
+                {storeMmgPayment && mmgStorePaymentDeadline(storeMmgPayment) ? (
+                  <p><strong>{mmgStorePaymentDeadline(storeMmgPayment)}</strong></p>
+                ) : null}
                 {payableMmgAction ? (
                   <button type="button" className={`${styles.secondaryButton} ${styles.paymentAction}`} disabled={openingPayment} onClick={() => void openVerifiedMmgPayment(payableMmgAction)}>
                     {openingPayment ? 'Rechecking payment…' : `Pay ${payableMmgAction.recipientName} by MMG`}

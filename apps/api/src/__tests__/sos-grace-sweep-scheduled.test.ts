@@ -10,7 +10,11 @@ import { scheduleRecurringJobs } from '../jobs/queue';
 // the real scheduler, assert the registration and a life-safety-tight cadence.
 
 function mockQueues() {
-  const make = () => ({ add: vi.fn().mockResolvedValue(undefined) });
+  const make = () => ({
+    add: vi.fn().mockResolvedValue(undefined),
+    getRepeatableJobs: vi.fn().mockResolvedValue([]),
+    removeRepeatableByKey: vi.fn().mockResolvedValue(true),
+  });
   return {
     orderQueue: make(),
     subscriptionQueue: make(),
@@ -18,6 +22,8 @@ function mockQueues() {
     notificationQueue: make(),
     verificationQueue: make(),
     dispatchQueue: make(),
+    offerQueue: make(),
+    safetyQueue: make(),
     searchQueue: make(),
   } as never;
 }
@@ -29,10 +35,12 @@ describe('SOS grace-expiry sweep is scheduled [F-0003]', () => {
   beforeEach(() => { delete process.env['SOS_GRACE_SWEEP_MS']; }); // hermetic default
   afterAll(() => { if (saved === undefined) delete process.env['SOS_GRACE_SWEEP_MS']; else process.env['SOS_GRACE_SWEEP_MS'] = saved; });
 
-  it('registers promote-sos-grace as a repeatable job on the dispatch queue', async () => {
-    const q = mockQueues() as unknown as { dispatchQueue: { add: ReturnType<typeof vi.fn> } };
+  // [row 331] On the safety queue (its own worker slots), never behind the dispatch sweeps.
+  it('registers promote-sos-grace as a repeatable job on the safety queue, not the dispatch queue', async () => {
+    const q = mockQueues() as unknown as { dispatchQueue: { add: ReturnType<typeof vi.fn> }; safetyQueue: { add: ReturnType<typeof vi.fn> } };
     await scheduleRecurringJobs(q as never);
-    const call = findAdd(q.dispatchQueue, 'promote-sos-grace');
+    expect(findAdd(q.dispatchQueue, 'promote-sos-grace')).toBeUndefined();
+    const call = findAdd(q.safetyQueue, 'promote-sos-grace');
     expect(call, 'promote-sos-grace must be scheduled — the SOS backstop is dark without it (F-0003)').toBeTruthy();
     const opts = call![2] as { repeat?: { every?: number } };
     expect(opts.repeat?.every).toBeTypeOf('number');
@@ -43,17 +51,17 @@ describe('SOS grace-expiry sweep is scheduled [F-0003]', () => {
 
   it('clamps a misconfigured sub-floor interval up to the 2s floor (no pathological churn)', async () => {
     process.env['SOS_GRACE_SWEEP_MS'] = '10'; // absurdly small
-    const q = mockQueues() as unknown as { dispatchQueue: { add: ReturnType<typeof vi.fn> } };
+    const q = mockQueues() as unknown as { safetyQueue: { add: ReturnType<typeof vi.fn> } };
     await scheduleRecurringJobs(q as never);
-    const call = findAdd(q.dispatchQueue, 'promote-sos-grace')!;
+    const call = findAdd(q.safetyQueue, 'promote-sos-grace')!;
     expect((call[2] as { repeat: { every: number } }).repeat.every).toBe(2_000);
   });
 
   it('ignores garbage (non-numeric) config and falls back to the default cadence', async () => {
     process.env['SOS_GRACE_SWEEP_MS'] = 'not-a-number';
-    const q = mockQueues() as unknown as { dispatchQueue: { add: ReturnType<typeof vi.fn> } };
+    const q = mockQueues() as unknown as { safetyQueue: { add: ReturnType<typeof vi.fn> } };
     await scheduleRecurringJobs(q as never);
-    const call = findAdd(q.dispatchQueue, 'promote-sos-grace')!;
+    const call = findAdd(q.safetyQueue, 'promote-sos-grace')!;
     const every = (call[2] as { repeat: { every: number } }).repeat.every;
     expect(Number.isFinite(every)).toBe(true); // never NaN → a NaN interval would break the repeatable job
     expect(every).toBeGreaterThanOrEqual(2_000);

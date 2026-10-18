@@ -86,9 +86,15 @@ async function buildTestApp() {
   return server;
 }
 
+// [AUD-L7-008] This suite runs the app in development mode; the worker must
+// get its own mode back afterwards. Registered first, so it runs LAST (after
+// the teardown below unstubs).
+const NODE_ENV_AT_LOAD = process.env['NODE_ENV'];
+afterAll(() => { expect(process.env['NODE_ENV']).toBe(NODE_ENV_AT_LOAD); });
+
 beforeAll(async () => {
   vi.stubEnv('ADS_ENABLED', '1');
-  process.env['NODE_ENV'] = 'development';
+  vi.stubEnv('NODE_ENV', 'development'); // restored by vi.unstubAllEnvs() in afterAll
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   app = await buildTestApp();
@@ -383,10 +389,14 @@ describe('composition root ↔ matrix drift guard, by plugin [SWIFT-092 · T1]',
   // publicRoutes / qrPublicRoutes (/api/v1/public) and qrResolverRoutes (the printed
   // QR short links) are public pages by name: QR resolution and public profile reads.
   // legalRoutes (/legal) serves the published legal pages.
+  // smsInboundRoutes (/api/v1/sms) is the SMS provider calling with a texted reply [R22]:
+  // machine-to-machine, HMAC-signed by the provider and refused (403) unsigned, 503 dark
+  // until configured; it only ever withdraws marketing consent — proven in marketing-stop.test.ts.
   // testControlRoutes exists only in isolated load builds; production never registers it.
   const EXEMPT_PLUGINS = new Set([
     'agentCashRoutes', 'attributionRoutes', 'discoveryRoutes', 'marketRoutes', 'mmgCheckoutPublicRoutes',
     'cardRailPublicRoutes', 'publicRoutes', 'qrPublicRoutes', 'qrResolverRoutes', 'legalRoutes', 'testControlRoutes',
+    'smsInboundRoutes',
   ]);
 
   it('flags a route plugin the matrix never mounts, even under a prefix it already sweeps (red-first)', () => {

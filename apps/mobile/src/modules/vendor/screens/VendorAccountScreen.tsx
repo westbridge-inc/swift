@@ -25,7 +25,10 @@ import { BrandSwitch } from '../../../kit/controls';
 import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { MmgNumberCard } from '../../../components/MmgNumberCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import type { StorePin } from '../../../lib/storePin';
@@ -106,6 +109,26 @@ export function VendorAccountScreen() {
     },
     onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
   });
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG NUMBER replaces the pay link:
+  // the same step-up, the same staged cool-off with the old number live, the same one-tap cancel.
+  const [mmgNumberError, setMmgNumberError] = useState<string | null>(null);
+  const updateMmgNumber = guardVendorOperation((mmgNumber: string | null) => vendorApi.updateProfile({ mmgNumber }));
+  const saveMmgNumber = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgNumber: string | null) => updateMmgNumber(mmgNumber)),
+    onMutate: () => setMmgNumberError(null),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgNumberError(serverMessage(e, 'That number could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgNumber = useVendorMutation({
+    mutationFn: () => vendorApi.cancelPendingMmgNumber(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current number stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
+  });
   // The server owns what a publishable number is (a complete +592 subscriber
   // line), so a rejection is surfaced in ITS words rather than re-guessed here —
   // two opinions about a valid number is how a shopkeeper gets told their own
@@ -120,6 +143,20 @@ export function VendorAccountScreen() {
     },
     onError: (e: any) => setCallNumberError(
       e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.',
+    ),
+  });
+
+  // [R3 · CAA s.70(3)] The store's own refund rule (owner only); the server's refusal is shown in its words.
+  const [refundRuleError, setRefundRuleError] = useState<string | null>(null);
+  const saveRefundRule = useVendorMutation({
+    mutationFn: (refundRule: string | null) => vendorApi.updateProfile({ refundRule }),
+    onMutate: () => setRefundRuleError(null),
+    onSuccess: () => {
+      setRefundRuleError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setRefundRuleError(
+      e?.response?.data?.error?.message ?? 'That refund rule could not be saved. Check it and try again.',
     ),
   });
 
@@ -170,6 +207,7 @@ export function VendorAccountScreen() {
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
           <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           {guestSample ? (
             <SettingsRow
@@ -189,6 +227,20 @@ export function VendorAccountScreen() {
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
+          <MmgNumberCard
+            value={store?.mmgNumber}
+            pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            saving={saveMmgNumber.isPending}
+            cancelling={cancelPendingMmgNumber.isPending}
+            error={mmgNumberError}
+            readOnly={!isOwner}
+            onSave={(n) => saveMmgNumber.mutate(n)}
+            onCancelPending={isOwner ? () => cancelPendingMmgNumber.mutate() : undefined}
+          />
+        ) : null}
+
+        {/* [PAYMENT-SIMPLIFY] The old pay link only while the server's STORE_MMG_PAY_LINK switch is on. */}
+        {isManager && store?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="store"
             value={store?.mmgPayUrl}
@@ -208,6 +260,15 @@ export function VendorAccountScreen() {
             saving={saveCallNumber.isPending}
             error={callNumberError}
             onSave={(p) => saveCallNumber.mutate(p)}
+          />
+        ) : null}
+
+        {isOwner ? (
+          <RefundRuleCard
+            value={store?.refundRule}
+            saving={saveRefundRule.isPending}
+            error={refundRuleError}
+            onSave={(rule) => saveRefundRule.mutate(rule)}
           />
         ) : null}
 
@@ -722,7 +783,7 @@ function StaffSection() {
           onPress={submit}
         />
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-          Tap a role pill to switch Manager ↔ Staff.
+          Tap a role to switch between Manager and Staff.
         </T>
         <WithdrawStaffInvites />
       </Card>

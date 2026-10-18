@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { scanUpload } from '../../lib/malware-scan';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -10,6 +11,8 @@ import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/doc
 import { createHash } from 'node:crypto';
 import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
 import { AppError } from '../../utils/errors';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
 
@@ -53,6 +56,8 @@ const statusQuerySchema = z.object({
 const consentFields = {
   consent: z.literal(true),
   privacyNoticeVersion: z.string().min(1).max(20),
+  /** [R17] the tick the client showed (website, phone build 12); recorded in the consent ledger. Builds 9-11 omit it. */
+  consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
 };
 
 const submitDocumentSchema = z.object({
@@ -131,6 +136,9 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);
+    if (body.consentTick && body.consentTick !== 'document_v1') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to a document upload.');
+    }
     const doc = await verification.submitDocument(
       request.user.userId,
       body.role,
@@ -139,6 +147,10 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.privacyNoticeVersion,
       request.user.role,
     );
+    // [R17] the tick the person gave, after the document is on file (a refused upload records no consent)
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType });
+    }
     reply.code(201);
     return { success: true, data: doc };
   });
@@ -167,6 +179,8 @@ export async function verificationRoutes(app: FastifyInstance) {
       if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
       await inspectImage(buffer, sniffed);
     }
+    // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
+    await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -286,12 +300,19 @@ export async function verificationRoutes(app: FastifyInstance) {
    *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
+    if (body.consentTick && body.consentTick !== 'customer_id_v1') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
+    }
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
       body.selfieUrl,
       body.privacyNoticeVersion,
     );
+    // [R17 · in-app ¶15] the customer's tick to keep the ID photo
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: 'customer', surface: consentSurfaceOf(request), ip: request.ip, docType: 'customer_id' });
+    }
     reply.code(201);
     const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
     return { success: true, data: { ...doc, idCheck } };

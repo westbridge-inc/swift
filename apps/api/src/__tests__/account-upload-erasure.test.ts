@@ -23,6 +23,7 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { AccountService } from '../modules/user/account.service';
 import { LocalStorageProvider } from '../providers/storage/storage-provider';
 import { placeDocLegalHold, placeDocLegalHoldIn, releaseDocLegalHold } from '../modules/verification/legal-hold';
+import { retryAccountErasures } from '../modules/user/account-erasure-retry';
 import { eraseUnclaimedUploads } from '../modules/user/upload-erasure';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -155,8 +156,13 @@ describe('(a) an upload no document claims goes with the account', () => {
       expect(e.sha256).toBe(u.sha256);
     }
     await releaseDocLegalHold(app.prisma, { holdId: hold.id, releasedBy: userId, reason: 'Synthetic case closed' });
-    await retry(userId);
+    // Nothing re-runs the erasure on release itself: the account tombstone's daily sweep (the retention job) does.
+    expect(await system(() => app.prisma.deletionReceipt.count({ where: { subjectId: userId } }))).toBe(0);
+    await retryAccountErasures({ prisma: app.prisma, log: app.log, io: io as never });
     for (const u of [doc, loose]) { await gone(u.key); expect((await envelope(u.key)).sha256).toBe('erased'); }
+    // ...and the deletion receipts are written then: the document and the unclaimed upload.
+    const receipts = await system(() => app.prisma.deletionReceipt.findMany({ where: { subjectId: userId }, select: { docTypeCode: true } }));
+    expect(receipts.map((r) => r.docTypeCode).sort()).toEqual(['national_id', 'unclaimed_upload']);
   });
 
   it('bytes that survive keep the upload open (key already shredded); the retry finishes it without a sign-in', async () => {

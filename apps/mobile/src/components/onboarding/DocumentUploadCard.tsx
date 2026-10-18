@@ -42,6 +42,11 @@ const DOC_LABELS: Record<string, string> = {
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
   selfie: 'Selfie',
+  // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
+  gei_electrical_licence: 'GEI Electrical Licence',
+  pest_control_operator_licence: 'Pest-Control Operator Licence (PTCCB)',
+  pesticide_applicator_certificate: 'Pesticide Applicator Certificate (PTCCB)',
+  eating_house_registration: 'Eating-House Registration (Georgetown)',
 };
 const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
 /** Friendly document name for other surfaces (suspension banners etc.). */
@@ -71,6 +76,7 @@ export function DocumentUploadCard({
   replaced = false,
   optionalHint,
   hint,
+  consented = false,
 }: {
   role: string;
   docType: string;
@@ -86,6 +92,8 @@ export function DocumentUploadCard({
   optionalHint?: string;
   /** [Owner ruling 11 Oct 2026] What this document is, in plain words (taxi checklist). */
   hint?: string;
+  /** [R17] The checklist's consent tick is given: only then can a document be uploaded. */
+  consented?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -179,6 +187,7 @@ function explainPermissionDenied(
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      ...(upload.isError && upload.variables ? [{ text: 'Retry saved photo', onPress: () => upload.mutate(upload.variables!) }] : []),
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -194,7 +203,9 @@ function explainPermissionDenied(
     ? ((upload.error as any)?.response?.data?.error?.message ?? 'Upload failed — tap to try again')
     : null;
 
-  const caption = uploadErr
+  const caption = !consented && !approved && !pending && !uploadErr
+    ? 'Tick the box above to upload'
+    : uploadErr
     ? uploadErr
     : approved
       ? daysLeft != null
@@ -219,7 +230,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
+    <Pressable disabled={approved || upload.isPending || !consented} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
@@ -241,7 +252,7 @@ function explainPermissionDenied(
             tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
-            {caption}
+            {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
           {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made

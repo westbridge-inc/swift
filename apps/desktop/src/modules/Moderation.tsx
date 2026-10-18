@@ -153,7 +153,7 @@ export default function Moderation() {
       <p className="text-sm text-neutral-500">
         {q.data?.pendingTotal ?? 0} open report{(q.data?.pendingTotal ?? 0) === 1 ? '' : 's'} — child-safety (CSAE) first.
       </p>
-      {rows.length === 0 && <p className="text-sm text-neutral-400">Nothing to review. 🎉</p>}
+      {rows.length === 0 && <p className="text-sm text-neutral-400">Nothing to review.</p>}
       {rows.map((r) => <Row key={r.id} r={r} onResolved={onResolved} />)}
     </div>
   );

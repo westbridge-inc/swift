@@ -33,6 +33,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
@@ -44,7 +45,7 @@ const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const PRODUCTION = 'swift-default';
 const REVIEW = `w0-review-${RUN}`;
 const DAY = 86_400_000;
-const phone = () => `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+const phone = () => testPhone();
 
 type PrismaModule = typeof import('../plugins/prisma');
 type TenantModule = typeof import('../plugins/tenant-context');

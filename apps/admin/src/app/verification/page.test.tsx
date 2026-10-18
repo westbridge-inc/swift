@@ -399,6 +399,9 @@ describe('[A-19] the expiring-type list cannot drift from the server', () => {
     expect(clientTypes).toEqual(serverTypes.filter((type) => !issued.includes(type)));
     expect(page).toContain("selected?.reviewerTypes?.includes('issuedOn')");
     expect(page).toContain('Issue date printed on the document');
+    // [R15] A licence or food certificate checked every January asks for its YEAR, never a printed date.
+    expect(page).toContain("selected?.reviewerTypes?.includes('certificateYear')");
+    expect(page).toContain('Year printed on the certificate');
   });
 });
 

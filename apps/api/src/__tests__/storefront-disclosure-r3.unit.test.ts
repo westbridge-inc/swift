@@ -40,6 +40,8 @@ async function fixture(status = 'ACTIVE') {
     } },
     categories: [], operatingHours: [], images: [], publicPhone: null, vendorType: 'RESTAURANT',
     latitude: 0, longitude: 0, minOrderAmount: 0,
+    // [R3] the seller block's own facts: no MMG link, no refund rule on file
+    mmgPayUrl: null, mmgNumber: null, refundRule: null,
   };
   const records: Row[] = [
     { id: 'private-identity-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-fixture',
@@ -146,7 +148,27 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
     expect(JSON.stringify(block)).not.toContain('TEST_ACCOUNT_CONTACT');
   });
 
-  it('[row 107] each decrypt of a business licence writes exactly one audit row, naming fields but never values', async () => {
+  // [R3 · legal research D10] The public block never opens a licence NUMBER (see below), so the decrypt these
+  // row-107 tests grade is a business record's public NAME field — the one the storefront does show.
+  it('[row 107] each decrypt of a business record writes exactly one audit row, naming fields but never values', async () => {
+    const h = await fixture();
+    h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
+      docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
+      submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
+    (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'business_name' }] }];
+    crypto.decrypt.mockReturnValue(Buffer.from('Fixture Trading Ltd'));
+    h.extracted.mockResolvedValue([{ id: 'run-fixture', wrappedDek: Buffer.from('fixture-wrapped'), fields: [
+      { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'business_name', valueCt: Buffer.from('fixture-encrypted') },
+    ] }] as never);
+    const block = (await h.read()).data.disclosure as { legalName: unknown };
+    expect(block.legalName).toEqual({ value: 'Fixture Trading Ltd', source: 'RECORD', docType: 'trade_licence' });
+    expect(h.audit).toHaveBeenCalledTimes(1);
+    expect(h.audit).toHaveBeenCalledWith({ data: { userId: null, action: 'DISCLOSURE_FIELDS_DECRYPTED', entity: 'VerificationDocument', entityId: 'licence-submission',
+      changes: { purpose: 'PUBLIC_STOREFRONT', docType: 'trade_licence', recordId: 'business-licence-record', fields: ['business_name'] } } });
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain('Fixture Trading Ltd');
+  });
+
+  it('[R3 · research D10] a business licence\'s NUMBER never reaches the public block: "on file" only, and it is never opened', async () => {
     const h = await fixture();
     h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
       docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
@@ -157,11 +179,10 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
       { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'permit_number', valueCt: Buffer.from('fixture-encrypted') },
     ] }] as never);
     const block = (await h.read()).data.disclosure as { licences: unknown[] };
-    expect(block.licences).toContainEqual({ value: 'TL-0042', source: 'RECORD', docType: 'trade_licence' });
-    expect(h.audit).toHaveBeenCalledTimes(1);
-    expect(h.audit).toHaveBeenCalledWith({ data: { userId: null, action: 'DISCLOSURE_FIELDS_DECRYPTED', entity: 'VerificationDocument', entityId: 'licence-submission',
-      changes: { purpose: 'PUBLIC_STOREFRONT', docType: 'trade_licence', recordId: 'business-licence-record', fields: ['permit_number'] } } });
-    expect(JSON.stringify(h.audit.mock.calls)).not.toContain('TL-0042');
+    expect(block.licences).toContainEqual({ value: 'on file', source: 'RECORD', docType: 'trade_licence' });
+    expect(JSON.stringify(block)).not.toContain('TL-0042');
+    expect(crypto.decrypt).not.toHaveBeenCalled();
+    expect(h.audit).not.toHaveBeenCalled();
   });
 
   it('[row 107] N public views within the cache TTL are ONE decrypt and ONE audit row; a changed record or an expired TTL compiles again', async () => {
@@ -171,13 +192,13 @@ describe('R3 public storefront disclosure privacy — actual caller', () => {
       h.records.push({ id: 'business-licence-record', tenantId: 'tenant-public', accountId: 'account-fixture', subjectId: 'subject-business',
         docType: 'trade_licence', submissionId: 'licence-submission', status: 'VALID', expiresOn: null, updatedAt: new Date('2026-10-01T00:00:00Z'),
         submission: { purgedAt: null, userId: 'account-fixture', docType: 'trade_licence', subjectId: 'subject-business' } });
-      (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'permit_number' }] }];
-      crypto.decrypt.mockReturnValue(Buffer.from('TL-0042'));
+      (h.prisma as unknown as { docType: { findMany: unknown } }).docType.findMany = async () => [{ legacyCode: 'trade_licence', fields: [{ fieldCode: 'business_name' }] }];
+      crypto.decrypt.mockReturnValue(Buffer.from('Fixture Trading Ltd'));
       h.extracted.mockResolvedValue([{ id: 'run-fixture', wrappedDek: Buffer.from('fixture-wrapped'), fields: [
-        { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'permit_number', valueCt: Buffer.from('fixture-encrypted') },
+        { id: 'field-fixture', runId: 'run-fixture', fieldCode: 'business_name', valueCt: Buffer.from('fixture-encrypted') },
       ] }] as never);
       for (let view = 0; view < 5; view += 1) {
-        expect(((await h.read()).data.disclosure as { licences: unknown[] }).licences).toContainEqual({ value: 'TL-0042', source: 'RECORD', docType: 'trade_licence' });
+        expect(((await h.read()).data.disclosure as { legalName: unknown }).legalName).toEqual({ value: 'Fixture Trading Ltd', source: 'RECORD', docType: 'trade_licence' });
       }
       expect(crypto.decrypt).toHaveBeenCalledTimes(1);
       expect(h.audit).toHaveBeenCalledTimes(1);
@@ -259,15 +280,27 @@ describe('R3 actual activation projection', () => {
     expect(crypto.unwrap).not.toHaveBeenCalled();
   });
 
-  it.each(['legalName', 'address', 'contact', 'operator'])('missing required %s still blocks activation', async missing => {
+  it.each(['legalName', 'address', 'contact'])('missing required %s still blocks activation', async missing => {
     const h = await fixture('PENDING_APPROVAL');
     h.vendor['isVerified'] = false;
     if (missing === 'legalName') h.records.splice(0, 1);
     if (missing === 'address') h.vendor['addressLine1'] = null;
     if (missing === 'contact') ((h.vendor['owner'] as Row)['user'] as Row)['isPhoneVerified'] = false;
-    if (missing === 'operator') vi.stubEnv('SUPPORT_EMAIL', '');
     await h.activate();
     expect(h.vendor).toMatchObject({ status: 'PENDING_APPROVAL', isVerified: false });
     expect(crypto.unwrap).not.toHaveBeenCalled();
+  });
+
+  // [R3 · owner 15 Oct 2026] The operator block is the ONE OPERATOR constant: blank configuration can no longer
+  // make it the missing element (it used to hold every store back when SUPPORT_EMAIL was unset).
+  it('the operator is never the missing element: with the configuration blank, a complete store still activates', async () => {
+    const h = await fixture('PENDING_APPROVAL');
+    h.vendor['isVerified'] = false;
+    h.vendor['publicPhone'] = '+5926001234';
+    vi.stubEnv('SUPPORT_EMAIL', '');
+    vi.stubEnv('PLATFORM_LEGAL_NAME', '');
+    vi.stubEnv('PLATFORM_REGISTERED_ADDRESS', '');
+    await h.activate();
+    expect(h.vendor).toMatchObject({ status: 'ACTIVE', isVerified: true });
   });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
 import { buildPlan, classify, executePlan, planDigest, signApproval, signBreakGlass, syntheticMarkersPresent, targetFingerprint, type BackupManifest, type PurgePlan } from '../modules/ops/purge-plan';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [SCR-001 / SCR-002] The demo purge as a privileged change workflow.
@@ -28,7 +29,7 @@ const deletedByCanonicalPath: string[] = [];
 const deleteUser = async (id: string) => { deletedByCanonicalPath.push(id); await prisma.user.delete({ where: { id } }); };
 // Eight random digits, not five: a 1e5 space collided with a parallel suite's row in CI (unique phone).
 const phone = () => `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`; // inside this suite's own range; other suites' +5926009998/9999 fixtures are outside it
-const otherPhone = () => `+5927${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+const otherPhone = () => testPhone();
 const mk = (data: Record<string, unknown>) => prisma.user.create({ data: { firstName: 'P', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', ...data } as never }).then((u) => { userIds.push(u.id); return u; });
 const setIdentity = (environment: string) => prisma.deploymentIdentity.upsert({ where: { id: 'singleton' }, create: { id: 'singleton', deploymentId: 'dep-test', environment }, update: { deploymentId: 'dep-test', environment } });
 const goodBackup = async (plan: PurgePlan): Promise<BackupManifest> => ({ targetDigest: plan.target.digest, takenAt: new Date(Date.now() - 60_000).toISOString(), restoreVerifiedAt: new Date().toISOString(), artifactDigest: 'a'.repeat(64) });
@@ -67,19 +68,48 @@ describe('[SCR-002] the selection is positive, never a negative classification',
     const kase = await prisma.incidentCase.create({ data: { caseNumber: `INC-${nanoid(8).toUpperCase()}`, severity: 'S1', category: 'SAFETY_THREAT', intake: 'OPS_CREATED', subjectUserId: held.id, summary: 'held', slaAckBy: new Date(), slaDecideBy: new Date(), legalHold: true } });
     caseIds.push(kase.id);
     const c = await classify(prisma, scope());
-    expect(c.demoCustomerIds).toEqual(expect.arrayContaining([demo.id, legacyRange.id]));
+    expect(c.demoCustomerIds).toContain(demo.id);
+    // [PLAT-3] the demo phone range is a live carrier range: a number in it with
+    // no synthetic marker is a person, never selected (it is unclassified)
+    expect(c.demoCustomerIds).not.toContain(legacyRange.id); expect(c.demoPartnerIds).not.toContain(legacyRange.id);
     expect(c.demoCustomerIds).not.toContain(admin.id); expect(c.demoCustomerIds).not.toContain(unclassified.id); expect(c.demoCustomerIds).not.toContain(held.id); expect(c.demoCustomerIds).not.toContain(partner.id);
     expect(c.demoPartnerIds).toContain(partner.id);
     expect(c.quarantinedIds).toContain(held.id);
     expect(c.adminIds).toContain(admin.id);
-    expect(await syntheticMarkersPresent(prisma)).toBeGreaterThanOrEqual(4);
+    expect(await syntheticMarkersPresent(prisma)).toBeGreaterThanOrEqual(3); // demo, partner, held: the marked rows this test made
+  });
+
+  it('[PLAT-3] a real number inside the demo range survives a purge: only the synthetic marker selects, and the unmarked rows are counted once', async () => {
+    // A sub-range of this suite's own scope, unique to this run, so every count is exact.
+    const sub = `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e3)).padStart(3, '0')}`;
+    const inSub = () => `${sub}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`;
+    const person = await mk({ phone: inSub() });
+    const personPartner = await mk({ phone: inSub(), roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER' });
+    const demo = await mk({ phone: inSub(), syntheticRunId: RUN });
+    const markedAdmin = await mk({ phone: inSub(), syntheticRunId: RUN, roles: ['ADMIN', 'CUSTOMER'], activeRole: 'ADMIN' });
+    const c = await classify(prisma, { phonePrefix: sub });
+    expect(c.total).toBe(4);
+    expect(c.demoCustomerIds).toEqual([demo.id]);
+    expect(c.demoPartnerIds).toEqual([]);
+    expect(c.adminIds).toEqual([markedAdmin.id]);
+    expect(c.unclassified).toBe(2); // person + personPartner; the marked admin is not counted twice
+    const plan = await buildPlan(prisma, URL_, undefined, { phonePrefix: sub });
+    expect(plan.demoCustomerIds).toEqual([demo.id]);
+    expect(plan.counts).toMatchObject({ total: 4, admins: 1, demoCustomers: 1, demoPartners: 0, unclassified: 2 });
+    // its own record of the canonical path, so the suite-wide one the later tests count stays untouched
+    const deletedHere: string[] = [];
+    const res = await executePlan(prisma, URL_, plan, { secret: SECRET, approvals: twoApprovals(plan), backup: await goodBackup(plan), deleteUser: async (id) => { deletedHere.push(id); await prisma.user.delete({ where: { id } }); } });
+    expect(res.deleted).toEqual([demo.id]);
+    expect(deletedHere).toEqual([demo.id]);
+    const survivors = await prisma.user.findMany({ where: { id: { in: [person.id, personPartner.id, markedAdmin.id] } }, select: { id: true } });
+    expect(survivors.map((u) => u.id).sort()).toEqual([person.id, personPartner.id, markedAdmin.id].sort());
   });
 });
 
 describe('[SCR-001] the register’s red proof', () => {
   it('the scope rides the digest — a plan approved for a subset cannot be widened to the rest', async () => {
     const mine = await mk({ phone: phone(), syntheticRunId: RUN });
-    const outside = await mk({ phone: `+5926003${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`, syntheticRunId: RUN }); // demo range, outside this suite's scope
+    const outside = await mk({ phone: testPhone(), syntheticRunId: RUN }); // demo range, outside this suite's scope
     const plan = await buildPlan(prisma, URL_, undefined, scope());
     expect(plan.scope).toEqual({ phonePrefix: SCOPE_PREFIX });
     expect(plan.demoCustomerIds).toContain(mine.id);
