@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
+import { fixtureTag } from './helpers/fixture-ids';
 import { prismaPlugin, beginRequestTenantContext, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -29,7 +30,9 @@ let tenantBUserId: string;
 let tenantBVendorOwnerId: string;
 let tenantBVendorId: string;
 const queuedDiscoveryJobs: Array<{ name: string; data: unknown }> = [];
-const TENANT_B = `tenant-admin-b-${nanoid(6)}`;
+// fixtureTag (0-9a-z): the receipt number below must pass the route's ^[A-Z0-9-]{1,64}$ param check on EVERY draw;
+// a nanoid '_' (8.96% of six-character tags) made the R12 case a random 400.
+const TENANT_B = `tenant-admin-b-${fixtureTag(6)}`;
 const DEFAULT_TENANT = 'swift-default';
 const TENANT_B_ADMIN_USER_ID = `${TENANT_B}-admin-user`;
 const TENANT_B_RIDER_USER_ID = `${TENANT_B}-rider-user`;

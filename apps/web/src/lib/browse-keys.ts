@@ -9,6 +9,8 @@
  * the signed-in person's own feed (their live order, their usuals), read by the
  * browser with their session and never seeded, cached or shared by the server.
  */
+import type { VendorDetail } from '@/lib/customer';
+
 export type HomeOwner = 'public' | 'me';
 
 export const homeFeedKey = (epoch: number, owner: HomeOwner, lat: number | null, lng: number | null) =>
@@ -38,10 +40,34 @@ export interface GuestRead<T> {
   data: T;
   /** When the API produced this answer (its Date header), so the browser knows how old it is. */
   at: number;
+  /** [PERF #2] The answer carried no readable Date header, so `at` is only when
+   *  this server received it. Never treated as fresh where an order depends on it. */
+  undated?: true;
 }
 
 /** A query's first answer from the page itself: used only while the query has
  *  no answer of its own, and re-read once it is older than the query allows. */
 export function fromPage<T>(seed: GuestRead<T> | null | undefined): { initialData: T; initialDataUpdatedAt: number } | Record<string, never> {
   return seed ? { initialData: seed.data, initialDataUpdatedAt: seed.at } : {};
+}
+
+/**
+ * [PERF #2] The oldest live menu a store page takes orders from without
+ * reading it again: the page's own background re-read cadence, so a menu the
+ * server drew into the page is never older than one the browser would have
+ * read itself. The API re-checks every choice at add and at checkout anyway.
+ */
+export const LIVE_MENU_MAX_AGE_MS = 30_000;
+
+/** [PERF #2] A store's live menu, drawn into its page by the server (browse-server.ts `storeMenuForPage`). */
+export interface ServerStoreMenu {
+  /** The guest menu (GET /customer/vendors/:id): the one that carries every item's required choices. */
+  vendor: VendorDetail;
+  /** When the API produced it (its Date header). */
+  at: number;
+  /** Its age when the server drew the page, by the server's own clock. */
+  ageMs: number;
+  /** One server render. The page takes the menu as live at most once per
+   *  render: Back/Forward shows a kept copy of the page, which reads again. */
+  renderId: string;
 }
