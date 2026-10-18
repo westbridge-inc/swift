@@ -547,12 +547,16 @@ describe('switched on (TAXI_MAX_STOPS=3): a ride with stops', () => {
 
   it('the quoted-fare check comes before the account gates: it is the request\'s own fault, judged before anything is read', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
-    const noSelfie = await makeCustomer({ selfieCapturedAt: null });
-    const res = await requestRide(noSelfie.token, trip([S1]));
+    // [Owner ruling 16 Oct 2026 — customers take no photos] The account gate used here is the live-ride
+    // gate (the selfie gate is gone): a customer with no photo books a plain ride, then asks for another.
+    const busy = await makeCustomer({ selfieCapturedAt: null });
+    const first = await requestRide(busy.token, trip());
+    expect(first.statusCode, first.body).toBe(201);
+    const res = await requestRide(busy.token, trip([S1]));
     expect([res.statusCode, res.json().error.code]).toEqual([400, 'EXPECTED_FARE_REQUIRED']);
-    // With the fare it reaches the gate it always reached.
-    const gated = await requestRide(noSelfie.token, trip([S1], { expectedFare: 2000 }));
-    expect([gated.statusCode, gated.json().error.code]).toEqual([403, 'SELFIE_REQUIRED']);
+    // With the fare it reaches the account gate.
+    const gated = await requestRide(busy.token, trip([S1], { expectedFare: 2000 }));
+    expect([gated.statusCode, gated.json().error.code]).toEqual([409, 'RIDE_IN_PROGRESS']);
   });
 
   it('the routing engine down: 503 ROUTE_UNAVAILABLE, never a guessed fare, nothing written', async () => {

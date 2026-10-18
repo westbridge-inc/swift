@@ -21,8 +21,12 @@ let served: EmergencyPolicy | null = null;
 export async function fetchEmergencyPolicy(country: string): Promise<EmergencyPolicy | null> {
   try {
     const res = await api.get('/public/emergency-policy', { params: { country }, timeout: 5_000 });
-    const policy = parseServedPolicy(res.data?.data);
-    if (policy) served = policy;
+    // [AUD-G7-023] Trusted only when its Ed25519 signature verifies under a
+    // pinned key, for the market asked for. A refused answer changes nothing:
+    // the last verified policy stays (never replaced by an older one), else the
+    // bundle answers at press time.
+    const policy = parseServedPolicy(res.data?.data, country);
+    if (policy && !(served && served.country === policy.country && (served.issuedAt ?? 0) > (policy.issuedAt ?? 0))) served = policy;
     return policy;
   } catch {
     return null;

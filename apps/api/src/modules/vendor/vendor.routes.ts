@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -77,6 +78,7 @@ import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { refundRuleForWrite } from './refund-rule';
 import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
@@ -121,6 +123,9 @@ const updateVendorProfileSchema = z.object({
   // [VERIFY-DOCS · ruling 7] OPTIONAL VAT registration number, owner only; null/'' takes it off.
   // Shape is enforced by vatNumberForWrite (utils/vendor-vat-number).
   vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
+  // [R3 · CAA s.70(3)] The store's own refund rule, owner only; null/'' takes it down.
+  // Shape is enforced by refundRuleForWrite (vendor/refund-rule).
+  refundRule: z.string().max(2000).nullable().optional(),
 })
   // [Q8] A store pin is one point. Half of one would move the store along a
   // single axis to a spot nobody chose, so the two travel together or not at all.
@@ -657,7 +662,8 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     include: {
       items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
-      customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
@@ -1229,6 +1235,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       attestationVersion: z.literal(DECLARATION_VERSION),
       privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
     }).parse(request.body ?? {});
+    // [R15 · owner 15 Oct 2026, research D9] Home cooks are held: a home kitchen needs the council's
+    // registration, and whether one can be registered is not confirmed yet. Refused before anything is written.
+    if (body.activityClass === 'home_cook') {
+      throw new AppError(409, 'HOME_COOK_HELD', 'Swift can’t take home cooks yet: a home kitchen needs a council registration that is still being confirmed. We’ll tell you when it opens.');
+    }
     const [vendor, user, registered, existing] = await Promise.all([
       app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
@@ -1357,6 +1368,9 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? undefined
       : vatNumberForWrite(body.vatRegistrationNumber);
     if (vatRegistrationNumber !== undefined) requireRole(access, 'OWNER');
+    // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
+    if (body.refundRule !== undefined) requireRole(access, 'OWNER');
+    const refundRule = refundRuleForWrite(body.refundRule);
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1387,6 +1401,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
+          ...(refundRule !== undefined && { refundRule }),
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
@@ -1668,7 +1683,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       where['OR'] = [
         { orderNumber: { contains: search, mode: 'insensitive' } },
         { customer: { firstName: { contains: search, mode: 'insensitive' } } },
-        { customer: { lastName: { contains: search, mode: 'insensitive' } } },
+        // [COORD 17 Oct] No search by a customer's last name: the store is no longer shown it, and a
+        // search would reveal it one guess at a time.
       ];
     }
 
@@ -1679,7 +1695,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
           items: VENDOR_ORDER_ITEMS,
-          customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
+          customer: { select: { id: true, firstName: true } }, // [COORD 17 Oct] never the last name
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
@@ -3015,6 +3031,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'store-media', log: request.log });
     const { url } = await storage.upload({
       buffer,
       filename: file.filename,
@@ -3421,7 +3438,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Booking.customerId is a User id with no relation — resolve names in one hit.
     const custIds = [...new Set(bookings.map((b) => b.customerId))];
     const users = custIds.length
-      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true, lastName: true } })
+      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true } }) // only the first name is served
       : [];
     const byId = new Map(users.map((u) => [u.id, u]));
     return {
@@ -3835,6 +3852,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
             ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
+            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
           }
         : null,
     };

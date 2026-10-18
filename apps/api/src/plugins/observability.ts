@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import fp from 'fastify-plugin';
 import client from 'prom-client';
 import * as Sentry from '@sentry/node';
 import { AppError } from '../utils/errors';
@@ -6,7 +7,9 @@ import { runtimeMode } from '../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Observability — both halves are env-gated and cost nothing when unset:
-//   SENTRY_DSN     → error tracking (5xx + worker failures)
+//   SENTRY_DSN     → error tracking (5xx + worker failures). An HTTP 5xx is
+//                    captured ONCE, by the app's error handler, on the status
+//                    it actually sent (middleware/error-handler.ts) [OBS-1].
 //   METRICS_TOKEN  → GET /metrics (Prometheus) behind a bearer token; without
 //                    the env the endpoint 404s, so the public API never
 //                    exposes internals by default.
@@ -496,6 +499,31 @@ export const notificationFailuresCounter = new client.Counter({
   name: 'swift_notification_failures_total',
   help: 'Notification deliveries that failed after retries, by channel and stage',
   labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
+// [STORE-ALERT 18 Oct 2026] Push that did not reach a phone. Before this a
+// refused Expo ticket (InvalidCredentials, DeviceNotRegistered, ...) or a bad
+// receipt left no trace at all, and a store with no push device looked the
+// same as a store that was rung. Labels are bounded: stage = request (one
+// failed HTTP attempt to Expo) | ticket | receipt; reason = an Expo error class
+// (push-outcome.ts list, else 'other') or timeout | network | http_429 |
+// http_4xx | http_5xx | bad_response. Never a token, a user or a phone.
+export const pushFailuresCounter = new client.Counter({
+  name: 'swift_push_failures_total',
+  help: 'Push messages (or Expo request attempts) that did not reach a phone, by stage and error class',
+  labelNames: ['stage', 'reason'] as const,
+  registers: [registry],
+});
+
+// [STORE-ALERT] An urgent push (alert class ring_order | ring_offer |
+// job_update) for a person with no active push device, or with push turned
+// off: nothing left for any phone. The count says how often an alert depends
+// on the socket and SMS alone.
+export const pushNoDeviceCounter = new client.Counter({
+  name: 'swift_push_no_device_total',
+  help: 'Urgent notifications whose recipient had no active push device (or push off), by alert class',
+  labelNames: ['alert_class'] as const,
   registers: [registry],
 });
 
@@ -1145,7 +1173,7 @@ export const tenantBindCounter = new client.Counter({
   registers: [registry],
 });
 
-export async function observabilityPlugin(app: FastifyInstance) {
+async function observability(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
     client.collectDefaultMetrics({ register: registry });
@@ -1213,7 +1241,8 @@ export async function observabilityPlugin(app: FastifyInstance) {
   }
 
   app.addHook('onResponse', (request, reply, done) => {
-    // routeOptions.url keeps cardinality bounded (":id", not real ids).
+    // routeOptions.url keeps cardinality bounded (":id", not real ids); a path
+    // no route matched (the 404 handler) has no template and is ONE series.
     const route = request.routeOptions?.url ?? 'unmatched';
     httpDuration.observe(
       { method: request.method, route, status: String(reply.statusCode) },
@@ -1222,16 +1251,10 @@ export async function observabilityPlugin(app: FastifyInstance) {
     done();
   });
 
-  // 5xx = our fault → Sentry. 4xx is the caller's problem and stays out.
-  app.addHook('onError', (request, _reply, error, done) => {
-    const status = (error as AppError).statusCode ?? 500;
-    if (status >= 500) {
-      // Route TEMPLATE, never the raw URL — /track/:token must not leak its
-      // token into the tracker [REPORT-013 F-013-04].
-      captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
-    }
-    done();
-  });
+  // [OBS-1] No onError hook here: an onError hook sees the THROWN error, not
+  // the status the error handler then sends (a ZodError → 400 or a Prisma
+  // not-found → 404 carry no statusCode and read as 500). The 5xx capture
+  // lives in the error handler, on the status it sent — one site, once.
 
   app.get('/metrics', async (request, reply) => {
     const token = process.env['METRICS_TOKEN'];
@@ -1243,3 +1266,11 @@ export async function observabilityPlugin(app: FastifyInstance) {
     return registry.metrics();
   });
 }
+
+/** [OBS-1] fastify-plugin (skip-override): the onResponse hook above must bind
+ *  to EVERY route of the instance it is registered on. A plain async plugin is
+ *  encapsulated — its hooks reached only the routes it declared itself, so the
+ *  latency/status histogram only ever recorded /metrics. Register it on the
+ *  root, BEFORE the route modules (app.ts does). /metrics is unchanged: same
+ *  path, same METRICS_TOKEN gate. */
+export const observabilityPlugin = fp(observability, { name: 'swift-observability' });

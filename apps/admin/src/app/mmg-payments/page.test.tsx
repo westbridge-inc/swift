@@ -277,6 +277,16 @@ describe('[MMG REVERSAL] returning a whole payment', () => {
     expect(within(form).queryByText(/no longer find this payment/)).toBeNull();
   });
 
+  it('[ADMIN-TRUTH] a failed read of the return status says so — the panel never silently disappears', async () => {
+    await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Something went wrong' } } };
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    expect(within(panel).getByText(/Couldn.t load the return status of this payment/)).toBeTruthy();
+    expect(within(panel).queryByRole('button', { name: 'Return this payment' })).toBeNull();
+  });
+
   it('switched off: says so, and offers no way to ask', async () => {
     await openConfirmed((request) => {
       if (request.url.pathname === REVERSAL_PATH) return reversalView({ switchedOn: false });

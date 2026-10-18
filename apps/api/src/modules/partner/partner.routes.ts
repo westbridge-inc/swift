@@ -15,6 +15,7 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { recordBackgroundLocationConsent } from './location-consent';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -60,6 +61,23 @@ export async function partnerRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
   const service = new PartnerService(app.prisma, notifications);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
+
+  /** [R18] POST /consent/background-location { granted } — the mover's answer to
+   *  the background-location disclosure, in the consent ledger (location-consent).
+   *  The phone sends yes only when the disclosure was accepted AND the system
+   *  sheet granted access. Movers only: nobody else is asked for it. */
+  app.post('/consent/background-location', auth, async (request) => {
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { roles: true } });
+    if (!user?.roles.some((r) => r === 'RIDER' || r === 'DRIVER' || r === 'MOVER')) {
+      throw new AppError(403, 'NOT_A_MOVER', 'Background location is asked of riders and drivers only.');
+    }
+    const { granted } = z.object({ granted: z.boolean() }).strict().parse(request.body);
+    const outcome = await recordBackgroundLocationConsent(app.prisma, {
+      userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+    });
+    return { success: true, data: outcome };
+  });
 
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {

@@ -23,7 +23,7 @@ const mocked = vi.hoisted(() => ({
 
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: mocked.replace, push: mocked.push }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: mocked.sendOtp, sessionProbe: vi.fn().mockResolvedValue({ ok: false }) }));
-vi.mock('@/lib/customer', () => ({ verifyOtp: mocked.verifyOtp, registerAccount: mocked.registerAccount, becomePartner: mocked.becomePartner }));
+vi.mock('@/lib/customer-account', () => ({ verifyOtp: mocked.verifyOtp, registerAccount: mocked.registerAccount, becomePartner: mocked.becomePartner }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
 
 beforeEach(() => {

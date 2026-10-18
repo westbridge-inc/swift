@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 // Explicitly service-free tests only (storage adapter uses its own temp files).
 // The database suite keeps its target lock.
@@ -23,6 +24,7 @@ export default defineConfig({
       'src/__tests__/order-status-single-source.test.ts',
     ],
     fileParallelism: false,
-    env: { NODE_ENV: 'test', KYC_PROVIDER: 'sandbox' },
+    // [AUD-G7-040] a disposable DB/Redis target, like vitest.config.ts.
+    env: { ...sideConfigTestEnv(), NODE_ENV: 'test', KYC_PROVIDER: 'sandbox' },
   },
 });
