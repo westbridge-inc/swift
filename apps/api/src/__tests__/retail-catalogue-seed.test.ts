@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import { seedRetailCatalogue } from '../modules/market/retail-catalogue.seed';
 import { seedDiscoveryTaxonomy } from '../modules/discovery/taxonomy.seed';
@@ -36,7 +36,7 @@ import { testPhone } from './helpers/fixture-ids';
 //     category rail but their first.
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const tenantId = 'swift-default';
 /** Marks this file's throwaway rows as synthetic. Without it the owner below
  *  counts as an UNCLASSIFIED user, and `purge-plan.test.ts` asserts that its

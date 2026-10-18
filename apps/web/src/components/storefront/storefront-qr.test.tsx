@@ -12,6 +12,7 @@ import { readGuestBasket } from '@/lib/basket';
 import type { StorefrontDetail } from '@/lib/api';
 import * as api from '@/lib/api';
 import * as customer from '@/lib/customer';
+import * as customerLogin from '@/lib/customer-login';
 import * as auth from '@/lib/auth';
 import * as browseServer from '@/lib/browse-server';
 import { stubIntersectionObserver } from '@/test/test-utils';
@@ -50,7 +51,7 @@ beforeEach(() => {
   nav.query = '';
   vi.spyOn(auth, 'sendOtp').mockResolvedValue(undefined);
   vi.spyOn(auth, 'verifyPartnerLogin').mockResolvedValue({ home: '/dashboard' } as Awaited<ReturnType<typeof auth.verifyPartnerLogin>>);
-  vi.spyOn(customer, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } } as Awaited<ReturnType<typeof customer.verifyCustomerLogin>>);
+  vi.spyOn(customerLogin, 'verifyCustomerLogin').mockResolvedValue({ user: { id: 'customer' } } as Awaited<ReturnType<typeof customerLogin.verifyCustomerLogin>>);
   vi.spyOn(api, 'fetchStorefront').mockResolvedValue(store);
   // [PERF #2] No live menu from the server here: the page checks it in the browser, as before.
   vi.spyOn(browseServer, 'storeMenuForPage').mockResolvedValue(null);

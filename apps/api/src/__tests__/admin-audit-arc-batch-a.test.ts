@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { enableModeB, rollbackModeB } from '../modules/billing/usd-migration';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
@@ -97,8 +97,7 @@ afterAll(async () => {
       await app.prisma.promoTerms.deleteMany({ where: { promoCodeId: promoId } }).catch(() => {});
       await app.prisma.promoCode.deleteMany({ where: { id: promoId } }).catch(() => {});
     }
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'arca').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'arca').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-arc-batch-a');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});

@@ -7,9 +7,10 @@ import { LegalAcceptanceModal } from '../components/LegalAcceptanceModal';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
-import { registerIfGranted } from '../services/push';
+import { installPushForegroundRetry, registerIfGranted } from '../services/push';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
+import { SessionHoldScreen } from '../screens/auth/SessionHoldScreen';
 import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
@@ -61,6 +62,13 @@ export function RootNavigator() {
     if (isAuthenticated) void registerIfGranted();
   }, [isAuthenticated, sessionGeneration]);
 
+  // [STORE-ALERT] ...and again whenever the app returns to the foreground, so
+  // turning notifications on in Settings registers this phone at once.
+  React.useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    return installPushForegroundRetry();
+  }, [isAuthenticated, sessionGeneration]);
+
   // The tap-router [first-open 2.4]: every notification tap lands on its
   // exact screen — cold starts flush via onReady below.
   React.useEffect(() => installNotificationTapRouter(), []);
@@ -89,12 +97,12 @@ export function RootNavigator() {
   const anyPreview = previewBypassForIntent(intent, { moverPreview, vendorSamplePreview });
   // Profile selfie (master plan §3): a signed-in EARNER account (mover,
   // business, advertiser) carries a camera-captured profile photo before using
-  // the app. [E27] Customers are not asked merely to browse or order; the taxi
-  // screen opens the camera when a ride request needs it. The API enforces the
-  // photo on rides and going online, not on ordinary checkout.
+  // the app. [Owner ruling 16 Oct 2026] Customers take no photos, taxi
+  // included: the API enforces the photo only on going online.
   // [MOB-007] Not conditional on a user being present: the store's hydration
   // law guarantees an authenticated state carries a user, and if it ever did
-  // not, the gate holds (selfie/recovery) rather than opening the stack.
+  // not, the gate holds (earner: selfie; customer: the sign-out hold) rather
+  // than opening the stack.
   const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;
   const Main = mainForIntent(intent);
   const entryGate = rootEntryGate({ isAuthenticated, wantsAuth, intent, countryCode, anyPreview, needsSelfie, hasUser: !!user });
@@ -170,6 +178,8 @@ export function RootNavigator() {
           <Stack.Screen name="RolePicker" component={RolePickerScreen} />
         ) : entryGate === 'selfie' ? (
           <Stack.Screen name="Selfie" component={SelfieCaptureScreen} />
+        ) : entryGate === 'hold' ? (
+          <Stack.Screen name="SessionHold" component={SessionHoldScreen} />
         ) : (
           <Stack.Screen name="Main" component={Main} />
         )}

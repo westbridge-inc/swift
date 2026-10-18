@@ -27,8 +27,8 @@ const FAQS: { q: string; a: string }[] = [
   },
   {
     q: 'Why does Swift ask for my ID?',
-    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie; a profile photo is taxi-only.
-    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first). Taxi rides also need a profile photo, so your driver knows who they are picking up.',
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie. [16 Oct] Customers take no photos, taxi included.
+    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first).',
   },
   {
     q: 'Can I cancel an order?',

@@ -10,7 +10,7 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import { testPhone } from './helpers/fixture-ids';
@@ -101,8 +101,7 @@ afterAll(async () => {
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: userIds } } }).catch(() => {});
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'doc1').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'doc1').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'document-intake-characterization');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});

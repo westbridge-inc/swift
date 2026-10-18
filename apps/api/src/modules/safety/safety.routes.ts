@@ -269,7 +269,7 @@ export async function safetyRoutes(app: FastifyInstance) {
     if (!isPlatformResponder(request.user.role)) throw new ForbiddenError('Only platform operators can run a drill.');
     process.env['OPS_ALERT_DRILL_INTERVAL_DAYS'] ??= '7';
     const { openOpsAlert } = await import('./ops-alert');
-    const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: '🧪 Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
+    const res = await openOpsAlert(app.prisma, new NotificationService(app.prisma, app.io), { kind: 'DRILL', tenantId: null, title: 'Ops alert drill — acknowledge now', body: 'A manual drill of the SOS paging path. Acknowledge it before the deadline; unacknowledged, it escalates like a real SOS.', data: { kind: 'ops_alert_drill', manual: true, by: request.user.userId } });
     void runOpsAlertDrillIfDue;
     return { success: true, data: res };
   });
