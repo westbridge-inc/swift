@@ -5,7 +5,7 @@ import { useNavigation, type NavigationProp, type ParamListBase } from '@react-n
 import { color, space } from '@swift/ui';
 import { useNotifications } from '../../../hooks/customer';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PressableScale, Screen, T } from '../../../kit';
-import { destinationFor } from '../../../services/notification-router';
+import { destinationFor, HOME_SCREEN } from '../../../services/notification-router';
 import { safeNavigate } from '../../../navigation/navigationRef';
 import { TeamInviteCards } from '../components/TeamInviteCards';
 
@@ -97,8 +97,11 @@ export function NotificationsScreen() {
             // that this screen can reach. A row with no destination, or one
             // that lives in another role's stack, stays a plain card, because
             // a button that goes nowhere is the defect this fixes.
+            // [PUSH-ROUTING] A push that opens HOME on purpose (the notice is
+            // the whole message) moves nothing from inside the app, so its
+            // row is a plain card too.
             const dest = destinationFor(n?.data);
-            if (!dest || !canReach(navigation, dest.screen)) return card;
+            if (!dest || dest.screen === HOME_SCREEN || !canReach(navigation, dest.screen)) return card;
             return (
               <PressableScale accessibilityRole="button" onPress={() => safeNavigate(dest.screen, dest.params)}>
                 {card}

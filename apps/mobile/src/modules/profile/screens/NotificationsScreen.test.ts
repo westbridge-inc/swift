@@ -154,6 +154,11 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     ['an order update', { orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' }, 'Delivery'],
     ['a ride update', { kind: 'ride_queue_matched', orderId: 'o2', audience: 'customer' }, 'Taxi'],
     ['a service-job update', { kind: 'booking_confirmed', jobId: 'j1' }, 'ServiceJobs'],
+    // [PUSH-ROUTING] Rows that used to open nothing.
+    ['an ID-on-file notice', { kind: 'verification_l2', audience: 'customer' }, 'IdentityVerification'],
+    ['a store reply to their review', { kind: 'review_response', ratingId: 'r1', vendorId: 'v1' }, 'VendorReviews'],
+    ['a support ticket update', { kind: 'support_update', ticketId: 't1' }, 'GetHelp'],
+    ['a drivers-are-back notice', { kind: 'supply_returned', audience: 'customer', pool: 'DRIVER' }, 'Taxi'],
   ])('%s row is a button that navigates through the push table', (_label, data, screen) => {
     const button = pressTheRow(renderRow(row(data)));
     expect(button.props['accessibilityRole']).toBe('button');
@@ -167,15 +172,20 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     pressTheRow(renderRow(row({ orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' })));
     expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'o1' });
   });
+
+  it('the customer copy of a moved appointment never aims at the store-only Schedule', () => {
+    // [PUSH-ROUTING] It was a plain card (the push opened nothing). It now
+    // opens their orders list, which CustomerStack mounts and where the
+    // appointment's order shows the moved time.
+    const data = { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' };
+    expect(destinationFor(data)).toEqual({ screen: 'OrdersHistory' });
+    pressTheRow(renderRow(row(data)));
+    expect(mocks.safeNavigate).toHaveBeenCalledExactlyOnceWith('OrdersHistory', undefined);
+    expect(mocks.safeNavigate).not.toHaveBeenCalledWith('Schedule', expect.anything());
+  });
 });
 
 describe('a row with nowhere to go is not a button [E28]', () => {
-  it('the customer copy of a moved appointment never aims at the store-only Schedule', () => {
-    const data = { kind: 'booking_rescheduled', bookingId: 'b1', audience: 'customer' };
-    expect(destinationFor(data)).toBeNull();
-    expect(buttonsIn(renderRow(row(data)))).toEqual([]);
-    expect(mocks.safeNavigate).not.toHaveBeenCalled();
-  });
 
   it('a store alert that reached the shopping inbox is not a button that opens nothing', () => {
     // vendor_order_alert rows sent before [Q10] carry no audience, so the
@@ -190,9 +200,21 @@ describe('a row with nowhere to go is not a button [E28]', () => {
   });
 
   it('a kind with no screen, or a row with no payload, is a plain card', () => {
-    for (const data of [{ kind: 'verification_l2', audience: 'customer' }, null]) {
+    // [PUSH-ROUTING] This used verification_l2, which now opens the ID screen
+    // (above); a kind nothing sends is the no-screen case it meant.
+    for (const data of [{ kind: 'kind_nothing_sends', audience: 'customer' }, null]) {
       expect(destinationFor(data as Record<string, unknown> | null)).toBeNull();
       expect(buttonsIn(renderRow(row(data)))).toEqual([]);
+    }
+    expect(mocks.safeNavigate).not.toHaveBeenCalled();
+  });
+
+  it('a row whose push opens HOME on purpose is a plain card, never a button that moves nothing', () => {
+    // [PUSH-ROUTING] HOME is the root route every role stack sits under; from
+    // inside the inbox a navigate there changes nothing on screen.
+    for (const data of [{ kind: 'trust_l3' }, { kind: 'rating_removed' }, { kind: 'trip_share_ended', outcome: 'COMPLETED' }]) {
+      expect(destinationFor(data), data.kind).toEqual({ screen: 'Main' });
+      expect(buttonsIn(renderRow(row(data))), data.kind).toEqual([]);
     }
     expect(mocks.safeNavigate).not.toHaveBeenCalled();
   });

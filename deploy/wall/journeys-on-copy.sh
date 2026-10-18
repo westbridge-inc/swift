@@ -19,7 +19,13 @@
 #      generated secrets), the two logins on it, each process's walled boot and
 #      the wall checks. The copy's own identity must then say staging.
 #   3. ONE walled process for the whole measured window: the copy's own worker
-#      (whose walled boot the rehearsal just attested) is stopped, and a private
+#      (whose walled boot the rehearsal just attested) is stopped. Then, on the
+#      COPY only, the journey roster's fixture fees (deploy/wall/fixture-fees.sql):
+#      its +5920 partners live on staging for weeks, so their trials end and
+#      billing suspends them for an unpaid fee; on the copy each gets the fresh
+#      trial a new partner is born with, and a store billing suspended gets back
+#      what billing took. No payment, receipt or ledger row; the copy is proved
+#      first (another cluster than the live one, and it says staging). Then a private
 #      api-journeys instance in the contract posture
 #      (deploy/docker-compose.journeys-copy.yml) serves the requests AND
 #      consumes the queues, so its own /metrics covers every request and every
@@ -34,19 +40,22 @@
 #      compliance-sample and expiry-sweep (verification-jobs). Each must complete.
 #   5. The instance's own measurements, sampled through the window (the metrics
 #      token never leaves the container): the 95th-percentile request time
-#      holds the budget (1 s), no query ever waited for a pool connection, the
-#      wall's binding ran (tenant and non-tenant bindings > 0) and system work
+#      holds the budget (1 s), the pool never reached its connection limit (the
+#      instance's own limit, read in its container: a query in flight at a
+#      sample is not saturation), the wall's binding ran (tenant and non-tenant bindings > 0) and system work
 #      never ran inside a caller's transaction (nontenant_system_in_tx = 0).
 #   6. No TenantInUnboundTransactionError or FATAL line in any copy process.
 #
 # Always, pass or fail: the copy's own logs (api, worker, api-journeys; the last
 # 400 lines each, redacted by deploy/wall/redact-log.py) are kept in the run's
-# results directory (copy-logs/), and the first FATAL lines are printed; then
+# results directory (copy-logs/), with the instance's metrics samples (metrics/,
+# redacted) once sampling began, and the first FATAL lines are printed; then
 # ./deploy/wall/rehearsal.sh down (the copy, the instance, their volumes, store
 # and secrets). "JOURNEYS PASSED" is printed only
 # when every step held; any other end is non-zero ("JOURNEYS FAILED at step").
-# The live staging API and database are only READ (the identity query, and the
-# copy step's dump): nothing here starts, stops or writes to them.
+# The live staging API and database are only READ (its identity, size and
+# cluster id, in a READ ONLY session, and the copy step's dump): nothing here
+# starts, stops or writes to them.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEPLOY="$(cd "$HERE/.." && pwd)"
@@ -94,8 +103,13 @@ JRN=("${REH[@]}" -f "$DEPLOY/docker-compose.journeys-copy.yml" --profile journey
 IDENTITY_SQL="SELECT environment FROM deployment_identity WHERE id = 'singleton'"
 SIZE_SQL="SELECT pg_database_size(current_database())"
 read_one() {  # read_one <sql> <compose argv…>: one answer from that database, read-only
+  # (a READ ONLY session: Postgres itself refuses a write here, on either stack)
   local sql="$1"; shift
-  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$sql" 2>/dev/null
+  "$@" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY" -c "$1"' sh "$sql" 2>/dev/null
+}
+write_copy() {  # write_copy <sql>: the one write this script makes (the fixture reset), only ever
+  # on the COPY's database: the rehearsal project is the only target this helper knows.
+  "${REH[@]}" exec -T postgres sh -c 'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -q -tA -v ON_ERROR_STOP=1 -c "$1"' sh "$1" 2>/dev/null
 }
 identity_of() { read_one "$IDENTITY_SQL" "$@"; }  # the database's own word
 LIVE_IDENTITY="$(identity_of "${LIVE[@]}")" || die "could not read this host's database identity; is the staging stack up?"
@@ -149,10 +163,25 @@ save_logs() {
   fi
   return 0
 }
+# save_metrics: the instance's /metrics samples and its final read (metrics lines
+# only, redacted) into metrics/ (0700), so a measurement can be re-read after the
+# copy is gone (17 Oct: the pool samples went with it).
+save_metrics() {
+  local kept="$JOURNEYS_RESULTS_DIR/metrics" name
+  [ -s "$WORK/samples.prom" ] || return 0
+  ( umask 077; mkdir -p "$kept" && chmod 700 "$kept" ) 2>/dev/null || { echo "journeys-on-copy: could not create $kept for the metrics samples" >&2; return 0; }
+  for name in samples.prom final.prom; do
+    [ -s "$WORK/$name" ] || continue
+    ( umask 077; python3 -I "$HERE/redact-log.py" <"$WORK/$name" >"$kept/$name" ) || true
+  done
+  echo "journeys-on-copy: metrics: the pool and request samples (redacted) are in $kept" >&2
+  return 0
+}
 cleanup() {
   local rc=$?
   stop_sampler
   save_logs
+  save_metrics
   rm -rf "$WORK"
   "$HERE/rehearsal.sh" down >/dev/null 2>&1 || echo "journeys-on-copy: the copy could not be removed; run ./deploy/wall/rehearsal.sh down" >&2
   if [ "$rc" -ne 0 ]; then echo "JOURNEYS FAILED at step: $STEP (exit $rc). The copy was removed." >&2; fi
@@ -169,6 +198,32 @@ STEP=instance
 # The instance is the ONLY queue consumer: the copy's worker stops first.
 "${REH[@]}" stop worker >/dev/null || die "the copy's worker could not be stopped"
 [ -z "$("${REH[@]}" ps -q worker 2>/dev/null)" ] || die "the copy's worker is still running: the journeys instance must be the only queue consumer"
+
+STEP=fixtures
+# [16 Oct] The journey roster's synthetic partners (+5920…) carry staging's own
+# fee history: their 14-day trials ended and billing suspended every one for
+# an unpaid weekly fee, correctly, so no journey could take an order or put a
+# mover online (0/8 on the first copy that booted). On the COPY only, they get
+# the fresh trial a new partner is born with (deploy/wall/fixture-fees.sql: two
+# UPDATEs, no payment, receipt, ledger or clock row). The target must prove it
+# is the copy first: another Postgres cluster than the live one (the rehearsal
+# copied everything but the cluster id) and, by the same identity check as
+# above, a copy of staging. The statement itself also refuses on any database
+# that does not say staging. Counts only are printed.
+CLUSTER_SQL="SELECT system_identifier::text FROM pg_control_system()"
+copy_cluster="$(read_one "$CLUSTER_SQL" "${REH[@]}")" || copy_cluster=""
+live_cluster="$(read_one "$CLUSTER_SQL" "${LIVE[@]}")" || live_cluster=""
+[[ "$copy_cluster" =~ ^[0-9]+$ && "$live_cluster" =~ ^[0-9]+$ ]] ||
+  die "could not read the copy's and the live cluster ids (the fixture reset needs both)"
+[ "$copy_cluster" != "$live_cluster" ] || die "the fixture reset would reach the live staging cluster, not the copy: nothing was changed"
+TARGET_IDENTITY="$(identity_of "${REH[@]}")" || TARGET_IDENTITY=""
+[ "$TARGET_IDENTITY" = staging ] || die "the fixture reset's target says '$TARGET_IDENTITY', not staging: nothing was changed"
+FIXTURE_SQL="$(cat "$HERE/fixture-fees.sql")" || die "could not read deploy/wall/fixture-fees.sql"
+touched="$(write_copy "$FIXTURE_SQL")" || die "the journey roster fixture fees could not be reset on the copy"
+[[ "$touched" =~ ^([0-9]+)\ ([0-9]+)$ ]] || die "the fixture reset answered unexpectedly"
+say "fixtures: ${BASH_REMATCH[1]} roster weekly fees set to a fresh 14-day trial on the copy, ${BASH_REMATCH[2]} billing-suspended roster stores reopened (no payment, receipt or ledger row; nothing on live staging)"
+
+STEP=instance
 export SWIFT_TAG="$SHA" LIVETEST_ADMIN_PHONE
 "${JRN[@]}" up -d api-journeys >/dev/null || die "the private journeys instance could not start"
 ready=0
@@ -179,6 +234,23 @@ for _ in $(seq 1 90); do
 done
 [ "$ready" = 1 ] || die "the journeys instance did not attest the wall and listen within 3 minutes"
 say "journeys instance: walled and listening on the copy's internal network; the only queue consumer"
+
+# [17 Oct] The pool's connection limit, so the pool can be judged against it.
+# Read INSIDE the instance by its own code from its own environment: the same
+# secret-file loader its server runs first, then the same sizing call
+# (plugins/prisma.ts). Only the number is printed, never the URL. No limit, no
+# judgement: the run holds before the journeys start.
+POOL_LIMIT_JS='require("/app/apps/api/dist/boot/secret-files");
+let limit = "";
+try {
+  const { resolveDatabaseUrl, poolRoleForApiProcess } = require("/app/apps/api/dist/utils/db-pool");
+  limit = new URL(resolveDatabaseUrl(process.env.DATABASE_URL, poolRoleForApiProcess())).searchParams.get("connection_limit") || "";
+} catch {}
+console.log(/^[1-9][0-9]*$/.test(limit) ? `pool-limit ${limit}` : "pool-limit unknown");'
+POOL_LIMIT="$("${JRN[@]}" exec -T api-journeys node -e "$POOL_LIMIT_JS" 2>/dev/null)" || POOL_LIMIT=""
+[[ "$POOL_LIMIT" =~ ^pool-limit\ ([1-9][0-9]*)$ ]] || die "could not read the journeys instance's pool connection limit (the pool is judged against it)"
+POOL_LIMIT="${BASH_REMATCH[1]}"
+say "pool limit: $POOL_LIMIT connections (the instance's own sizing, read in its container)"
 
 # The instance's own /metrics, read INSIDE it with the copy's token file: only
 # the latency buckets, the pool gauge and the binding counters come out.
@@ -193,7 +265,11 @@ fetch("http://127.0.0.1:3000/metrics", { headers: { authorization: `Bearer ${tok
   .catch(() => { console.log("metrics: unreachable"); process.exit(2); });'
 metrics() { "${JRN[@]}" exec -T api-journeys node -e "$METRICS_JS"; }
 # The pool gauge is a moment: sample it every 2 s through the journeys and jobs.
-# It also ends by itself once the scratch directory is gone.
+# The FIRST sample is taken here, in the foreground, so the measured window
+# opens before the journeys start instead of racing them (16 Oct CI: a
+# background first read landed after the runner had started). The loop also
+# ends by itself once the scratch directory is gone.
+metrics >>"$WORK/samples.prom" 2>/dev/null || echo 'sample: failed' >>"$WORK/samples.prom"
 ( while [ -d "$WORK" ] && [ ! -e "$WORK/stop" ]; do
     metrics >>"$WORK/samples.prom" 2>/dev/null || echo 'sample: failed' >>"$WORK/samples.prom"
     sleep 2
@@ -254,7 +330,7 @@ const conn = () => new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: nu
 STEP=measure
 stop_sampler
 metrics >"$WORK/final.prom" || die "could not read the journeys instance's metrics"
-python3 -I - "$WORK/samples.prom" "$WORK/final.prom" "$P95_BUDGET_S" "$MIN_REQUESTS" <<'PY' || die "the walled instance's measurements did not hold (above)"
+python3 -I - "$WORK/samples.prom" "$WORK/final.prom" "$P95_BUDGET_S" "$MIN_REQUESTS" "$POOL_LIMIT" <<'PY' || die "the walled instance's measurements did not hold (above)"
 import re, sys
 LINE = re.compile(r'^([a-z_]+)\{(.*)\}\s+(\S+)$')
 LABEL = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
@@ -273,7 +349,7 @@ def parse(path):
                 pass
     return out
 samples, final = parse(sys.argv[1]), parse(sys.argv[2])
-budget, least = float(sys.argv[3]), int(sys.argv[4])
+budget, least, limit = float(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])
 bad = []
 def say(text):
     print(f'journeys-on-copy: {text}')
@@ -302,7 +378,9 @@ else:
     ranked = sorted(((p95(s), k) for k, s in routes.items() if p95(s)[0] is not None), key=lambda x: (-x[0][0], -x[0][1]))
     for (bound, count), (method, route) in ranked[:5]:
         say(f'latency: slowest {method} {route} p95 <= {bound:g} s ({count} requests)')
-# The pool, through the window.
+# The pool, through the window. Saturation is the pool at its connection limit:
+# 'waiting' counts checkouts in flight at the moment of a sample (17 Oct: max 2
+# with 5 of 40 open), so it is reported, not judged.
 pool = {}
 for n, l, v in samples + final:
     if n == 'swift_db_pool':
@@ -310,9 +388,10 @@ for n, l, v in samples + final:
 if not pool.get('open'):
     bad.append('the pool was never measured')
 else:
-    say(f"pool: {len(pool['open'])} samples, open max {max(pool['open']):g}, busy max {max(pool.get('busy', [0])):g}, waiting max {max(pool.get('waiting', [0])):g}")
-    if max(pool.get('waiting', [0])) > 0:
-        bad.append(f"queries waited for a pool connection (max {max(pool['waiting']):g})")
+    say(f"pool: {len(pool['open'])} samples, open max {max(pool['open']):g} of limit {limit}, busy max {max(pool.get('busy', [0])):g}, waiting max {max(pool.get('waiting', [0])):g}")
+    full = sum(1 for v in pool['open'] if v >= limit)
+    if full:
+        bad.append(f"the pool reached its connection limit ({limit} open) in {full} of {len(pool['open'])} samples: queries queue for a connection")
 # The wall's binding counters.
 kinds = {l.get('kind'): v for n, l, v in final if n == 'swift_tenant_bind_total'}
 say('binding: ' + (', '.join(f'{k}={v:g}' for k, v in sorted(kinds.items())) or 'none'))

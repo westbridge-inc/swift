@@ -403,6 +403,9 @@ async function claimNextRow(prisma: PrismaClient, options: { orderIds?: string[]
       SELECT "id"
       FROM "order_outbox"
       WHERE "processedAt" IS NULL
+        -- [row 267] A row whose retry budget is spent is a dead letter: never claimed again.
+        AND "deadLetteredAt" IS NULL
+        AND "attempts" < "maxAttempts"
         AND "availableAt" <= CURRENT_TIMESTAMP
         AND (
           "claimedAt" IS NULL

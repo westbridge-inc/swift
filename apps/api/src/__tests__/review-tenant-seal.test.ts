@@ -50,13 +50,14 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 import { grantStepUp } from './helpers/step-up';
+import { testPhone } from './helpers/fixture-ids';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
 const REVIEW = `review-seal-${RUN}`;
 const PRODUCTION = 'swift-default';
 const DAY = 86_400_000;
 /** Phones: +59200065 + 4 digits (a block no other suite uses). */
-const base = `+59200065${String(Math.floor(Math.random() * 90) + 10)}`;
+const base = testPhone();
 const CONTACT = `${base}91`; // a real-looking emergency contact a reviewer might type (no account)
 
 let app: FastifyInstance;

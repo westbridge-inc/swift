@@ -13,6 +13,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, deliverStaffInvite, staffInviteRevocationVersion } from '../modules/vendor/staff-invites';
 import { NotificationService } from '../modules/notification/notification.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up (switch ON). Nothing pending is listed to the owner, which
@@ -36,7 +37,7 @@ let owner: { userId: string; token: string; phone: string };
 let vendorId: string;
 let storeName: string;
 
-const phone = () => `+59249${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = () => testPhone();
 
 async function makeUser(roles: UserRole[], activeRole: UserRole, firstName = 'Invitee') {
   const user = await app.prisma.user.create({

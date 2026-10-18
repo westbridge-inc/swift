@@ -20,6 +20,7 @@ import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] This suite states the destructive capability it needs; without it the test-mode guard refuses.
 grantSuiteCapability('unscoped-mutation');
@@ -140,7 +141,7 @@ async function makePlacement(base: string, freqCap?: number, tenantId = tenant) 
 async function makeHttpUser(sessionCount = 1) {
   const user = await httpApp.prisma.user.create({
     data: {
-      phone: `+592${Math.floor(1_000_000 + Math.random() * 8_999_999)}`,
+      phone: testPhone(),
       firstName: 'Ad', lastName: `Principal${nanoid(4)}`,
       roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true,
     },

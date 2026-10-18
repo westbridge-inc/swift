@@ -70,7 +70,8 @@ export function RidePostTripSheet({ ride, onDone }: { ride: any | null; onDone: 
         Trip complete
       </PopupTitle>
       <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-        {money(fare)} · cash · paid to {driverName}
+        {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Paid straight to the driver at drop-off: cash or MMG. */}
+        {money(fare)} · cash or MMG · paid to {driverName}
       </T>
 
       {driverPayUrl ? (

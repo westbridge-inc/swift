@@ -37,6 +37,7 @@ import {
   type VendorOrderActionKind,
 } from '../shared';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 import { useVerificationStatus } from '../../../hooks/verification';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import {
@@ -938,6 +939,8 @@ export function VendorOps({ store, navigation }: any) {
           />
         }
       >
+        {/* [STORE-ALERT] Says so when this phone cannot ring for new orders. */}
+        {!inPreview ? <PushOffStrip audience="store" style={{ marginBottom: space.lg }} /> : null}
         {/* Multi-store switcher — only when the owner has more than one store. */}
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>

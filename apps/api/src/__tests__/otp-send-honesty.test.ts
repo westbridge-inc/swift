@@ -7,6 +7,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { AuthService } from '../modules/auth/auth.service';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { guyanaDayKey } from '../utils/guyana-day';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // H3 (from the pre-launch audit): sendOtp used to `.catch(() => {})` the SMS
@@ -53,13 +54,13 @@ afterAll(async () => {
 describe('OTP send honesty', () => {
   it('reports success only when the SMS actually sends', async () => {
     const svc = new AuthService(app, okChannels);
-    const res = await svc.sendOtp(`+59248${Math.floor(Math.random() * 9e6) + 1e6}`, TEST_IP);
+    const res = await svc.sendOtp(testPhone(), TEST_IP);
     expect(res.message).toBe('OTP sent successfully');
   });
 
   it('throws 502 (not a false success) when the SMS send fails', async () => {
     const svc = new AuthService(app, failingChannels);
-    await expect(svc.sendOtp(`+59248${Math.floor(Math.random() * 9e6) + 1e6}`, TEST_IP)).rejects.toMatchObject({
+    await expect(svc.sendOtp(testPhone(), TEST_IP)).rejects.toMatchObject({
       statusCode: 502,
       code: 'SMS_SEND_FAILED',
     });
@@ -85,7 +86,7 @@ describe('OTP send honesty', () => {
 
   it('refunds the just-spent daily budget when the SMS provider fails', async () => {
     const svc = new AuthService(app, failingChannels);
-    const phone = `+59277${Math.floor(Math.random() * 9e6) + 1e6}`;
+    const phone = testPhone();
     const day = guyanaDayKey(new Date());
     await app.redis.del(`otp_phone_day:${day}:${phone}`, `otp_ip_day:${day}:${TEST_IP}`);
     const globalBefore = Number((await app.redis.get(`sms_global_day:${day}`)) ?? 0);
