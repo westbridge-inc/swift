@@ -4,8 +4,8 @@ import Svg, { Circle } from 'react-native-svg';
 import { color } from '@swift/ui';
 
 /** [design-100x Flow-8 signature] THE TRUST HALO — a segmented ring around
- *  the avatar where every lit segment is a REAL account fact (phone verified ·
- *  selfie on file · first order placed). Never decorative: unlit segments are
+ *  the avatar where every lit segment is a REAL account fact (the customer
+ *  Profile: phone verified · first order placed). Never decorative: unlit segments are
  *  the honest to-do list, and the host's caption names the next one.
  *  Promoted verbatim from ProfileScreen [Wave 3 part 2 deferral]. The deck
  *  caps it at 84dp — it's a profile mark, not a gauge; keep `size` ≤ 84. */

@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
 import { TripShareService, MAX_LIVE_SHARES_PER_TRIP } from '../modules/safety/trip-share.service';
 import type { NotificationChannels } from '../providers/notifications/channels';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [M062] Minting a trip-share link is bounded atomically: a person holds at
@@ -79,7 +80,7 @@ describe('[M062] the live-link allowance is atomic', () => {
 describe('[M062] the text is reserved before the link exists', () => {
   it('a text refused by its per-minute limit leaves no orphaned link', async () => {
     const { customer, order } = await mkTrip();
-    const phone = `+5926${String(Date.now()).slice(-6)}`;
+    const phone = testPhone();
     await svc.mint(customer.id, order.id, { sendToPhone: phone });
     const before = await prisma.tripShareToken.count({ where: { orderId: order.id } });
     await expect(svc.mint(customer.id, order.id, { sendToPhone: phone })).rejects.toMatchObject({ statusCode: 429, code: 'RATE_LIMITED' });
@@ -89,7 +90,7 @@ describe('[M062] the text is reserved before the link exists', () => {
   it('a mint refused after the reservation gives the budget back and texts nobody', async () => {
     const { customer, order } = await mkTrip();
     for (let i = 0; i < MAX_LIVE_SHARES_PER_TRIP; i += 1) await svc.mint(customer.id, order.id);
-    const phone = `+5927${String(Date.now()).slice(-6)}`;
+    const phone = testPhone();
     sent.length = 0;
     await expect(svc.mint(customer.id, order.id, { sendToPhone: phone })).rejects.toMatchObject({ code: 'TOO_MANY_SHARE_LINKS' });
     expect(sent.filter((m) => m.to === phone)).toHaveLength(0);

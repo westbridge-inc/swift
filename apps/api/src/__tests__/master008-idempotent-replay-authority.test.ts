@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { withIdempotency } from '../utils/idempotency';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [MASTER-008] An idempotent replay is answered only to the principal that
@@ -25,7 +26,7 @@ import { withIdempotency } from '../utils/idempotency';
 
 const DAY = 24 * 60 * 60 * 1000;
 const GPS = { lat: 7.93, lng: -58.41 };
-const PHONE_PREFIX = `+59287${String(Math.floor(Math.random() * 900) + 100)}`;
+const PHONE_PREFIX = testPhone();
 let app: FastifyInstance;
 const userIds: string[] = [];
 const orderIds: string[] = [];

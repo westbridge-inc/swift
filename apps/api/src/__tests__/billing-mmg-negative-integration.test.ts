@@ -14,6 +14,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { activeOverdueMs, beginConfirmationInTx, currentDunningClock } from '../modules/billing/dunning-clock';
 import { subscriptionOperability, inoperableSubscriptionWhere } from '../modules/subscription/operate-gate';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { testPhone } from './helpers/fixture-ids';
 
 const db = new PrismaClient();
 const due = new Date('2026-09-25T12:00:00Z');
@@ -25,7 +26,7 @@ const service = new BillingService(db, notifications, getPaymentProvider());
 
 async function fixture(status: 'PENDING' | 'FAILED' | 'EXPIRED' = 'PENDING') {
   const key = randomUUID();
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(Math.random() * 9_000_000_000) + 1_000_000_000}`,
+  const user = await db.user.create({ data: { phone: testPhone(),
     firstName: 'Synthetic', lastName: 'NegativeProof', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: { ownerId: owner.id, name: 'Synthetic negative proof fixture', slug: `negative-${key}`,

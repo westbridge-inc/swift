@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { BellRing } from 'lucide-react';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
@@ -122,7 +123,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-y-auto bg-black/80 p-3 min-[400px]:p-6">
       <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-4 text-center shadow-2xl min-[400px]:p-8">
-        <p className="text-4xl">🔔</p>
+        <BellRing aria-hidden="true" className="mx-auto h-10 w-10 text-[var(--swift-red)]" />
         <h2 className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
           {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>

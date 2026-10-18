@@ -11,6 +11,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { authRoutes } from '../modules/auth/auth.routes';
 import { NotificationService, acknowledgeAlert } from '../modules/notification/notification.service';
 import { loginWithOtp } from './helpers/otp';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Alert-delivery tracking (alerts spec §A4): a row at send, a stamp at
@@ -61,7 +62,7 @@ describe('send → ack → health', () => {
   it('newOrderForVendor writes a delivery row; acknowledgeAlert stamps it once', async () => {
     const vendorUser = await app.prisma.user.create({
       data: {
-        phone: `+59256${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Alert', lastName: 'Vendor',
         roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
         isPhoneVerified: true,
@@ -100,7 +101,7 @@ describe('send → ack → health', () => {
     const healthProbe = await app.prisma.user.create({
       data: {
         tenantId: 'swift-default',
-        phone: `+59257${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Alert', lastName: 'Probe',
         roles: ['MOVER', 'CUSTOMER'] as never[], activeRole: 'MOVER' as never,
         isPhoneVerified: true,

@@ -114,7 +114,7 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       // acknowledgement with a deadline; unacknowledged, it escalates.
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
-        title: '🚨 SOS ACTIVE — respond now',
+        title: 'URGENT: SOS ACTIVE — respond now',
         body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
@@ -162,7 +162,7 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
       const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
-      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {
@@ -329,15 +329,15 @@ export const FAILURE_PAGE_LEASE_SECONDS = 120;
  *  on-call phones verbatim. */
 const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (sosAlertId: string) => string }> = {
   CONTACT_SMS: {
-    title: '🚨 SOS contact text failed — call the person now',
+    title: 'URGENT: SOS contact text failed — call the person now',
     body: (id) => `The emergency text to the contact of the person who raised SOS alert ${id} did not go through (number hidden). Call the person who raised it now.`,
   },
   OPS_PAGE: {
-    title: '🚨 SOS page failed — open the war room now',
+    title: 'URGENT: SOS page failed — open the war room now',
     body: (id) => `The page for SOS alert ${id} did not go through. Open the war room and respond now.`,
   },
   WAR_ROOM: {
-    title: '🚨 SOS live board update failed — open the war room now',
+    title: 'URGENT: SOS live board update failed — open the war room now',
     body: (id) => `The live war-room update for SOS alert ${id} did not go through. Open the alert and respond now.`,
   },
   EVIDENCE: {

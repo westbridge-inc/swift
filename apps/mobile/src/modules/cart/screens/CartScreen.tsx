@@ -515,6 +515,35 @@ export function CartScreen() {
     setPickupAttempt((n) => n + 1);
   };
 
+  // [row 5 · ANDROID-QA 5 Oct] A lost reply whose order went through. The
+  // server empties the cart inside the order's own transaction, so when the
+  // phone learns "placed" (the receipt probe, or a replayed key) the refetched
+  // cart is EMPTY — and "Your cart is empty" hid the only line that said the
+  // order exists. The empty cart now says the order went through, with a way
+  // to it. The outcome is one-off: it is acknowledged when the customer opens
+  // the order, or when the cart, once seen emptied by that order, has new
+  // things in it — a new intent, which must not inherit "already placed" and
+  // a dead Place order button.
+  const placedOutcome: object | null = placeOrder.error instanceof CheckoutAlreadyPlacedError ? placeOrder.error : recovery.placedOrderIds;
+  const [acknowledgedOutcome, setAcknowledgedOutcome] = useState<object | null>(null);
+  const placedOutcomeLive = placedOutcome !== null && placedOutcome !== acknowledgedOutcome;
+  const placedOrderIds: string[] = !placedOutcomeLive ? []
+    : placeOrder.error instanceof CheckoutAlreadyPlacedError ? placeOrder.error.orderIds : (recovery.placedOrderIds ?? []);
+  const cartEmpty = !c || items.length === 0;
+  const emptiedByOutcome = useRef<object | null>(null);
+  useEffect(() => {
+    if (!placedOutcomeLive || cart.isLoading || cart.isFetching) return;
+    if (cartEmpty) emptiedByOutcome.current = placedOutcome;
+    else if (emptiedByOutcome.current === placedOutcome) setAcknowledgedOutcome(placedOutcome);
+  }, [placedOutcomeLive, placedOutcome, cartEmpty, cart.isLoading, cart.isFetching]);
+  // No placeOrder.reset() here: resetting and navigating in one tick is the
+  // ceremony P0 above, and an acknowledged outcome is simply not shown.
+  const openPlacedOrder = () => {
+    setAcknowledgedOutcome(placedOutcome);
+    if (placedOrderIds.length === 1) navigation.navigate('Delivery', { orderId: placedOrderIds[0] });
+    else navigation.navigate('OrdersHistory');
+  };
+
   if (!isAuthenticated) {
     return (
       <Screen>
@@ -533,7 +562,7 @@ export function CartScreen() {
   // [MOB-020] The two answers that are NOT failures: the order already exists
   // (a replayed key under a changed body, or a resolved earlier intent) and
   // the order is still being placed (a concurrent twin). Neither is retried.
-  const alreadyPlaced = placeOrder.error instanceof CheckoutAlreadyPlacedError || recovery.placedOrderIds !== null;
+  const alreadyPlaced = placedOutcomeLive;
   const stillPlacing = placeOrder.error instanceof CheckoutInFlightError;
   // [AX372 R1] Nor is an order whose outcome is unknown while the phone asks
   // the server what became of it (after a timeout, a 5xx, or on a restart).
@@ -544,7 +573,9 @@ export function CartScreen() {
       ? CHECKING_ORDER_MESSAGE
       : stillPlacing
         ? 'This order is already being placed — hold on a moment.'
-        : placeOrder.isError
+        // [row 5] "Already placed" is an outcome, never a failure: once it is
+        // acknowledged it says nothing at all.
+        : placeOrder.isError && !(placeOrder.error instanceof CheckoutAlreadyPlacedError)
           // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
           // the message checkout returned — exactly what the web cart shows.
           ? checkoutErrorMessage(placeOrder.error)
@@ -570,6 +601,22 @@ export function CartScreen() {
         // keeps the cart it already has — lines, Remove pills and all — and
         // the next focus or foreground tries again. (null data = an empty cart.)
         <ErrorState onRetry={() => cart.refetch()} />
+      ) : cartEmpty && alreadyPlaced ? (
+        <EmptyState
+          picto="orders"
+          title="Your order went through"
+          body="The reply was lost on the way back, but the order reached the store. It is in your orders."
+          actionLabel={placedOrderIds.length === 1 ? 'Track your order' : 'See your orders'}
+          onAction={openPlacedOrder}
+        />
+      ) : cartEmpty && checkingOutcome ? (
+        <EmptyState
+          picto="orders"
+          title="Checking your order"
+          body={CHECKING_ORDER_MESSAGE}
+          actionLabel="See your orders"
+          onAction={() => navigation.navigate('OrdersHistory')}
+        />
       ) : !c || items.length === 0 ? (
         <EmptyState
           picto="groceries"
@@ -728,7 +775,7 @@ export function CartScreen() {
               // server already sends `lineTotal` (unitPrice × quantity) and it
               // is what sums into "Items (n)". If a response ever omits it we
               // fall back to exactly what shipped before rather than printing a
-              // confident $0 — money() has no missing-value face.
+              // confident $0 (money() now prints a dash for a missing amount).
               // `Number(null)` is 0 and `Number.isFinite(0)` is TRUE, so the
               // obvious guard passes for a MISSING line total and prints a
               // confident $0 — the exact thing the comment above says it is

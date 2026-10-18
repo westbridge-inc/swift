@@ -11,6 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { signStatementToken, signStatementTokenV1 } from '../modules/order/statement';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Statements (marketplace §12, the receipt's siblings): earner earnings and
@@ -32,7 +33,7 @@ const marker = nanoid(6).toLowerCase();
 async function makeUser(roles: string[], activeRole: string) {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59259${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'State', lastName: 'Ment',
       roles: roles as never[], activeRole: activeRole as never,
       isPhoneVerified: true,
