@@ -72,9 +72,10 @@ export function AddressForm({ address, onSaved, onCancel, fixedDefault }: {
             : null;
   async function save(event: FormEvent) {
     event.preventDefault();
+    // Every submit is Save: the map's own controls are plain buttons and its
+    // search box keeps Enter to itself. (Never read SubmitEvent.submitter —
+    // Safari before 15.4 leaves it out, and Save would silently do nothing.)
     if (missing || !pin || sending.current) return;
-    // A search inside the map is not the Save action.
-    if ((event.nativeEvent as SubmitEvent).submitter?.getAttribute('data-save-address') !== 'true') return;
     sending.current = true; setBusy(true); setError(null);
     const body: AddressInput = { ...form, label: form.label.trim(), addressLine1: form.addressLine1.trim(), city: form.city.trim(), latitude: pin.latitude, longitude: pin.longitude };
     try {
@@ -95,6 +96,7 @@ export function AddressForm({ address, onSaved, onCancel, fixedDefault }: {
         {stored && <button type="button" className={secondaryClass} onClick={() => { setAdjusting(false); setPicked(null); }}>Keep the saved pin</button>}
       </div> : stored && <div className="space-y-2">
         <p className="text-sm text-[var(--swift-muted)]">Pin on the map: Latitude {stored.latitude.toFixed(5)}, Longitude {stored.longitude.toFixed(5)}</p>
+        <p className="text-sm text-[var(--swift-muted)]">Changing the words doesn’t move the pin. If the door moved, use Move the pin.</p>
         <button type="button" className={secondaryClass} onClick={() => { setPicked(null); setAdjusting(true); }}>Move the pin</button>
       </div>}
       <label className="block space-y-1"><span>Label</span><input className={fieldClass} required maxLength={50} value={form.label} onChange={(e) => edit({ label: e.target.value })} /></label>
@@ -107,6 +109,6 @@ export function AddressForm({ address, onSaved, onCancel, fixedDefault }: {
     </fieldset>
     {missing && <p className="text-sm text-[var(--swift-muted)]">{missing}</p>}
     {error && <p role="alert">{error}</p>}
-    <div className="flex gap-2"><button data-save-address="true" className={buttonClass} disabled={busy || missing !== null}>{busy ? 'Saving…' : 'Save address'}</button><button type="button" className={secondaryClass} disabled={busy} onClick={onCancel}>Cancel</button></div>
+    <div className="flex gap-2"><button type="submit" className={buttonClass} disabled={busy || missing !== null}>{busy ? 'Saving…' : 'Save address'}</button><button type="button" className={secondaryClass} disabled={busy} onClick={onCancel}>Cancel</button></div>
   </form>;
 }

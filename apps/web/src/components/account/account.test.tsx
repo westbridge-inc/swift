@@ -650,4 +650,31 @@ describe('[PINS] saved addresses are placed and adjusted on the map', () => {
     expect(saveButton().disabled).toBe(true);
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
   });
+
+  it('a browser that names no submit button (Safari before 15.4) still saves', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'Gate code 1234');
+    // A plain submit event carries no SubmitEvent.submitter, as older iPhones send it.
+    fireEvent.submit(saveButton().closest('form')!);
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ instructions: 'Gate code 1234', latitude: 6.8, longitude: -58.1 });
+  });
+
+  it('Enter in the map’s search box searches; it never saves the address', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    await openMap();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    await user.type(screen.getByLabelText('Search for a street or place'), 'Mapped{Enter}');
+    expect(await screen.findByRole('button', { name: /Mapped Test Street/ })).toBeTruthy();
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+  });
+
+  it('an edit says the words never move the pin, and how to move it', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    expect(screen.getByText('Changing the words doesn’t move the pin. If the door moved, use Move the pin.')).toBeTruthy();
+  });
 });
