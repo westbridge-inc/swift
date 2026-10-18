@@ -270,3 +270,20 @@ describe('[item 20] the wall is inert while switched off', () => {
     }
   });
 });
+
+describe('[item 20 · S4-1] the person binding is transaction-local', () => {
+  it('a pooled connection that served one person shows the next unbound query nothing', async () => {
+    // ONE connection, through the app's own scoped construction: whatever a bound
+    // query left on it, the next query on it sees. A session-scoped setting would
+    // carry Alice into an unbound read and leak instead of failing closed.
+    const one = prismaModule.createScopedProcessClient({ datasourceUrl: logins!.singleConnectionUrl });
+    try {
+      expect(await asPerson(ids.alice, () => one.address.count({ where: { userId: ids.alice } }))).toBe(2);
+      expect(await one.address.count({ where: { userId: ids.alice } })).toBe(0);
+      expect(await asPerson(ids.alice, () => one.$transaction((tx) => tx.address.count({ where: { userId: ids.alice } })))).toBe(2);
+      expect(await one.address.count({ where: { userId: ids.alice } })).toBe(0);
+      expect(await asPerson(ids.alice, () => one.$transaction([one.address.count({ where: { userId: ids.alice } })]))).toEqual([2]);
+      expect(await tenant.runWithTenant(PRODUCTION, () => one.address.count({ where: { userId: ids.alice } }))).toBe(0);
+    } finally { await one.$disconnect(); }
+  });
+});
