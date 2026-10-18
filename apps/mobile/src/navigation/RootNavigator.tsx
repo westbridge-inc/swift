@@ -7,7 +7,7 @@ import { LegalAcceptanceModal } from '../components/LegalAcceptanceModal';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useVendorPreview } from '../stores/vendorPreview';
 import { useCustomerCountry } from '../hooks/useCustomerCountry';
-import { registerIfGranted } from '../services/push';
+import { installPushForegroundRetry, registerIfGranted } from '../services/push';
 import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { SessionHoldScreen } from '../screens/auth/SessionHoldScreen';
@@ -60,6 +60,13 @@ export function RootNavigator() {
   // project id ships — see services/push.ts).
   React.useEffect(() => {
     if (isAuthenticated) void registerIfGranted();
+  }, [isAuthenticated, sessionGeneration]);
+
+  // [STORE-ALERT] ...and again whenever the app returns to the foreground, so
+  // turning notifications on in Settings registers this phone at once.
+  React.useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    return installPushForegroundRetry();
   }, [isAuthenticated, sessionGeneration]);
 
   // The tap-router [first-open 2.4]: every notification tap lands on its
