@@ -207,7 +207,12 @@ export async function logout(): Promise<void> {
     // 401s clears NOTHING, leaving the month-long refresh cookie alive to sign
     // the person straight back in. The refresh-and-retry makes the sign-out
     // land. `redirectOnExpired: false` because we are already leaving.
-    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false });
+    //
+    // [Row 225] Sign out names no expected account: on a shared browser it signs
+    // THIS BROWSER out, whoever the cookie names now. A person who presses Sign
+    // out in a tab left open from earlier must never leave the browser signed in
+    // to the account another tab signed in since.
+    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false, expectPrincipal: false });
   } catch {
     // Offline, or a session already gone: nothing here can reach the cookies,
     // and the local clear below still takes the person to /login.
@@ -296,10 +301,13 @@ async function tryRefresh(): Promise<boolean> {
   return refreshFlight;
 }
 
+/** The server refused a write because the shared cookie now names another account (row 225). */
+export const SERVER_SESSION_CHANGED = 'This browser is now signed in to another Swift account. Nothing was saved — this page now shows that account.';
+
 export async function apiFetch(
   path: string,
   options?: RequestInit,
-  policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
+  policy: { redirectOnExpired?: boolean; storeId?: string | null; expectPrincipal?: boolean } = {},
 ) {
   const requestSession = authSnapshot();
   const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
@@ -321,7 +329,7 @@ export async function apiFetch(
         ...options?.headers,
         // [Row 225] The account this page is acting as: the API refuses a write
         // whose cookie (shared by every tab) now names someone else.
-        ...(requestSession.principal && { 'X-Swift-Expected-Principal': requestSession.principal }),
+        ...(policy.expectPrincipal !== false && requestSession.principal && { 'X-Swift-Expected-Principal': requestSession.principal }),
       },
     });
   };
@@ -350,7 +358,11 @@ export async function apiFetch(
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
   }
   // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
-  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') void sessionProbe();
+  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') {
+    void sessionProbe();
+    // The page re-renders as that account by itself (the probe above): say what happened, ask for nothing.
+    throw new ApiRequestError(SERVER_SESSION_CHANGED, 409, 'SESSION_CHANGED');
+  }
   if (isClosedDemoAnswer(res.status, json)) {
     await endClosedDemo({ redirect: policy.redirectOnExpired !== false });
     throw new ApiRequestError(DEMO_ENDED_NOTICE, 410, 'REVIEW_SESSION_CLOSED');

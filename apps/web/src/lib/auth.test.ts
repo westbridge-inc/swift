@@ -447,6 +447,35 @@ describe('[Row 225] the server holds a write to the account this tab is showing'
     await vi.waitFor(() => expect(auth.getSessionPrincipal()).toBe('u2'));
     expect(heard).toHaveBeenCalled();
   });
+
+  it('the refusal says what happened — nothing was saved and the page now shows who is signed in — and never asks for a reload the tab does by itself', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'Nothing was saved — reload to continue as the account now signed in.' } } }));
+    const refused = await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }).catch((e: Error) => e);
+    expect(refused.message).toContain('Nothing was saved');
+    expect(refused.message).toContain('now shows');
+    expect(refused.message.toLowerCase()).not.toContain('reload');
+  });
+
+  it('Sign out in a stale tab signs this browser out, whoever the shared cookie names now: it declares no expectation, and the tab stays signed out', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const calls: Array<{ path: string; expected: string | undefined }> = [];
+    mockApi(({ url, init }) => {
+      calls.push({ path: url.pathname, expected: expectedOf(init) });
+      return url.pathname.endsWith('/auth/me') ? signedInAs('u2') : { body: { success: true, data: { ok: true } } };
+    });
+    await auth.logout();
+    expect(calls.find((c) => c.path.endsWith('/auth/logout'))).toEqual({ path: '/api/v1/auth/logout', expected: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(auth.getSessionPrincipal()).toBeNull();
+    expect(calls.some((c) => c.path.endsWith('/auth/me'))).toBe(false);
+  });
 });
 
 describe('[Q7b] a returning customer is restored, and the app shell hears every change', () => {
