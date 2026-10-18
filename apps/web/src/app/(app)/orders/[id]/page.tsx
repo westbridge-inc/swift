@@ -17,7 +17,9 @@ import {
   Truck,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
-import { activeRide, cancelOrder, decideSubstitution, getOrder, getRide, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { activeRide, getRide } from '@/lib/customer-rides';
+import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
