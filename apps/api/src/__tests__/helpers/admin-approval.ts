@@ -3,6 +3,7 @@ import { nanoid } from 'nanoid';
 import { runWithoutTenant } from '../../plugins/prisma';
 import { APPROVAL_HEADER } from '../../modules/admin/admin-approval';
 import { TEST_ADMIN_REASON } from './admin-reason';
+import { testPhone } from './fixture-ids';
 
 /**
  * [ADM-005] A money or platform action takes two people.
@@ -32,7 +33,7 @@ function secondAdminToken(app: FastifyInstance, tenantId: string): Promise<strin
   let existing = byTenant.get(tenantId);
   if (!existing) {
     existing = (async () => {
-      const phone = `+59273${String(Math.floor(Math.random() * 90000) + 10000)}`;
+      const phone = testPhone();
       const user = await runWithoutTenant(() => app.prisma.user.create({
         data: {
           phone, firstName: 'Second', lastName: `Approver${nanoid(4)}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],

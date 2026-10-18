@@ -1946,6 +1946,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         return;
       }
 
+      if (job.name === 'substitution-expiry') {
+        // [SUBSTITUTION · owner 17 Oct 2026] A store's swap question waits a
+        // bounded time: past it the line is removed (never silently swapped)
+        // or, on MMG, the question is withdrawn — so no order waits forever on
+        // an answer. CAS per line; each line runs in its own order's tenant.
+        const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
+          narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+        });
+        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
+        return;
+      }
+
       if (job.name === 'ads-release-expired') {
         // Ads reservation expiry [ads-platform spec §7.3]: expired RESERVED
         // holds go RELEASED and give the inventory back. CAS + guarded
@@ -2773,6 +2786,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // Ads reservation expiry [ads-platform spec §7.3]: every minute, release
   // RESERVED holds whose TTL lapsed so the inventory frees up for others.
   await queues.dispatchQueue.add('ads-release-expired', {}, {
+    repeat: { pattern: '* * * * *' },
+    removeOnComplete: 20,
+    removeOnFail: 20,
+  });
+
+  // [SUBSTITUTION · owner 17 Oct 2026] Swap-question deadlines: every minute,
+  // remove (or, on MMG, withdraw) any swap the customer did not answer in time.
+  await queues.dispatchQueue.add('substitution-expiry', {}, {
     repeat: { pattern: '* * * * *' },
     removeOnComplete: 20,
     removeOnFail: 20,

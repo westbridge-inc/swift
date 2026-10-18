@@ -5,6 +5,7 @@ import { scopedPrisma as prisma, scopedClientFor } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { boundedRead, isOutOfTime } from '../modules/search/search-budget';
+import { testPhone } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
@@ -56,8 +57,8 @@ beforeAll(async () => {
   ]) await prisma.$executeRawUnsafe(sql);
   await runAsSystem('test-setup', async () => {
     for (const t of [T, U]) await prisma.tenant.create({ data: { id: t, name: `Budget wall ${t}`, slug: t } });
-    userT = (await prisma.user.create({ data: { phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Budget', lastName: 'T', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: T } })).id;
-    userU = (await prisma.user.create({ data: { phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Budget', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: U } })).id;
+    userT = (await prisma.user.create({ data: { phone: testPhone(), firstName: 'Budget', lastName: 'T', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: T } })).id;
+    userU = (await prisma.user.create({ data: { phone: testPhone(), firstName: 'Budget', lastName: 'U', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: U } })).id;
   });
   probeOne = new PrismaClient({ datasourceUrl: withLogin(PROBE_LOGIN, 'connection_limit=1') });
   sysRaw = new PrismaClient({ datasourceUrl: withLogin(SYSTEM_LOGIN) });

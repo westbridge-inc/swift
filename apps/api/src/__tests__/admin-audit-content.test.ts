@@ -13,6 +13,7 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutabilit
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTES_WITHOUT_ENTITY, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { declaredFields, diffOf, digestOf } from '../modules/admin/audit-change';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-004] THE AUDIT ROW RECORDED THE REQUEST, NOT THE CHANGE.
@@ -66,7 +67,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  const phone = `+59271${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Content', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',

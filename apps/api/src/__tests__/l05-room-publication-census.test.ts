@@ -69,7 +69,8 @@ describe('sensitive room publication census', () => {
     expect(bypasses).toEqual([]);
     // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed)
     // + the admin store-refund close (#1607)
+    // + the swap question withdrawn at its deadline on MMG (#1830, through the gate)
     // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance).
-    expect(orderPublishers).toBe(46);
+    expect(orderPublishers).toBe(47);
   });
 });

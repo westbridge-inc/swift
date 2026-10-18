@@ -50,7 +50,7 @@ import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
-import { lineOptionsAsMade, substitutionView } from '../order/substitution-view';
+import { legacySwapItemFields, lineOptionsAsMade, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -2624,7 +2624,7 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
-        items: { select: { name: true, quantity: true, totalCustomer: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2846,14 +2846,17 @@ export async function customerRoutes(app: FastifyInstance) {
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
           // Additions only for a permission-aware client. The flat subStatus
-          // field activates dormant swap controls in older binaries.
+          // field activates the swap card older binaries already carry, so for
+          // them it is switched on only when every word of that card is true
+          // (legacySwapItemFields); otherwise the line's name says what is
+          // happening [SUBSTITUTION · owner 17 Oct: the customer is always told].
           ...(supportsSwapDecisions ? {
             options: lineOptionsAsMade(i),
             subStatus: i.subStatus,
             substituteName: i.substituteName,
             substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
             substitution: substitutionView(i, order),
-          } : {}),
+          } : legacySwapItemFields(i, order)),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),

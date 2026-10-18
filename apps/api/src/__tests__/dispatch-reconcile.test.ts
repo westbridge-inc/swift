@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { reconcileStuckDispatch } from '../modules/dispatch/dispatch.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // C1 (CRITICAL from the pre-launch audit): the dispatch offer key + the delayed
@@ -46,7 +47,7 @@ async function makeStuckOrder(status: OrderStatus, opts: { orderType?: string; f
 // so every taxi fixture here has its own passenger.
 async function newPassenger(): Promise<string> {
   const passenger = await app.prisma.user.create({
-    data: { phone: `+59247${String(Math.floor(Math.random() * 9e6) + 1e6)}`, firstName: 'Rc', lastName: 'Passenger', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Passenger', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   (app as any).__cleanupUsers.push(passenger.id);
   return passenger.id;
@@ -68,15 +69,15 @@ beforeAll(async () => {
   await app.ready();
 
   const customer = await app.prisma.user.create({
-    data: { phone: `+59247${String(Math.floor(Math.random() * 9e6) + 1e6)}`, firstName: 'Rc', lastName: 'Cust', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Cust', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   customerId = customer.id;
   const ownerUser = await app.prisma.user.create({
-    data: { phone: `+59247${String(Math.floor(Math.random() * 9e6) + 1e6)}`, firstName: 'Rc', lastName: 'Vend', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: testPhone(), firstName: 'Rc', lastName: 'Vend', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
   const vendor = await app.prisma.vendor.create({
-    data: { ownerId: owner.id, name: 'Rc Diner', slug: `rc-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `+59247${nanoid(6)}`, addressLine1: '1 Rc', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' },
+    data: { ownerId: owner.id, name: 'Rc Diner', slug: `rc-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: testPhone(), addressLine1: '1 Rc', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' },
   });
   vendorId = vendor.id;
   (createdOrderIds as string[]).push(); // noop to keep ref

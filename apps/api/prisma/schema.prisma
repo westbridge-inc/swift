@@ -2699,6 +2699,12 @@ model OrderItem {
   substituteItemId String?
   substituteName   String?
   substitutePrice  Decimal?           @db.Decimal(10, 2)
+  /// [SUBSTITUTION 17 Oct] When an open swap question stops waiting for the
+  /// customer. Set with the proposal, cleared when the question closes. Past
+  /// it, the line is REMOVED (never silently swapped) — or, on MMG where the
+  /// total can't change in-app, the question is withdrawn. NULL = no open
+  /// question (or one proposed before this column: the sweep starts its clock).
+  substituteDecideBy DateTime?
 
   @@map("order_items")
 }

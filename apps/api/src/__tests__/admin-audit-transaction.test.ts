@@ -13,6 +13,7 @@ import { auditWithin, wroteAuditInline, type AuditLogWriter, type AuditRequestLi
 import { adminAuditCounter } from '../plugins/observability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE AUDIT ROW IS WRITTEN AFTER COMMIT AND MAY FAIL SILENTLY.
@@ -69,7 +70,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  const phone = `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Txn', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',

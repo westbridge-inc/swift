@@ -121,6 +121,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'route-match': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
   'stale-movers': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'substitution-expiry': { policy: 'SAFE_REPLAY', why: 'Removes (or, on MMG, withdraws) swap questions past their deadline. Every write is a compare-and-set on the open question with its deadline already passed (subStatus PENDING, substituteDecideBy <= now) under the order-row lock; a closed question no longer matches, so a replay changes nothing and sends nothing. The customer is told only by the compare-and-set winner. A question with no deadline gets one by a compare-and-set on NULL, so a replay cannot extend a running wait.' },
   'supply-watch-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'sync-vendor': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'tier-recalc': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -187,6 +188,7 @@ export type JobName =
   | 'route-match'
   | 'scheduler-heartbeat'
   | 'stale-movers'
+  | 'substitution-expiry'
   | 'supply-watch-scan'
   | 'sync-vendor'
   | 'tier-recalc'
