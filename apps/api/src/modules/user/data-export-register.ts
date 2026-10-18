@@ -9,6 +9,7 @@
  * account-export-register.test.ts red, so the export can never quietly fall
  * behind the data, and nothing new leaks into it unreviewed.
  */
+import { TYPES_FOR_ROLE } from '../rating/rating-stats.service';
 
 /** Why a column of an exported table is left out. */
 export type OmitReason =
@@ -89,14 +90,28 @@ export interface ExportEntry {
   readonly foldedBefore?: string;
   /** The file's row order (after `month`): never creation order, which would pair the k-th row with the k-th trip. */
   readonly sortBy?: readonly string[];
+  /**
+   * Applied after `month`: a month with fewer than `below` rows is given as ONE row (its count and the average
+   * of `average`), never row by row, so a person with few jobs that month cannot pair a rating with a trip.
+   */
+  readonly monthFloor?: { readonly below: number; readonly average: string };
 }
+
+/**
+ * Ratings a MOVER (rider or driver) received. Their app shows only folded weekly figures, never one rating,
+ * so the export gives the score and month only (COORD ruling 17 Oct 23:38Z, owner decisions 23:40Z): no words,
+ * no tags, and a month with fewer than 5 is given as its count and average.
+ */
+export const MOVER_RATING_TYPES: readonly string[] = [...TYPES_FOR_ROLE.RIDER, ...TYPES_FOR_ROLE.DRIVER];
+/** Fewer ratings than this in a month are given only as the month's count and average. */
+export const MOVER_RATING_MONTH_FLOOR = 5;
 
 /** The person's own account row. */
 export const ACCOUNT_FIELDS = [
   'id', 'phone', 'email', 'emailChangedAt', 'firstName', 'lastName', 'selfieCapturedAt', 'roles', 'activeRole', 'lastMoverRole',
   'status', 'isPhoneVerified', 'isEmailVerified', 'acceptedTermsAt', 'tosVersion', 'trustLevel', 'lossProtectionSuspendedAt',
   'countryCode', 'notificationPrefs', 'lastKnownLat', 'lastKnownLng',
-  'createdAt', 'updatedAt', 'lastActiveAt',
+  'createdAt', 'updatedAt', 'lastActiveAt', 'inactivityNoticeAt',
 ] as const;
 
 export const EXPORT_REGISTER: readonly ExportEntry[] = [
@@ -113,13 +128,20 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
   },
   {
-    // Ratings about you: score, tags, words and the month. Never who gave it or for which order (ratings
-    // are anonymous); only once the double-blind window has shown it (rating.service.ts) and the daily
-    // fold has counted it (rating-standing.ts), so no single rating can be paired with a single trip.
+    // Ratings about you (not as a rider or driver): score, tags, words and the month. Never who gave it, for
+    // which order, or the rater's role (`type` says rider, driver or customer); only once the double-blind
+    // window has shown it (rating.service.ts) and the daily fold has counted it (rating-standing.ts).
     category: 'ratingsReceived', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
-    where: { visibleAt: { not: null }, state: 'ACTIVE' }, foldedBefore: 'createdAt', month: ['createdAt'],
+    where: { visibleAt: { not: null }, state: 'ACTIVE', type: { notIn: MOVER_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
     sortBy: ['createdAt', 'score', 'comment', 'tags'],
-    fields: ['rateeId', 'type', 'score', 'comment', 'tags', 'createdAt'],
+    fields: ['rateeId', 'score', 'comment', 'tags', 'createdAt'],
+  },
+  {
+    // Ratings about you as a rider or driver: the score and month only, a thin month as its count and average.
+    category: 'ratingsReceivedAsMover', model: 'Rating', by: ['rateeId'], key: 'id', rest: 'OTHER_PERSON',
+    where: { visibleAt: { not: null }, state: 'ACTIVE', type: { in: MOVER_RATING_TYPES } }, foldedBefore: 'createdAt', month: ['createdAt'],
+    sortBy: ['createdAt', 'score'], monthFloor: { below: MOVER_RATING_MONTH_FLOOR, average: 'score' },
+    fields: ['rateeId', 'score', 'createdAt'],
   },
   {
     category: 'ratingsGiven', model: 'Rating', by: ['raterId'], key: 'id', omit: { state: 'FRAUD_SAFETY' },

@@ -1,7 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import {
-  ACCOUNT_FIELDS, EXPORT_REGISTER, OMIT_REASON_TEXT, OMIT_RULES, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
+  ACCOUNT_FIELDS, EXPORT_REGISTER, MOVER_RATING_MONTH_FLOOR, OMIT_REASON_TEXT, OMIT_RULES, UNLISTED_REASONS, WITHHELD, WITHHELD_REASON_TEXT,
   type ExportEntry, type OmitReason, type WithheldReason,
 } from './data-export-register';
 
@@ -63,7 +63,26 @@ async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[],
     return portable(r);
   });
   if (entry.sortBy) kept.sort((a, b) => compareBy(a, b, entry.sortBy!));
-  return { rows: kept, complete };
+  return { rows: entry.monthFloor ? floorThinMonths(kept, entry) : kept, complete };
+}
+
+/**
+ * A month with fewer rows than the floor becomes ONE row: the month, how many, and their average
+ * (rounded as the app rounds, rating-standing.ts). Rows of fuller months stay as they are (already
+ * sorted, so never in trip order). A month is the first `month` column.
+ */
+function floorThinMonths(rows: Row[], entry: ExportEntry): Row[] {
+  const { below, average } = entry.monthFloor!;
+  const monthOf = entry.month![0]!;
+  const byMonth = new Map<unknown, Row[]>();
+  for (const r of rows) byMonth.set(r[monthOf], [...(byMonth.get(r[monthOf]) ?? []), r]);
+  return [...byMonth.values()].flatMap((group): Row[] => {
+    if (group.length >= below) return group;
+    const sum = group.reduce((s, r) => s + Number(r[average]), 0);
+    const kept: Row = { [monthOf]: group[0]![monthOf], count: group.length, [`${average}Average`]: Math.round((sum / group.length) * 100) / 100 };
+    for (const column of entry.by) if (group.every((r) => r[column] === group[0]![column])) kept[column] = group[0]![column];
+    return [kept];
+  });
 }
 
 /** Plain value order on the given columns (numbers as numbers, anything else as its JSON text). */
@@ -90,6 +109,7 @@ export const EXPORT_NOTICE =
   'This file is a copy of the personal data Swift holds about you, by category ("coverage" lists them all). '
   + 'Chat messages you sent are included; messages other people sent you are not. '
   + 'Ratings you received are included with their score, words and month, but never who gave them, and only once they count in your rating. '
+  + `As a rider or driver you get the score and month only, and a month with fewer than ${MOVER_RATING_MONTH_FLOOR} ratings as its count and average, so no rating can be matched to one trip. `
   + `Left out on purpose: ${OMIT_REASONS_IN_USE.map((r) => OMIT_REASON_TEXT[r]).join('; ')}. `
   + '"withheld" lists the kinds of records that are not in this file.';
 

@@ -155,7 +155,8 @@ describe('the account export', () => {
     await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: a, message: `from a ${MARK}` } });
     await app.prisma.chatMessage.create({ data: { chatRoomId: room.id, senderId: b, message: `from b ${MARK}` } });
     const data = await service().exportData(a) as unknown as Record<string, Array<Record<string, unknown>>>;
-    expect(data['ratingsReceived']).toEqual([{ rateeId: a, type: 'RIDER_TO_CUSTOMER', score: 4, comment: `kind and quick ${MARK}`, tags: [], createdAt: expect.stringMatching(/^\d{4}-\d{2}$/) }]);
+    // No `type`: RIDER_TO_CUSTOMER would tell the person a rider (not a driver or a store) rated them.
+    expect(data['ratingsReceived']).toEqual([{ rateeId: a, score: 4, comment: `kind and quick ${MARK}`, tags: [], createdAt: expect.stringMatching(/^\d{4}-\d{2}$/) }]);
     // As the file carries it (JSON): Decimals and dates become strings.
     expect(JSON.parse(JSON.stringify(data['ratingSummary']))).toEqual([{ subjectRole: 'CUSTOMER', subjectId: a, displayRating: '4', standing: 'NEW', actorVisibleAt: expect.any(String) }]);
     expect(data['chatMessagesSent']).toEqual([expect.objectContaining({ message: `from a ${MARK}` })]);
@@ -178,6 +179,62 @@ describe('the account export', () => {
     }
     const data = await service().exportData(a) as unknown as Record<string, Array<{ score: number }>>;
     expect(data['ratingsReceived']!.map((r) => r.score)).toEqual([1, 4, 5]); // created 5, 1, 4
+  });
+
+  // COORD ruling 17 Oct 23:38Z: a mover's own app shows only folded weekly figures, so the export never gives a
+  // mover one rating's words or tags, and a month with fewer than 5 ratings only as its count and average.
+  const monthStart = (back: number) => { const n = new Date(); return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth() - back, 10)); };
+  type MoverRating = { type: 'CUSTOMER_TO_RIDER' | 'CUSTOMER_TO_DRIVER'; score: number; at: Date; extra?: Record<string, unknown> };
+  async function moverRatings(rateeId: string, ratings: MoverRating[]) {
+    const rater = await person();
+    const owner = await person();
+    const v = await store(owner);
+    for (const [i, r] of ratings.entries()) {
+      const o = await app.prisma.order.create({ data: order(rater, v.id, 7_200 + seq * 20 + i) });
+      await app.prisma.rating.create({ data: {
+        orderId: o.id, raterId: rater, rateeId, type: r.type, score: r.score, comment: `words ${i} ${MARK}`, tags: [`tag${i}-${MARK}`],
+        visibleAt: new Date(), createdAt: new Date(r.at.getTime() + i * 1_000), ...r.extra,
+      } });
+    }
+    return rater;
+  }
+
+  it('gives a mover a thin month (< 5 ratings) only as its count and average: no words, tags or rater role', async () => {
+    const mover = await person();
+    await app.prisma.rider.create({ data: { userId: mover, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const rater = await moverRatings(mover, [
+      { type: 'CUSTOMER_TO_RIDER', score: 2, at: monthStart(2) },
+      { type: 'CUSTOMER_TO_DRIVER', score: 5, at: monthStart(2) },
+    ]);
+    // Never counted: excluded as fake, still double-blind, or given after the last daily fold.
+    await moverRatings(mover, [
+      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2), extra: { state: 'EXCLUDED' } },
+      { type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(2), extra: { visibleAt: null } },
+      { type: 'CUSTOMER_TO_RIDER', score: 1, at: new Date() },
+    ]);
+    const data = await service().exportData(mover) as unknown as Record<string, unknown> & { notice: string };
+    expect(data['ratingsReceivedAsMover']).toEqual([{ rateeId: mover, createdAt: monthStart(2).toISOString().slice(0, 7), count: 2, scoreAverage: 3.5 }]);
+    expect(data['ratingsReceived']).toEqual([]);
+    const text = JSON.stringify(data);
+    for (const leak of [`words 0 ${MARK}`, `words 1 ${MARK}`, `tag0-${MARK}`, `tag1-${MARK}`, 'CUSTOMER_TO_RIDER', 'CUSTOMER_TO_DRIVER', rater]) expect(text).not.toContain(leak);
+    expect(data.notice).toContain('As a rider or driver you get the score and month only');
+  });
+
+  it('gives a mover a full month (>= 5) as score + month rows, sorted, never words or tags', async () => {
+    const mover = await person();
+    await app.prisma.rider.create({ data: { userId: mover, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+    const full = monthStart(1);
+    await moverRatings(mover, [5, 1, 4, 2, 3].map((score) => ({ type: 'CUSTOMER_TO_RIDER' as const, score, at: full })));
+    await moverRatings(mover, [{ type: 'CUSTOMER_TO_RIDER', score: 1, at: monthStart(3) }]);
+    const data = await service().exportData(mover) as unknown as Record<string, unknown>;
+    const month = full.toISOString().slice(0, 7);
+    expect(data['ratingsReceivedAsMover']).toEqual([
+      { rateeId: mover, createdAt: monthStart(3).toISOString().slice(0, 7), count: 1, scoreAverage: 1 },
+      ...[1, 2, 3, 4, 5].map((score) => ({ rateeId: mover, score, createdAt: month })),
+    ]);
+    const text = JSON.stringify(data);
+    for (let i = 0; i < 5; i++) for (const leak of [`words ${i} ${MARK}`, `tag${i}-${MARK}`]) expect(text).not.toContain(leak);
+    expect(data['ratingsReceived']).toEqual([]);
   });
 
   it('never carries security internals or the fraud signals that fired', async () => {
