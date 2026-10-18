@@ -27,6 +27,7 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -392,6 +393,9 @@ export class BillingService {
   /** Bill everything due. One subscription's failure never kills the batch. */
   async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
     await this.recoverConfirmationSettlements(undefined, now);
+    // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
+    // rise whose date the next fee has reached moved in, before anything due is priced.
+    await this.sweepFeeRises(now).catch((err) => log().error({ err }, '[F2] the pass over held fee rises failed; billing goes on at the rates on record'));
     const due = await this.prisma.subscription.findMany({
       where: {
         autoRenew: true,
@@ -2307,6 +2311,10 @@ export class BillingService {
     if (['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(authority.status)) {
       await this.reinstateRows(tx, current, periodKey);
     }
+    // [F2 · fee-rise-notice.ts] The week just paid may be the last one before a
+    // told rise: it moves in with the period, in this transaction, so the coming
+    // week is quoted (and paid) at the told fee from this moment, never sooner.
+    await this.applyHeldFeeRiseInTx(tx, sub.id, now, { drop: false });
     return 'advanced';
   }
 
@@ -4994,6 +5002,218 @@ export class BillingService {
   /** Billing notices belong to the surface that pays the fee. */
   private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
     return sub.vendor ? 'business' : 'earner';
+  }
+
+  /**
+   * [F2 · GUARDRAILS §7 · fee-rise-notice.ts] The hourly pass over held
+   * weekly-fee rises: tell each payer not yet told, and move in each told rise
+   * whose date the next weekly fee has reached. One subscription's failure
+   * never stops the others or the billing run.
+   */
+  async sweepFeeRises(now = new Date()): Promise<{ told: number; applied: number; deferred: number; dropped: number }> {
+    const out = { told: 0, applied: 0, deferred: 0, dropped: 0 };
+    const rows = await this.prisma.platformConfig.findMany({ where: { key: { startsWith: FEE_RISE_PREFIX } }, select: { key: true, value: true }, orderBy: { key: 'asc' } });
+    for (const row of rows) {
+      const subscriptionId = row.key.slice(FEE_RISE_PREFIX.length);
+      try {
+        const held = readHeldFeeRise(row.value);
+        if (!held) {
+          log().error({ subscriptionId }, '[F2] an unreadable held fee rise: it applies to nothing until a person looks');
+          continue;
+        }
+        if (!held.noticeAt) {
+          const told = await this.tellFeeRise(subscriptionId, held, now);
+          if (told === 'dropped') out.dropped += 1;
+          if (told !== 'told') continue;
+          out.told += 1;
+        }
+        const result = await this.prisma.$transaction(async (tx) => {
+          await lockSubscriptionPayer(tx, subscriptionId);
+          return this.applyHeldFeeRiseInTx(tx, subscriptionId, now, { drop: true });
+        });
+        if (result === 'applied') out.applied += 1;
+        if (result === 'deferred') out.deferred += 1;
+        if (typeof result === 'object') {
+          out.dropped += 1;
+          await this.tellFeeRiseCancelled(subscriptionId, result.held, result.feeNow);
+        }
+      } catch (error) {
+        log().error({ err: error, subscriptionId }, '[F2] could not tell or apply this held fee rise; the next run retries');
+      }
+    }
+    return out;
+  }
+
+  /** Why a held rise no longer matches its subscription, or null while it still does. */
+  private feeRiseObstacle(sub: Subscription | null, held: HeldFeeRise): string | null {
+    if (!sub) return 'GONE';
+    if (sub.status === 'CANCELLED') return 'PLAN_ENDED';
+    if (sub.customRate !== null) return 'NEGOTIATED_RATE';
+    if (Number(sub.weeklyRate) !== held.from) return 'RATE_MOVED';
+    return null;
+  }
+
+  /**
+   * Tell the payer of a held rise, and only then date it: the first weekly fee
+   * at least FEE_RISE_NOTICE_DAYS after the notice reached their inbox. The
+   * inbox row is the notice; without one nothing is told and nothing applies
+   * (the next run retries). A retried send finds the first row by its dedupe
+   * key, so the date and the moment told are the ones that row holds.
+   */
+  private async tellFeeRise(subscriptionId: string, held: HeldFeeRise, now: Date): Promise<'told' | 'untold' | 'dropped'> {
+    const sub = await this.prisma.subscription.findUnique({
+      where: { id: subscriptionId },
+      include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+    });
+    if (this.feeRiseObstacle(sub, held) !== null || sub?.feeWaived) {
+      // Gone, negotiated, waived or moved under it before anyone was told: nothing to tell, nothing to apply.
+      const dropped = await this.prisma.$transaction(async (tx) => {
+        // A subscription that is gone has no payer to lock; its record is all that is left.
+        if (sub) await lockSubscriptionPayer(tx, subscriptionId);
+        const fresh = sub ? await tx.subscription.findUnique({ where: { id: subscriptionId } }) : null;
+        if (this.feeRiseObstacle(fresh, held) === null && !fresh?.feeWaived) return false;
+        return this.dropHeldFeeRiseInTx(tx, subscriptionId, held, fresh, true);
+      });
+      return dropped ? 'dropped' : 'untold';
+    }
+    // A fresh clock: a long run's start time never dates a notice sent later.
+    const at = new Date(Math.max(now.getTime(), Date.now()));
+    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at);
+    const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
+    const copy = feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
+    const userId = this.payerUserId(sub as SubWithRelations);
+    const inboxId = await this.notifications.send({
+      userId, type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
+      data: {
+        kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
+        currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+      },
+      dedupeKey,
+    });
+    if (!inboxId) {
+      log().warn({ subscriptionId }, '[F2] fee rise notice not delivered; the rise applies to nothing until it is');
+      return 'untold';
+    }
+    // The inbox row is what the payer was told: a retried send returns the first row, with its own date.
+    const inbox = await this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } });
+    const told = (inbox?.data ?? {}) as Record<string, unknown>;
+    const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null);
+    const toldFrom = iso(told['appliesFrom']);
+    const toldAt = iso(told['toldAt']);
+    if (!inbox || inbox.dedupeKey !== dedupeKey || !toldFrom || !toldAt) {
+      log().error({ subscriptionId, inboxId }, '[F2] the fee rise notice row could not be read back; the rise applies to nothing until it is');
+      return 'untold';
+    }
+    return this.prisma.$transaction(async (tx) => {
+      await lockSubscriptionPayer(tx, subscriptionId);
+      const key = feeRiseKey(subscriptionId);
+      const again = await tx.platformConfig.findUnique({ where: { key } });
+      const still = again ? readHeldFeeRise(again.value) : null;
+      if (!still || still.noticeAt || still.heldAt !== held.heldAt || still.from !== held.from || still.to !== held.to) return 'untold' as const;
+      const value: HeldFeeRise = { ...still, noticeAt: toldAt, appliesFrom: toldFrom, inboxId };
+      // The record refuses a told date sooner than 14 days after the notice: never written, never applied.
+      if (!readHeldFeeRise(value)) {
+        log().error({ subscriptionId, toldAt, toldFrom }, '[F2] a told date sooner than the notice period; the rise applies to nothing until a person looks');
+        return 'untold' as const;
+      }
+      await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+      await tx.auditLog.create({ data: {
+        action: 'BILLING_FEE_RISE_TOLD', entity: 'Subscription', entityId: subscriptionId,
+        changes: { from: still.from, to: still.to, currencyCode: still.currencyCode, noticeAt: toldAt, appliesFrom: toldFrom, inboxId, inboxCreatedAt: inbox.createdAt.toISOString(), userId },
+      } });
+      return 'told' as const;
+    });
+  }
+
+  /** Drop a held rise that no longer matches (payer locked). True when a row was dropped. */
+  private async dropHeldFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, held: HeldFeeRise, sub: Subscription | null, untold: boolean): Promise<boolean> {
+    const key = feeRiseKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    // Only the very rise judged: a newer one held since is left for the next pass.
+    if (!row || readHeldFeeRise(row.value)?.heldAt !== held.heldAt) return false;
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: {
+      action: 'BILLING_FEE_RISE_DROPPED', entity: 'Subscription', entityId: subscriptionId,
+      changes: {
+        from: held.from, to: held.to, told: !untold, appliesFrom: held.appliesFrom,
+        why: this.feeRiseObstacle(sub, held) ?? (sub?.feeWaived ? 'FEE_WAIVED' : 'NO_LONGER_HELD'),
+        rateNow: sub ? Number(sub.weeklyRate) : null,
+      },
+    } });
+    return true;
+  }
+
+  /**
+   * Move a told rise in, in the caller's transaction (the payer is locked),
+   * once every week that started before its told date is settled: the next
+   * weekly fee to be charged is due on or after that date. A whole week held
+   * in the fee credit at the old price keeps it: the rise moves one week
+   * later, once. `drop` = the hourly pass may drop a rise that no longer
+   * matches (the paid-week transaction leaves that to it).
+   */
+  private async applyHeldFeeRiseInTx(
+    tx: Prisma.TransactionClient, subscriptionId: string, now: Date, opts: { drop: boolean },
+  ): Promise<'none' | 'waiting' | 'deferred' | 'applied' | { dropped: true; held: HeldFeeRise; feeNow: number | null }> {
+    const key = feeRiseKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    if (!row) return 'none';
+    const held = readHeldFeeRise(row.value);
+    if (!held?.noticeAt || !held.appliesFrom) return 'waiting';
+    const sub = await tx.subscription.findUnique({ where: { id: subscriptionId } });
+    if (this.feeRiseObstacle(sub, held) !== null) {
+      if (!opts.drop) return 'waiting';
+      await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub, false);
+      return { dropped: true, held, feeNow: sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null };
+    }
+    const appliesFrom = new Date(held.appliesFrom);
+    if (sub!.nextBillingDate.getTime() < appliesFrom.getTime()) return 'waiting';
+    if (!held.deferredOnce) {
+      const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
+      if (credit && credit.currencyCode === sub!.currencyCode && Number(credit.balance) >= held.from) {
+        const later = new Date(sub!.nextBillingDate.getTime() + 7 * 86_400_000);
+        const value: HeldFeeRise = { ...held, appliesFrom: later.toISOString(), deferredOnce: true };
+        await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+        await tx.auditLog.create({ data: {
+          action: 'BILLING_FEE_RISE_DEFERRED', entity: 'Subscription', entityId: subscriptionId,
+          changes: { from: held.from, to: held.to, paidAtOldPrice: Number(credit.balance), weekKeepsOldPrice: sub!.nextBillingDate.toISOString(), appliesFrom: later.toISOString() },
+        } });
+        return 'deferred';
+      }
+    }
+    const won = await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
+    if (won.count !== 1) return 'waiting';
+    await tx.platformConfig.delete({ where: { key } });
+    const sequence = await tx.billingEvent.count({ where: { subscriptionId, type: 'TIER_CHANGE' } }) + 1;
+    await tx.billingEvent.create({ data: {
+      subscriptionId, type: 'TIER_CHANGE', amount: held.to, currencyCode: sub!.currencyCode,
+      idempotencyKey: `tier:${subscriptionId}:${sequence}:${held.from}->${held.to}`,
+      note: `Weekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
+    } });
+    await tx.auditLog.create({ data: {
+      action: 'BILLING_FEE_RISE_APPLIED', entity: 'Subscription', entityId: subscriptionId,
+      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString() },
+    } });
+    return 'applied';
+  }
+
+  /** A told rise that will not happen: the payer is told so, best-effort (it never raises what they pay). */
+  private async tellFeeRiseCancelled(subscriptionId: string, held: HeldFeeRise, feeNow: number | null): Promise<void> {
+    if (feeNow === null || !(feeNow < held.to)) return;
+    try {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+      });
+      if (!sub) return;
+      const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
+      await this.notifications.send({
+        userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode },
+        dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
+      });
+    } catch (error) {
+      log().warn({ err: error, subscriptionId }, '[F2] the fee rise cancellation notice could not be sent');
+    }
   }
 
   /** [owner rule 2026-09-29 · DS287 S3] The paying sentence of every fee

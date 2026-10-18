@@ -6,6 +6,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './mover-fee-history';
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -419,9 +420,10 @@ export async function resolveMoverFeeHold(
   const target = partnerRateFor(tiers, tariff.subject);
   const previousRate = Number(canonical.weeklyRate);
   // [COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A finance resolution never raises a weekly
-  // fee at once: a higher card rate needs at least 14 days' in-app notice first (the F2 fee-change
-  // notice, not built yet), so until that notice exists the source keeps the rate it was paying.
-  // A lower card rate applies at once: there is nothing to be told before a cut.
+  // fee at once: a higher card rate needs at least 14 days' in-app notice first, so the source keeps
+  // the rate it was paying and the rise is HELD for the F2 notice (billing/fee-rise-notice.ts): the
+  // payer is told the old fee, the new fee and the first weekly fee it applies to, at least 14 days
+  // ahead, and only then does it apply. A lower card rate applies at once: nothing to be told first.
   const nextRate = Math.min(previousRate, target.rate);
   const heldRise = target.rate > previousRate ? { heldRise: target.rate, heldUntil: 'FEE_CHANGE_NOTICE_14_DAYS' } : {};
   if (nextRate !== previousRate) {
@@ -430,6 +432,10 @@ export async function resolveMoverFeeHold(
     await tx.billingEvent.create({ data: { subscriptionId: canonical.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: canonical.currencyCode,
       idempotencyKey: `tier:${canonical.id}:${sequence}:${previousRate}->${nextRate}`,
       note: `Finance authority resolution changes the future weekly rate from ${previousRate} to ${nextRate}; issued charges and paid periods retained.` } });
+  }
+  if (target.rate > previousRate) {
+    await holdFeeRiseInTx(tx, { subscriptionId: canonical.id, from: previousRate, to: target.rate, currencyCode: canonical.currencyCode,
+      source: 'MOVER_FEE_RESOLVED', sourceRef: input.approvalId, now: new Date() });
   }
   const aliasEvidence: Record<string, string> = {};
   const sourceEvidence: Record<string, string> = {};

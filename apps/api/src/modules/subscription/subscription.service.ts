@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
@@ -231,13 +232,17 @@ export class SubscriptionService {
         const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
         const priced = partnerRateFor(tiers, tariff.subject);
         // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A fee the
-        // mover has already paid a week at is never raised at once: a higher taxi card rate waits
-        // for the 14-day fee-change notice (F2), as the weekly re-tier does. Before any paid week
-        // (a trial) the role they activate prices the first fee, in either activation order.
+        // mover has already paid a week at is never raised at once: a higher taxi card rate is HELD
+        // for the 14-day fee-change notice (F2, billing/fee-rise-notice.ts), told and applied only
+        // from the weekly fee it was told for. Before any paid week (a trial) the role they activate
+        // prices the first fee, in either activation order.
         const from = Number(sub.weeklyRate);
         const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
           where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
         const nextRate = paidAtRate ? from : priced.rate;
+        if (paidAtRate) {
+          await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: priced.rate, currencyCode: sub.currencyCode, source: 'TAXI_ACTIVATION', now: new Date() });
+        }
         if (nextRate !== from) {
           sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: nextRate } });
           const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
