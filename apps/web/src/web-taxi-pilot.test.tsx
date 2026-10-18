@@ -10,6 +10,7 @@ import WelcomePage from './app/(marketing)/welcome/page';
 import FaqPage from './app/(marketing)/faq/page';
 import HowItWorksPage from './app/(marketing)/how-it-works/page';
 import { SiteFooter } from './components/site';
+import { CustomerSessionProvider, type CustomerSession } from './components/customer-session';
 
 vi.mock('@/site.config', () => ({
   site: { legalEntityName: 'Westbridge', supportEmail: 'support@example.test' },
@@ -33,16 +34,34 @@ function sources(dir: string): string[] {
   });
 }
 
+const URLS = ['/taxi', '/taxi?pickup=6.8,-58.1&dropoff=6.9,-58.2', '/taxi?request=1&rideClass=ECONOMY'];
+const asPerson = (status: 'signed-in' | 'guest'): CustomerSession => ({
+  status, scope: status === 'guest' ? 'guest' : 'customer-test', epoch: 0,
+  ensureSignedIn: async () => status === 'signed-in', nearPoint: null, setNearPoint: () => undefined,
+});
+
 describe('web taxi pilot restriction', () => {
-  it.each(['/taxi', '/taxi?pickup=6.8,-58.1&dropoff=6.9,-58.2', '/taxi?request=1&rideClass=ECONOMY'])(
-    '%s offers the mobile app and no booking controls', async (url) => {
-      window.history.replaceState({}, '', url);
-      const { container } = render(<TaxiPage />);
-      expect(await screen.findByText(/Taxi rides are booked in the Swift mobile app/)).toBeTruthy();
-      expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
-      expect(container.querySelector('form, input, select, button')).toBeNull();
-    },
-  );
+  it.each(URLS)('%s offers the mobile app and no booking controls to a guest', async (url) => {
+    window.history.replaceState({}, '', url);
+    const { container } = render(<CustomerSessionProvider value={asPerson('guest')}><TaxiPage /></CustomerSessionProvider>);
+    expect(await screen.findByText(/Taxi rides are booked in the Swift mobile app/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
+    expect(container.querySelector('form, input, select, button')).toBeNull();
+  });
+
+  // [Row 117 · owner 16 Oct 2026 20:40Z] A signed-in customer may now price a
+  // route (the server's fare estimate); BOOKING stays in the app. The only
+  // controls are the two address boxes and their map pins — no form, no
+  // select, no request button, whatever the URL carries.
+  it.each(URLS)('%s offers a signed-in customer the fare boxes and the app, and no booking controls', async (url) => {
+    window.history.replaceState({}, '', url);
+    const { container } = render(<CustomerSessionProvider value={asPerson('signed-in')}><TaxiPage /></CustomerSessionProvider>);
+    expect(await screen.findByText(/Taxi rides are booked in the Swift mobile app/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Open Swift app' }).getAttribute('href')).toBe('swift://');
+    expect(container.querySelector('form, select')).toBeNull();
+    expect([...container.querySelectorAll('input')].map((input) => input.placeholder)).toEqual(['Search address…', 'Search address…']);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['Pin pickup on the map', 'Pin destination on the map']);
+  });
 
   it('uses the mobile app’s registered scheme, without inventing a taxi route or store URL', () => {
     const config = readFileSync(join(process.cwd(), '../mobile/app.config.ts'), 'utf8');
