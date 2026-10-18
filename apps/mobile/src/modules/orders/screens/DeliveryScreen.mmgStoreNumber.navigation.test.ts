@@ -14,12 +14,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // payment page. A malformed answer shows nothing.
 // ---------------------------------------------------------------------------
 
-type Deferred = { promise: Promise<unknown>; resolve: (v: unknown) => void; reject: (e: unknown) => void };
-const deferred = (): Deferred => {
-  let resolve!: (v: unknown) => void; let reject!: (e: unknown) => void;
-  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-  return { promise, resolve, reject };
-};
 const fx = vi.hoisted(() => ({
   getOrder: vi.fn(),
   cancelOrder: vi.fn(),
