@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 /** Pure cash decisions and a transaction double: no database or Redis connections. */
 export default defineConfig({
@@ -11,6 +12,7 @@ export default defineConfig({
       'src/__tests__/stock-single-writer.test.ts',
     ],
     fileParallelism: false,
-    env: { NODE_ENV: 'test' },
+    // [AUD-G7-040] a disposable DB/Redis target, like vitest.config.ts.
+    env: { ...sideConfigTestEnv(), NODE_ENV: 'test' },
   },
 });
