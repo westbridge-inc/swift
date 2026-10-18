@@ -42,13 +42,16 @@ export const MONEY_01: Journey<Ctx> = {
 export const MONEY_02: Journey<Ctx> = {
   id: 'MONEY-02',
   estimateSeconds: 30,
-  title: 'Vendor MMG pay-link rail (Swift holds nothing)',
-  cases: 'vendor pay link; claim; duplicate; mismatch; expiry and recovery',
+  title: 'Vendor MMG rail: the store number, the pay link off (Swift holds nothing)',
+  cases: 'store MMG number (pay link off); claim; duplicate; mismatch; expiry and recovery',
   async run(rec, ctx) {
     const C2 = ctx.roster.customers.C2!, R1 = ctx.roster.vendors.R1!, item = ctx.world.items.R1;
     rec.require('R1 orderable', !!item, ctx.world.notReady.R1 ?? '');
+    // [PAYMENT-SIMPLIFY #1848] MMG pays the store's NUMBER; the old pay-link shape is told to update the app.
     const mmg = await placeOrder(C2.session, R1.vendorId!, item!.itemId, R1.lat, R1.lng, { payment: 'MOBILE_MONEY', pickup: true });
-    rec.deny('MMG checkout when the store holds no pay link', mmg, [400, 503], ['MMG_NOT_AVAILABLE', 'MMG_PAY_LINKS_NOT_CONFIGURED']);
+    rec.deny('an MMG checkout the old pay-link way is told to update the app', mmg, [400], ['MMG_UPDATE_APP']);
+    const toNumber = await placeOrder(C2.session, R1.vendorId!, item!.itemId, R1.lat, R1.lng, { payment: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER', pickup: true });
+    rec.deny("MMG to the store's number when the store has no MMG number", toNumber, [400], ['MMG_NOT_AVAILABLE']);
     const cash = await placeOrder(C2.session, R1.vendorId!, item!.itemId, R1.lat, R1.lng, { pickup: true, key: idemKey(ctx.runId, 'money02-cash') });
     const id = orderIdsOf(cash)[0];
     if (id) {
@@ -56,8 +59,10 @@ export const MONEY_02: Journey<Ctx> = {
       await POST(`/customer/orders/${id}/cancel`, { reason: 'journey cleanup' }, C2.session.token);
     }
     const set = await PUT('/vendor/profile', { mmgPayUrl: 'https://pay.example.invalid/store' }, R1.session.token);
-    rec.deny('a pay link cannot be set without a fresh step-up', set, [400, 403, 503], ['STEP_UP_REQUIRED', 'INVALID_MMG_PAY_URL', 'MMG_PAY_LINKS_NOT_CONFIGURED']);
-    rec.skipAll(`every case needs a store with a live MMG pay link; setting one needs a step-up whose code reaches the owner only by SMS (the dev OTP code does not apply)${codeOf(set) === 'MMG_PAY_LINKS_NOT_CONFIGURED' ? ', and pay links are not configured on this target (MMG_PAY_URL_ALLOWED_HOSTS)' : ''}. Every order-side MMG step is an attestation record (no provider call), so Phase B needs Twilio for the step-up, not an MMG round-trip`);
+    rec.deny('a new pay link is refused (the store MMG number replaces it), before any step-up', set, [409], ['MMG_PAY_LINK_OFF']);
+    const number = await PUT('/vendor/profile', { mmgNumber: '+5920000000' }, R1.session.token);
+    rec.deny("the store's MMG number takes only a Guyana mobile: a fixture number is refused, nothing is written (its step-up is proven in CI: store-mmg-number.test)", number, [400], ['INVALID_MMG_NUMBER']);
+    rec.skipAll("every case needs a store with a live MMG number; setting one needs a step-up whose code reaches the owner only by SMS (the dev OTP code does not apply), and Phase A has no SMS provider");
   },
 };
 

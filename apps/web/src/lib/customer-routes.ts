@@ -52,7 +52,7 @@ const RULES: RouteRule[] = [
   // [W6] A store's one page (the old address above sends here, permanently).
   { match: under('/store'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/explore'), public: true, tab: 'home', parent: HOME_PATH },
-  // Taxi on the web is an explanation and an app link — booking stays off.
+  // Taxi on the web: a fare estimate (signed in) and an app link — booking stays in the app.
   { match: exact('/taxi'), public: true, tab: 'home', parent: HOME_PATH },
   { match: exact('/market'), public: true, tab: 'market', parent: null },
   {

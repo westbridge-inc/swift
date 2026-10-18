@@ -76,7 +76,9 @@ describe('[§8 · R4] a word that only mentions the goods holds the item for a p
     ['Parrot', 'WILDLIFE'], ['Macaw (live)', 'WILDLIFE'], ['Sloth plush toy', 'WILDLIFE'],
     ['Gemstone bracelet', 'PRECIOUS_MINERALS'], ['Gold dust 1g', 'PRECIOUS_MINERALS'], ['Gold bar chocolate', 'PRECIOUS_MINERALS'],
     ['Gift card $5000', 'CURRENCY'], ['Credit card', 'CURRENCY'], ['Bitcoin', 'CURRENCY'],
-    ['Baygon spray', 'PESTICIDES'], ['Mosquito coils 10pk', 'PESTICIDES'], ['Bug spray', 'PESTICIDES'],
+    // [owner 16 Oct] household insect sprays and mosquito coils are allowed now (prohibited-items-household-insecticide.test.ts);
+    // a generic insecticide spray is still held for a person
+    ['Insecticide spray', 'PESTICIDES'], ['Bug spray for crops', 'PESTICIDES'],
     ['Replica jersey', 'COUNTERFEIT'], ['Bootleg DVD', 'COUNTERFEIT'],
     ['Lawyer', 'LEGAL_SERVICES'], ['Firecracker popsicle', 'EXPLOSIVES'],
     // [REVIEW-F S3-1] held, not refused: a book, craft beads, a word that is also a flavour or a shade

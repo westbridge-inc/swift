@@ -164,7 +164,7 @@ describe('[DELETION-INTEGRITY] build 9 never shows a false deletion receipt', ()
 
   it('a legal hold receipt reaches build 9 with its own message, never as a completed deletion', async () => {
     const held = {
-      deleted: false as const, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: 1, heldMoverObjects: 0, pendingDocuments: 0, pendingAvatarObjects: 0,
+      deleted: false as const, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: 1, heldMoverObjects: 0, heldUploads: 0, pendingDocuments: 0, pendingAvatarObjects: 0, pendingUploads: 0,
       message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
     };
     for (const [call, status] of [[build9Delete, 'PENDING_DOCUMENT_ERASURE'], [build10Delete, 'PENDING_LEGAL_HOLD']] as const) {

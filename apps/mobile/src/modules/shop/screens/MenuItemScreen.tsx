@@ -29,6 +29,7 @@ import {
   T,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { STORE_PICK } from '../../../lib/storePick';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -296,9 +297,9 @@ export function MenuItemScreen() {
             </View>
             {item.isPopular ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Feather name="trending-up" size={14} color={color.brand[600]} />
+                <Feather name="thumbs-up" size={14} color={color.brand[600]} />
                 <T variant="label" tone="deep">
-                  Popular
+                  {STORE_PICK}
                 </T>
               </View>
             ) : null}

@@ -1,3 +1,4 @@
+import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { formatMoney } from '../../utils/currency-amount';
@@ -315,7 +316,7 @@ export async function windDownPartner(
     vendorIds.length
       ? prisma.vendor.updateMany({
           where: { id: { in: vendorIds } },
-          data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' },
+          data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED },
         })
       : Promise.resolve({ count: 0 }),
     vendorIds.length

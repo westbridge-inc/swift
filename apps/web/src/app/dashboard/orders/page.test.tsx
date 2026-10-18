@@ -312,7 +312,7 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     'offers no attest button on a %s payment, and says why',
     async (paymentStatus) => {
       const { fetchMock } = await openMmgDetail(paymentStatus);
-      expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
       // and the screen is not silent about it
       expect(screen.getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
       expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
@@ -327,15 +327,30 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     await dismissTakeover(user);
     await user.click(row);
     await waitFor(() => expect(screen.getByText('Total (MMG)')).toBeTruthy());
-    expect(screen.queryByRole('button', { name: /received in my MMG/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
     expect(screen.queryByLabelText(/MMG transaction reference/i)).toBeNull();
     expect(screen.getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
   });
 
+  // [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes cancels: the store sees when.
+  it("shows the server's cancel-at line beside the Paid by MMG button", async () => {
+    const line = 'Cancels automatically at 3:45 PM unless you mark it "Paid by MMG".';
+    const over = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', mmgPayBy: '2026-10-18T19:45:00.000Z', mmgPayByLine: line };
+    mockApi(boardHandler([wireVendorOrder(over)], wireVendorOrderDetail(over)));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const row = await rowFor('SW-1001');
+    await dismissTakeover(user);
+    await user.click(row);
+    await screen.findByRole('button', { name: /^Paid by MMG$/i });
+    expect(screen.getByText(line)).toBeTruthy();
+  });
+
   it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
     const { user, fetchMock } = await openMmgDetail('PENDING');
-    const button = await screen.findByRole('button', { name: /received in my MMG/i });
+    const button = await screen.findByRole('button', { name: /^Paid by MMG$/i });
+    // [PAYMENT-SIMPLIFY] The button says only "Paid by MMG"; the amount is named beside it.
+    expect(screen.getByText(/^Tap when .*\d.* is in your MMG account\.$/)).toBeTruthy();
     expect((button as HTMLButtonElement).disabled).toBe(true); // no reference yet
     await user.click(button);
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
@@ -747,7 +762,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
       expect(screen.queryByRole('button', { name }), name).toBeNull();
     }
     expect(screen.queryByRole('checkbox')).toBeNull();
-    expect(screen.queryByRole('button', { name: /received in my MMG/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Paid by MMG$/ })).toBeNull();
     // Declining stays where it was: the server allows it.
     if (status === 'PENDING') expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
   });
