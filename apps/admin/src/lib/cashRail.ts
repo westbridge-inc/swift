@@ -201,7 +201,7 @@ export function railHealth(k: CashKpis | null): { state: 'ok' | 'watch' | 'bad';
  * action as broken at the exact moment it worked.
  */
 export function outcomeOfThrown(error: unknown): MoneyActionOutcome {
-  const e = (error ?? {}) as { status?: number; code?: string; message?: string; details?: { approvalId?: string } };
+  const e = (error ?? {}) as { status?: number; code?: string; message?: string; details?: { approvalId?: string; askedByYou?: boolean } };
   if (e.status === 202 && e.code === 'APPROVAL_REQUIRED') {
     return {
       kind: 'queued',
@@ -213,7 +213,9 @@ export function outcomeOfThrown(error: unknown): MoneyActionOutcome {
   if (e.code === 'APPROVAL_ALREADY_OPEN') {
     return {
       kind: 'queued',
-      message: 'Already waiting for a second admin. Nothing new was asked, and nothing has moved yet.',
+      message: e.details?.askedByYou === false
+        ? 'Another admin already asked for this, and it is waiting in Approvals. Nothing new was asked, and nothing has moved yet.'
+        : 'Already waiting for a second admin. Nothing new was asked, and nothing has moved yet.',
       ...(e.details?.approvalId ? { approvalId: e.details.approvalId } : {}),
     };
   }

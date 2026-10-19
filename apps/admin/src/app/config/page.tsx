@@ -138,15 +138,13 @@ export default function ConfigPage() {
                 {section.items.map((item) => (
                   <div key={item.key} className="p-3 rounded-lg bg-white/5">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm">{item.label}</label>
+                      <label htmlFor={`config-${item.key}`} className="text-sm">{item.label}</label>
                       <input
+                        id={`config-${item.key}`}
                         type="number"
                         step="any"
                         value={edits[item.key] ?? String(values[item.key] ?? '')}
-                        onChange={(e) => {
-                          setStatus(null);
-                          setEdits((prev) => ({ ...prev, [item.key]: e.target.value }));
-                        }}
+                        onChange={(e) => setEdits((prev) => ({ ...prev, [item.key]: e.target.value }))}
                         className="bg-[var(--panel-2)] text-white px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none w-32 text-right"
                       />
                     </div>
