@@ -366,9 +366,12 @@ describe('[E02] THE PAID-CANCEL GUARD: a paid MMG order is never cancelled or re
     ['CAPTURED', 'CANCELLED'],
     ['CAPTURED', 'REFUNDED'],
   ] as const)('raw SQL: a %s MMG order cannot become %s without one', async (paymentStatus, target) => {
-    const order = await makeOrder({ paymentStatus });
+    // [row 264] REFUNDED follows a closed order (order-status.ts); from PREPARING the database's order
+    // machine would refuse it before this guard is reached, so the REFUNDED cases start DELIVERED.
+    const from = target === 'REFUNDED' ? 'DELIVERED' : 'PREPARING';
+    const order = await makeOrder({ paymentStatus, status: from });
     await expect(setStatus(order.id, target)).rejects.toThrow(/MMG_REFUND_OBLIGATION_REQUIRED/);
-    expect((await orderRow(order.id)).status).toBe('PREPARING');
+    expect((await orderRow(order.id)).status).toBe(from);
   });
 
   it('the ORM is held to the same rule (no path is special)', async () => {
