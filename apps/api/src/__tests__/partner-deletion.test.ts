@@ -3,7 +3,7 @@ import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { OrderStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -17,6 +17,7 @@ import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS, windDown
 import { restoreBillingAccess } from '../modules/billing/billing-access';
 import { currentDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [Apple 5.1.1(v)] A mover or vendor closes their own account.
@@ -63,14 +64,15 @@ async function makePartner(roles: UserRole[], opts: { committedFloat?: number; s
 
 /** A settlement hangs off a real order and vendor; borrow whatever the seeded
  *  database already has rather than inventing a storefront for a fixture. */
-async function makeCashOrder(riderId: string) {
+/** [row 264] Born in `status`: the database refuses moving an order back across the machine. */
+async function makeCashOrder(riderId: string, status: OrderStatus = 'DELIVERED') {
   const vendor = await app.prisma.vendor.findFirstOrThrow({ select: { id: true } });
   const customer = await app.prisma.user.findFirstOrThrow({ where: { customer: { isNot: null } }, select: { id: true } });
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `PD-${nanoid(10).toUpperCase()}`,
       customerId: customer.id, vendorId: vendor.id, riderId,
-      orderType: 'FOOD_DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Test St',
+      orderType: 'FOOD_DELIVERY', status, deliveryAddress: '1 Test St',
       deliveryLat: 6.8055, deliveryLng: -58.1553,
       subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500,
       deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
@@ -190,11 +192,11 @@ describe('[5.1.1v] a partner deletes their own account', () => {
 
   it.each(['RIDER', 'DRIVER'] as const)('blocks active work assigned to a %s even in customer mode', async (role) => {
     const p = await makePartner(['CUSTOMER', role]);
-    const order = await makeCashOrder(p.riderId);
+    const order = await makeCashOrder(p.riderId, 'PICKED_UP');
     if (role === 'DRIVER') {
       const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: nanoid(8), driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
-      await app.prisma.order.update({ where: { id: order.orderId }, data: { riderId: null, driverId: driver.id, status: 'PICKED_UP' } });
-    } else await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'PICKED_UP' } });
+      await app.prisma.order.update({ where: { id: order.orderId }, data: { riderId: null, driverId: driver.id } });
+    }
     const res = await del(p.token);
     expect(res.statusCode, res.payload).toBe(409);
     expect(res.json().error.code).toBe('ACTIVE_ORDERS');
@@ -212,11 +214,11 @@ describe('[5.1.1v] a partner deletes their own account', () => {
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true,
     } });
     vendorIds.push(vendor.id);
-    const order = await makeCashOrder(p.riderId);
-    await app.prisma.order.update({ where: { id: order.orderId }, data: { vendorId: vendor.id, riderId: null, status: 'PREPARING' } });
+    const order = await makeCashOrder(p.riderId, 'PREPARING');
+    await app.prisma.order.update({ where: { id: order.orderId }, data: { vendorId: vendor.id, riderId: null } });
     await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'ACTIVE_ORDERS' });
     expect(await app.prisma.vendor.findUnique({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
-    await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'DELIVERED' } });
+    await walkOrderStatus(app.prisma, order.orderId, 'DELIVERED');
     const settlement = await app.prisma.deliveryCashSettlement.create({ data: { orderId: order.orderId, riderId: p.riderId, vendorId: vendor.id, amount: 1500, status: 'OWED' } });
     await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
     await app.prisma.deliveryCashSettlement.update({ where: { id: settlement.id }, data: { status: 'SETTLED' } });

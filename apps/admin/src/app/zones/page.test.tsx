@@ -205,4 +205,18 @@ describe('[ZONE-FARES · Sol F3] a fixed fare joins two zones of ONE market — 
     expect(prompt).not.toHaveBeenCalled();
     expect(writes).toEqual([]);
   });
+
+  it('[BUG-GUARDS C3] a failed read says it failed, with a retry — never "No zones yet" or "No fixed fares"', async () => {
+    mockApi((request: ApiRequest) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/zone-fares') {
+        return { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Something went wrong' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<ZonesPage />);
+    expect(await screen.findByText(/Couldn.t load the zones and fares/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    expect(screen.queryByText(/No zones yet/)).toBeNull();
+    expect(screen.queryByText(/No fixed fares/)).toBeNull();
+  });
 });

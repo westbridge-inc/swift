@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import courierRoutes from '../modules/courier/courier.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Courier (spec §4.3). Send a parcel person-to-person: pickup != dropoff,
@@ -161,10 +162,15 @@ describe('MASTER-034 expiry and sender controls', () => {
   it('absolute expiry and terminal grace are enforced without cleanup', async () => {
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const { orderId, trackingToken } = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, customer.token)).json().data;
-    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED', deliveredAt: new Date(Date.now() - 3_600_001) } });
+    // Terminal grace: delivered more than an hour ago.
+    await walkOrderStatus(app.prisma, orderId, 'DELIVERED', { deliveredAt: new Date(Date.now() - 3_600_001) });
     expect((await inject('GET', `/api/v1/courier/track/${trackingToken}`)).statusCode).toBe(404);
-    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'READY_FOR_PICKUP', placedAt: new Date(Date.now() - 12 * 3_600_000) } });
-    expect((await inject('GET', `/api/v1/courier/track/${trackingToken}`)).statusCode).toBe(404);
-    expect((await inject('POST', `/api/v1/courier/order/${orderId}/tracking`, {}, customer.token)).statusCode).toBe(404);
+    // Absolute expiry: a live job placed 12 hours ago. [row 264] A delivered job never goes back to
+    // READY_FOR_PICKUP (the database refuses it), so this is a second, live job.
+    const second = (await inject('POST', '/api/v1/courier/order', ORDER_BODY, customer.token)).json().data;
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: second.orderId } })).status).toBe('READY_FOR_PICKUP');
+    await app.prisma.order.update({ where: { id: second.orderId }, data: { placedAt: new Date(Date.now() - 12 * 3_600_000) } });
+    expect((await inject('GET', `/api/v1/courier/track/${second.trackingToken}`)).statusCode).toBe(404);
+    expect((await inject('POST', `/api/v1/courier/order/${second.orderId}/tracking`, {}, customer.token)).statusCode).toBe(404);
   });
 });

@@ -518,7 +518,7 @@ describe('the waiting charge at booking (Rev 2 §8.2)', () => {
     fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
-    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 500 per 10 minutes after your driver arrives');
+    expect(byTestId('taxi-waiting-terms')?.textContent).toBe('Waiting: 300 per 10 minutes after your driver arrives');
     snap('rider-booking-waiting-terms');
   });
 
@@ -568,8 +568,8 @@ describe('the live ride', () => {
     snap('rider-active-ride-waiting');
     const card = byTestId('taxi-waiting');
     expect(card?.textContent).toContain('13 min waited');
-    expect(card?.textContent).toMatch(/\$500 so far/);
-    expect(card?.textContent).toMatch(/Next \$500 in 6:30/);
+    expect(card?.textContent).toMatch(/\$300 so far/);
+    expect(card?.textContent).toMatch(/Next \$300 in 6:30/);
   });
 
   it('no waiting card before the server sends one', async () => {
@@ -585,7 +585,7 @@ describe('the live ride', () => {
     fx.routes['get /rides/active'] = () => ok(null);
     await act(async () => fx.fire('order:status_changed', { orderId: 'cm-ride-3', status: 'DELIVERED', fare: { total: 2800, fareBreakdown: FARE_BREAKDOWN } }));
     await settle();
-    expect(byTestId('post-trip')?.textContent).toBe('3300');
+    expect(byTestId('post-trip')?.textContent).toBe('3100');
   });
 
   it('a DELIVERED event without a breakdown hands the receipt today’s ride', async () => {
