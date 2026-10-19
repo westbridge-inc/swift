@@ -11,7 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, staffAddDailyCap, spendStaffAddAllowance } from '../modules/vendor/staff-invites';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up. Until STAFF_INVITE_ACCEPT is on, adding a known number
@@ -54,7 +54,7 @@ async function makeOwnerWithStore() {
   vendorOwnerIds.push(vo.id);
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Cap Bistro ${nanoid(4)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Cap Bistro ${wordFreeTag(8)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
       phone: phone(), addressLine1: '6 Crew Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

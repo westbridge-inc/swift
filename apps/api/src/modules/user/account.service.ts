@@ -1,5 +1,7 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
 import { eraseMoverObjects } from './mover-object-erasure';
+import { exportPersonalData } from './data-export';
+import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
@@ -58,64 +60,10 @@ export async function closesByRequest(
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
-  /** DPA right of access + portability: a copy of the person's own data. */
+  /** DPA right of access + portability: a copy of the person's own data.
+   *  [Row 331 (b)] Every category of the export register, paged, never cut silently (data-export.ts). */
   async exportData(userId: string) {
-    const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        phone: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roles: true,
-        activeRole: true,
-        lastMoverRole: true,
-        countryCode: true,
-        trustLevel: true,
-        isPhoneVerified: true,
-        createdAt: true,
-        lastActiveAt: true,
-      },
-    });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
-
-    const [addresses, orders, ratingsGiven, serviceJobs] = await Promise.all([
-      prisma.address.findMany({
-        where: { userId },
-        select: { label: true, addressLine1: true, addressLine2: true, city: true, latitude: true, longitude: true, createdAt: true },
-      }),
-      prisma.order.findMany({
-        where: { customerId: userId },
-        select: { orderNumber: true, orderType: true, status: true, totalAmount: true, createdAt: true, deliveredAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.rating.findMany({
-        where: { raterId: userId },
-        select: { score: true, comment: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.serviceJob.findMany({
-        where: { customerId: userId },
-        select: { status: true, scheduledFor: true, quoteAmount: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-    ]);
-
-    return {
-      exportedAt: new Date().toISOString(),
-      notice:
-        'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
-      account: user,
-      addresses,
-      orders,
-      ratingsGiven,
-      serviceJobs,
-    };
+    return exportPersonalData(this.app.prisma, userId);
   }
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
@@ -193,6 +141,11 @@ export class AccountService {
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
         await tx.deviceToken.deleteMany({ where: { userId } });
+        // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
+        // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
+        // verification.service openForOwedWork), and the row's userId never
+        // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
+        await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
@@ -420,6 +373,14 @@ export class AccountService {
     const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
     pendingDocuments += moverObjects.pending;
 
+    // [Row 331 · DSAR-ERASURE (a)] Uploads no document or mover pointer claims (the optional L2
+    // ID selfie, an abandoned onboarding file) go too, with a receipt; a hold keeps them.
+    const uploads = await eraseUnclaimedUploads(prisma, storage, userId, this.app.log);
+    // [Row 331 (c)] Everything shredded above stops carrying its content hash, so the same
+    // document uploaded later cannot find this account again (held objects keep theirs until purged).
+    const fingerprints = await forgetErasedFingerprints(prisma, userId, this.app.log);
+    let pendingUploads = uploads.pending + fingerprints.pending;
+
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
     //     leaves the object reachable — a DPA deletion-barrier breach. Delete
@@ -514,7 +475,10 @@ export class AccountService {
     //     leaves; case-bound safety evidence lives elsewhere under its own
     //     hold rules.
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
+    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone
+    // (a legal hold on the person keeps both, reported as held).
+    const liveness = await eraseLivenessSelfies(prisma, storage, userId, this.app.log);
+    pendingUploads += liveness.pending;
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
@@ -544,18 +508,20 @@ export class AccountService {
       },
     });
 
-    if (deferred.count > 0 || moverObjects.held > 0) {
+    // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
+    const heldUploads = uploads.held + liveness.held;
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
-        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held,
-        pendingDocuments, pendingAvatarObjects,
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }
 
-    if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0 || pendingUploads > 0) {
       return {
         deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
-        pendingDocuments, pendingAvatarObjects,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
         ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
       };

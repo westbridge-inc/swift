@@ -16,6 +16,7 @@ import { IdentityService } from '../modules/integrity/identity.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -51,7 +52,7 @@ async function makeVendorFor(userId: string) {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Enf Vendor ${seq}-${nanoid(4)}`, slug: `enf-${nanoid(8).toLowerCase()}`,
+      name: `Enf Vendor ${seq}-${wordFreeTag(8)}`, slug: `enf-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 800_000 + seq}`,
       addressLine1: '2 Enforcement Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,

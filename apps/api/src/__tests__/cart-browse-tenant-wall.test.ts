@@ -8,10 +8,11 @@ import { authPlugin } from '../plugins/auth';
 import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // DL-7 revision 2: real DB reads, historical cart relations and real sessions.
 // The browse interleaving changes a fixture only AFTER the real ID query.
-const run = `dl7r2-${nanoid(10).toLowerCase()}`;
+const run = `dl7r2-${wordFreeTag(10)}`;
 const hiddenKinds = ['REVIEW', 'CRAWLER', 'INACTIVE'] as const;
 type Store = { id: string; itemId: string; tenantId: string };
 type Customer = { id: string; token: string };

@@ -25,8 +25,9 @@ import { getKeyProvider, resetKeyProviderForTests } from '../providers/storage/e
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type SandboxCheckoutKeys } from '../providers/mmg/mmg-checkout';
 import {
   SandboxMmgProvider, lookupDetailFrom, sandboxAddHistory, sandboxResetMmg, sandboxScriptReversal, sandboxSetTxStatus,
-  type MmgLookupClient, type MmgLookupDetail, type MmgReversalClient,
+  type MmgCheckoutLookupClient, type MmgLookupDetail, type MmgReversalClient,
 } from '../providers/mmg/mmg-provider';
+import { FakeMmgHistory } from './helpers/mmg-history-fake';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -60,7 +61,12 @@ let admin: { token: string; userId: string };
 
 /** MMG's lookup as the checkout verifier reads it (scripted per transaction, UAT shape). */
 const lookups = new Map<string, MmgLookupDetail>();
-const checkoutLookup: MmgLookupClient = { transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' } };
+/** [7 Oct] MMG's Transaction History, which ties a payment to its checkout and gives its time. */
+const history = new FakeMmgHistory();
+const checkoutLookup: MmgCheckoutLookupClient = {
+  transactionLookupDetail: async (id) => lookups.get(id) ?? { outcome: 'not_found' },
+  transactionHistoryRows: (query) => history.transactionHistoryRows(query),
+};
 const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
 const uatAnswer = (txn: string, amountGyd: number): Record<string, unknown> => ({
   transactionStatus: 'successful', amount: String(amountGyd), currency: 'GYD', creationDate: gyStamp(new Date()),
@@ -117,6 +123,7 @@ async function paidCheckout(opts: { due?: Date } = {}) {
   const txn = `RV${seq}${RUN}`;
   const amount = Number(row.amount);
   lookups.set(txn, lookupDetailFrom(uatAnswer(txn, amount), txn));
+  history.holds(txn, amount, { external_id: row.merchantTransactionId });
   const token = sandbox.sandboxReplyToken({ merchantTransactionId: row.merchantTransactionId, transactionId: txn, ResultCode: '0', secretKey: 'x' });
   expect(await checkoutService.observeReply({ source: 'RETURN', outcome: 'success', params: { token } })).toBe('CONFIRMED');
   // MMG's merchant API knows the transaction too (the reversal's lookup).

@@ -36,3 +36,18 @@ export async function searchSuggestions(q: string): Promise<SearchSuggestion[]> 
   const data = (await apiFetch(`/api/v1/search/suggestions?q=${encodeURIComponent(q)}`)).data;
   return Array.isArray(data) ? data.filter((s): s is SearchSuggestion => typeof s?.text === 'string' && s.text.trim() !== '') : [];
 }
+
+/** How many "Worth trying right now" dishes a search with no matches offers (the phone's six). */
+export const TRENDING_SHOWN = 6;
+
+/**
+ * [B2 · the phone's "Worth trying right now"] GET /search/trending: the most
+ * ordered dishes across OPEN stores — an EARNED ranking, never a store's own
+ * tick — with prohibited and hidden items removed by the server. A search with
+ * no matches offers them, so an empty result opens a door instead of ending.
+ */
+export async function searchTrending(): Promise<MarketItem[]> {
+  const data = (await apiFetch('/api/v1/search/trending')).data;
+  if (!Array.isArray(data)) return [];
+  return data.filter((item): item is MarketItem => typeof item?.id === 'string' && typeof item?.vendorId === 'string' && typeof item?.name === 'string');
+}
