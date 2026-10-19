@@ -513,9 +513,11 @@ export class CashRulesService {
           assertFailureSource(source, mover);
           // [TAXI multi-stop 4/8] A trip with a stop still open ends unpaid only
           // when the passenger did not come back to the car at that stop, after
-          // its grace; a refusal waits for the destination. Read on the locked
-          // row, before anything is filed. A ride without stops reads one empty list.
-          if (isRide) await assertTripMayEndUnpaidOn(tx, orderId, input.outcome as 'no_show' | 'refused');
+          // its grace; a refusal waits for the destination. The stops are read on
+          // the locked row, before anything is filed. A ride without stops reads
+          // nothing: its taxiStopCount is null from the request on (the itinerary
+          // is frozen there), so this path is exactly today's.
+          if (isRide && order.taxiStopCount != null) await assertTripMayEndUnpaidOn(tx, orderId, input.outcome as 'no_show' | 'refused');
           const rules = await this.configFor(order.customer.countryCode);
           const filing = await captureHandoverEvidence(tx, source, {
             actorId: moverUserId, sessionId: input.sessionId, outcome: input.outcome as 'no_show' | 'refused',
