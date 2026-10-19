@@ -12,6 +12,7 @@ import { sweepPage } from '../../lib/sweep-cursor';
 import { stageCheckinDeliveries, drainCheckinDeliveries, hardPromptState, checkinDeliveryKilled, passengerAsk, driverAsk, type CheckinDeliveryObserver } from './guardian-delivery';
 import { guardianDeliveryCounter } from '../../plugins/observability';
 import { SosService } from './sos.service';
+import { loadTaxiStops, nextStopSequence, type TaxiStopRow } from '../rides/taxi-stops-read';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
 // Same runtime doctrine as the SOS grace sweep: a scheduled tick that owns ALL
@@ -67,6 +68,10 @@ const sustainSeconds = () => num('GUARDIAN_DEVIATION_SUSTAIN_SECONDS', 90);
 const stopRadiusM = () => num('GUARDIAN_STOP_RADIUS_M', 60);
 const nearEndpointM = () => num('GUARDIAN_NEAR_ENDPOINT_M', 150);
 const overdueMinMinutes = () => num('GUARDIAN_OVERDUE_MIN_MINUTES', 15);
+/** [TAXI multi-stop 5/8] Extra time each stop of a ride adds to its ETA
+ *  allowance (pulling in, the passenger getting out and back), on top of the
+ *  measured wait at the stop itself. */
+const stopAllowanceMinutes = () => num('GUARDIAN_STOP_ALLOWANCE_MINUTES', 10);
 const staleGpsMinutes = () => num('GUARDIAN_STALE_GPS_MINUTES', 3);
 /** §5.4 — how far from the destination a "completed" trip may end before it
  *  is flagged for post-trip review. Generous: addresses are imprecise and the
@@ -126,6 +131,10 @@ interface DetectorState {
   lastFix?: { lat: number; lng: number; atMs: number };
   /** §5.4 — completion happened far from the destination; set once at close. */
   completionFlag?: { distM: number; at: string };
+  /** [TAXI multi-stop 5/8] What the position detectors aim at on a ride with
+   *  stops: 'STOP_<n>' (the next open stop) or 'DESTINATION'. A change resets
+   *  the divergence baseline. Never set on a ride without stops. */
+  targetKey?: string;
   events?: Array<{ t: string; kind: string; detail?: Record<string, unknown> }>;
 }
 
@@ -167,7 +176,49 @@ type OrderSnapshot = {
   deliveryLat: unknown;
   deliveryLng: unknown;
   driver: { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null } | null;
+  /** [TAXI multi-stop 5/8] null = a ride without stops: every detector exactly as before. */
+  taxiStopCount?: number | null;
+  /** The ride's stops in the passenger's order (read with the page; only for a ride with stops). */
+  stops?: readonly GuardianStop[];
 };
+
+/** A stop as the detectors read it. */
+export type GuardianStop = Pick<TaxiStopRow, 'sequence' | 'lat' | 'lng' | 'status' | 'arrivedAt' | 'departedAt' | 'skippedAt'>;
+
+/**
+ * [TAXI multi-stop 5/8] Where a ride with stops is heading now: the next open
+ * stop (the stop law's PENDING or ARRIVED, in the passenger's order), else the
+ * final destination. Null for a ride without stops (the detectors keep aiming
+ * at the destination, unchanged).
+ */
+export function guardianTarget(
+  stops: readonly GuardianStop[] | undefined,
+  dest: { lat: number; lng: number },
+): { key: string; point: { lat: number; lng: number } } | null {
+  if (!stops) return null;
+  const next = nextStopSequence(stops);
+  const stop = next == null ? null : stops.find((s) => s.sequence === next);
+  return stop ? { key: `STOP_${stop.sequence}`, point: { lat: stop.lat, lng: stop.lng } } : { key: 'DESTINATION', point: dest };
+}
+
+/**
+ * [TAXI multi-stop 5/8] The time a ride's stops add to its ETA allowance: a
+ * fixed allowance per stop plus the measured wait at each (its arrival to its
+ * departure or skip, or to now while the car is still there). A passenger
+ * shopping at a stop the car waits for is not an overdue trip. Zero for a
+ * ride without stops.
+ */
+export function stopsAllowanceMs(stops: readonly GuardianStop[] | undefined, now: Date): number {
+  if (!stops) return 0;
+  let ms = 0;
+  for (const s of stops) {
+    ms += stopAllowanceMinutes() * 60_000;
+    if (!s.arrivedAt) continue;
+    const end = s.departedAt ?? s.skippedAt ?? (s.status === 'ARRIVED' ? now : null);
+    if (end) ms += Math.max(0, end.getTime() - s.arrivedAt.getTime());
+  }
+  return ms;
+}
 
 export interface GuardianSweepResult {
   opened: number;
@@ -368,10 +419,14 @@ export class GuardianService {
         pickupLng: true,
         deliveryLat: true,
         deliveryLng: true,
+        taxiStopCount: true,
         driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
       },
         });
-        const byId = new Map(orders.map((o) => [o.id, o]));
+        // [TAXI multi-stop 5/8] The page's rides with stops, their stops in one
+        // query (none for a page without them).
+        const stops = await loadTaxiStops(this.prisma, orders.filter((o) => o.taxiStopCount != null).map((o) => o.id));
+        const byId = new Map(orders.map((o): [string, OrderSnapshot] => [o.id, o.taxiStopCount != null ? { ...o, stops: stops.get(o.id) ?? [] } : o]));
         return sessions.map((session) => ({ ...session, order: byId.get(session.orderId) ?? null }));
       },
       handle: async ({ order, ...session }) => {
@@ -442,7 +497,11 @@ export class GuardianService {
         ? { lat: Number(order.deliveryLat), lng: Number(order.deliveryLng) }
         : null;
     if (!dest || !state.lastFix) return;
-    const distM = Math.round(metersBetween(state.lastFix.lat, state.lastFix.lng, dest.lat, dest.lng));
+    const fix = state.lastFix;
+    // [TAXI multi-stop 5/8] A trip that ended at a stop the car was waiting at
+    // (the passenger did not come back) ended where the passenger chose.
+    const ends = [dest, ...(order.stops ?? []).filter((st) => st.status === 'ARRIVED').map((st) => ({ lat: st.lat, lng: st.lng }))];
+    const distM = Math.round(Math.min(...ends.map((e) => metersBetween(fix.lat, fix.lng, e.lat, e.lng))));
     if (distM <= completionToleranceM()) return;
 
     state.completionFlag = { distM, at: now.toISOString() };
@@ -535,21 +594,34 @@ export class GuardianService {
       const lng = fix.currentLng as number;
       state.lastFix = { lat, lng, atMs: fixAt.getTime() };
       const distToDest = metersBetween(lat, lng, dest.lat, dest.lng);
+      // [TAXI multi-stop 5/8] A ride with stops is aimed at its NEXT open stop
+      // (a stop away from the destination is the passenger's route, not a
+      // deviation), and a new target starts a new baseline: the ratchet only
+      // ever compares the car with the place it is heading for now.
+      const target = guardianTarget(order.stops, dest);
+      if (target && state.targetKey !== target.key) {
+        if (state.targetKey != null) pushEvent(state, now, 'TARGET_CHANGED', { from: state.targetKey, to: target.key });
+        state.targetKey = target.key;
+        state.minDistToDestM = undefined;
+        state.divergingSinceMs = null;
+      }
+      const distToTarget = target ? metersBetween(lat, lng, target.point.lat, target.point.lng) : distToDest;
 
       // Divergence ratchet (§5.2, adapted — see header).
       const prevMin = state.minDistToDestM;
-      state.minDistToDestM = prevMin == null ? distToDest : Math.min(prevMin, distToDest);
+      state.minDistToDestM = prevMin == null ? distToTarget : Math.min(prevMin, distToTarget);
       const threshold = deviationMeters()[band];
-      const diverging = distToDest > state.minDistToDestM + threshold;
+      const diverging = distToTarget > state.minDistToDestM + threshold;
       if (diverging) {
         state.divergingSinceMs = state.divergingSinceMs ?? fixAt.getTime();
         const sustainedMs = fixAt.getTime() - state.divergingSinceMs;
         if (sustainedMs >= sustainSeconds() * 1000 && !state.flags!.deviation) {
           raise('deviation', {
-            distToDestM: Math.round(distToDest),
+            distToDestM: Math.round(distToTarget),
             minDistToDestM: Math.round(state.minDistToDestM),
             thresholdM: threshold,
             sustainedS: Math.round(sustainedMs / 1000),
+            ...(target ? { target: target.key } : {}),
           });
         }
       } else {
@@ -559,9 +631,13 @@ export class GuardianService {
       // Long-stop (§5.2): stationary beyond the band budget, measured on the
       // fix clock (frozen GPS can't advance it), suppressed near either
       // endpoint (boarding/alighting are legitimate stops).
+      // [TAXI multi-stop 5/8] The stop a ride is heading for is an endpoint too
+      // (pulling in before the arrival tap, and the wait there: a stop the car
+      // waits at, ARRIVED, is always the next open one).
       const nearEndpoint =
         distToDest < nearEndpointM() ||
-        (pickup ? metersBetween(lat, lng, pickup.lat, pickup.lng) < nearEndpointM() : false);
+        (pickup ? metersBetween(lat, lng, pickup.lat, pickup.lng) < nearEndpointM() : false) ||
+        (target ? distToTarget < nearEndpointM() : false);
       if (nearEndpoint) {
         state.stopAnchor = null;
         state.stopSinceMs = null;
@@ -584,7 +660,8 @@ export class GuardianService {
       const plannedMinutes =
         order.taxiDuration ??
         (order.pickedUpAt ? (session.plannedEtaAt.getTime() - order.pickedUpAt.getTime()) / 60_000 : 0);
-      const allowanceMs = Math.max(overdueMinMinutes(), plannedMinutes * 0.5) * 60_000;
+      // [TAXI multi-stop 5/8] + each stop's allowance and its measured wait.
+      const allowanceMs = Math.max(overdueMinMinutes(), plannedMinutes * 0.5) * 60_000 + stopsAllowanceMs(order.stops, now);
       if (now.getTime() > session.plannedEtaAt.getTime() + allowanceMs) {
         raise('overdue', {
           plannedEtaAt: session.plannedEtaAt.toISOString(),
