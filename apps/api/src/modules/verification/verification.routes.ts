@@ -9,7 +9,7 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
+import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
@@ -172,13 +172,12 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
-    // [Row 108] Read by the real decoder here, because the storage seam only ever sees this file encrypted.
-    // What the bytes ARE decides it (a PDF passed the sniff above as a PDF).
-    if (file.mimetype !== 'application/pdf') {
-      const sniffed = sniffImageType(buffer);
-      if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-      await inspectImage(buffer, sniffed);
-    }
+    // [Row 108 · Row 238 · GUARDRAILS §2] The storage seam only ever sees this file ENCRYPTED, so the
+    // photo is cleaned here, before it is sealed, by the seam's own helper: the metadata a phone camera
+    // writes (GPS, capture time, device, serial) removed failing closed, then the clean bytes read by the
+    // real decoder. What the bytes ARE decides it (a PDF passed the sniff above as a PDF: not a photo).
+    const photo = await cleanStoredPhoto(buffer, file.mimetype);
+    const sealedBytes = photo?.buffer ?? buffer;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
     await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
@@ -189,6 +188,8 @@ export async function verificationRoutes(app: FastifyInstance) {
     // proved at submission, so refuse instead of handing back an unusable file.
     const keys = getKeyProvider();
     if (keys) {
+      // The fingerprint of the file AS SUBMITTED: the duplicate-document and retry identity, comparable
+      // with every row stored before [Row 238]. A one-way digest keeps nothing of the removed metadata.
       const sha256 = createHash('sha256').update(buffer).digest('hex');
       // [#1449 S4-1] A retry after a lost reply sends the same file again: answer with the
       // upload already stored, so no second copy of an ID document is kept (and no second review signal).
@@ -201,7 +202,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       const dup = (await liveDuplicateHolders(app.prisma, sha256, request.user.userId)).length > 0;
 
       const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const { ciphertext, iv, authTag } = encryptBuffer(sealedBytes, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
         // Multipart normalizes empty/path-only names to ''. Appending .enc
@@ -218,7 +219,7 @@ export async function verificationRoutes(app: FastifyInstance) {
           authTag: new Uint8Array(authTag),
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
           mimeType: file.mimetype,
-          sizeBytes: buffer.length,
+          sizeBytes: sealedBytes.length, // what is stored (and what a deletion receipt destroys)
           sha256,
           createdBy: request.user.userId,
         },
