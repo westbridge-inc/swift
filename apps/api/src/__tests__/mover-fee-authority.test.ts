@@ -21,6 +21,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { feeRiseKey, readHeldFeeRise } from '../modules/billing/fee-rise-notice';
 import { platformStats } from '../modules/admin/platform-stats';
 import { runFxChangeNotices } from '../modules/billing/fx-notices';
 import { grantStepUp } from './helpers/step-up';
@@ -32,6 +33,11 @@ const tenantIds: string[] = [];
 const rateIds: string[] = [];
 const orphanSubscriptionIds: string[] = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test-mover-fee-authority');
+/** [F2] The rise a path held for the 14-day notice (billing/fee-rise-notice.ts), or null. */
+const heldRiseOf = async (subscriptionId: string) => {
+  const row = await app.prisma.platformConfig.findUnique({ where: { key: feeRiseKey(subscriptionId) } });
+  return row ? readHeldFeeRise(row.value) : null;
+};
 let app: FastifyInstance;
 let billing: BillingService;
 let subscriptions: SubscriptionService;
@@ -126,6 +132,8 @@ afterAll(async () => {
     ] }, select: { id: true } });
     orphanSubscriptionIds.push(...originals.map((s) => s.id));
     await cleanupPayerBillingClocks(app.prisma, ids);
+    await app.prisma.platformConfig.deleteMany({ where: { key: { in: orphanSubscriptionIds.map(feeRiseKey) } } });
+    await purgeAuditLogs(app.prisma, { entity: 'Subscription', entityId: { in: orphanSubscriptionIds }, action: { startsWith: 'BILLING_FEE_RISE_' } }, 'test-mover-fee-authority-cleanup');
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: orphanSubscriptionIds } } });
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: ids } } });
@@ -184,6 +192,8 @@ describe('one mover fee across actual role surfaces', () => {
       expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: rider.id } })).weeklyRate)).toBe(riderRate);
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } })).toBe(0);
       expect((await resolveMoverFeeAuthority(app.prisma, f))?.feeType).toBe('TAXI_DRIVER');
+      // [F2] Held for the 14-day notice, not dropped: the payer is told 8,000 and its date before it applies.
+      expect(await heldRiseOf(rider.id)).toMatchObject({ from: riderRate, to: 8000, source: 'TAXI_ACTIVATION', noticeAt: null, appliesFrom: null });
     });
   });
 
@@ -197,6 +207,7 @@ describe('one mover fee across actual role surfaces', () => {
       expect(Number(after.weeklyRate)).toBe(8000);
       const change = await app.prisma.billingEvent.findMany({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } });
       expect(change.map((e) => [Number(e.amount), e.idempotencyKey.endsWith(':9000->8000')])).toEqual([[8000, true]]);
+      expect(await heldRiseOf(rider.id)).toBeNull(); // a cut needs no notice: nothing is held
     });
   });
 
@@ -435,6 +446,9 @@ describe('bounded finance decision with original money retained', () => {
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, type: 'TIER_CHANGE' } })).toBe(0);
       const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } });
       expect(audit.changes).toMatchObject({ futureRate: { before: 6000, after: 6000, heldRise: 8000, heldUntil: 'FEE_CHANGE_NOTICE_14_DAYS' } });
+      // [F2] The held rise has its reader: recorded for the 14-day notice, untold, applying to nothing yet.
+      expect(await heldRiseOf(f.rider.id)).toMatchObject({ from: 6000, to: 8000, source: 'MOVER_FEE_RESOLVED', noticeAt: null, appliesFrom: null });
+      expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: f.rider.id, action: 'BILLING_FEE_RISE_HELD' } })).toBe(1);
     });
     for (const role of ['rider', 'driver']) {
       const screen = await call(f.token, 'GET', `${role}/subscription`);
