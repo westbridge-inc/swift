@@ -12,6 +12,7 @@ import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
+import { StoreLiveFeed } from '@/components/store-live-feed';
 
 /** The business console's places. The items tab is named like the app, by the
  *  store's type: Menu, Inventory, Products or Services (lib/catalogue-name). */
@@ -136,7 +137,10 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
   const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType)), [selected?.vendorType]);
 
-  return (
+  // [PERF row 8] The store's live feed, for a store the server listed for this account.
+  const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;
+  return (<>
+    {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
       switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
@@ -155,7 +159,7 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
         </p>
       )}
     </ConsoleShell>
-  );
+  </>);
 }
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {

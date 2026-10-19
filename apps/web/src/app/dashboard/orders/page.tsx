@@ -8,6 +8,7 @@ import NewOrderTakeover from '@/components/NewOrderTakeover';
 import { mmgDisputePaused, MMG_DISPUTE_NOTICE } from '@/lib/mmg-dispute';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
 import { BusinessStatus } from '@/components/business-status';
 import { DataUnavailable } from '@/components/data-unavailable';
@@ -229,7 +230,9 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
 function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
-  const order = useQuery({ queryKey: storeKey(storeId, 'order', id), queryFn: () => getOrder(id), refetchInterval: 10_000 });
+  // [PERF row 8] The store's live feed re-reads this order on its events; the poll is the fallback.
+  const orderPoll = useFeedPollInterval(storeId, 10_000, 30_000);
+  const order = useQuery({ queryKey: storeKey(storeId, 'order', id), queryFn: () => getOrder(id), refetchInterval: orderPoll });
   const [prepTime, setPrepTime] = useState(20);
   const [pickupCode, setPickupCode] = useState('');
   // [W-25] The store's attestation carries the provider reference from its own
@@ -610,11 +613,13 @@ export default function OrdersPage() {
     else if (!event.shiftKey && (document.activeElement === last || !dialog.current.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
   };
 
-  // One poll feeds every lane — the queue is the live surface, keep it fresh.
+  // One read feeds every lane. The store's live feed re-reads it on every
+  // order event (PERF row 8); the poll is the fallback, slower only while live.
+  const ordersPoll = useFeedPollInterval(storeId, 10_000, 30_000);
   const orders = useQuery({
     queryKey: storeKey(storeId, 'orders'),
     queryFn: () => getOrders({ limit: 100 }),
-    refetchInterval: 10_000,
+    refetchInterval: ordersPoll,
   });
 
   const all = useMemo(() => orders.data?.orders ?? [], [orders.data]);
