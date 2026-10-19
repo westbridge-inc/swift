@@ -35,6 +35,7 @@ import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone } from './helpers/fixture-ids';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import {
   OWNER_WALL_NOTICE_ACTIONS, insertNoticeFor, noticeId, pendingStaffInvitesOf, publicPhoneAsked, staffInviteesOf, upsertNoticeFor,
@@ -169,7 +170,7 @@ afterAll(async () => {
       await owner.notification.deleteMany({ where: { userId: { in: users } } });
       await owner.deviceToken.deleteMany({ where: { userId: { in: users } } });
       await owner.session.deleteMany({ where: { userId: { in: users } } });
-      await owner.auditLog.deleteMany({ where: { userId: { in: users } } }).catch(() => undefined);
+      await purgeFixtureAuditTrail(owner, users, 'owner-wall-notifications');
       if (ids.vendor) await owner.vendor.deleteMany({ where: { id: ids.vendor } }).catch(() => undefined);
       if (ids.vendorOwner) await owner.vendorOwner.deleteMany({ where: { id: ids.vendorOwner } }).catch(() => undefined);
       await owner.user.deleteMany({ where: { id: { in: users } } }).catch(() => undefined);
