@@ -1,4 +1,5 @@
 import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { batchClock } from '../../utils/batch-clock';
 import { lockFeePaymentDecision } from './fee-payment-authority';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
@@ -749,6 +750,9 @@ export class MmgCheckoutService {
    *  earlier credit carries its provider identity [F2], then expire the
    *  checkouts no reply ever came for, and look again at every one that is due. */
   async pollIntents(now: Date = new Date()): Promise<{ expired: number; checked: number }> {
+    // [REVIEW-M #1832 S3-1] Each checkout is expired, verified and credited at the poll's clock moved on
+    // by the real time the poll has taken (utils/batch-clock.ts), never at its start instant.
+    const clock = batchClock(now);
     return runAsSystem('mmg-checkout-poll', async () => {
       const out = { expired: 0, checked: 0 };
       try {
@@ -774,7 +778,7 @@ export class MmgCheckoutService {
         select: { id: true },
         take: POLL_BATCH,
       });
-      for (const row of stale) if (await this.expireUnanswered(row.id, now)) out.expired += 1;
+      for (const row of stale) if (await this.expireUnanswered(row.id, clock())) out.expired += 1;
       const due = await this.prisma.mmgCheckoutIntent.findMany({
         where: { status: { in: ['CONFIRMING', 'EXPIRED', 'NOT_PAID'] }, nextCheckAt: { lte: now } },
         orderBy: { nextCheckAt: 'asc' },
@@ -783,14 +787,14 @@ export class MmgCheckoutService {
       });
       for (const row of due) {
         try {
-          await this.verify(row.id, now);
+          await this.verify(row.id, clock());
           out.checked += 1;
         } catch (err) {
           log().error({ err, checkoutId: row.id }, '[MMG checkout] verification failed; it stays due and is retried');
         }
       }
       try {
-        await this.reconcileUnappliedPages(now);
+        await this.reconcileUnappliedPages(clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the unapplied-payment page reconcile failed; it is retried on the next poll');
       }
@@ -799,7 +803,7 @@ export class MmgCheckoutService {
       // [review S2-1] Always run (two small bounded reads when idle): a return
       // closed as "not returned" is watched for a week even when nothing is open.
       try {
-        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);
+        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the fee-reversal sweep failed; it is retried on the next poll');
       }
