@@ -35,7 +35,7 @@ export interface TaxiRates {
   /** [TAXI waiting charge] What one FULL block of waiting costs (whole units), and
    *  how long a block is. Optional: a payload that names neither (every config
    *  written before the waiting charge) waits on the declared defaults,
-   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (500 per 10 minutes),
+   *  TAXI_WAITING_DEFAULTS in modules/rides/taxi-waiting.ts (300 per 10 minutes),
    *  so no stored payload changes and no version is minted by their arrival. */
   waitingChargePerBlock?: number; waitingBlockMinutes?: number;
 }

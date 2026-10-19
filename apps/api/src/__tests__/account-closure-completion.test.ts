@@ -17,6 +17,7 @@ import { VerificationService } from '../modules/verification/verification.servic
 import { runWithoutTenant, runWithTenant } from '../plugins/tenant-context';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [DELETION-INTEGRITY] A business or advertiser closure request is completed.
@@ -137,7 +138,7 @@ describe('[DELETION-INTEGRITY] support completes an in-app closure request', () 
     expect(await app.prisma.session.count({ where: { userId: b.userId } })).toBe(1);
     expect(await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).toMatchObject({ status: 'OPEN', resolvedAt: null });
 
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'DELIVERED' } });
+    await walkOrderStatus(app.prisma, order.id, 'DELIVERED');
     const retried = await complete(b.ticketId);
     expect(retried.statusCode, retried.payload).toBe(200);
     expect(await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: b.ticketId } })).toMatchObject({ status: 'RESOLVED' });

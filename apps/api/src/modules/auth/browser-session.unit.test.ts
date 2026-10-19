@@ -8,6 +8,7 @@ import {
   SIGNUP_CONTINUATION_COOKIE,
   clearSignupContinuationCookie,
   carriesOwnSessionCookie,
+  browserClientOf,
   sessionCookieNamesFor,
   resetBrowserOriginsForTests,
   setSessionCookies,
@@ -152,12 +153,14 @@ describe('browser signup continuation', () => {
 });
 
 describe('the browse gate and the cookie names agree on what a session cookie is', () => {
-  const PROD = { NODE_ENV: 'production' };
-  const req = (client?: string) => ({ headers: client ? { 'x-swift-client': client } : {} }) as unknown as FastifyRequest;
+  // production serves the console from ADMIN_HOST; a request names admin-web only from that origin
+  const PROD = { NODE_ENV: 'production', ADMIN_HOST: 'admin.swift.example' };
+  const originFor = (client?: string) => (client === 'admin-web' ? { origin: 'https://admin.swift.example' } : {});
+  const req = (client?: string) => ({ headers: client ? { 'x-swift-client': client, ...originFor(client) } : {} }) as unknown as FastifyRequest;
 
   it('only the request\'s OWN pair is a session to authenticate: the console\'s __Host- pair for the console, the plain pair for the website and natives', () => {
     const withCookie = (client: string | undefined, cookie: string) =>
-      ({ headers: { ...(client ? { 'x-swift-client': client } : {}), cookie } }) as unknown as FastifyRequest;
+      ({ headers: { ...(client ? { 'x-swift-client': client, ...originFor(client) } : {}), cookie } }) as unknown as FastifyRequest;
     expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_at=a'), PROD)).toBe(true);
     expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_rt=r'), PROD)).toBe(true);
     expect(carriesOwnSessionCookie(withCookie('admin-web', 'swift_at=a; swift_rt=r'), PROD)).toBe(false);
@@ -172,5 +175,26 @@ describe('the browse gate and the cookie names agree on what a session cookie is
     expect(sessionCookieNamesFor(req('web'), PROD)).toEqual({ access: 'swift_at', refresh: 'swift_rt', accessPath: '/api/v1', refreshPath: '/api/v1/auth' });
     expect(sessionCookieNamesFor(req(), PROD).access).toBe('swift_at');
     expect(sessionCookieNamesFor(req('admin-web'), { NODE_ENV: 'development', API_PUBLIC_URL: 'http://localhost:3000' }).access).toBe('swift_at');
+  });
+});
+
+describe('admin-web is a browser client only from the console\'s own origin', () => {
+  const req = (origin?: string, client = 'admin-web') =>
+    ({ headers: { 'x-swift-client': client, ...(origin ? { origin } : {}) } }) as unknown as FastifyRequest;
+
+  it('with ADMIN_HOST set: its https origin only (case-insensitive); the website, an http copy, a look-alike and no origin are not', () => {
+    const env = { NODE_ENV: 'production', ADMIN_HOST: 'Admin.Swift.Example' };
+    expect(browserClientOf(req('https://admin.swift.example'), env)).toBe('admin-web');
+    expect(browserClientOf(req('https://web.swift.example'), env)).toBeNull();
+    expect(browserClientOf(req('http://admin.swift.example'), env)).toBeNull();
+    expect(browserClientOf(req('https://admin.swift.example.evil.test'), env)).toBeNull();
+    expect(browserClientOf(req(undefined), env)).toBeNull();
+    expect(browserClientOf(req('https://web.swift.example', 'web'), env)).toBe('web');
+  });
+
+  it('production without ADMIN_HOST serves no console: admin-web is no browser client; other modes keep the CORS rule', () => {
+    expect(browserClientOf(req('https://admin.swift.example'), { NODE_ENV: 'production' })).toBeNull();
+    expect(browserClientOf(req('http://localhost:3001'), { NODE_ENV: 'development' })).toBe('admin-web');
+    expect(browserClientOf(req('http://localhost:3001'), { NODE_ENV: 'test' })).toBe('admin-web');
   });
 });
