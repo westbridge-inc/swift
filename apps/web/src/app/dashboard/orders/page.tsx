@@ -409,7 +409,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             <span>{row.minus && row.value !== null ? `-${money(row.value)}` : money(row.value)}</span>
           </div>
         ))}
-        <p className="pt-1 text-xs font-semibold text-[var(--swift-muted)]">{orderPaymentLine(o)}</p>
+        {orderPaymentLine(o) && <p className="pt-1 text-xs font-semibold text-[var(--swift-muted)]">{orderPaymentLine(o)}</p>}
       </section>
 
       {s === 'CANCELLED' && (

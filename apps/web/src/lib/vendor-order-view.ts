@@ -33,10 +33,12 @@ export function orderMoneyRows(o: VendorOrder): Array<{ label: string; value: nu
   return rows;
 }
 
-/** The line under the money card: how this order is paid. */
-export function orderPaymentLine(o: VendorOrder): string {
+/** The line under the money card: how this order is paid. A method with no
+ *  line of its own gets none: a card order must never read as cash. */
+export function orderPaymentLine(o: VendorOrder): string | null {
+  if (o.paymentMethod === 'CASH') return 'Cash on handover — you keep 100% of the goods total.';
   if (o.paymentMethod === 'MOBILE_MONEY') return 'MMG — the customer pays your store’s MMG account.';
-  return 'Cash on handover — you keep 100% of the goods total.';
+  return null;
 }
 
 /** The Customer card's lines: where the order goes (phone ContactCard lines). */
