@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient, type UserRole } from '@prisma/client';
+import type { UserRole } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { GuardianService } from '../modules/safety/guardian.service';
 import { computeActiveLegEta } from '../modules/dispatch/live-eta';
 import { getMapsProvider } from '../providers/maps/maps-provider';
+import { testPrismaClient } from './helpers/test-prisma-client';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 5/8] Safety across a ride's stops. Without this, a ride
@@ -27,7 +28,7 @@ import { getMapsProvider } from '../providers/maps/maps-provider';
 // A ride without stops is unchanged (safety-guardian-sweep, live-eta).
 // ---------------------------------------------------------------------------
 
-const prisma = new PrismaClient({ datasources: { db: { url: process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test' } } });
+const prisma = testPrismaClient();
 
 const emits: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
 const io = {
