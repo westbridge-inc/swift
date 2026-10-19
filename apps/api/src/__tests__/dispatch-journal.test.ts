@@ -248,7 +248,7 @@ describe('checkout delivery gate (§2, flag-gated)', () => {
     // Self-contained always-open vendor at the empty corner (no hours rows).
     const owner = await app.prisma.vendorOwner.create({ data: { userId: customerId } });
     ownerId = owner.id;
-    const marker = wordFreeTag(6);
+    const marker = wordFreeTag(8);
     const vendor = await app.prisma.vendor.create({
       data: {
         ownerId: owner.id,

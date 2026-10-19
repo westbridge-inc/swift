@@ -58,7 +58,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, firstName = 'In
 async function makeStore(ownerUserId: string) {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUserId } });
   vendorOwnerIds.push(vo.id);
-  const name = `Withdraw Bistro ${wordFreeTag(4)}`;
+  const name = `Withdraw Bistro ${wordFreeTag(8)}`;
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id, name, slug: `withdraw-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',

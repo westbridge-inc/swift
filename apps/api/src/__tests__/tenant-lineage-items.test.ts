@@ -79,7 +79,7 @@ afterAll(async () => {
 
 const item = (data: Prisma.ItemUncheckedCreateInput) => app.prisma.item.create({ data });
 const plate = (vendorId: string, categoryId: string, extra: Partial<Prisma.ItemUncheckedCreateInput> = {}): Prisma.ItemUncheckedCreateInput =>
-  ({ vendorId, categoryId, name: `Plate ${wordFreeTag(4)}`, basePrice: 1000, isAvailable: true, ...extra });
+  ({ vendorId, categoryId, name: `Plate ${wordFreeTag(8)}`, basePrice: 1000, isAvailable: true, ...extra });
 
 describe('[STA-1 §4 lineage] items and categories carry their tenant on the row', () => {
   it('both tables are in BOTH walls and are FORCED', async () => {

@@ -118,7 +118,7 @@ describe('the category feed', () => {
     });
     const merged = await app.prisma.discoveryCategory.create({
       data: {
-        tenantId: 'swift-default', slug: `feed-merged-${wordFreeTag(6)}`,
+        tenantId: 'swift-default', slug: `feed-merged-${wordFreeTag(8)}`,
         name: 'Old Wok', kind: 'CUISINE', vertical: 'FOOD', emoji: '🥡',
         aliases: [], status: 'MERGED', mergedIntoId: target.id,
       },

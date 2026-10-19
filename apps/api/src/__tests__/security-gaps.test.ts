@@ -25,7 +25,7 @@ let userId: string;
 let ownerUserId: string;
 let vendorId: string;
 let itemId: string;
-const marker = wordFreeTag(6);
+const marker = wordFreeTag(8);
 const createdOrderIds: string[] = [];
 const previousMasterKek = process.env['MASTER_KEK'];
 

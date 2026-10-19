@@ -41,7 +41,7 @@ async function makeVendorSub(
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Rev ${wordFreeTag(5)}`, slug: `rev-${nanoid(6)}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Rev ${wordFreeTag(8)}`, slug: `rev-${nanoid(6)}`, vendorType: 'RESTAURANT',
       phone: '+5920074800', addressLine1: '1 Rev St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
     },

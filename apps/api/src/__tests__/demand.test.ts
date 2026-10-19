@@ -30,7 +30,7 @@ let driverId: string;
 let riderId: string;
 let ownerId: string;
 let customerId: string;
-const marker = wordFreeTag(6);
+const marker = wordFreeTag(8);
 
 async function makeUser(roles: string[], activeRole: string) {
   const u = await app.prisma.user.create({

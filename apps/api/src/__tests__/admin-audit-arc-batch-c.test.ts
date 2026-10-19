@@ -50,7 +50,7 @@ async function sanSubscription() {
   const ownerUser = await person('VENDOR_OWNER', 'Own');
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `C Kitchen ${RUN} ${wordFreeTag(3)}`, slug: `arcc-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `C Kitchen ${RUN} ${wordFreeTag(8)}`, slug: `arcc-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: testPhone(), addressLine1: '3 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);

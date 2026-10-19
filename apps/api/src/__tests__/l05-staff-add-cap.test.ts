@@ -54,7 +54,7 @@ async function makeOwnerWithStore() {
   vendorOwnerIds.push(vo.id);
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Cap Bistro ${wordFreeTag(4)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Cap Bistro ${wordFreeTag(8)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
       phone: phone(), addressLine1: '6 Crew Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

@@ -23,7 +23,7 @@ let app: FastifyInstance;
 const userIds: string[] = [];
 const orderIds: string[] = [];
 const vendorIds: string[] = [];
-const MARK = wordFreeTag(6);
+const MARK = wordFreeTag(8);
 let seq = 0;
 const phoneBase = 592_760_000_000 + Math.floor(Math.random() * 9_000_000);
 

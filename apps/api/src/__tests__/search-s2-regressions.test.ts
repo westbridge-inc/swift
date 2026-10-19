@@ -27,7 +27,7 @@ import { wordFreeTag } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = wordFreeTag(6);
+const RUN = wordFreeTag(8);
 const TENANT = `s2-guest-${RUN}`;
 const NEEDLE = `hammer-${RUN}`;
 // Unique prefix, grep-proven: no other test file uses +5920052, and it is

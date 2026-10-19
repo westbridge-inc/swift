@@ -96,7 +96,7 @@ describe('onboarding review loop', () => {
     const result = await partners.becomePartner(founder.id, {
       role: 'VENDOR',
       business: {
-        name: `Review Loop Deli ${wordFreeTag(4)}`,
+        name: `Review Loop Deli ${wordFreeTag(8)}`,
         vendorType: 'RESTAURANT',
         phone: '+5926667777',
         addressLine1: '9 Queue Street',

@@ -17,7 +17,8 @@ import { wordFreeTag } from './helpers/fixture-ids';
 const CHECKED_FIELD = /\b(name|description|tags|cuisineTypes|slug|sectionName|substituteName|packageDescription|refundRule)\s*:\s*(`[^`]*`)/g;
 /** Rows whose names the checker never reads. */
 const UNCHECKED_MODELS = new Set(['tenant', 'adCampaign', 'adPlacement', 'zone', 'customer', 'reviewSession', 'deviceToken', 'user']);
-const RANDOM = '(?:nanoid|fixtureTag)';
+/** Random draws that can hold letters: nanoid/fixtureTag, base-36/hex strings, UUIDs (short hex like 'cbd' is a hit too). */
+const RANDOM = '(?:nanoid\\(|fixtureTag\\(|randomUUID\\(|Math\\.random\\(\\)\\.toString\\(|randomBytes\\([^)]*\\)\\.toString\\(|Date\\.now\\(\\)\\.toString\\(36)';
 const MODEL = /\.(\w+)\.(?:create|upsert|createMany|update|updateMany)\(|\b(vendors|items|optionGroups|options|category|menuCategories|categories|vendor|item)\s*:\s*\{\s*(?:create|connectOrCreate)/g;
 
 function testFiles(dir: string): string[] {
@@ -31,7 +32,7 @@ function testFiles(dir: string): string[] {
 /** Every checked name in a file built from random letters: `file:line field template`. */
 export function randomCheckedNames(file: string, source: string): string[] {
   const lines = source.split('\n');
-  const randomVars = [...source.matchAll(new RegExp(`(?:const|let)\\s+(\\w+)\\s*=\\s*(?:String\\()?(?:${RANDOM}\\(|\`[^\`]*\\$\\{${RANDOM}\\()`, 'g'))].map((m) => m[1]!);
+  const randomVars = [...source.matchAll(new RegExp(`(?:const|let)\\s+(\\w+)\\s*=\\s*(?:String\\()?(?:${RANDOM}|\`[^\`]*\\$\\{[^}]*${RANDOM})`, 'g'))].map((m) => m[1]!);
   const found: string[] = [];
   lines.forEach((line, i) => {
     for (const m of line.matchAll(CHECKED_FIELD)) {
@@ -42,12 +43,12 @@ export function randomCheckedNames(file: string, source: string): string[] {
         if (hits.length) { model = hits[hits.length - 1]![1] ?? hits[hits.length - 1]![2]!; break; }
       }
       if (UNCHECKED_MODELS.has(model) || (field === 'slug' && model !== 'discoveryCategory')) continue;
-      const direct = new RegExp(`\\$\\{${RANDOM}\\(`).test(template!);
+      const direct = new RegExp(`\\$\\{[^}]*${RANDOM}`).test(template!);
       const viaVar = randomVars.filter((v) => new RegExp(`\\$\\{${v}\\b`).test(template!));
       if (direct || viaVar.length) found.push(`${file}:${i + 1} ${field}@${model} ${template!.slice(0, 60)}`);
     }
     // A name held in a variable first: `const name = \`Shop ${nanoid(4)}\``.
-    const held = new RegExp(`(?:const|let)\\s+(name|description)\\s*=\\s*\`[^\`]*\\$\\{${RANDOM}\\(`).exec(line);
+    const held = new RegExp(`(?:const|let)\\s+(name|description)\\s*=\\s*\`[^\`]*\\$\\{[^}]*${RANDOM}`).exec(line);
     if (held) found.push(`${file}:${i + 1} ${held[1]} (held) ${line.trim().slice(0, 60)}`);
   });
   return found;
@@ -70,12 +71,14 @@ describe('no API test builds a checked name from random letters', () => {
     expect(randomCheckedNames('x.ts', "await prisma.item.create({ data: { name: `Sub ${nanoid(6)}` } });")).toHaveLength(1);
     expect(randomCheckedNames('x.ts', "const RUN = nanoid(6);\nawait prisma.vendor.create({ data: { name: `Shop ${RUN}` } });")).toHaveLength(1);
     expect(randomCheckedNames('x.ts', "const name = `Gone ${fixtureTag(8)}`;")).toHaveLength(1);
+    expect(randomCheckedNames('x.ts', "const RUN = Math.random().toString(36).slice(2, 8);\nawait prisma.item.create({ data: { name: `Dish ${RUN}` } });")).toHaveLength(1);
+    expect(randomCheckedNames('x.ts', "await prisma.vendor.create({ data: { name: `Shop ${randomBytes(3).toString('hex')}` } });")).toHaveLength(1);
     expect(randomCheckedNames('x.ts', "await prisma.tenant.create({ data: { name: `T ${nanoid(6)}` } });")).toEqual([]);
     expect(randomCheckedNames('x.ts', "await prisma.vendor.create({ data: { slug: `s-${nanoid(6)}` } });")).toEqual([]);
   });
 
   it('a wordFreeTag() name is always clear at the real checker; a random-letter one is not', () => {
-    const tagged = Array.from({ length: 20_000 }, () => `Sub ${wordFreeTag(6)}`);
+    const tagged = Array.from({ length: 20_000 }, () => `Sub ${wordFreeTag(8)}`);
     expect(tagged.filter((name) => !clear(name))).toEqual([]);
     expect(clear('Sub rumVg5')).toBe(false); // a real nanoid(6) draw
     const drawn = Array.from({ length: 50_000 }, () => `Sub ${nanoid(6)}`);

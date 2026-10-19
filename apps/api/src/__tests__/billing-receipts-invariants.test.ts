@@ -95,7 +95,7 @@ describe('scenario R — gapless sequential receipts', () => {
   });
 
   it('[security review: csv-formula-injection] a vendor name, channel or reference shaped like a formula reaches the journal as text', async () => {
-    const name = `=HYPERLINK("http://evil.example/${wordFreeTag(6)}","open")`;
+    const name = `=HYPERLINK("http://evil.example/${wordFreeTag(8)}","open")`;
     const { sub } = await makeVendorSub({}, name);
     const e = await topupEvent(sub.id, 2100);
     const { receiptNumber } = await issueReceipt(prisma, { subscriptionId: sub.id, billingEventId: e.id, amount: 2100, channel: '@SUM(A1)', mmgRef: '+1+1', tenantId: TENANT });

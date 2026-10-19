@@ -55,7 +55,7 @@ async function makeVendorFor(userId: string) {
   const vendor = await prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Integrity Vendor ${seq}-${wordFreeTag(4)}`, slug: `integrity-${nanoid(8).toLowerCase()}`,
+      name: `Integrity Vendor ${seq}-${wordFreeTag(8)}`, slug: `integrity-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 500_000 + seq}`,
       addressLine1: '1 Test Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,

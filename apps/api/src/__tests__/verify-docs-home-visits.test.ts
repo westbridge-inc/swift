@@ -34,7 +34,7 @@ import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { wordFreeTag } from './helpers/fixture-ids';
 
 const DAY = 86_400_000;
-const RUN = wordFreeTag(6);
+const RUN = wordFreeTag(8);
 const phoneBase = 592_006_400_000 + Math.floor(Math.random() * 90_000);
 let app: FastifyInstance;
 let service: VerificationService;

@@ -64,7 +64,7 @@ async function makeVendor(userId: string, over: { status?: 'ACTIVE' | 'SUSPENDED
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Qr Vendor ${seq}-${wordFreeTag(4)}`,
+      name: `Qr Vendor ${seq}-${wordFreeTag(8)}`,
       slug: `qr-vendor-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT',
       phone: `+${phoneBase + 500_000 + seq}`,

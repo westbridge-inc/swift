@@ -97,7 +97,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id,
-      name: `File Foods ${wordFreeTag(4)}`,
+      name: `File Foods ${wordFreeTag(8)}`,
       slug: `file-foods-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920036900',

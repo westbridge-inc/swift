@@ -13,7 +13,7 @@ import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const marker = `pubsf${wordFreeTag(4)}`;
+const marker = `pubsf${wordFreeTag(8)}`;
 let liveSlug: string;
 let hiddenSlug: string;
 let liveVendorId: string;
@@ -23,7 +23,7 @@ let ownerId: string;
 let userId: string;
 
 async function makeVendor(overrides: Record<string, unknown>) {
-  const suffix = wordFreeTag(6).toLowerCase();
+  const suffix = wordFreeTag(8).toLowerCase();
   const v = await app.prisma.vendor.create({
     data: {
       ownerId,

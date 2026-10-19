@@ -20,7 +20,7 @@ import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 let token: string;
-const marker = `pvdraft${wordFreeTag(4)}`;
+const marker = `pvdraft${wordFreeTag(8)}`;
 let pendingVendorId: string;
 let pendingSlug: string;
 let suspendedVendorId: string;
@@ -29,7 +29,7 @@ let ownerId: string;
 const vendorIds: string[] = [];
 
 async function makeVendor(overrides: Record<string, unknown>) {
-  const suffix = wordFreeTag(6).toLowerCase();
+  const suffix = wordFreeTag(8).toLowerCase();
   const v = await app.prisma.vendor.create({
     data: {
       ownerId,

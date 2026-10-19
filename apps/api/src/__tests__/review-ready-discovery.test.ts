@@ -150,7 +150,7 @@ beforeAll(async () => {
     update: { value: true },
   });
   const dc = await app.prisma.discoveryCategory.create({
-    data: { tenantId, slug: `rr-cat-${wordFreeTag(5)}`, name: 'Ready Food', kind: 'CUISINE', vertical: 'FOOD', emoji: '🍲', aliases: [] },
+    data: { tenantId, slug: `rr-cat-${wordFreeTag(8)}`, name: 'Ready Food', kind: 'CUISINE', vertical: 'FOOD', emoji: '🍲', aliases: [] },
   });
   discoveryCategoryId = dc.id;
   await app.prisma.vendorDiscoveryCategory.create({

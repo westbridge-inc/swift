@@ -25,7 +25,7 @@ import { wordFreeTag } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 let token: string;
-const NEEDLE = `svisneedle${wordFreeTag(6)}`;
+const NEEDLE = `svisneedle${wordFreeTag(8)}`;
 
 const createdUserIds: string[] = [];
 const createdVendorIds: string[] = [];

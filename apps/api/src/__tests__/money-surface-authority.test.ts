@@ -29,7 +29,7 @@ import { wordFreeTag } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = wordFreeTag(6);
+const RUN = wordFreeTag(8);
 const OLD_LINK = `https://pay.mmg.gy/store-old-${RUN}`;
 const NEW_LINK = `https://pay.mmg.gy/store-new-${RUN}`;
 const NEWER_LINK = `https://pay.mmg.gy/store-newer-${RUN}`;

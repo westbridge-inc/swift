@@ -20,7 +20,7 @@ import { wordFreeTag } from './helpers/fixture-ids';
 let app: FastifyInstance;
 let adminToken: string;
 const userIds: string[] = [];
-const marker = `zqx${wordFreeTag(4)}`;
+const marker = `zqx${wordFreeTag(8)}`;
 
 async function buildTestApp() {
   const server = Fastify({ logger: false });

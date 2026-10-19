@@ -97,7 +97,7 @@ beforeAll(async () => {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Capacity Diner ${wordFreeTag(4)}`, slug: `capacity-${nanoid(6)}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Capacity Diner ${wordFreeTag(8)}`, slug: `capacity-${nanoid(6)}`, vendorType: 'RESTAURANT',
       phone: '+5920071900', addressLine1: '2 Kitchen St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.801, longitude: -58.156, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

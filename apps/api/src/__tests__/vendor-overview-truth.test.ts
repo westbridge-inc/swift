@@ -57,7 +57,7 @@ beforeAll(async () => {
   await app.prisma.session.create({ data: { userId: owner.id, token, refreshToken: nanoid(48), deviceId: 'ovt', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
   const vendor = await app.prisma.vendor.create({
-    data: { ownerId: vo.id, name: `OvT ${wordFreeTag(5)}`, slug: `ovt-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: '+5920074701', addressLine1: '1 OvT St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true },
+    data: { ownerId: vo.id, name: `OvT ${wordFreeTag(8)}`, slug: `ovt-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: '+5920074701', addressLine1: '1 OvT St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', isVerified: true },
   });
   vendorId = vendor.id;
   const cust = await app.prisma.user.create({

@@ -110,7 +110,7 @@ async function freshVendor() {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } });
   ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `B4 Kitchen ${RUN} ${wordFreeTag(3)}`, slug: `b4-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `B4 Kitchen ${RUN} ${wordFreeTag(8)}`, slug: `b4-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: testPhone(), addressLine1: '1 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);

@@ -615,7 +615,7 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
     expect((await inject('PUT', `/api/v1/vendor/categories/${category.id}`, { name: 'Back again' }, vendorToken)).statusCode).toBe(404);
     expect((await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken)).statusCode).toBe(404);
     expect((await inject('POST', '/api/v1/vendor/items', { categoryId: category.id, name: 'Into the archive', basePrice: 100 }, vendorToken)).statusCode).toBe(404);
-    const live = await app.prisma.category.create({ data: { vendorId, name: `Live ${wordFreeTag(6)}` } });
+    const live = await app.prisma.category.create({ data: { vendorId, name: `Live ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: live.id, name: 'Mover fixture', basePrice: 100 } });
     expect((await inject('PUT', `/api/v1/vendor/items/${item.id}`, { categoryId: category.id }, vendorToken)).statusCode).toBe(404);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).categoryId).toBe(live.id);

@@ -29,7 +29,7 @@ import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = wordFreeTag(6);
+const RUN = wordFreeTag(8);
 const userIds: string[] = [];
 let token = '';
 
