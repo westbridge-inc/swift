@@ -193,7 +193,21 @@ function harness() {
   // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
   // and an unclaimed upload is kept while the person is under a legal hold (none here).
   db.livenessCheck.findMany = vi.fn(async () => []);
-  db.docLegalHold = { count: vi.fn(async () => 0) };
+  db.docLegalHold = { count: vi.fn(async () => 0), findFirst: vi.fn(async () => null) };
+  // [erasure covers every person table] The owed rows, cards, profiles, case text and safety records the
+  // erasure now covers (erasure-coverage.ts): none exist for these subjects.
+  for (const name of ['notification', 'moneySurfaceCommand', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin', 'cardSession', 'sosRetrigger', 'evidenceItem']) {
+    db[name] = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  }
+  for (const name of ['checkoutReceipt', 'strike', 'enforcementAction', 'supportTicket', 'complianceViolation', 'complianceReviewCase', 'rectificationRequest',
+    'contentReport', 'ratingReport', 'sosAlert', 'tripSafetySession', 'fraudCase', 'custodyRecoveryCase']) {
+    db[name] = { updateMany: vi.fn(async () => ({ count: 0 })) };
+  }
+  for (const name of ['rider', 'driver', 'serviceProvider']) db[name].updateMany = vi.fn(async () => ({ count: 0 }));
+  db.customer = { findUnique: vi.fn(async () => null) };
+  db.paymentInstrument = { findMany: vi.fn(async () => []) };
+  db.safetyDeletionHold = { findFirst: vi.fn(async () => null) };
+  db.incidentCase = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
   // The synthetic route session is not a fresh code sign-in, so deletion
   // falls through to the step-up grant the route harness holds in Redis.
   db.session.findUnique = vi.fn(async () => null);
@@ -826,7 +840,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     h.db.serviceProvider.updateMany = vi.fn(async () => ({ count: 0 }));
     for (const name of ['order', 'serviceJob']) h.db[name] = { count: vi.fn(async () => 0) };
-    for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []) };
+    for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
     h.db.platformConfig = { upsert: vi.fn() };
     const matches = (doc: any, where: any): boolean => Object.entries(where ?? {}).every(([field, value]: [string, any]) => {
       if (field === 'OR') return value.some((clause: any) => matches(doc, clause));
@@ -1186,6 +1200,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.safetyDeletionHold = {
       findUnique: vi.fn(async () => null),
       create: vi.fn(async ({ data }: any) => ({ id: 'synthetic-hold', ...data })),
+      // The erasure's later passes read the hold it just opened (safety check-in deliveries and safety records stay).
+      findFirst: vi.fn(async () => (h.db.safetyDeletionHold.create.mock.calls.length ? { id: 'synthetic-hold' } : null)),
     };
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: true, status: 'PENDING_SAFETY_HOLD', holdId: 'synthetic-hold' });
     const sealed = h.db.safetyDeletionHold.create.mock.calls[0][0].data;
@@ -1246,7 +1262,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox', 'notification', 'moneySurfaceCommand', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

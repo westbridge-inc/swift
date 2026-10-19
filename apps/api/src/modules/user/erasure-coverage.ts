@@ -49,21 +49,22 @@ export async function eraseOwedRowsInTransaction(tx: Prisma.TransactionClient, u
  * erasure exception. A card session that moved no money goes; one that is payment evidence stays.
  */
 export async function retireCardsAndSessions(db: PrismaClient, userId: string): Promise<{ revoked: number; sessionsDeleted: number }> {
-  const { closeUnsentCardIntents } = await import('../billing/billing.service');
-  const { lockSubscriptionPayer } = await import('../subscription/mover-fee-authority');
   const active = await db.paymentInstrument.findMany({ where: { userId, status: 'ACTIVE' }, select: { id: true, subscriptionId: true } });
   let revoked = 0;
+  // Loaded only when there is a card to revoke (the billing modules are not part of every erasure).
+  const { closeUnsentCardIntents } = active.length ? await import('../billing/billing.service') : { closeUnsentCardIntents: null };
+  const { lockSubscriptionPayer } = active.length ? await import('../subscription/mover-fee-authority') : { lockSubscriptionPayer: null };
   for (const card of active) {
     revoked += await db.$transaction(async (tx) => {
       // payer -> subscription -> card: the order a charge's authorization and handoff take (card-rail.service).
-      await lockSubscriptionPayer(tx, card.subscriptionId);
+      await lockSubscriptionPayer!(tx, card.subscriptionId);
       await tx.$queryRaw`SELECT "id" FROM "payment_instruments" WHERE "id" = ${card.id} FOR UPDATE`;
       const now = new Date();
       const out = await tx.paymentInstrument.updateMany({
         where: { id: card.id, userId, status: 'ACTIVE' }, data: { status: 'REVOKED', revokedAt: now, revokedBy: userId },
       });
       if (out.count !== 1) return 0;
-      const unsent = await closeUnsentCardIntents(tx, { instrumentId: card.id }, 'CARD_OUT_OF_SERVICE', now);
+      const unsent = await closeUnsentCardIntents!(tx, { instrumentId: card.id }, 'CARD_OUT_OF_SERVICE', now);
       await tx.auditLog.create({ data: {
         userId, action: 'CARD_REVOKED_ACCOUNT_DELETED', entity: 'PaymentInstrument', entityId: card.id,
         changes: { subscriptionId: card.subscriptionId, status: 'REVOKED', unsentChargesClosed: unsent },
