@@ -29,6 +29,8 @@ const orderIds: string[] = [];
 let seq = 0;
 const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 100_000_000);
 const T = 'swift-default';
+/** Every incident case this suite makes carries it, so the cleanup finds them all (some are about a synthetic other person). */
+const CASE_PREFIX = 'IC-COV';
 const soon = () => new Date(Date.now() + 86_400_000);
 
 async function person(roles: UserRole[] = ['CUSTOMER']) {
@@ -96,6 +98,12 @@ afterAll(async () => {
   ] }, select: { id: true } });
   await quiet(cleanupPayerBillingClocks(app.prisma, userIds));
   const mine = { userId: { in: userIds } };
+  // No held case without a hold row may outlive this suite: it would freeze evidence retention (scanLegalHolds) for
+  // every later suite on the same database. Bundles first, then the cases (released first, in case one cannot go).
+  const caseIds = (await app.prisma.incidentCase.findMany({ where: { caseNumber: { startsWith: CASE_PREFIX } }, select: { id: true } })).map((c) => c.id);
+  await quiet(app.prisma.evidenceBundle.deleteMany({ where: { caseId: { in: caseIds }, sealedAt: null } }));
+  await quiet(app.prisma.incidentCase.updateMany({ where: { id: { in: caseIds } }, data: { legalHold: false } }));
+  await quiet(app.prisma.incidentCase.deleteMany({ where: { id: { in: caseIds } } }));
   for (const step of [
     () => app.prisma.supportTicket.deleteMany({ where: mine }), () => app.prisma.strike.deleteMany({ where: mine }),
     () => app.prisma.complianceViolation.deleteMany({ where: mine }), () => app.prisma.complianceReviewCase.deleteMany({ where: mine }),
@@ -272,7 +280,7 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
     const tripOrder = `ord-${nanoid(8)}`;
     const trip = await app.prisma.tripSafetySession.create({ data: { tenantId: T, orderId: tripOrder, orderType: 'TAXI', passengerUserId: u, driverUserId: `drv-${nanoid(6)}`, status: 'CLOSED', closedAt: new Date(),
       riskFactors: { night: true }, deviationState: { lat: 6.8, lng: -58.1 } } });
-    const kase = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S3', category: 'other', intake: 'OPS_CREATED',
+    const kase = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S3', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, orderId: 'ord-s', summary: 'What happened to her', details: { where: 'street' }, decisionNotes: 'Notes', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
     const bundle = await app.prisma.evidenceBundle.create({ data: { tenantId: T, bundleNumber: `EB-${nanoid(8)}`, caseId: kase.id, subjectUserId: u } });
     await app.prisma.evidenceItem.create({ data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: 'fix', content: { lat: 6.8 }, contentHash: 'h'.repeat(64) } });
@@ -295,9 +303,9 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
     const u = await person();
     const other = `other-${nanoid(6)}`;
     const sos = await app.prisma.sosAlert.create({ data: { tenantId: T, actorUserId: u, actorRole: 'CUSTOMER', status: 'RESOLVED', resolvedAt: new Date(), triggerLat: 6.8, triggerNote: 'Covered' } });
-    const held = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'OPS_CREATED',
+    const held = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, summary: 'Held summary', legalHold: true, slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
-    await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'SOS_RESOLUTION',
+    await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'SOS_RESOLUTION',
       subjectUserId: other, sosAlertId: sos.id, summary: 'About the SOS', legalHold: true, slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
     const trip = await app.prisma.tripSafetySession.create({ data: { tenantId: T, orderId: `ord-${nanoid(8)}`, orderType: 'TAXI', passengerUserId: u, driverUserId: other, status: 'CLOSED', closedAt: new Date(),
       escalatedToSosId: sos.id, riskFactors: { night: true } } });
@@ -309,9 +317,9 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
 
   it('an open case: the erasure opens a safety deletion hold, so every safety record stays whole', async () => {
     const u = await person();
-    const open = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'INVESTIGATING', severity: 'S2', category: 'other', intake: 'OPS_CREATED',
+    const open = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'INVESTIGATING', severity: 'S2', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, summary: 'Open summary', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
-    const closed = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S3', category: 'other', intake: 'OPS_CREATED',
+    const closed = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S3', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, summary: 'Closed while another is open', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
     await erase(u);
     const rows = await app.prisma.incidentCase.findMany({ where: { id: { in: [open.id, closed.id] } }, select: { summary: true }, orderBy: { summary: 'asc' } });
