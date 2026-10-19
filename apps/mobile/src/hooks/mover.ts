@@ -56,6 +56,7 @@ async function tryUnwrap<T = any>(p: Promise<any>): Promise<T | null> {
 }
 
 export type { MoverKind } from '../lib/moverLocation';
+import { boardPaused } from '../lib/moverBoard';
 
 /** [TAXI multi-stop] Has THIS server advertised rides with stops
  *  (GET /rides/capabilities, maxStops > 0)? Every failure is "no". */
@@ -278,13 +279,15 @@ export function useDemand<T = any>(kind: MoverKind | null, point?: { lat: number
   return pv ? PV.previewQuery(PV.PREVIEW_DEMAND) : q;
 }
 
-export function useAvailableJobs(kind: MoverKind | null, online: boolean) {
+/** The job board; it rests while a taxi driver is on a ride (lib/moverBoard). */
+export function useAvailableJobs(kind: MoverKind | null, online: boolean, onRide = false) {
   const pv = usePreview();
+  const open = online && !boardPaused(kind, onRide);
   const q = useQuery({
     queryKey: ['mover', 'available', kind],
     queryFn: () => unwrap(svc(kind as MoverKind).available()),
-    enabled: !!kind && online && !pv,
-    refetchInterval: () => online ? POLL.moverAvailable() : false,
+    enabled: !!kind && open && !pv,
+    refetchInterval: () => open ? POLL.moverAvailable() : false,
   });
   return pv ? PV.previewQuery(PV.PREVIEW_AVAILABLE) : q;
 }
