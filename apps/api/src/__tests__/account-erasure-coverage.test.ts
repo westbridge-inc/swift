@@ -291,15 +291,31 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
     expect([f.reasonCode, f.caseId, f.referral, f.linkedAccountIds]).toEqual(['DOC_FORGED', fraudCaseId, ERASED_TEXT, []]);
   });
 
-  it('a case still open, or one under a legal hold, stays whole', async () => {
+  it('a closed case under a legal hold stays whole, and so do the SOS it covers and the trip session escalated into that SOS', async () => {
     const u = await person();
+    const other = `other-${nanoid(6)}`;
+    const sos = await app.prisma.sosAlert.create({ data: { tenantId: T, actorUserId: u, actorRole: 'CUSTOMER', status: 'RESOLVED', resolvedAt: new Date(), triggerLat: 6.8, triggerNote: 'Covered' } });
     const held = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, summary: 'Held summary', legalHold: true, slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
+    await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'SOS_RESOLUTION',
+      subjectUserId: other, sosAlertId: sos.id, summary: 'About the SOS', legalHold: true, slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
+    const trip = await app.prisma.tripSafetySession.create({ data: { tenantId: T, orderId: `ord-${nanoid(8)}`, orderType: 'TAXI', passengerUserId: u, driverUserId: other, status: 'CLOSED', closedAt: new Date(),
+      escalatedToSosId: sos.id, riskFactors: { night: true } } });
+    await erase(u);
+    expect((await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: held.id } })).summary).toBe('Held summary');
+    expect((await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: sos.id } })).triggerNote).toBe('Covered');
+    expect((await app.prisma.tripSafetySession.findUniqueOrThrow({ where: { id: trip.id } })).riskFactors).toEqual({ night: true });
+  });
+
+  it('an open case: the erasure opens a safety deletion hold, so every safety record stays whole', async () => {
+    const u = await person();
     const open = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'INVESTIGATING', severity: 'S2', category: 'other', intake: 'OPS_CREATED',
       subjectUserId: u, summary: 'Open summary', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
+    const closed = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `IC-${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S3', category: 'other', intake: 'OPS_CREATED',
+      subjectUserId: u, summary: 'Closed while another is open', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
     await erase(u);
-    const rows = await app.prisma.incidentCase.findMany({ where: { id: { in: [held.id, open.id] } }, select: { summary: true }, orderBy: { summary: 'asc' } });
-    expect(rows.map((r) => r.summary)).toEqual(['Held summary', 'Open summary']);
+    const rows = await app.prisma.incidentCase.findMany({ where: { id: { in: [open.id, closed.id] } }, select: { summary: true }, orderBy: { summary: 'asc' } });
+    expect(rows.map((r) => r.summary)).toEqual(['Closed while another is open', 'Open summary']);
   });
 
   it('a hold is read inside the erasure transaction: a person under a legal hold keeps their safety records; after release the re-sweep de-identifies them', async () => {
@@ -352,6 +368,18 @@ describe('[#1879 S3-3 · REVIEW-G R1] no activation write for an erased account'
     await erase(u);
     await expect(new SubscriptionService(app.prisma).startTrialForVendor(v.id)).rejects.toMatchObject({ code: 'ACCOUNT_CLOSED' });
     expect(await app.prisma.subscription.count({ where: { vendorId: v.id } })).toBe(0);
+  });
+
+  it("an erased owner's stores are projected nothing (no flags, no promotion, no trial)", async () => {
+    const u = await person();
+    await store(u);
+    await erase(u);
+    const svc = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), getKycProvider());
+    const checklist = vi.spyOn(VerificationService.prototype as never, 'isRoleVerified' as never) as unknown as { mock: { calls: unknown[][] }; mockRestore(): void };
+    try {
+      await (svc as unknown as { projectVendorActivation: (db: unknown, userId: string) => Promise<void> }).projectVendorActivation(app.prisma, u);
+      expect(checklist.mock.calls.length).toBe(0);
+    } finally { checklist.mockRestore(); }
   });
 
   it('an erasure that starts while a store activation holds the person waits for it, then winds the new trial down', async () => {
