@@ -8,6 +8,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, space } from '@swift/ui';
 import { useLocationStore } from '../../../stores/locationStore';
+import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { CircleChip, PillButton, T } from '../../../kit';
 
 // Center-pin map picker: pan the map, the fixed pin marks the spot, Confirm
@@ -25,15 +26,21 @@ export function LocationPickerScreen() {
   // pin: without a real fix (param or device), Confirm stays off until the
   // user has actually placed the pin themselves — an invented coordinate
   // must not become a durable delivery address.
-  const hasRealFix = !!initial || (latitude != null && longitude != null);
+  // [PINS · row 107] "Device" means a LIVE fix (permission granted). The
+  // store also keeps where the phone LAST was; the map may open there, but
+  // like the city centre it is only a place to start looking.
+  const [hasRealFix] = useState(() => !!initial || grantedLocationFix(latitude, longitude, locationStatus) !== null);
+  const [lastKnownStart] = useState(() => !initial && latitude != null && longitude != null);
   const [touched, setTouched] = useState(false);
 
-  const start: Region = {
+  // Fixed at mount: a location update while the user pans must not move the
+  // start the "moved" check is measured from.
+  const [start] = useState<Region>(() => ({
     latitude: initial?.latitude ?? latitude ?? 6.8013,
     longitude: initial?.longitude ?? longitude ?? -58.1551, // Georgetown fallback (view only)
     latitudeDelta: 0.01,
     longitudeDelta: 0.01,
-  };
+  }));
   const [region, setRegion] = useState<Region>(start);
   const mapRef = useRef<MapView>(null);
   const confirmable = hasRealFix || touched;
@@ -121,7 +128,9 @@ export function LocationPickerScreen() {
             }}
           >
             <T variant="caption" tone="muted" center>
-              This is a city-centre starting point — move the map to your spot first.
+              {lastKnownStart
+                ? 'This is where your phone last was, not where it is now — move the map to your spot first.'
+                : 'This is a city-centre starting point — move the map to your spot first.'}
             </T>
           </View>
         ) : null}

@@ -19,7 +19,9 @@ export interface Cart {
 export type MmgCartUnavailableReason =
   | 'MULTI_VENDOR_UNSUPPORTED'
   | 'VENDOR_NOT_CONFIGURED'
-  | 'VENDOR_LINK_INVALID';
+  | 'VENDOR_LINK_INVALID'
+  /** [PAYMENT-SIMPLIFY] The store pay link is switched off (STORE_MMG_PAY_LINK); MMG goes to the store's number. */
+  | 'PAY_LINKS_OFF';
 
 export interface CartPaymentCapabilities {
   /** Changes when the vendor set or validated payment destination changes. */
@@ -28,10 +30,22 @@ export interface CartPaymentCapabilities {
     available: true;
     fundsFlow: 'DIRECT_AT_HANDOVER';
   };
+  /** The OLD store pay-link rail (builds 9-11 read only this). */
   mmg: {
     available: boolean;
     provider: 'MMG';
     fundsFlow: 'DIRECT_TO_VENDOR';
+    unavailableReason: MmgCartUnavailableReason | null;
+  };
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's NUMBER: the customer pays the store
+   * directly; the number and the exact amount are shown on the order once the store accepts. The
+   * number itself is never in the cart. Absent on an older server. */
+  mmgStoreNumber?: {
+    available: boolean;
+    provider: 'MMG';
+    fundsFlow: 'DIRECT_TO_VENDOR';
+    payTo: 'STORE_NUMBER';
+    shownWhen: 'STORE_ACCEPTS';
     unavailableReason: MmgCartUnavailableReason | null;
   };
 }

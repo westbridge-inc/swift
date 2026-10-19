@@ -167,6 +167,26 @@ describe('[W5] Delivery or Pickup at checkout', () => {
     expect(JSON.parse(String(init.body))).toMatchObject({ paymentMethod: 'MOBILE_MONEY', tipAmount: 0, fulfillmentSelections: { v1: 'PICKUP' }, expectedTotal: 1800 });
   });
 
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG NUMBER replaces its pay link: with the link rail off, the
+  // server offers MMG to the number, and the order says so (the number itself appears only after the store accepts).
+  it("pays the store's MMG number when the server offers it (the old pay link is off)", async () => {
+    const numberCaps = () => ({
+      ...caps(false), scope: 'number',
+      mmgStoreNumber: { available: true, provider: 'MMG', fundsFlow: 'DIRECT_TO_VENDOR', payTo: 'STORE_NUMBER', shownWhen: 'STORE_ACCEPTS', unavailableReason: null },
+    });
+    pickupQuote = () => ({ ...pickupCart(false), paymentCapabilities: numberCaps() });
+    deliveryQuote = () => ({ ...deliveryCart(false), paymentCapabilities: numberCaps() });
+    at('/checkout', <CheckoutPage />);
+    await choosePickup();
+    expect(await screen.findByRole('button', { name: 'Place pickup order · $1,800' })).toBeTruthy();
+    const pay = await screen.findByRole('radiogroup', { name: 'Payment' });
+    fireEvent.click(within(pay).getByRole('radio', { name: /Pay with MMG/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Place pickup order · $1,800 · pay by MMG' }));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/o1'));
+    const [[, init]] = calls('POST', '/api/v1/customer/checkout') as [[unknown, RequestInit]];
+    expect(JSON.parse(String(init.body))).toMatchObject({ paymentMethod: 'MOBILE_MONEY', mmgPayTo: 'STORE_NUMBER', fulfillmentSelections: { v1: 'PICKUP' }, expectedTotal: 1800 });
+  });
+
   it('locks checkout when the server does not confirm a pickup price — never a delivery total under a pickup label', async () => {
     pickupQuote = () => deliveryCart(false);
     at('/checkout', <CheckoutPage />);

@@ -79,6 +79,8 @@ export interface Cart {
     scope?: string;
     cash?: { available: boolean; fundsFlow: 'DIRECT_AT_HANDOVER' };
     mmg?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; unavailableReason?: string | null };
+    /** [PAYMENT-SIMPLIFY] MMG to the store's number (shown on the order once the store accepts). */
+    mmgStoreNumber?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; payTo?: 'STORE_NUMBER'; shownWhen?: 'STORE_ACCEPTS'; unavailableReason?: string | null };
   };
 }
 

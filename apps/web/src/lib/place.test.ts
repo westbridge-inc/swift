@@ -121,18 +121,19 @@ describe('[W-08] the address page enforces it', () => {
   const code = code_(readFileSync(join(process.cwd(), 'src/app/(app)/order/location/page.tsx'), 'utf8'));
   const geo = code_(readFileSync(join(process.cwd(), 'src/lib/geolocate.ts'), 'utf8'));
 
-  it('editing the address clears the captured place', () => {
-    expect(code).toMatch(/if \(place && !placeMatches\(place, next\)\) setPlace\(null\)/);
+  // [PINS · row 107] The page no longer captures a device fix for typed words:
+  // it adds an address with the shared pin form (components/account/address-form,
+  // behaviour pinned in account.test.tsx and order/location/page.test.tsx), whose
+  // stored point is the pin the person placed on the map.
+  it('the page never pairs a device fix with the typed words', () => {
+    expect(code).not.toMatch(/currentFix|currentCoords|acceptFix/);
+    expect(code).toMatch(/import \{ AddressForm \} from '@\/components\/account\/address-form';/);
+    expect(code).toMatch(/<AddressForm\b/);
   });
 
-  it('save is impossible without a place bound to the text being saved', () => {
-    expect(code).toMatch(/if \(!canSave\(place, form\)\) return;/);
-    expect(code).toMatch(/disabled=\{busy \|\| !ready\}/);
-  });
-
-  it('the coordinates saved are the captured ones, never a fresh unrelated fix', () => {
-    expect(code).toMatch(/latitude: place!\.lat/);
-    expect(code).toMatch(/longitude: place!\.lng/);
+  it('the page sends no coordinates of its own: the saved point is the form’s pin', () => {
+    expect(code).not.toMatch(/latitude|longitude/);
+    expect(code).not.toMatch(/addAddress\(/);
     // the old shape: ask the browser inside save() and pair it with the form
     expect(code).not.toMatch(/const coords = await currentCoords/);
   });
@@ -141,12 +142,11 @@ describe('[W-08] the address page enforces it', () => {
     expect(code).not.toMatch(/getAddresses\(\)\.catch\(/);
     expect(code).toMatch(/<DataUnavailable/);
     // and it must not decide "first address" from a list that failed to load
-    expect(code).toMatch(/isDefault: addresses !== null && addresses\.length === 0/);
+    expect(code).toMatch(/fixedDefault=\{addresses !== null && addresses\.length === 0\}/);
   });
 
   it('the accuracy the browser reports is carried, not discarded', () => {
     expect(geo).toMatch(/accuracyM: typeof p\.coords\.accuracy === 'number'/);
-    expect(code).toMatch(/accuracyM: fix\.accuracyM/);
     // currentCoords still exists for other callers, and still has no fallback
     expect(geo).toMatch(/export function currentCoords/);
     expect(geo).not.toMatch(/6\.8013, -58\.1551\D*\)/);
