@@ -342,6 +342,10 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
   });
 });
 
+/** A spy on a private method (vi.spyOn types it as never). */
+const spyOnPrivate = (proto: object, name: string) =>
+  vi.spyOn(proto as never, name as never) as unknown as { mockImplementationOnce(fn: unknown): { mockRestore(): void }; mockRestore(): void };
+
 describe('[#1879 S3-3 · REVIEW-G R1] no activation write for an erased account', () => {
   it('an erasure that commits inside the approval tail: the erased mover gets no trial and no plate key', async () => {
     const u = await person();
@@ -352,7 +356,7 @@ describe('[#1879 S3-3 · REVIEW-G R1] no activation write for an erased account'
     const standing = vi.spyOn(app.prisma.verificationDocument, 'findUnique').mockImplementationOnce((async () => ({ state: 'COMMITTED' })) as never);
     let erased: unknown;
     // The tail's last read before its writes: the erasure commits here, after the tail's barrier check.
-    const verified = vi.spyOn(VerificationService.prototype as never, 'isRoleVerified' as never).mockImplementationOnce((async () => {
+    const verified = spyOnPrivate(VerificationService.prototype, 'isRoleVerified').mockImplementationOnce((async () => {
       erased = await erase(u);
       return true;
     }) as never);
@@ -388,7 +392,7 @@ describe('[#1879 S3-3 · REVIEW-G R1] no activation write for an erased account'
     const subs = new SubscriptionService(app.prisma);
     let erasure: Promise<unknown> | undefined;
     const original = (SubscriptionService.prototype as unknown as { activation: (...a: unknown[]) => Promise<unknown> }).activation;
-    const hook = vi.spyOn(SubscriptionService.prototype as never, 'activation' as never).mockImplementationOnce((async function (this: unknown, ...args: unknown[]) {
+    const hook = spyOnPrivate(SubscriptionService.prototype, 'activation').mockImplementationOnce((async function (this: unknown, ...args: unknown[]) {
       erasure = erase(u);
       await new Promise((r) => setTimeout(r, 400));
       return original.apply(this, args);
