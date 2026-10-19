@@ -1,7 +1,8 @@
 -- [GUARDRAILS §2 · owner 19 Oct (G1, G3) · COORD 19 Oct 03:46Z + 04:51Z] The account erasure's one-way
--- exceptions to three immutability triggers. Each applies ONLY to a person whose users row carries the
--- erasure's own marker (phone = 'deleted:' || id). Only the erasure writes that marker, under the users row
--- lock, after it closes authority. Everything else stays exactly as immutable as before.
+-- exceptions to three immutability triggers. Each applies ONLY to a person the erasure has cut off (swift_erased_person:
+-- marker phone = 'deleted:' || id AND status DEACTIVATED AND the erasure's ACCOUNT_ERASURE_CUTOFF audit row), and
+-- only to that person's own rows. Everything else stays exactly as immutable as before. The app opens these writes
+-- through the same function (account-closure.ts erasureExceptionOpen), so the two gates are one.
 --   1. payment_instruments: an out-of-service card of an erased person may have its sealed token and wrapped key
 --      overwritten with fixed zero bytes (crypto-forgotten) and its card facts replaced by fixed erased values,
 --      once. A card erased that way that no payment, card session, observation or replacement names may be deleted.
@@ -13,8 +14,15 @@
 
 SET lock_timeout = '10s';
 
+-- The gate: all three of the erasure's own cut-off writes, committed together under the users row lock: the exact
+-- marker, DEACTIVATED, and its ACCOUNT_ERASURE_CUTOFF audit row (audit_logs is immutable to app logins). No input
+-- path can write the marker (every phone is normalised to + and digits), and a marker alone opens nothing.
 CREATE OR REPLACE FUNCTION swift_erased_person(p_user TEXT) RETURNS boolean AS $$
-  SELECT EXISTS (SELECT 1 FROM users u WHERE u.id = p_user AND u.phone = 'deleted:' || u.id);
+  SELECT EXISTS (
+    SELECT 1 FROM users u
+    WHERE u.id = p_user AND u.phone = 'deleted:' || u.id AND u.status::text = 'DEACTIVATED'
+      AND EXISTS (SELECT 1 FROM audit_logs a WHERE a."entity" = 'User' AND a."entityId" = u.id AND a."action" = 'ACCOUNT_ERASURE_CUTOFF')
+  );
 $$ LANGUAGE sql STABLE;
 
 -- 1a. The frozen-card law, plus the one erasure write.

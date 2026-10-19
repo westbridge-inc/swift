@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, erasureExceptionOpen } from './account-closure';
 
 /** What replaces a required text column the erasure empties. */
 export const ERASED_TEXT = '[deleted with the account]';
@@ -78,6 +78,8 @@ export async function retireCardsAndSessions(db: PrismaClient, userId: string): 
   }
   const forgotten = await db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return { wiped: 0, deleted: 0 };
+    // The database's gate, read under the person's lock: only an account the erasure has cut off.
+    if (!await erasureExceptionOpen(tx, userId)) return { wiped: 0, deleted: 0 };
     // [erasure exception, payment_instruments_frozen] Out of service: token and wrapped key overwritten (the token is
     // unrecoverable), card facts replaced. The binding, consent and how it left service stay.
     const wiped = await tx.paymentInstrument.updateMany({
@@ -159,7 +161,7 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
   await db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return;
     // [erasure exception, safeb_payer_immutable] The payer hash and the digest that encodes it go; the row stays.
-    await tx.$executeRaw`
+    if (await erasureExceptionOpen(tx, userId)) await tx.$executeRaw`
       UPDATE "mmg_payer_evidence" SET "payerHash" = 'erased', "digest" = 'erased:' || "id"
       WHERE "accountId" = ${userId} AND "payerHash" <> 'erased' /* erasure-payer-evidence */
     `;
@@ -266,7 +268,10 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
         AND (b."sosAlertId" IS NULL OR b."sosAlertId" = ANY(${alertIds}::text[]))
       ORDER BY b."id" FOR UPDATE /* erasure-safety-bundles */
     `;
-    if (bundles.length) await tx.evidenceItem.deleteMany({ where: { bundleId: { in: bundles.map((b) => b.id) } } });
+    if (bundles.length) {
+      const sealedToo = await erasureExceptionOpen(tx, userId);
+      await tx.evidenceItem.deleteMany({ where: { bundleId: { in: bundles.map((b) => b.id) }, ...(sealedToo ? {} : { sealedAt: null }) } });
+    }
 
     // Confirmed fraud cases about the person whose legal hold (if any) is released: the referral text and the
     // other accounts it linked go; the reason code, dates and case link stay.
