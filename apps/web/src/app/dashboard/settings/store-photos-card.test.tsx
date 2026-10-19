@@ -46,6 +46,6 @@ describe('[IMAGES-E2E] the store photos card', () => {
     vi.spyOn(vendorApi, 'uploadStorePhoto').mockRejectedValue(new Error('File content does not match an image format'));
     renderWithQuery(<StorePhotosCard storeId="store-1" />);
     await userEvent.upload(await screen.findByLabelText('Logo file'), new File(['x'], 'logo.png', { type: 'image/png' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('File content does not match an image format');
+    expect((await screen.findByRole('alert')).textContent).toContain('File content does not match an image format');
   });
 });
