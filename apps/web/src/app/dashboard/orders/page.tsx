@@ -14,7 +14,10 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  acceptOrder, completePickup, confirmPayment, getItems, getOrder, getOrders,
+  customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
+} from '@/lib/vendor-order-view';
+import {
+  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, getOrders,
   markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
@@ -41,7 +44,8 @@ function statusChip(s: string, paused = false) {
         paused ? 'bg-amber-100 text-amber-800' : done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'
       }`}
     >
-      {paused ? MMG_DISPUTE_NOTICE.title : s.replaceAll('_', ' ')}
+      {/* [U45] The phone's words (vendor/shared.tsx OrderStatusPill), never a status code. */}
+      {paused ? MMG_DISPUTE_NOTICE.title : vendorStatusLabel(s)}
     </span>
   );
 }
@@ -153,6 +157,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                 checked={!!it.picked}
                 disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
+                aria-label={`Picked: ${it.quantity}× ${it.name}`}
                 className="h-4 w-4 accent-[var(--swift-red)]"
               />
               <span className="flex-1 text-sm">
@@ -258,6 +263,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       }
       if (kind === 'confirm-payment') return confirmPayment(id, mmgRef.trim());
       if (kind === 'retry-dispatch') return retryDispatch(id);
+      if (kind === 'return-received') return confirmReturnReceived(id);
       if (kind === 'vendor-delivery') return setFulfillmentMode(id, 'VENDOR_DELIVERY');
       if (kind === 'platform-rider') return setFulfillmentMode(id, 'PLATFORM_RIDER');
       throw new Error(`Unknown action ${kind}`);
@@ -337,6 +343,12 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       : null;
   const customer = [o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
   const riderName = o.rider?.user ? [o.rider.user.firstName, o.rider.user.lastName].filter(Boolean).join(' ') : '';
+  const customerTel = telHref(o.customer?.phone);
+  const riderTel = telHref(o.rider?.user?.phone);
+  const recovery = recoveryView(o.custodyRecovery);
+  const timeline = [...(o.statusHistory ?? [])].reverse();
+  const prepLine = prepTimeLine(o);
+  const fulfilmentWord = { DELIVERY: 'Delivery', PICKUP: 'Pickup', APPOINTMENT: 'Appointment' }[String(o.fulfillment ?? '')] ?? null;
   const riderAssigned = Boolean(o.riderId || o.rider);
   const isDelivery = o.fulfillment === 'DELIVERY';
   const selfDelivery = o.fulfillmentMode === 'VENDOR_DELIVERY';
@@ -368,7 +380,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="min-w-0 flex-1">
           <p className="sw-heading">#{o.orderNumber}</p>
           <p className="mt-0.5 text-sm text-[var(--swift-muted)]">
-            {customer} · {timeAgo(o.placedAt)} · {o.fulfillment ?? o.orderType}
+            {[customer, timeAgo(o.placedAt), fulfilmentWord].filter(Boolean).join(' · ')}
           </p>
           {o.fulfillment === 'APPOINTMENT' && o.appointmentSlot ? <p className="mt-1 text-sm font-semibold">Appointment: {formatAppointmentSlot(o.appointmentSlot)}</p> : null}
         </div>
@@ -382,19 +394,82 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
 
       <div className="mt-4 space-y-1.5">
         {o.items.map((it) => (
-          <div key={it.id} className="flex justify-between text-sm">
-            <span><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
-            <span className="font-medium">{money(it.totalCustomer)}</span>
+          <div key={it.id} className="flex justify-between gap-3 text-sm">
+            <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
+            <span className="shrink-0 font-medium">{money(it.totalCustomer)}</span>
           </div>
         ))}
-        <div className="flex justify-between border-t border-[var(--swift-border)] pt-2 text-sm font-bold">
-          <span>Total ({o.paymentMethod === 'MOBILE_MONEY' ? 'MMG' : 'Cash'})</span>
-          <span>{money(o.totalAmount)}</span>
-        </div>
       </div>
 
-      {o.deliveryInstructions && <p className="mt-3 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">Note: {o.deliveryInstructions}</p>}
-      {riderAssigned && <p className="mt-3 text-sm text-[var(--swift-muted)]">Rider: <b className="text-[var(--swift-ink)]">{riderName || 'Swift rider'}</b> {o.rider?.user?.phone}</p>}
+      {/* [U25] The money card, as on the phone: recorded amounts only. */}
+      <section aria-label="Payment" className="mt-4 space-y-1 rounded-lg bg-[var(--swift-subtle)] p-3 text-sm">
+        {orderMoneyRows(o).map((row) => (
+          <div key={row.label} className={`flex justify-between gap-3 ${row.strong ? 'border-t border-[var(--swift-border)] pt-2 font-bold' : ''}`}>
+            <span>{row.label}</span>
+            <span>{row.minus && row.value !== null ? `-${money(row.value)}` : money(row.value)}</span>
+          </div>
+        ))}
+        <p className="pt-1 text-xs font-semibold text-[var(--swift-muted)]">{orderPaymentLine(o)}</p>
+      </section>
+
+      {s === 'CANCELLED' && (
+        <section aria-label="Cancellation" className="mt-3 rounded-lg bg-[var(--swift-red)]/5 p-3 text-sm">
+          <p className="font-semibold text-[var(--swift-red)]">Cancelled{whenLabel(o.cancelledAt) ? ` ${whenLabel(o.cancelledAt)}` : ''}</p>
+          {o.cancellationReason && <p className="mt-1 text-[var(--swift-muted)]">{o.cancellationReason}</p>}
+        </section>
+      )}
+
+      {/* [U02] A store that delivers itself must find and call the customer: the
+          phone's Customer card. The server withholds the phone and address once
+          the order is closed, so they simply are not there then. */}
+      <section aria-label="Customer" className="mt-3 rounded-lg border border-[var(--swift-border)] p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Customer</p>
+            <p className="break-words text-sm font-semibold">{customer}</p>
+          </div>
+          {customerTel && (
+            <a href={customerTel} aria-label={`Call ${customer}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
+              Call
+            </a>
+          )}
+        </div>
+        {[...customerLines(o), ...(o.fulfillment === 'PICKUP' && o.deliveryInstructions ? [o.deliveryInstructions] : [])].map((line, i) => (
+          <p key={i} className="mt-1.5 break-words text-sm text-[var(--swift-muted)]">{line}</p>
+        ))}
+      </section>
+
+      {riderAssigned && (
+        <section aria-label="Rider" className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--swift-border)] p-3">
+          <div className="min-w-0">
+            <p className="text-xs font-bold uppercase tracking-wide text-[var(--swift-muted)]">Rider</p>
+            <p className="break-words text-sm font-semibold">{riderName || 'Swift rider'}</p>
+          </div>
+          {riderTel && (
+            <a href={riderTel} aria-label={`Call ${riderName || 'the rider'}`} className="inline-flex min-h-11 shrink-0 items-center rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-subtle)]">
+              Call
+            </a>
+          )}
+        </section>
+      )}
+
+      {/* [AF-MOB-006 · U25] A delivery that went wrong after pickup: the server's
+          words, and the store's one action once the goods are on their way back. */}
+      {recovery && (
+        <section aria-label="Delivery recovery" className={`mt-3 rounded-lg p-3 text-sm ${recovery.open ? 'bg-amber-50' : 'bg-[var(--swift-subtle)]'}`}>
+          <p className="font-bold">{recovery.headline}</p>
+          <p className="mt-1 text-[var(--swift-muted)]">{recovery.body}</p>
+          {storeCanConfirmReturn(recovery, o) && (
+            <button
+              onClick={() => act.mutate('return-received')}
+              disabled={act.isPending}
+              className="mt-3 min-h-11 rounded-lg bg-[var(--swift-red)] px-4 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              {act.isPending && act.variables === 'return-received' ? 'Confirming…' : 'The order is back with us'}
+            </button>
+          )}
+        </section>
+      )}
       {activeDelivery && (
         <section className="mt-3 rounded-lg bg-[var(--swift-subtle)] p-3" aria-label="Delivery owner">
           <p className="text-sm font-semibold">
@@ -446,6 +521,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
               <select
                 value={prepTime}
                 onChange={(e) => setPrepTime(Number(e.target.value))}
+                aria-label="Preparation time"
                 className="rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
               >
                 {[10, 15, 20, 30, 45, 60].map((m) => <option key={m} value={m}>{m} min prep</option>)}
@@ -456,6 +532,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
                 value={pickupCode}
                 onChange={(e) => setPickupCode(e.target.value)}
                 placeholder="Pickup code"
+                aria-label="Pickup code"
                 className="w-32 rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
               />
             )}
@@ -560,17 +637,42 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
             Paid by MMG
           </button>
         )}
-        {!paused && s === 'READY_FOR_PICKUP' && o.fulfillment !== 'PICKUP' && !selfDelivery && !riderAssigned && (
-          <button
-            onClick={() => act.mutate('retry-dispatch')}
-            disabled={act.isPending}
-            className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold hover:bg-[var(--swift-subtle)] disabled:opacity-50"
-          >
-            Search for a rider again
-          </button>
+        {/* [S4 · phone VendorOrderDetailScreen "No rider yet"] The same states and
+            words as the phone; the server no-ops while an offer is live. */}
+        {!paused && isDelivery && !selfDelivery && !riderAssigned && ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'].includes(s) && (
+          <section aria-label="No rider yet" className="w-full rounded-lg bg-[var(--swift-subtle)] p-3">
+            <p className="text-sm font-semibold">No rider yet</p>
+            <p className="mt-1 text-sm text-[var(--swift-muted)]">Swift searches nearby movers automatically — retry if nobody took it.</p>
+            <button
+              onClick={() => act.mutate('retry-dispatch')}
+              disabled={act.isPending}
+              className="mt-3 min-h-11 rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold hover:bg-[var(--swift-card)] disabled:opacity-50"
+            >
+              Find a rider
+            </button>
+          </section>
         )}
       </div>
-      {error && <p className="mt-3 text-sm text-[var(--swift-red)]">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-sm text-[var(--swift-red)]">{error}</p>}
+
+      {/* [U25] The immutable status log, oldest first, and the quoted prep time — as on the phone. */}
+      {timeline.length > 0 && (
+        <section aria-label="Timeline" className="mt-5 border-t border-[var(--swift-border)] pt-4">
+          <h3 className="text-sm font-bold">Timeline</h3>
+          <ol className="mt-2 space-y-2">
+            {timeline.map((entry, i) => (
+              <li key={i} className="text-sm">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <span className="font-semibold">{vendorStatusLabel(entry.status)}</span>
+                  <span className="text-xs text-[var(--swift-muted)]">{whenLabel(entry.createdAt)}</span>
+                </div>
+                {entry.note && <p className="break-words text-xs text-[var(--swift-muted)]">{entry.note}</p>}
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+      {prepLine && <p className="mt-3 text-xs text-[var(--swift-muted)]">{prepLine}</p>}
     </div>
   );
 }
