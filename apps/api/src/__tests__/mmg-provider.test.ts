@@ -452,6 +452,7 @@ describe('MMG live adapter — Transaction History for the checkout payment time
     ['payment', 422, (mmg) => mmg.initiatePayment({ reference: 'ref-stall', amountMinor: 50_000, currencyCode: 'GYD', payerId: 'payer-stall' }), 'answer'],
     ['payment', 503, (mmg) => mmg.initiatePayment({ reference: 'ref-stall', amountMinor: 50_000, currencyCode: 'GYD', payerId: 'payer-stall' }), 'answer'],
     ['poll lookup', 200, (mmg) => mmg.transactionLookup({ transactionId: 'tx-stall' }), 'throws'],
+    // The push rail's history list reads through transactionHistoryRows (never throws): a stall is 'unavailable'.
     ['history list', 200, (mmg) => mmg.transactionHistory(), 'throws'],
     ['balance', 200, (mmg) => mmg.accountBalance(), 'throws'],
   ];
@@ -470,7 +471,7 @@ describe('MMG live adapter — Transaction History for the checkout payment time
       await vi.advanceTimersByTimeAsync(14_999);
       expect(result).toBe('pending');
       await vi.advanceTimersByTimeAsync(1);
-      if (shape === 'throws') expect(result).toEqual({ thrown: 'MMG request timed out' });
+      if (shape === 'throws') expect(result).toEqual({ thrown: _name === 'history list' ? 'MMG history unavailable' : 'MMG request timed out' });
       else expect(result).toMatchObject(_name === 'checkout lookup' ? { outcome: 'error' } : { status: 'error' });
       expect(stalledSignal?.aborted).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
