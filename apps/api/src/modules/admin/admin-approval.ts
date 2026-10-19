@@ -171,7 +171,7 @@ export type ApprovalOutcome =
   | { outcome: 'granted'; approvalId: string }
   | { outcome: 'refused'; code: ApprovalRefusal; approvalId?: string }
   /** [U06] An earlier ask for the same act still stands: nothing new was written. */
-  | { outcome: 'already-open'; approvalId: string; status: OpenApprovalStatus };
+  | { outcome: 'already-open'; approvalId: string; status: OpenApprovalStatus; askedByYou: boolean };
 
 export type ApprovalRefusal =
   | 'unknown-approval'
@@ -222,7 +222,7 @@ async function standingAskFor(
   subject: ApprovalSubject,
   fingerprint: string,
   now: Date,
-): Promise<{ id: string; status: OpenApprovalStatus } | null> {
+): Promise<{ id: string; status: OpenApprovalStatus; requestedBy: string } | null> {
   const action = `${subject.method.toUpperCase()} ${subject.routeUrl}`;
   const params = subject.params ?? {};
   const hasTarget = Object.keys(params).length > 0;
@@ -233,7 +233,7 @@ async function standingAskFor(
       expiresAt: { gt: now },
       ...(hasTarget ? { entityId: entityIdOf(params) } : { fingerprint }),
     },
-    select: { id: true, status: true, bodySnapshot: true },
+    select: { id: true, status: true, requestedBy: true, bodySnapshot: true },
     orderBy: { createdAt: 'asc' },
   });
   const wanted = canonicalParams(params);
@@ -242,14 +242,21 @@ async function standingAskFor(
     const stored = (row.bodySnapshot as { params?: Record<string, unknown> } | null)?.params;
     return !!stored && typeof stored === 'object' && canonicalParams(stored) === wanted;
   });
-  return match ? { id: match.id, status: match.status as OpenApprovalStatus } : null;
+  return match ? { id: match.id, status: match.status as OpenApprovalStatus, requestedBy: match.requestedBy } : null;
 }
 
 /** [U06] What the operator is told when their ask already stands. */
-export function alreadyOpenMessage(status: OpenApprovalStatus): string {
-  return status === 'APPROVED'
-    ? 'This was already approved and is waiting to be executed from Approvals. Nothing new was asked.'
-    : 'This is already waiting for a second admin in Approvals. Nothing new was asked. To ask for something different, cancel that request first.';
+export function alreadyOpenMessage(status: OpenApprovalStatus, askedByYou: boolean): string {
+  if (status === 'APPROVED') {
+    // Only the admin who asked can apply it (separation of duties), so a
+    // different admin is told who must act rather than told to apply it.
+    return askedByYou
+      ? 'You already have this approved. Apply it from Approvals. Nothing new was asked.'
+      : 'Another admin already has this approved and waiting to be applied by them from Approvals. Nothing new was asked.';
+  }
+  return askedByYou
+    ? 'This is already waiting for a second admin in Approvals. Nothing new was asked. To ask for something different, cancel that request first.'
+    : 'Another admin already asked for this, and it is waiting in Approvals. Nothing new was asked.';
 }
 
 /** What the operator is told, in the terms of what they were trying to do. */
@@ -323,13 +330,15 @@ export async function resolveApproval(
       // second sees the first's row.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`privileged-approval-ask:${askTargetKey(subject, fingerprint)}`}, 0))`;
       const standing = await standingAskFor(tx, subject, fingerprint, now);
-      if (standing) return { standing } as const;
+      if (standing) return { kind: 'standing', standing } as const;
       // [Review S2-1] Checked before it is written: an ask that could never be recorded is
       // refused now and never becomes a "payout reported" marker.
       if (refundEntity) await validatePaidAsk(tx, refundEntity, subject.body);
-      return { created: await write(tx) } as const;
+      return { kind: 'created', created: await write(tx) } as const;
     });
-    if ('standing' in asked) return { outcome: 'already-open', approvalId: asked.standing.id, status: asked.standing.status };
+    if (asked.kind === 'standing') {
+      return { outcome: 'already-open', approvalId: asked.standing.id, status: asked.standing.status, askedByYou: asked.standing.requestedBy === actor.userId };
+    }
     return { outcome: 'requested', approvalId: asked.created.id, fingerprint };
   }
 

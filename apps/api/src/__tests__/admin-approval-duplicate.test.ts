@@ -120,7 +120,7 @@ describe('[U06] a second ask for the same act is refused while the first stands'
     expect(again.statusCode, again.body).toBe(409);
     const error = again.json().error;
     expect(error.code).toBe('APPROVAL_ALREADY_OPEN');
-    expect(error.details).toEqual({ approvalId: firstId, approvalStatus: 'PENDING' });
+    expect(error.details).toEqual({ approvalId: firstId, approvalStatus: 'PENDING', askedByYou: true });
     expect(error.message).toMatch(/already waiting for a second admin/i);
     expect(await openRows('PUT /config/:key', key)).toBe(1);
   });
@@ -141,6 +141,9 @@ describe('[U06] a second ask for the same act is refused while the first stands'
     const theirs = await writeConfig(other.token, key, { rate: 1 });
     expect(theirs.statusCode, theirs.body).toBe(409);
     expect(theirs.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // told it is someone else's ask, never told to cancel or apply it themselves
+    expect(theirs.json().error.details.askedByYou).toBe(false);
+    expect(theirs.json().error.message).toMatch(/another admin already asked/i);
   });
 
   it('a different target is a different act: not refused', async () => {
@@ -200,8 +203,13 @@ describe('[U06] once the first ask no longer stands, a new ask is accepted', () 
 
     const again = await writeConfig(requester.token, key, { rate: 4 });
     expect(again.statusCode, again.body).toBe(409);
-    expect(again.json().error.details).toEqual({ approvalId: id, approvalStatus: 'APPROVED' });
+    expect(again.json().error.details).toEqual({ approvalId: id, approvalStatus: 'APPROVED', askedByYou: true });
     expect(again.json().error.message).toMatch(/approved/i);
+    // only the admin who asked can apply it: anyone else is told whose it is
+    const theirs = await writeConfig(other.token, key, { rate: 4 });
+    expect(theirs.statusCode, theirs.body).toBe(409);
+    expect(theirs.json().error.details).toEqual({ approvalId: id, approvalStatus: 'APPROVED', askedByYou: false });
+    expect(theirs.json().error.message).toMatch(/applied by them/i);
 
     const executed = await writeConfig(requester.token, key, { rate: 4 }, id);
     expect(executed.statusCode, executed.body).toBe(200);

@@ -850,8 +850,8 @@ export async function adminRoutes(app: FastifyInstance) {
       // [U06] A second press, or a second admin, asking for an act that is
       // already waiting: nothing was written, and the earlier ask is named.
       adminApprovalCounter.labels('already_open', authority.cls).inc();
-      throw new AppError(409, 'APPROVAL_ALREADY_OPEN', alreadyOpenMessage(outcome.status),
-        { approvalId: outcome.approvalId, approvalStatus: outcome.status });
+      throw new AppError(409, 'APPROVAL_ALREADY_OPEN', alreadyOpenMessage(outcome.status, outcome.askedByYou),
+        { approvalId: outcome.approvalId, approvalStatus: outcome.status, askedByYou: outcome.askedByYou });
     }
     if (outcome.outcome === 'refused') {
       adminApprovalCounter.labels(outcome.code, authority.cls).inc();
