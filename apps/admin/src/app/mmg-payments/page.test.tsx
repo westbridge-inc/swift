@@ -47,7 +47,8 @@ const confirmedDetail: MmgCheckoutSupportDetail = {
   ...confirmedBase,
   timeline: [
     { at: '2026-10-01T19:39:40.000Z', source: 'RETURN', resultCode: '0', transactionStatus: null, mmgTransactionId: '20402048536279', mmgTransactionReference: null, amount: null, currency: null, windowCheck: 'INSIDE', failure: null },
-    { at: '2026-10-01T19:39:41.000Z', source: 'LOOKUP', resultCode: null, transactionStatus: 'successful', mmgTransactionId: '20402048536279', mmgTransactionReference: '20402048601581', amount: '2100', currency: 'GYD', windowCheck: 'INSIDE', failure: null },
+    { at: '2026-10-01T19:39:41.000Z', source: 'LOOKUP', resultCode: null, transactionStatus: 'successful', mmgTransactionId: '20402048536279', mmgTransactionReference: '20402048601581', amount: '2100', currency: 'GYD', windowCheck: null, failure: null },
+    { at: '2026-10-01T19:39:42.000Z', source: 'HISTORY', resultCode: null, transactionStatus: 'completed', mmgTransactionId: '20402048536279', mmgTransactionReference: null, amount: '2100', currency: 'GYD', windowCheck: 'INSIDE', failure: null },
   ],
   timelineTruncated: false,
   creditedPeriod: { state: 'APPLIED', periodStart: '2026-09-30T12:00:00.000Z', periodEnd: '2026-10-07T12:00:00.000Z', receiptNumber: 'SWF-SWIFT-2026-000123' },
@@ -159,7 +160,10 @@ describe('MMG payments: one payment, its timeline and what it paid', () => {
     expect(within(panel).getAllByText('20402048536279').length).toBeGreaterThan(0);
     expect(within(panel).getByText('Result code 0 (successful)')).toBeTruthy();
     expect(within(panel).getByText('MMG status: successful')).toBeTruthy();
-    expect(within(panel).getByText('Amount: 2100 GYD')).toBeTruthy();
+    // [7 Oct] MMG's history record of it: the window is read from its time, never from the lookup.
+    expect(within(panel).getByText('MMG transaction history')).toBeTruthy();
+    expect(within(panel).getByText('MMG status: completed')).toBeTruthy();
+    expect(within(panel).getAllByText('Amount: 2100 GYD')).toHaveLength(2);
     expect(within(panel).getAllByText('Inside the checkout window')).toHaveLength(2);
     expect(within(panel).getByText(`Paid the week of ${day('2026-09-30T12:00:00.000Z')} to ${day('2026-10-07T12:00:00.000Z')}.`)).toBeTruthy();
     expect(within(panel).getByText('Receipt SWF-SWIFT-2026-000123')).toBeTruthy();
@@ -180,15 +184,33 @@ describe('MMG payments: one payment, its timeline and what it paid', () => {
     expect(within(panel).queryByText('Credited period')).toBeNull();
   });
 
-  it("[Sol, DS663] a lookup whose MMG time is after MMG's first reply says so, never 'Inside the checkout window'", async () => {
+  it("[Sol, DS663 · 7 Oct] MMG's history record dated after MMG's first reply says so, never 'Inside the checkout window'", async () => {
     mockApi(({ url }: ApiRequest) => (url.pathname === `${PATH}/${held.id}`
-      ? { body: { success: true, data: detailOf(held, { timeline: [{ at: held.replyAt!, source: 'LOOKUP', resultCode: null, transactionStatus: 'successful', mmgTransactionId: '20402048536280', mmgTransactionReference: held.mmgTransactionReference, amount: '6001', currency: 'GYD', windowCheck: 'AFTER_REPLY', failure: null }] }) } }
+      ? { body: { success: true, data: detailOf(held, { timeline: [{ at: held.replyAt!, source: 'HISTORY', resultCode: null, transactionStatus: 'completed', mmgTransactionId: '20402048536280', mmgTransactionReference: null, amount: '6001', currency: 'GYD', windowCheck: 'AFTER_REPLY', failure: null }] }) } }
       : page([held])));
     const { user } = renderWithQuery(<MmgPaymentsPage />);
     await screen.findByRole('table');
     await user.click(screen.getByRole('button', { name: `Open payment ${held.swiftReference}` }));
     const panel = await screen.findByRole('region', { name: 'Payment detail' });
-    expect(within(panel).getByText("After MMG's first reply: MMG's time may not match the zone setting")).toBeTruthy();
+    expect(within(panel).getByText("After MMG's first reply: MMG's time may not match the zone setting, or it is another payment")).toBeTruthy();
+    expect(within(panel).queryByText('Inside the checkout window')).toBeNull();
+  });
+
+  it.each([
+    ['NOT_IN_HISTORY', "Not in MMG's transaction history", 'HISTORY_NOT_FOUND'],
+    ['AMBIGUOUS', "More than one record in MMG's transaction history", null],
+    ['DISAGREES', "MMG's transaction history record does not match the checkout", null],
+    ['UNAVAILABLE', "MMG's transaction history could not be read in full", 'HISTORY_FAILED'],
+  ] as const)("[7 Oct] MMG's history answer %s is said in plain words, never 'Inside the checkout window'", async (windowCheck, words, failure) => {
+    mockApi(({ url }: ApiRequest) => (url.pathname === `${PATH}/${held.id}`
+      ? { body: { success: true, data: detailOf(held, { timeline: [{ at: held.replyAt!, source: 'HISTORY', resultCode: null, transactionStatus: null, mmgTransactionId: '20402048536280', mmgTransactionReference: null, amount: null, currency: null, windowCheck, failure }] }) } }
+      : page([held])));
+    const { user } = renderWithQuery(<MmgPaymentsPage />);
+    await screen.findByRole('table');
+    await user.click(screen.getByRole('button', { name: `Open payment ${held.swiftReference}` }));
+    const panel = await screen.findByRole('region', { name: 'Payment detail' });
+    expect(within(panel).getByText('MMG transaction history')).toBeTruthy();
+    expect(within(panel).getByText(words)).toBeTruthy();
     expect(within(panel).queryByText('Inside the checkout window')).toBeNull();
   });
 
