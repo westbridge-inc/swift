@@ -67,7 +67,9 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'TripSafetySession.driverUserId': 'G3: a closed trip safety session keeps status, dates, score and order link; risk factors and deviation (location) go. Kept whole because open, held, or escalated into an SOS that stays whole',
   'IncidentCase.subjectUserId': 'G3: a closed case keeps number, status, severity, decision code, dates and order link; summary, details and decision notes go. Kept whole because open or under a legal hold',
   'IncidentCase.reporterUserId': 'G3: a closed case keeps number, status, severity, decision code, dates and order link; summary, details and decision notes go. Kept whole because open or under a legal hold',
-  'EvidenceBundle.subjectUserId': 'G3: an unheld bundle of a closed case or SOS loses its unsealed items. Kept because sealed: sealed evidence is immutable at the database (safety spec §9.2) until the follow-up erasure exception; or whole because held',
+  'EvidenceBundle.subjectUserId': 'G3: an unheld bundle of a closed case or SOS loses its items, sealed ones too (the evidence_item_block_sealed erasure exception; COORD 19 Oct 04:51Z: the owner\'s G3 ruling outranks "sealed = forever"); the bundle row, its seal hash and its dates stay as proof the evidence existed. Kept whole because held',
+  'PaymentInstrument.userId': 'the card leaves service (an ACTIVE card is REVOKED, its unsent charges closed), then its sealed token and wrapped key are overwritten and its card facts replaced (the payment_instruments_frozen erasure exception: token unrecoverable). A card no payment, card session, observation or replacement names is deleted; one that settlement history names stays, forgotten',
+  'MmgPayerEvidence.accountId': 'G1: the row stays (tier, source, dates, subscription and payment links); the payer hash and the digest that encodes it are replaced (the safeb_payer_immutable erasure exception). No new evidence is written for a closed account (the writer refuses DEACTIVATED)',
   'FraudCase.subjectUserId': 'G3: a confirmed case keeps reason code, dates and case link; the referral text and the other accounts it linked go. Kept whole because its legal hold is not released',
 };
 
@@ -149,8 +151,6 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'PersonProfile.accountId': 'the document register index (the custody record of purged documents)',
   'BusinessProfile.ownerAccountId': 'the document register index (the custody record of purged documents)',
   'AlgoDecision.subjectId': 'the log of automated dispatch and pricing steps (Privacy Policy §4); order and store ids, not the person',
-  'PaymentInstrument.userId': 'kept because settlement history and frozen at the database (PT-1: payments name the row; its binding, sealed token and card facts never change; no DELETE): the erasure REVOKES every active card and closes its unsent charges. Forgetting the token and card facts is the follow-up erasure exception (COORD 19 Oct 03:46Z)',
-  'MmgPayerEvidence.accountId': 'G1: kept because immutable at the database (safeb_payer_immutable): the payer hash is dropped by the follow-up erasure exception (owner 19 Oct G1). No new evidence is written for a closed account (the writer refuses DEACTIVATED)',
   'TrialGrant.accountId': 'G1: the one-trial grant stays on the de-identified account (role, status, reason code, dates); it holds no phone, address or hash',
   'SosAlert.counterpartyUserId': "another person's emergency record: it names this person only by the de-identified account id; the location and notes are the other person's",
   'SosRetrigger.counterpartyUserId': "another person's emergency record: it names this person only by the de-identified account id (the re-triggers of an SOS this person raised go with it)",

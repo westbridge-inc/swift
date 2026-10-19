@@ -12,6 +12,10 @@ import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-clos
 
 /** What replaces a required text column the erasure empties. */
 export const ERASED_TEXT = '[deleted with the account]';
+/** What an erased card holds (the migration's payment_instruments erasure exception accepts exactly these). */
+export const ERASED_CARD = {
+  vaultTokenSealed: new Uint8Array(29), vaultTokenDek: new Uint8Array(33), brand: 'ERASED', last4: '0000', expMonth: 1, expYear: 2000,
+} as const;
 /** The checkout replay record keeps its order ids and date; this replaces its frozen response and request hash. */
 export const ERASED_CHECKOUT_RESULT = { erased: true } as const;
 
@@ -48,7 +52,7 @@ export async function eraseOwedRowsInTransaction(tx: Prisma.TransactionClient, u
  * token and facts frozen and refuses its delete (PT-1, card_rail_v2); forgetting them is the follow-up
  * erasure exception. A card session that moved no money goes; one that is payment evidence stays.
  */
-export async function retireCardsAndSessions(db: PrismaClient, userId: string): Promise<{ revoked: number; sessionsDeleted: number }> {
+export async function retireCardsAndSessions(db: PrismaClient, userId: string): Promise<{ revoked: number; wiped: number; deleted: number; sessionsDeleted: number }> {
   const active = await db.paymentInstrument.findMany({ where: { userId, status: 'ACTIVE' }, select: { id: true, subscriptionId: true } });
   let revoked = 0;
   // Loaded only when there is a card to revoke (the billing modules are not part of every erasure).
@@ -72,6 +76,27 @@ export async function retireCardsAndSessions(db: PrismaClient, userId: string): 
       return 1;
     });
   }
+  const forgotten = await db.$transaction(async (tx) => {
+    if (!await lockPerson(tx, userId)) return { wiped: 0, deleted: 0 };
+    // [erasure exception, payment_instruments_frozen] Out of service: token and wrapped key overwritten (the token is
+    // unrecoverable), card facts replaced. The binding, consent and how it left service stay.
+    const wiped = await tx.paymentInstrument.updateMany({
+      where: { userId, status: { not: 'ACTIVE' }, brand: { not: ERASED_CARD.brand } },
+      data: { ...ERASED_CARD },
+    });
+    // [payment_instruments_no_delete] An erased card that no payment, session, observation or replacement names goes.
+    const unnamed = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT i."id" FROM "payment_instruments" i
+      WHERE i."userId" = ${userId} AND i."status"::text <> 'ACTIVE' AND i."brand" = ${ERASED_CARD.brand}
+        AND NOT EXISTS (SELECT 1 FROM "subscription_payments" p WHERE p."instrumentId" = i."id")
+        AND NOT EXISTS (SELECT 1 FROM "card_sessions" s WHERE s."instrumentId" = i."id")
+        AND NOT EXISTS (SELECT 1 FROM "card_observations" o WHERE o."instrumentId" = i."id")
+        AND NOT EXISTS (SELECT 1 FROM "payment_instruments" r WHERE r."replacedById" = i."id")
+      FOR UPDATE OF i /* erasure-card-forget */
+    `;
+    const deleted = unnamed.length ? (await tx.paymentInstrument.deleteMany({ where: { userId, id: { in: unnamed.map((r) => r.id) } } })).count : 0;
+    return { wiped: wiped.count, deleted };
+  });
   const sessionsDeleted = await db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return 0;
     // Moved no money: terminal without success, no payment, provider transaction, card, provider action,
@@ -89,7 +114,7 @@ export async function retireCardsAndSessions(db: PrismaClient, userId: string): 
     if (!transient.length) return 0;
     return (await tx.cardSession.deleteMany({ where: { userId, id: { in: transient.map((r) => r.id) } } })).count;
   });
-  return { revoked, sessionsDeleted };
+  return { revoked, ...forgotten, sessionsDeleted };
 }
 
 /**
@@ -133,6 +158,11 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
 export async function deidentifyCaseRecords(db: PrismaClient, userId: string): Promise<void> {
   await db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return;
+    // [erasure exception, safeb_payer_immutable] The payer hash and the digest that encodes it go; the row stays.
+    await tx.$executeRaw`
+      UPDATE "mmg_payer_evidence" SET "payerHash" = 'erased', "digest" = 'erased:' || "id"
+      WHERE "accountId" = ${userId} AND "payerHash" <> 'erased' /* erasure-payer-evidence */
+    `;
     await tx.strike.updateMany({ where: { userId, OR: [{ phone: { not: null } }, { addressKey: { not: null } }] }, data: { phone: null, addressKey: null } });
     await tx.enforcementAction.updateMany({
       where: { accountId: userId, OR: [{ appealNote: { not: null } }, { NOT: { signalsFired: { equals: [] } } }] },
@@ -226,8 +256,9 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
       await tx.tripSafetySession.updateMany({ where: { id: { in: sessionIds } }, data: { riskFactors: Prisma.DbNull, deviationState: Prisma.DbNull } });
     }
 
-    // Evidence bundles about the person: unheld, of a closed case or SOS. Unsealed items go; sealed evidence is
-    // immutable at the database (safety spec §9.2) and stays until the follow-up erasure exception.
+    // Evidence bundles about the person: unheld, of a closed case or SOS. Their items go, sealed ones too (the
+    // evidence_item_block_sealed erasure exception; COORD 19 Oct 04:51Z: the owner's G3 ruling outranks "sealed =
+    // forever"). The bundle row, its seal hash and its dates stay as proof the evidence existed.
     const bundles = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT b."id" FROM "EvidenceBundle" b
       WHERE b."subjectUserId" = ${userId} AND NOT b."legalHold"
@@ -235,7 +266,7 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
         AND (b."sosAlertId" IS NULL OR b."sosAlertId" = ANY(${alertIds}::text[]))
       ORDER BY b."id" FOR UPDATE /* erasure-safety-bundles */
     `;
-    if (bundles.length) await tx.evidenceItem.deleteMany({ where: { bundleId: { in: bundles.map((b) => b.id) }, sealedAt: null } });
+    if (bundles.length) await tx.evidenceItem.deleteMany({ where: { bundleId: { in: bundles.map((b) => b.id) } } });
 
     // Confirmed fraud cases about the person whose legal hold (if any) is released: the referral text and the
     // other accounts it linked go; the reason code, dates and case link stay.

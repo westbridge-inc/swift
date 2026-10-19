@@ -172,14 +172,18 @@ describe('[COORD 23:28Z] owed rows go with the account (in the erasure transacti
 });
 
 describe('[COORD 03:46Z] cards: every saved card leaves service; payment evidence stays', () => {
-  it('an ACTIVE card is REVOKED by the erasure (the PT-1 row stays, frozen); its unsent charges are closed', async () => {
+  it('an ACTIVE card is REVOKED, its token and facts forgotten, and the row deleted when nothing names it; a card a payment names stays, forgotten', async () => {
     const u = await person(['CUSTOMER', 'MOVER']);
     const { sub } = await riderWithSubscription(u);
     const active = await app.prisma.paymentInstrument.create({ data: card(u, sub.id) });
+    const old = await app.prisma.paymentInstrument.create({ data: card(u, sub.id, { status: 'EXPIRED', expiredAt: new Date() }) });
+    await app.prisma.cardSession.create({ data: session(u, sub.id, { status: 'SUCCEEDED', instrumentId: old.id }) });
     await erase(u);
-    const after = await app.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: active.id } });
-    expect({ status: after.status, revokedBy: after.revokedBy, revoked: after.revokedAt !== null }).toEqual({ status: 'REVOKED', revokedBy: u, revoked: true });
+    expect(await app.prisma.paymentInstrument.count({ where: { id: active.id } })).toBe(0);
     expect(await app.prisma.auditLog.count({ where: { action: 'CARD_REVOKED_ACCOUNT_DELETED', entityId: active.id } })).toBe(1);
+    const kept = await app.prisma.paymentInstrument.findUniqueOrThrow({ where: { id: old.id } });
+    expect([kept.status, kept.brand, kept.last4, Buffer.from(kept.vaultTokenSealed).equals(Buffer.alloc(29)), Buffer.from(kept.vaultTokenDek).equals(Buffer.alloc(33))])
+      .toEqual(['EXPIRED', 'ERASED', '0000', true, true]);
   });
 
   it('a card session that moved no money goes; one with a provider transaction (payment evidence) stays', async () => {
@@ -228,10 +232,14 @@ describe('[owner 19 Oct G1 + G2] fraud marks and case rows stay without their id
   it('a strike and an enforcement action keep the row (reason, order link, dates) without phone, address key, signals and appeal text', async () => {
     const u = await person();
     const s = await app.prisma.strike.create({ data: { userId: u, reason: 'failed_payment_absent', phone: '+5920000002', addressKey: 'addr-key', orderId: 'ord-1' } });
+    const payerId = nanoid(12);
+    await app.prisma.$executeRaw`INSERT INTO "mmg_payer_evidence" ("id", "tenantId", "accountId", "actorRole", "payerHash", "tier", "source", "digest")
+      VALUES (${payerId}, ${T}, ${u}, 'RIDER', ${'h'.repeat(64)}, 'DECLARED', 'BILLING_DECLARATION', ${nanoid(32)})`;
     const e = await app.prisma.enforcementAction.create({ data: { accountId: u, level: 'DENY_TRIAL', reasonCode: 'TRIAL_CONSUMED', signalsFired: [{ phoneHash: 'x' }], decidedBy: 'SYSTEM', appealNote: 'It was my brother' } });
     await erase(u);
     const [sa, ea] = await Promise.all([app.prisma.strike.findUniqueOrThrow({ where: { id: s.id } }), app.prisma.enforcementAction.findUniqueOrThrow({ where: { id: e.id } })]);
     expect({ reason: sa.reason, orderId: sa.orderId, phone: sa.phone, addressKey: sa.addressKey }).toEqual({ reason: 'failed_payment_absent', orderId: 'ord-1', phone: null, addressKey: null });
+    expect(await app.prisma.$queryRaw`SELECT "payerHash", "digest" FROM "mmg_payer_evidence" WHERE "id" = ${payerId}`).toEqual([{ payerHash: 'erased', digest: `erased:${payerId}` }]);
     expect({ reasonCode: ea.reasonCode, level: ea.level, signalsFired: ea.signalsFired, appealNote: ea.appealNote }).toEqual({ reasonCode: 'TRIAL_CONSUMED', level: 'DENY_TRIAL', signalsFired: [], appealNote: null });
   });
 
@@ -276,6 +284,11 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
       subjectUserId: u, orderId: 'ord-s', summary: 'What happened to her', details: { where: 'street' }, decisionNotes: 'Notes', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
     const bundle = await app.prisma.evidenceBundle.create({ data: { tenantId: T, bundleNumber: `EB-${nanoid(8)}`, caseId: kase.id, subjectUserId: u } });
     await app.prisma.evidenceItem.create({ data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: 'fix', content: { lat: 6.8 }, contentHash: 'h'.repeat(64) } });
+    // The SOS's bundle, sealed the way the evidence service seals one (items stamped, then the bundle's seal hash).
+    const sealedBundle = await app.prisma.evidenceBundle.create({ data: { tenantId: T, bundleNumber: `EB-${nanoid(8)}`, sosAlertId: sos.id, subjectUserId: u } });
+    const sealedAt = new Date();
+    await app.prisma.evidenceItem.create({ data: { bundleId: sealedBundle.id, kind: 'NOTE', label: 'sealed', content: { note: 'what she said' }, contentHash: 's'.repeat(64), sealedAt } });
+    await app.prisma.evidenceBundle.update({ where: { id: sealedBundle.id }, data: { sealedAt, sealedBy: 'ops-x', sealHash: 'f'.repeat(64) } });
     const fraudCaseId = randomUUID();
     const fraud = await app.prisma.fraudCase.create({ data: { tenantId: T, subjectUserId: u, submissionId: 'sub-f', caseId: fraudCaseId, reasonCode: 'DOC_FORGED', confirmedBy: 'admin-x', linkedAccountIds: ['acc-2'], referral: 'Referred with her details' } });
     await erase(u);
@@ -286,7 +299,10 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
     expect([s.status, s.orderId, s.riskFactors, s.deviationState]).toEqual(['CLOSED', tripOrder, null, null]);
     const k = await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: kase.id } });
     expect([k.status, k.orderId, k.caseNumber, k.summary, k.details, k.decisionNotes]).toEqual(['CLOSED', 'ord-s', kase.caseNumber, ERASED_TEXT, null, null]);
-    expect(await app.prisma.evidenceItem.count({ where: { bundleId: bundle.id } })).toBe(0);
+    expect(await app.prisma.evidenceItem.count({ where: { bundleId: { in: [bundle.id, sealedBundle.id] } } })).toBe(0);
+    // The proof it existed: the bundle row, its seal hash and its dates stay.
+    expect(await app.prisma.evidenceBundle.findUniqueOrThrow({ where: { id: sealedBundle.id }, select: { sealHash: true, sealedAt: true, openedAt: true } }))
+      .toEqual({ sealHash: 'f'.repeat(64), sealedAt, openedAt: expect.any(Date) });
     const f = await app.prisma.fraudCase.findUniqueOrThrow({ where: { id: fraud.id } });
     expect([f.reasonCode, f.caseId, f.referral, f.linkedAccountIds]).toEqual(['DOC_FORGED', fraudCaseId, ERASED_TEXT, []]);
   });
