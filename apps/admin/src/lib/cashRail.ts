@@ -209,5 +209,13 @@ export function outcomeOfThrown(error: unknown): MoneyActionOutcome {
       ...(e.details?.approvalId ? { approvalId: e.details.approvalId } : {}),
     };
   }
+  // [U06] A second ask for an act that is already waiting: nothing new was asked.
+  if (e.code === 'APPROVAL_ALREADY_OPEN') {
+    return {
+      kind: 'queued',
+      message: 'Already waiting for a second admin. Nothing new was asked, and nothing has moved yet.',
+      ...(e.details?.approvalId ? { approvalId: e.details.approvalId } : {}),
+    };
+  }
   return { kind: 'error', message: e.message ?? 'The request failed.' };
 }

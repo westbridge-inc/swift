@@ -79,6 +79,15 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: 'Nothing has changed yet. A different admin must approve it in Approvals; once they do, you apply it from there. Do not send it again — that would ask twice.',
         link: { label: 'Open Approvals', href: APPROVALS_HREF },
       };
+    case 'APPROVAL_ALREADY_OPEN':
+      // [U06] The server refused a second ask for an act that is already waiting: nothing new was
+      // asked, and the earlier ask is named. Shown as the queued answer it is, never as a failure.
+      return {
+        tone: 'queued',
+        title: "Already waiting for a second admin's approval",
+        next: 'Nothing new was asked. The earlier request is in Approvals: a different admin approves it there, then you apply it. To ask for something different, cancel that request first.',
+        link: { label: 'Open Approvals', href: APPROVALS_HREF },
+      };
     case 'CHECKLIST_INCOMPLETE':
       return {
         tone: 'refused',
@@ -272,6 +281,10 @@ export function outcomeOf(error: unknown, ctx: OutcomeContext = {}): Outcome {
   const approvalId = copy.tone === 'queued' && typeof details?.['approvalId'] === 'string' ? details['approvalId'] as string : undefined;
 
   const outcome: Outcome = { ...copy };
+  if (code === 'APPROVAL_ALREADY_OPEN' && details?.['approvalStatus'] === 'APPROVED') {
+    outcome.title = 'Already approved and waiting for you to apply it';
+    outcome.next = 'Nothing new was asked. Open Approvals and apply the approved request; do not ask again.';
+  }
   if (serverMessage && serverMessage !== copy.title) outcome.serverMessage = serverMessage;
   if (code) outcome.code = code;
   if (status !== undefined) outcome.status = status;

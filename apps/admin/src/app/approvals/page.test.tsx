@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import ApprovalsPage from './page';
 import {
   API_ORIGIN,
@@ -79,8 +79,14 @@ describe('the approval card shows what executes', () => {
     expect(screen.getByText('Amount')).toBeTruthy();
     expect(screen.getByText('Subscription Id')).toBeTruthy();
 
+    // [U63] one click asks first: nothing runs until the panel is confirmed
     await user.click(screen.getByRole('button', { name: 'Execute the approved action' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toMatch(/runs the approved request now/);
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    await user.click(within(panel).getByRole('button', { name: 'Execute it' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    expect(await screen.findByText('Executed.')).toBeTruthy();
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(String(url)).toBe(`${API_ORIGIN}/api/v1/admin/approvals/ap1/apply`);
     expect(init?.method).toBe('POST');
@@ -160,6 +166,9 @@ describe('[OWNER #13] solo approval on your own request', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Cancel this request' }));
+    const panel = await screen.findByRole('dialog');
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    await user.click(within(panel).getByRole('button', { name: 'Cancel the request' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/approvals/ap-solo/cancel`);
   });

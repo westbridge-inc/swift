@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRevenue,
   fetchCashSettlements,
@@ -10,9 +10,8 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { MutationError } from '@/components/MutationError';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -127,7 +126,9 @@ function MmgSection() {
             {LEDGER_FILTERS.map((f) => (
               <button
                 key={f}
+                type="button"
                 onClick={() => setFilter(f)}
+                aria-pressed={filter === f}
                 className={`px-2.5 py-1 rounded-lg text-xs ${
                   filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
                 }`}
@@ -175,10 +176,18 @@ function MmgSection() {
 function SettlementsSection() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
-  const process = useMutation({
-    mutationFn: ({ id, reference, reason }: { id: string; reference?: string; reason: string }) => processSettlement(id, reference, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
-  });
+  // [U28] Acknowledging is classified C4: its first answer can be a second
+  // admin's approval, which used to print as "Settlement update failed".
+  const actions = useActionRunner(() => qc.invalidateQueries({ queryKey: ['settlements'] }));
+  const [queuedRows, setQueuedRows] = useState<Record<string, true>>({});
+  const acknowledge = (s: any) => void actions.run({
+    title: `Acknowledge the sales digest for ${s.vendor?.name ?? 'this vendor'}?`,
+    body: <p>Swift moves no money: this records that you reviewed it.</p>,
+    confirmLabel: 'Acknowledge',
+    fields: [{ kind: 'text', name: 'note', label: 'Note', hint: 'Optional: a reference to the report you checked it against' }],
+    submit: ({ reason, values }) => processSettlement(s.id, String(values['note'] ?? '') || undefined, reason),
+    success: () => 'Digest acknowledged.',
+  }).then((outcome) => { if (outcome?.tone === 'queued') setQueuedRows((all) => ({ ...all, [s.id]: true })); });
   const rows: any[] = data?.data ?? [];
   // Nothing pending → no noise. A failed read is not "nothing pending": it shows below.
   if (!isLoading && !isError && rows.length === 0) return null;
@@ -189,11 +198,7 @@ function SettlementsSection() {
       <p className="text-[var(--muted)] text-xs mb-4">
         Each vendor’s own completed sales for the week. Swift takes no cut and pays nothing out — acknowledge a digest once you have reviewed it.
       </p>
-      {process.error && (
-        <div className="mb-3">
-          <MutationError error={process.error} label="Settlement update failed" />
-        </div>
-      )}
+      {actions.banner}
       {isLoading ? (
         <p className="text-sm text-[var(--muted)]">Loading…</p>
       ) : isError ? (
@@ -209,17 +214,12 @@ function SettlementsSection() {
               </span>
               <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button
-                onClick={() => {
-                  const ref = window.prompt(`Note for ${s.vendor?.name ?? 'this digest'} (optional):`) ?? undefined;
-                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) {
-                    const reason = askReason({ action: 'acknowledge this sales digest', subject: s.vendor?.name ?? 'this digest' });
-                    if (reason) process.mutate({ id: s.id, reference: ref || undefined, reason });
-                  }
-                }}
-                disabled={process.isPending}
+                type="button"
+                onClick={() => acknowledge(s)}
+                disabled={queuedRows[s.id] === true}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
               >
-                Acknowledge
+                {queuedRows[s.id] ? 'Waiting for approval' : 'Acknowledge'}
               </button>
             </div>
           ))}
