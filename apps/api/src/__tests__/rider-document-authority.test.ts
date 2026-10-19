@@ -129,11 +129,13 @@ describe('rider GO uses current document authority even with a legacy approval',
 function verification() {
   return new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
 }
-async function availableOrder() {
+/** [row 264] A taxi is born a taxi (PENDING): the database refuses moving a READY delivery back to PENDING. */
+async function availableOrder(kind: 'delivery' | 'taxi' = 'delivery') {
   const customer = await fixture();
   const order = await app.prisma.order.create({ data: {
-    customerId: customer.userId, orderNumber: `DOCS-${nanoid()}`, orderType: 'FOOD_DELIVERY',
-    status: 'READY_FOR_PICKUP', fulfillment: 'DELIVERY', paymentMethod: 'CASH',
+    customerId: customer.userId, orderNumber: `DOCS-${nanoid()}`,
+    ...(kind === 'taxi' ? { orderType: 'TAXI', status: 'PENDING', taxiFareTotal: 1000 } : { orderType: 'FOOD_DELIVERY', status: 'READY_FOR_PICKUP' }),
+    fulfillment: 'DELIVERY', paymentMethod: 'CASH',
     pickupAddress: 'Synthetic pickup', deliveryAddress: 'Synthetic drop',
     pickupLat: 6.8, pickupLng: -58.15, deliveryLat: 6.81, deliveryLng: -58.16,
     subtotalBase: 100, subtotalMarkup: 0, subtotalCustomer: 100, deliveryFee: 500, totalAmount: 600,
@@ -347,7 +349,7 @@ describe('the selected operating profile owns its vehicle proof', () => {
 describe('proof deadlines remain authoritative at the custody write', () => {
   it.each(['board', 'offer', 'driver'] as const)('rolls back %s custody when expiry passes after the locked verdict', async (door) => {
     const mover = await fixture();
-    const order = await availableOrder();
+    const order = await availableOrder(door === 'driver' ? 'taxi' : 'delivery');
     let moverId = mover.riderId;
     if (door === 'driver') {
       await app.prisma.user.update({ where: { id: mover.userId }, data: { activeRole: 'DRIVER', roles: ['RIDER', 'DRIVER'] } });
@@ -365,7 +367,6 @@ describe('proof deadlines remain authoritative at the custody write', () => {
       // [VERIFY-DOCS · ruling 8] the two hire licences a taxi now needs (the legacy flag cannot supply them):
       // the locked verdict must be allowed, so the deadline at the write is what refuses.
       await currentTaxiSplitDocuments(app.prisma, mover.userId);
-      await app.prisma.order.update({ where: { id: order.id }, data: { orderType: 'TAXI', status: 'PENDING', taxiFareTotal: 1000 } });
     } else {
       expect((await go(mover.token)).statusCode).toBe(200);
       await app.prisma.rider.update({ where: { id: mover.riderId }, data: { floatLimit: 10000 } });
@@ -402,7 +403,7 @@ describe('proof deadlines remain authoritative at the custody write', () => {
 
 
 it('refuses Driver custody with known expired proof despite legacy approval', async () => {
-  const mover = await fixture(); const order = await availableOrder();
+  const mover = await fixture(); const order = await availableOrder('taxi');
   await app.prisma.user.update({ where: { id: mover.userId }, data: { activeRole: 'DRIVER', roles: ['DRIVER', 'RIDER'] } });
   const session = await app.prisma.session.findFirstOrThrow({ where: { userId: mover.userId } });
   const driver = await app.prisma.driver.create({ data: {
@@ -415,7 +416,6 @@ it('refuses Driver custody with known expired proof despite legacy approval', as
     coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, fileUrl: 'storage://synthetic/driver-claim',
   } });
   await document(mover.userId, 'drivers_licence', 'APPROVED', new Date(Date.now() - DAY));
-  await app.prisma.order.update({ where: { id: order.id }, data: { orderType: 'TAXI', status: 'PENDING', taxiFareTotal: 1000 } });
   const dispatch = new DispatchService(app.prisma, app.redis, app.io, new HaversineMapsProvider(), async () => {});
   await expect(dispatch.claimOrder(order.id, driver.id, 'DRIVER')).rejects.toMatchObject({ code: 'VERIFICATION_REQUIRED' });
   expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).driverId).toBeNull();
