@@ -160,18 +160,8 @@ beforeAll(async () => {
     select: { id: true },
   });
   if (stale.length) {
-    const orders = await app.prisma.order.findMany({
-      where: { customerId: { in: stale.map((u) => u.id) } },
-      select: { id: true },
-    });
-    // The log table is append-only by design, so a prior run's rows are cleared
-    // through the raw path rather than the guarded client.
-    if (orders.length) {
-      await app.prisma.$executeRawUnsafe(
-        `DELETE FROM "order_status_logs" WHERE "orderId" = ANY($1::text[])`,
-        orders.map((o) => o.id),
-      );
-    }
+    // [row 264] The log table is append-only in the database too: a prior run's
+    // rows leave with their orders (the foreign-key cascade), never on their own.
     await app.prisma.order.deleteMany({ where: { customerId: { in: stale.map((u) => u.id) } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: stale.map((u) => u.id) } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: stale.map((u) => u.id) } } });
@@ -185,12 +175,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (createdOrderIds.length) {
-    await app.prisma.$executeRawUnsafe(
-      `DELETE FROM "order_status_logs" WHERE "orderId" = ANY($1::text[])`,
-      createdOrderIds,
-    );
-  }
+  // [row 264] The status-log rows leave with their orders (the foreign-key cascade).
   await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
   await app.prisma.rider.deleteMany({ where: { userId: { in: createdUserIds } } });
   await app.prisma.session.deleteMany({ where: { userId: { in: createdUserIds } } });

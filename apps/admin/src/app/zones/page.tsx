@@ -7,6 +7,7 @@ import {
   fetchZoneFares, createZoneFare, updateZoneFare, deleteZoneFare,
   type FareZone, type ZoneFare,
 } from '@/lib/api';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionRunner } from '@/components/mc/useActionRunner';
 import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares';
 
@@ -23,7 +24,7 @@ import { fareProblem, gyd, ZONE_FARE_MAX, ZONE_FARE_MIN } from '@/lib/zoneFares'
 // ---------------------------------------------------------------------------
 
 export default function ZonesPage() {
-  const { data, isLoading, error } = useQuery({ queryKey: ['zone-fares'], queryFn: fetchZoneFares });
+  const { data, isLoading, error, refetch, isFetching } = useQuery({ queryKey: ['zone-fares'], queryFn: fetchZoneFares });
   const fares = data?.data?.fares ?? [];
   const zones = data?.data?.zones ?? [];
 
@@ -37,14 +38,16 @@ export default function ZonesPage() {
         second admin&apos;s approval.
       </p>
 
+      {/* [BUG-GUARDS C3] A failed read is never "No zones yet" / "No fixed fares": the tables
+          only render once the read answered (failed-read-never-empty.census.test.ts). */}
       {error ? (
-        <p role="alert" className="text-sm mb-6" style={{ color: 'var(--bad)' }}>
-          Couldn&apos;t load the zones and fares: {(error as Error).message}
-        </p>
-      ) : null}
-
-      <ZoneTable zones={zones} loading={isLoading} />
-      <FixedFares fares={fares} zones={zones} loading={isLoading} />
+        <QueryFailed error={error} what="the zones and fares" onRetry={() => void refetch()} retrying={isFetching} className="mb-6" />
+      ) : (
+        <>
+          <ZoneTable zones={zones} loading={isLoading} />
+          <FixedFares fares={fares} zones={zones} loading={isLoading} />
+        </>
+      )}
     </div>
   );
 }
