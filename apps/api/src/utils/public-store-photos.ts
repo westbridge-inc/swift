@@ -42,9 +42,11 @@ import { MAX_IMAGE_PIXELS, sniffImageType } from './images';
 //     dropped (EXIF/GPS, XMP, IPTC, comments AND the ICC profile, whose text
 //     tags can name a device), and sized: the long edge at most 1600 px, or a
 //     list width from a fixed ladder (?w=). The type is decided by the bytes.
-//   - Cache: a day (`public, max-age=86400`) with a weak ETag; never `immutable`,
-//     so a photo a store removes stops being served within the day everywhere.
-//     A refusal is never cached.
+//   - Cache: `public, max-age=86400, immutable` with a weak ETag. The bytes at
+//     one address never change (every upload gets a new random name), so a
+//     browser need not ask again; the lifetime stays ONE day (not a year), so a
+//     photo a store removes, or one of an item later banned, stops being served
+//     within the day everywhere. A refusal is never cached.
 // ---------------------------------------------------------------------------
 
 /** The stores' photo folder (vendor.routes: `items/${vendorId}`). */
@@ -55,7 +57,7 @@ export const STORE_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
 export const STORE_PHOTO_FULL_EDGE = 1600;
 /** The list widths a client may ask for (?w=). A fixed ladder, so a caller cannot make one photo into a thousand renders. */
 export const STORE_PHOTO_WIDTHS = [160, 320, 480, 640, 960, 1280] as const;
-export const STORE_PHOTO_CACHE_CONTROL = 'public, max-age=86400';
+export const STORE_PHOTO_CACHE_CONTROL = 'public, max-age=86400, immutable';
 /** Bumped whenever the drawing changes, so an old ETag never claims new bytes. */
 const RENDER_VERSION = 'r1';
 

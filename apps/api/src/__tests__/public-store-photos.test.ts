@@ -104,15 +104,29 @@ async function makeItem(vendorId: string, imageUrl: string | null, overrides: Re
   });
 }
 
-/** A camera photo: 2000x1200, EXIF naming the phone, rotated by its orientation tag, a P3 colour profile. */
+/** Where the camera stood (made up): what the GPS block and the XMP packet below carry. */
+const XMP_PLACE = '6,48.5208N';
+const XMP_PACKET = '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+  + `<rdf:Description xmlns:exif="http://ns.adobe.com/exif/1.0/" exif:GPSLatitude="${XMP_PLACE}"/></rdf:RDF></x:xmpmeta>`;
+
+/** A camera photo: 2000x1200, EXIF naming the phone AND a GPS block, an XMP packet with
+ *  the place, rotated by its orientation tag, a P3 colour profile. It goes into the bucket
+ *  directly (stash), past the upload's own strip: the door must not rely on that strip. */
 async function cameraJpeg(): Promise<Buffer> {
   return sharp({ create: { width: 2000, height: 1200, channels: 3, background: { r: 200, g: 40, b: 30 } } })
-    .withExif({ IFD0: { Make: 'SecretMaker', Model: 'SecretPhoneModel', Copyright: 'Jane Private' } })
+    .withExif({
+      IFD0: { Make: 'SecretMaker', Model: 'SecretPhoneModel', Copyright: 'Jane Private' },
+      IFD3: { GPSLatitudeRef: 'N', GPSLatitude: '6/1 48/1 3125/100', GPSLongitudeRef: 'W', GPSLongitude: '58/1 9/1 3600/100' },
+    })
+    .withXmp(XMP_PACKET)
     .withMetadata({ orientation: 6 })
     .withIccProfile('p3')
     .jpeg({ quality: 90 })
     .toBuffer();
 }
+
+/** The EXIF tag that points at a GPS block (0x8825), in either byte order. */
+const hasGpsBlock = (exif: Buffer | undefined) => !!exif && (exif.includes(Buffer.from([0x88, 0x25])) || exif.includes(Buffer.from([0x25, 0x88])));
 
 /** Put bytes in the private bucket under a key, as an upload would have. */
 function stash(key: string, bytes: Buffer): string {
@@ -190,7 +204,13 @@ describe('a store uploads a photo; the customer sees it', () => {
   });
 
   it('serves the picture upright, at most 1600 px, with NO metadata: no EXIF, no GPS block, no ICC profile, no device name', async () => {
-    const key = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    const stored = await cameraJpeg();
+    // The stored object itself still carries all of it (as if the upload strip had missed it).
+    const before = await sharp(stored).metadata();
+    expect(hasGpsBlock(before.exif)).toBe(true);
+    expect(before.xmp?.toString()).toContain(XMP_PLACE);
+    expect(before.icc).toBeDefined();
+    const key = stash(`items/${store.id}/${photoName()}`, stored);
     await makeItem(store.id, key);
     const res = await get(`/${key}`);
     expect(res.statusCode).toBe(200);
@@ -203,7 +223,7 @@ describe('a store uploads a photo; the customer sees it', () => {
     expect(meta.xmp).toBeUndefined();
     expect(meta.iptc).toBeUndefined();
     expect(meta.orientation).toBeUndefined();
-    for (const secret of ['SecretMaker', 'SecretPhoneModel', 'Jane Private', 'Display P3']) {
+    for (const secret of ['SecretMaker', 'SecretPhoneModel', 'Jane Private', 'Display P3', XMP_PLACE, 'adobe:ns:meta', 'Exif\0\0']) {
       expect(res.rawPayload.includes(Buffer.from(secret))).toBe(false);
     }
   });
@@ -213,7 +233,9 @@ describe('a store uploads a photo; the customer sees it', () => {
     await makeItem(store.id, key);
     const thumb = await get(`/${key}?w=320`);
     expect(thumb.statusCode).toBe(200);
-    expect((await sharp(thumb.rawPayload).metadata()).width).toBe(320);
+    const thumbMeta = await sharp(thumb.rawPayload).metadata();
+    expect(thumbMeta.width).toBe(320);
+    expect([thumbMeta.exif, thumbMeta.xmp, thumbMeta.icc, thumbMeta.iptc]).toEqual([undefined, undefined, undefined, undefined]);
     expect(thumb.rawPayload.length).toBeLessThan(60_000);
     for (const bad of ['?w=333', '?w=99999', '?w=320&x=1', '?q=1']) {
       const res = await get(`/${key}${bad}`);
@@ -227,7 +249,7 @@ describe('a store uploads a photo; the customer sees it', () => {
     await makeItem(store.id, key);
     const first = await get(`/${key}?w=480`);
     expect(first.statusCode).toBe(200);
-    expect(first.headers['cache-control']).toBe('public, max-age=86400');
+    expect(first.headers['cache-control']).toBe('public, max-age=86400, immutable');
     expect(first.headers['cross-origin-resource-policy']).toBe('cross-origin');
     expect(first.headers['x-content-type-options']).toBe('nosniff');
     const etag = first.headers['etag'] as string;
@@ -248,7 +270,9 @@ describe('a store uploads a photo; the customer sees it', () => {
       const res = await get(`/${key}?w=640`);
       expect(res.statusCode).toBe(200);
       expect(res.headers['content-type']).toBe(type);
-      expect((await sharp(res.rawPayload).metadata()).width).toBe(640);
+      const drawn = await sharp(res.rawPayload).metadata();
+      expect(drawn.format).toBe(type.slice('image/'.length));
+      expect(drawn.width).toBe(640);
     }
   });
 
@@ -258,7 +282,15 @@ describe('a store uploads a photo; the customer sees it', () => {
     const section = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
     await app.prisma.vendor.update({ where: { id: store.id }, data: { logoUrl: logo, coverImageUrl: cover } });
     await app.prisma.category.create({ data: { vendorId: store.id, name: `Drinks ${wordFreeTag(4)}`, imageUrl: section } });
-    for (const key of [logo, cover, section]) expect((await get(`/${key}?w=160`)).statusCode).toBe(200);
+    for (const key of [logo, cover, section]) {
+      for (const address of [`/${key}?w=160`, `/${key}`]) {
+        const res = await get(address);
+        expect(res.statusCode).toBe(200);
+        const meta = await sharp(res.rawPayload).metadata();
+        expect([meta.exif, meta.xmp, meta.icc, meta.iptc]).toEqual([undefined, undefined, undefined, undefined]);
+        expect(res.rawPayload.includes(Buffer.from(XMP_PLACE))).toBe(false);
+      }
+    }
   });
 });
 
@@ -356,6 +388,10 @@ describe('only a photo a visible store still shows; nothing else in the bucket',
     const key = stash(`items/${s.id}/${photoName()}`, await cameraJpeg());
     await makeItem(s.id, key);
     await refused(`/${key}`);
+    // Its logo is guarded by the store's own hold alone (no item check stands in front of it).
+    const logo = stash(`items/${s.id}/${photoName()}`, await cameraJpeg());
+    await app.prisma.vendor.update({ where: { id: s.id }, data: { logoUrl: logo } });
+    await refused(`/${logo}`);
   });
 
   it('a referenced key whose bytes are not a photo is refused', async () => {
