@@ -1649,6 +1649,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - the reinstate decides again inside its transaction, under the owner's
    *    account lock and the store row lock [Opus S3-1], so a deletion or a
    *    document decision racing it cannot be undone by it;
+   *  - waiting, every go-live rule met, while billing holds its weekly fee
+   *    (subscription SUSPENDED or CHURNED) → the projection makes it live
+   *    UNDER billing's hold (SUSPENDED, source BILLING, intake closed) and the
+   *    owner is told to pay the fee to open it; the payment lifts it [#1541];
    *  - otherwise refused with what is missing, and nothing changes.
    */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -1670,6 +1674,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refused) throw refused;
 
     let updated;
+    // [#1541] Documents approved while billing holds the weekly fee: live under that hold, not open.
+    let feeHeld = false;
     if (next === 'CAN_ACTIVATE') {
       // The one authority that makes a store live, on every path (review,
       // auto-approval, the reconcile belt — and now this button), run for this
@@ -1679,7 +1685,8 @@ export async function adminRoutes(app: FastifyInstance) {
         extra: { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next },
       }));
       updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
-      if (updated.status !== 'ACTIVE') {
+      feeHeld = updated.status === 'SUSPENDED' && updated.suspensionSource === 'BILLING';
+      if (updated.status !== 'ACTIVE' && !feeHeld) {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
     } else if (next === 'CAN_LIFT_TO_WAITING') {
@@ -1750,7 +1757,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
-    await notifications.send({
+    // [#1541] A store that went live under billing's hold was told so by the projection itself (documents
+    // approved, pay the weekly fee to open): one notice, on both activation edges.
+    if (!feeHeld) await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(next === 'CAN_LIFT_TO_WAITING'
