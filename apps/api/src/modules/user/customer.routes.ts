@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -7,6 +8,7 @@ import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
@@ -891,8 +893,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  and riders rate them too; respect runs both ways). Aggregate only —
    *  never per-rating rows, never who said what. */
   app.get('/rating', async (request: AuthRequest) => {
-    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
-    return { success: true, data: surface };
+    // [COORD 18 Oct, option S] A customer's own star is shown from whole groups of 5 only (rating-groups.ts).
+    const { displayRating, ratingBucket, ratingCount, topRated } = await shownRatingFor(app.prisma, 'CUSTOMER', request.user.userId);
+    return { success: true, data: { displayRating, ratingBucket, ratingCount, topRated } };
   });
 
   app.get('/profile', async (request: AuthRequest) => {
@@ -967,7 +970,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** GET /account/export — DPA right of access + portability: the customer's own
    *  data as portable JSON. Documents' contents are never exported. */
-  app.get('/account/export', async (request: AuthRequest) => {
+  // [Row 331 · REVIEW-G S3-1] ~60 reads per export: a few an hour is plenty for a person, and keeps it from being a load lever.
+  app.get('/account/export', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async (request: AuthRequest) => {
     const data = await account.exportData(request.user.userId);
     return { success: true, data };
   });
@@ -1657,7 +1661,9 @@ export async function customerRoutes(app: FastifyInstance) {
     if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
-    const activePromos = await app.prisma.promoCode.findMany({
+    // [Row 272] A code that has reached its usage limit is not advertised: it
+    // could only be refused at checkout. The counters never leave the server.
+    const activePromos = (await app.prisma.promoCode.findMany({
       where: {
         vendorId: id,
         isActive: true,
@@ -1667,10 +1673,18 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
+        maxUses: true, currentUses: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+      take: 20,
+    }))
+      .filter((p) => p.maxUses == null || p.currentUses < p.maxUses)
+      .slice(0, 5)
+      .map((p) => ({
+        code: p.code, description: p.description, discountType: p.discountType,
+        discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null,
+        validUntil: p.validUntil,
+      }));
 
     // Check if favorited (guests have none)
     const isFavorite = request.user?.userId
@@ -1767,7 +1781,10 @@ export async function customerRoutes(app: FastifyInstance) {
         distanceKm,
         deliveryFee,
         etaMin,
-        promos: activePromos.map((p) => ({ ...p, discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null })),
+        promos: activePromos,
+        // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
+        // "N promos available" row). Same list as `promos`, kept for older readers.
+        activePromos,
       },
     };
   });
@@ -2768,10 +2785,8 @@ export async function customerRoutes(app: FastifyInstance) {
         })()
       : null;
 
-    // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
-    const riderSurface = order.rider?.userId
-      ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
-      : null;
+    // R8.4: the live-order card shows "{Rider} · {display}★" — [COORD 18 Oct, option S] from whole groups of 5 only.
+    const riderSurface = order.rider?.userId ? shownSurface(await shownRatingFor(app.prisma, 'RIDER', order.rider.userId)) : null;
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
@@ -3697,9 +3712,8 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     // Check user-specific usage
-    const userUsage = await app.prisma.order.count({
-      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+    const userUsage = await app.prisma.order.count({ where: promoUsesByPersonWhere(authority.memberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');
     }

@@ -16,6 +16,7 @@ import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } f
 import { OrderService } from '../modules/order/order.service';
 import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Terminal transitions must FREE THE MOVER — found live in the 2026-07-12
@@ -997,7 +998,8 @@ describe('delivery watchdog under stacking: every leg, one pointer rule', () => 
     expect(moved.primaryLegId).toBe(later.id);
 
     // `offline` pins availability false whatever the room.
-    await app.prisma.order.updateMany({ where: { riderId: rider.riderId }, data: { status: 'DELIVERED' } });
+    // [row 264] Each leg walks to DELIVERED along declared edges (the database refuses a jump).
+    for (const leg of await app.prisma.order.findMany({ where: { riderId: rider.riderId }, select: { id: true } })) await walkOrderStatus(app.prisma, leg.id, 'DELIVERED');
     const empty = await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.riderId, { availability: 'offline' }));
     expect(empty.primaryLegId).toBeNull();
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).isAvailable).toBe(false);

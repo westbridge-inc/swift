@@ -1,5 +1,7 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
+import { exportPersonalData } from './data-export';
 import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
@@ -15,6 +17,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -58,64 +61,10 @@ export async function closesByRequest(
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
-  /** DPA right of access + portability: a copy of the person's own data. */
+  /** DPA right of access + portability: a copy of the person's own data.
+   *  [Row 331 (b)] Every category of the export register, paged, never cut silently (data-export.ts). */
   async exportData(userId: string) {
-    const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        phone: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roles: true,
-        activeRole: true,
-        lastMoverRole: true,
-        countryCode: true,
-        trustLevel: true,
-        isPhoneVerified: true,
-        createdAt: true,
-        lastActiveAt: true,
-      },
-    });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
-
-    const [addresses, orders, ratingsGiven, serviceJobs] = await Promise.all([
-      prisma.address.findMany({
-        where: { userId },
-        select: { label: true, addressLine1: true, addressLine2: true, city: true, latitude: true, longitude: true, createdAt: true },
-      }),
-      prisma.order.findMany({
-        where: { customerId: userId },
-        select: { orderNumber: true, orderType: true, status: true, totalAmount: true, createdAt: true, deliveredAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.rating.findMany({
-        where: { raterId: userId },
-        select: { score: true, comment: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.serviceJob.findMany({
-        where: { customerId: userId },
-        select: { status: true, scheduledFor: true, quoteAmount: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-    ]);
-
-    return {
-      exportedAt: new Date().toISOString(),
-      notice:
-        'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
-      account: user,
-      addresses,
-      orders,
-      ratingsGiven,
-      serviceJobs,
-    };
+    return exportPersonalData(this.app.prisma, userId);
   }
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
@@ -193,6 +142,11 @@ export class AccountService {
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
         await tx.deviceToken.deleteMany({ where: { userId } });
+        // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
+        // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
+        // verification.service openForOwedWork), and the row's userId never
+        // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
+        await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
@@ -278,6 +232,7 @@ export class AccountService {
       // Marked wound down with the cutoff, so no billing repair or fee payment
       // can reopen a closed account's store (it reopens billing holds only).
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
+      await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
@@ -510,8 +465,10 @@ export class AccountService {
 
     // Sessions and push tokens were revoked atomically with authority cutoff.
 
-    // 3. Drop precise saved locations (home/work) outright.
-    await prisma.address.deleteMany({ where: { userId } });
+    // 3. Drop precise saved locations (home/work) outright. [item 20] Through
+    //    a named system capability: an admin's closure or the erasure retry job
+    //    acts for someone else, and the owner wall would let it delete nothing.
+    await runAsSystem('account:erasure-addresses', () => prisma.address.deleteMany({ where: { userId } }));
 
     // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
     //     recovery ID/selfie pointers, biometric liveness rows, public trip

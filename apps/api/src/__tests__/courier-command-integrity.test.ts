@@ -13,6 +13,7 @@ import { OrderService, holdReleaseObserver, TERMINAL_ORDER_STATUSES } from '../m
 import * as outbox from '../modules/order/checkout-outbox';
 import { releaseHeldOrdersJob } from '../jobs/queue';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
+import { retireLiveOrders, walkOrderStatus } from './helpers/order-status-walk';
 
 // Real HTTP, database transactions and a private BullMQ queue. No worker runs:
 // its accepted jobs are inspected so duplicate publication cannot hide.
@@ -67,7 +68,8 @@ afterEach(async () => {
   vi.restoreAllMocks(); delete holdReleaseObserver.afterRelease;
   vi.stubEnv('LIFECYCLE_V2', '0');
   // Keep immutable order history, remove only this run's live competition.
-  await app.prisma.order.updateMany({ where: { customerId: { in: users }, status: { notIn: TERMINAL_ORDER_STATUSES } }, data: { status: 'CANCELLED', holdExpiresAt: null } });
+  // [row 264] Along declared edges: an order in custody cannot be cancelled, so it is retired the way it can end.
+  await retireLiveOrders(app.prisma, { customerId: { in: users } }, { holdExpiresAt: null });
 });
 afterAll(async () => {
   await queue.obliterate({ force: true }); await queue.close();
@@ -229,7 +231,7 @@ describe('terminal recipient minimisation', () => {
     const a = await actor(); const m = await actor(true); const res = await post(a);
     expect(res.statusCode).toBe(201); const id = res.json().data.orderId;
     const rider = await app.prisma.rider.create({ data: { userId: m.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', currentOrderId: id } });
-    await app.prisma.order.update({ where: { id }, data: { riderId: rider.id, status, deliveredAt: new Date() } });
+    await walkOrderStatus(app.prisma, id, status, { riderId: rider.id, deliveredAt: new Date() });
     for (const url of ['/api/v1/rider/orders', '/api/v1/rider/orders/active', '/api/v1/rider/orders/active-legs', `/api/v1/courier/track/${res.json().data.trackingToken}`]) {
       const response = await read(url, url.includes('/rider/') ? m : undefined); expect(response.statusCode, response.body).toBe(200);
       expect(response.body).not.toContain(body.recipientName); expect(response.body).not.toContain(body.recipientPhone); expect(response.body).not.toContain(body.dropoffAddress);

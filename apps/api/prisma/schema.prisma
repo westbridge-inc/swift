@@ -185,7 +185,13 @@ model Session {
   id                   String    @id @default(cuid())
   userId               String
   user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// [Row 231] SHA-256 hex digest of the access token — never the token.
+  /// The prisma `sessionCredentialDigest` extension (src/lib/session-credential.ts)
+  /// digests every write and lookup that comes through Prisma (call sites pass
+  /// the plaintext the client presented); raw SQL digests explicitly; the CHECK
+  /// constraints `sessions_*_digest_check` refuse any other shape.
   token                String    @unique
+  /// [Row 231] SHA-256 hex digest of the current refresh token (same rules as `token`).
   refreshToken         String    @unique
   /// Durable authentication assurance for this exact session generation.
   /// Existing/pre-cutover rows intentionally remain LEGACY and can continue
@@ -196,6 +202,7 @@ model Session {
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
+  /// [Row 231] SHA-256 hex digest of the replaced refresh token, or NULL (same rules as `token`).
   previousRefreshToken String?   @unique
   rotatedAt            DateTime?
   deviceId             String
@@ -3764,15 +3771,15 @@ model MmgCheckoutObservation {
   tenantId  String   @default("swift-default")
   /// The checkout the observation was matched to, if any.
   intentId  String?
-  /// RETURN | NOTIFY | LOOKUP
+  /// RETURN | NOTIFY | LOOKUP | HISTORY
   source    String
-  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP: the transaction id asked about.
+  /// RETURN/NOTIFY: the path the partner came back on. LOOKUP/HISTORY: the transaction id asked about.
   detail    String?
-  /// The decrypted reply (RETURN/NOTIFY) or the lookup answer (LOOKUP).
+  /// The decrypted reply (RETURN/NOTIFY), the lookup answer (LOOKUP), or the history query and only the rows naming the transaction (HISTORY).
   body      Json?
   /// Key names and JSON types only (describeShape): safe for any log.
   shape     Json?
-  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED
+  /// Why nothing could be used: NO_TOKEN | NO_CHECKOUT | LOOKUP_NOT_FOUND | LOOKUP_FAILED | HISTORY_NOT_FOUND | HISTORY_FAILED
   failure   String?
   createdAt DateTime @default(now())
 
@@ -4845,6 +4852,9 @@ model ChatMessage {
   createdAt       DateTime @default(now())
 
   @@index([offPlatformFlag])
+  /// [Row 310] Chat polling: one room's newest messages (and a sender's recent
+  /// ones in that room). Built online by its own migration.
+  @@index([chatRoomId, createdAt])
   @@map("chat_messages")
 }
 

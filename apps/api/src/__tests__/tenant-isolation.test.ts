@@ -8,7 +8,7 @@ import { getTenantId, prismaPlugin, runWithTenant, runWithoutTenant } from '../p
 import { IdentityService } from '../modules/integrity/identity.service';
 import { runIdentityBackfill } from '../modules/integrity/backfill';
 import { ensureSan, releaseSan } from '../modules/billing/san.service';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Tenant isolation (multi-tenancy stage 2 / launch-readiness §1.2): with a
@@ -269,7 +269,7 @@ describe('tenant isolation (stage 2)', () => {
   });
 
   it('the global identity union escapes request scoping and records authoritative tenant provenance', async () => {
-    const suffix = nanoid(8);
+    const suffix = wordFreeTag(8);
     const [defaultUser, tenantBUser] = await runWithoutTenant(() => prisma.$transaction([
       prisma.user.create({
         data: {
@@ -382,7 +382,7 @@ describe('tenant isolation (stage 2)', () => {
   });
 
   it('the never-recycle SAN tombstone deny registry is visible across tenants', async () => {
-    const suffix = nanoid(8).toLowerCase();
+    const suffix = wordFreeTag(8);
     const ownerUser = await runWithoutTenant(() => prisma.user.create({
       data: {
         phone: testPhone(),

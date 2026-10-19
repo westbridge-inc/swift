@@ -11,7 +11,7 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { statementRoutes } from '../modules/order/statement.routes';
 import { signStatementToken, signStatementTokenV1 } from '../modules/order/statement';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Statements (marketplace §12, the receipt's siblings): earner earnings and
@@ -28,7 +28,7 @@ const userIds: string[] = [];
 const orderIds: string[] = [];
 const earningIds: string[] = [];
 let ownerId: string;
-const marker = nanoid(6).toLowerCase();
+const marker = wordFreeTag(8);
 
 async function makeUser(roles: string[], activeRole: string) {
   const u = await app.prisma.user.create({

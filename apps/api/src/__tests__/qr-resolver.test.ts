@@ -14,6 +14,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { QrService, QR_GRACE_CONFIG_KEY } from '../modules/qr/qr.service';
 import { flushScanLog, resetScanLogForTests } from '../modules/qr/scan-log';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -63,7 +64,7 @@ async function makeVendor(userId: string, over: { status?: 'ACTIVE' | 'SUSPENDED
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Qr Vendor ${seq}-${nanoid(4)}`,
+      name: `Qr Vendor ${seq}-${wordFreeTag(8)}`,
       slug: `qr-vendor-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT',
       phone: `+${phoneBase + 500_000 + seq}`,

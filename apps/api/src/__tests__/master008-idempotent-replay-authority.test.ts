@@ -9,7 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { withIdempotency } from '../utils/idempotency';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [MASTER-008] An idempotent replay is answered only to the principal that
@@ -97,7 +97,7 @@ beforeAll(async () => {
   await app.ready();
   const owner = await makeUser(['VENDOR_OWNER'], 'VENDOR_OWNER');
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
-  const slug = `m008-${nanoid(8).toLowerCase().replace(/[^a-z0-9]/g, '0')}`;
+  const slug = `m008-${wordFreeTag(8)}`;
   vendorId = (await app.prisma.vendor.create({
     data: { ownerId: vo.id, name: `M008 ${slug}`, slug, vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}9999`, addressLine1: '1 Replay St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: GPS.lat, longitude: GPS.lng, status: 'ACTIVE', acceptingOrders: true, isVerified: true },
   })).id;
