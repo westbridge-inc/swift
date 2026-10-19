@@ -1,4 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { eraseUserDevices } from '../../lib/owner-rls';
 import { eraseMoverObjects } from './mover-object-erasure';
 import { exportPersonalData } from './data-export';
 import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
@@ -140,7 +141,8 @@ export class AccountService {
       };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
-        await tx.deviceToken.deleteMany({ where: { userId } });
+        // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
+        await eraseUserDevices(tx, userId);
         // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
         // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
         // verification.service openForOwedWork), and the row's userId never
