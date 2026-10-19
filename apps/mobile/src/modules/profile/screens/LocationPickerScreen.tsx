@@ -12,7 +12,7 @@ import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { CircleChip, PillButton, T } from '../../../kit';
 
 // Center-pin map picker: pan the map, the fixed pin marks the spot, Confirm
-// returns the coordinate to the caller via merged navigation params.
+// returns the coordinate to the caller (popTo, merged navigation params).
 export function LocationPickerScreen() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
@@ -47,11 +47,11 @@ export function LocationPickerScreen() {
 
   const confirm = () => {
     if (!confirmable) return;
-    navigation.navigate({
-      name: returnTo,
-      params: { picked: { latitude: region.latitude, longitude: region.longitude } },
-      merge: true,
-    });
+    // React Navigation 7: navigate() PUSHES a second copy of a screen that is
+    // already in the stack (it no longer goes back to it), so the address form
+    // the person filled in was buried under a blank one and Save returned to
+    // the picker. popTo goes back to THAT form and merges the pin into it.
+    navigation.popTo(returnTo, { picked: { latitude: region.latitude, longitude: region.longitude } }, { merge: true });
   };
 
   return (
