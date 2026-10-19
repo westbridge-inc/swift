@@ -19,6 +19,8 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
@@ -72,7 +74,20 @@ const jobRequestSchema = z.object({
 const QUOTE_AMOUNT = new Intl.NumberFormat('en-GY', { maximumFractionDigits: 2 });
 const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.string().max(1000).optional() });
 
+/** [IMAGES-E2E PR3] How many photos one provider's portfolio holds. */
+export const PORTFOLIO_MAX = 12;
+
+/** [IMAGES-E2E PR3] A profile save may keep, reorder or drop portfolio photos, never add
+ *  one (an outside address or a path into another folder would skip the scan and the redraw). */
+export function assertPortfolioOnlyKeeps(sent: string[], current: string[]): void {
+  const allowed = new Set(current);
+  if (new Set(sent).size !== sent.length || sent.some((photo) => !allowed.has(photo))) {
+    throw new AppError(400, 'PORTFOLIO_UPLOAD_ONLY', 'Add portfolio photos by uploading them');
+  }
+}
+
 export async function servicesRoutes(app: FastifyInstance) {
+  const storage = getStorageProvider();
   const auth = { preHandler: [app.authenticate] };
   const optionalAuth = { preHandler: [app.authenticateOptional] };
   const ratingService = new RatingService(app.prisma, app.io);
@@ -166,6 +181,12 @@ export async function servicesRoutes(app: FastifyInstance) {
       }
       // [REVIEW-PARTNER] A demo account never becomes a service provider.
       if (users[0].tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+      // [IMAGES-E2E PR3] Portfolio photos are UPLOADED (POST /providers/me/portfolio: scanned,
+      // redrawn without camera data). A profile save may keep, reorder or drop them, never add one.
+      if (body.portfolioPhotos !== undefined) {
+        const current = await tx.serviceProvider.findUnique({ where: { userId }, select: { portfolioPhotos: true } });
+        assertPortfolioOnlyKeeps(body.portfolioPhotos, current?.portfolioPhotos ?? []);
+      }
       await tx.serviceProvider.upsert({
         where: { userId },
         create: {
@@ -189,6 +210,46 @@ export async function servicesRoutes(app: FastifyInstance) {
     });
     // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
     return { success: true, data: { ...provider, ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)) } };
+  });
+
+  /** [IMAGES-E2E PR3] POST /providers/me/portfolio — add one photo of the provider's own work. */
+  app.post('/providers/me/portfolio', auth, async (request) => {
+    const userId = request.user.userId;
+    const provider = await app.prisma.serviceProvider.findUnique({
+      where: { userId },
+      select: { id: true, portfolioPhotos: true, user: { select: { status: true } } },
+    });
+    if (!provider) throw new NotFoundError('ServiceProvider');
+    if (provider.user.status !== 'ACTIVE') {
+      throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot publish a provider profile right now.');
+    }
+    if (provider.portfolioPhotos.length >= PORTFOLIO_MAX) {
+      throw new AppError(409, 'PORTFOLIO_FULL', `A portfolio holds ${PORTFOLIO_MAX} photos. Remove one to add another.`);
+    }
+    const url = await keepPublicPhoto(request, storage, `portfolio/${provider.id}`, 'provider-portfolio');
+    const updated = await app.prisma.serviceProvider.update({
+      where: { id: provider.id },
+      data: { portfolioPhotos: { push: url } },
+      select: { id: true, portfolioPhotos: true },
+    });
+    return { success: true, data: updated };
+  });
+
+  /** [IMAGES-E2E PR3] DELETE /providers/me/portfolio/:file — take one photo down (the public door stops serving it). */
+  app.delete<{ Params: { file: string } }>('/providers/me/portfolio/:file', auth, async (request) => {
+    const provider = await app.prisma.serviceProvider.findUnique({
+      where: { userId: request.user.userId },
+      select: { id: true, portfolioPhotos: true },
+    });
+    if (!provider) throw new NotFoundError('ServiceProvider');
+    const keep = provider.portfolioPhotos.filter((photo) => photo.split('/').pop() !== request.params.file);
+    if (keep.length === provider.portfolioPhotos.length) throw new NotFoundError('PortfolioPhoto', request.params.file);
+    const updated = await app.prisma.serviceProvider.update({
+      where: { id: provider.id },
+      data: { portfolioPhotos: { set: keep } },
+      select: { id: true, portfolioPhotos: true },
+    });
+    return { success: true, data: updated };
   });
 
   app.get('/providers/me', auth, async (request) => {

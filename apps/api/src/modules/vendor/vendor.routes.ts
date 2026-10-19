@@ -1,6 +1,5 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
-import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -56,8 +55,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
-import { renderStorePhoto } from '../../utils/public-store-photos';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -3135,28 +3133,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    * public door serves. The storage seam strips again on the way in.
    */
   async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
-      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
-    }
-
-    const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
-      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    }
-
-    await scanUpload(buffer, { surface: 'store-media', log: request.log });
-    const drawn = await renderStorePhoto(buffer, null);
-    if (!drawn) throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    const ext = drawn.type === 'image/png' ? '.png' : drawn.type === 'image/webp' ? '.webp' : '.jpg';
-    const { url } = await storage.upload({
-      buffer: drawn.body,
-      filename: `photo${ext}`,
-      mimeType: drawn.type,
-      folder: `items/${vendorId}`,
-    });
-    return url;
+    return keepPublicPhoto(request, storage, `items/${vendorId}`, 'store-media');
   }
 
   /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers). */
