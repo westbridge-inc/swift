@@ -28,6 +28,7 @@ import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone } from './helpers/fixture-ids';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_NOTICE_ACTIONS } from '../lib/owner-wall-notices';
+import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, and grants the owner wall to one, by raw DDL.
 grantSuiteCapability('ddl');
@@ -205,8 +206,8 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
              has_function_privilege('swift_app', p.oid, 'EXECUTE') AS app_exec
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
        WHERE p.proname LIKE 'swift_owner_wall_%' ORDER BY 1`;
-    // [item 20 · notifications] The notice actions (owner-wall-notifications) are the only others.
-    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS].sort());
+    // [item 20 · notifications · support tickets] The notice and ticket actions (owner-wall-notifications) are the only others.
+    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS, ...OWNER_WALL_TICKET_ACTIONS].sort());
     for (const r of rows) {
       expect(r, r.name).toMatchObject({ secdef: true, public_exec: false, app_exec: true });
       expect(r.config, r.name).toContain('search_path=pg_catalog, public');
