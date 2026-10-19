@@ -30,11 +30,13 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { testPrismaClient } from './helpers/test-prisma-client';
+import { sessionCredentialDigest } from '../lib/session-credential';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone } from './helpers/fixture-ids';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 import {
@@ -76,7 +78,8 @@ const silentIo = { to: () => ({ emit: () => true }) };
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
   await owner.session.create({ data: {
-    userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `own-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
+    // [#1865] A raw client stores what the app stores: the credential digests.
+    userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), authMethod: 'OTP', deviceId: `own-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
     expiresAt: new Date(Date.now() + DAY),
   } });
   return token;
@@ -170,7 +173,7 @@ afterAll(async () => {
       await owner.notification.deleteMany({ where: { userId: { in: users } } });
       await owner.deviceToken.deleteMany({ where: { userId: { in: users } } });
       await owner.session.deleteMany({ where: { userId: { in: users } } });
-      await owner.auditLog.deleteMany({ where: { userId: { in: users } } }).catch(() => undefined);
+      await purgeFixtureAuditTrail(owner, users, 'owner-wall-notifications');
       if (ids.vendor) await owner.vendor.deleteMany({ where: { id: ids.vendor } }).catch(() => undefined);
       if (ids.vendorOwner) await owner.vendorOwner.deleteMany({ where: { id: ids.vendorOwner } }).catch(() => undefined);
       await owner.user.deleteMany({ where: { id: { in: users } } }).catch(() => undefined);

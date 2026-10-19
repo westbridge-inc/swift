@@ -1,8 +1,7 @@
 import { handoverBlockCounter } from '../../plugins/observability';
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Order, Prisma } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { handoverAttemptState } from './handover-security';
+import { handoverAttemptState, handoverCodeMatches } from './handover-security';
 import { handoverAuthorityFor, handoverVersionMatches, HANDOVER_REFUSALS } from '../order/handover-authority';
 
 export interface HandoverDecision {
@@ -80,8 +79,7 @@ export async function verifyHandoverDecision(tx: Prisma.TransactionClient, sourc
   if (!proof.code) return { handoverFailure: { statusCode: 400, code: pickup ? 'MISSING_PICKUP_CODE' : 'MISSING_PIN',
     message: pickup ? "Enter the customer's pickup code to hand over this order." : "Enter the customer's 6-digit delivery PIN." } };
   // Fixed-length digests avoid a secret-dependent comparison or length exit.
-  const digest = (value: string) => createHash('sha256').update(value).digest();
-  const matches = timingSafeEqual(digest(secret), digest(proof.code));
+  const matches = handoverCodeMatches(secret, proof.code);
   // Preserve the existing counters: pickup counts every comparison, delivery
   // counts wrong guesses. A successful terminal action admits no more guesses.
   if (pickup || !matches) await tx.order.update({ where: { id: source.id }, data: pickup

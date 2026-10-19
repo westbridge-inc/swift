@@ -2218,12 +2218,9 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // Nightly proofs [san spec 24.2/16.3]: wallet balances re-derived from
         // the ledger, wrongful suspensions AUTO-HEALED (worst-harm invariant),
         // enforcement leaks + receipt gaps surfaced. Failures page.
-        const { runBillingInvariants } = await import('../modules/billing/invariants');
+        const { brokenInvariantCount, runBillingInvariants } = await import('../modules/billing/invariants');
         const report = await runBillingInvariants(ctx.prisma);
-        const broken =
-          report.walletMismatches.length + report.wrongfulSuspensions.length + report.enforcementLeaks.length +
-          report.unjudgedSubscriptions.length +
-          report.receiptGaps.length + report.ledgerWalletMismatches.length + report.refundPayableMismatches.length + (report.ledgerTrialImbalance ? 1 : 0);
+        const broken = brokenInvariantCount(report);
         if (broken > 0) {
           const { notifyAdmins, NotificationService } = await import('../modules/notification/notification.service');
           await opsPageOnce(ctx, 'billing-invariants', 12 * 3600, () =>
@@ -2232,7 +2229,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
               // tenant's event. Explicitly null so it reads as a decision [NOC-A F45].
               tenantId: null,
               title: 'Billing invariant failures',
-              body: `${report.walletMismatches.length} fee-paid-ahead mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger vs fee-paid-ahead drift(s), ${report.refundPayableMismatches.length} refund set-aside drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
+              body: `${report.walletMismatches.length} fee-paid-ahead mismatch(es), ${report.wrongfulSuspensions.length} wrongful suspension(s) auto-healed, ${report.paidSuspensionsLeftHeld.length} paid suspension(s) left held for a person, ${report.enforcementLeaks.length} enforcement leak(s), ${report.unjudgedSubscriptions.length} subscription(s) needing an ownership review, ${report.receiptGaps.length} receipt gap(s), ${report.ledgerWalletMismatches.length} ledger vs fee-paid-ahead drift(s), ${report.refundPayableMismatches.length} refund set-aside drift(s)${report.ledgerTrialImbalance ? ', LEDGER TRIAL BALANCE BROKEN' : ''}.`,
               data: { kind: 'billing_invariants', report: { ...report, walletsChecked: report.walletsChecked } },
             }),
           );

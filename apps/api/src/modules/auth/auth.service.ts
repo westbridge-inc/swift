@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingTotals } from '../rating/rating-groups';
 import { revokeUserDevice, revokeUserDevices } from '../../lib/owner-rls';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
@@ -43,6 +44,7 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
+import { sessionCredentialMatches } from '../../lib/session-credential';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import {
   PUBLIC_SIGNUP_TENANT_ID,
@@ -313,6 +315,10 @@ export class AuthService {
       include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
+    // rider or driver row (they move with each single rating): the whole-groups figure instead.
+    if (user.rider) Object.assign(user.rider, await shownRatingTotals(this.app.prisma, 'RIDER', user.id));
+    if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));
 
     // [L04 · AUTH-2] The code proves the phone, not that the account may sign
     // in. Status is read under the User lock (the order ban/suspend and
@@ -995,10 +1001,13 @@ export class AuthService {
       const user = users[0];
       if (!user) return { kind: 'invalid' as const };
 
+      // [Row 231] Raw SQL bypasses the prisma digest extension: the row holds
+      // digests, and the presented credential is checked against them in
+      // constant time. The access token is not read back at all — a stored
+      // digest is never something to hand out.
       const sessions = await tx.$queryRaw<Array<{
         id: string;
         userId: string;
-        token: string;
         refreshToken: string;
         previousRefreshToken: string | null;
         rotatedAt: Date | null;
@@ -1007,7 +1016,7 @@ export class AuthService {
         deviceType: string;
         authMethod: SessionAuthMethod;
       }>>`
-        SELECT "id", "userId", "token", "refreshToken", "previousRefreshToken",
+        SELECT "id", "userId", "refreshToken", "previousRefreshToken",
                "rotatedAt", "expiresAt", "deviceId", "deviceType",
                "authMethod"::text AS "authMethod"
         FROM "sessions"
@@ -1022,9 +1031,9 @@ export class AuthService {
       }
       // Match the credential and retire reused rotations before any account
       // status answer. Even a blocked account must invalidate this family.
-      const previous = session.refreshToken !== refreshToken;
+      const previous = !sessionCredentialMatches(session.refreshToken, refreshToken);
       if (previous) {
-        if (session.previousRefreshToken !== refreshToken) return { kind: 'invalid' as const };
+        if (!sessionCredentialMatches(session.previousRefreshToken, refreshToken)) return { kind: 'invalid' as const };
         const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
         const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
         if (!(age <= graceMs)) {
@@ -1055,28 +1064,28 @@ export class AuthService {
         };
       }
 
-      // A legitimate double-fire receives the current pair only AFTER the
-      // same account-status and assurance checks as a current credential.
-      if (previous) {
-        return {
-          kind: 'success' as const,
-          tokens: { accessToken: session.token, refreshToken: session.refreshToken, expiresIn: 900 },
-        };
-      }
-
+      // A legitimate double-fire — a retry whose first answer was lost — is
+      // answered only AFTER the same account-status and assurance checks as a
+      // current credential. [Row 231] Only digests are stored, so the pair that
+      // answered the first call cannot be handed out again: the replay is
+      // answered with a FRESH pair below and the first answer's pair is
+      // superseded (401 on use), never revoked. The chain (previousRefreshToken,
+      // rotatedAt) stays where the first rotation put it, so a replay cannot
+      // extend its own grace, and the same credential after the window is
+      // still theft evidence that revokes the family above.
       const newAccessToken = this.app.jwt.sign({
         userId: user.id,
         role: user.activeRole,
         jti: nanoid(8),
       });
       const newRefreshToken = nanoid(64);
+      // Plaintext in, digest at rest: the prisma session extension digests these.
       await tx.session.update({
         where: { id: session.id },
         data: {
           token: newAccessToken,
           refreshToken: newRefreshToken,
-          previousRefreshToken: refreshToken,
-          rotatedAt: new Date(),
+          ...(previous ? {} : { previousRefreshToken: refreshToken, rotatedAt: new Date() }),
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         },
       });
@@ -1231,7 +1240,9 @@ export class AuthService {
       const session = sessions[0];
       if (
         !session
-        || (session.refreshToken !== refreshToken && session.previousRefreshToken !== refreshToken)
+        // [Row 231] the row holds digests: the presented credential is checked against them in constant time
+        || (!sessionCredentialMatches(session.refreshToken, refreshToken)
+          && !sessionCredentialMatches(session.previousRefreshToken, refreshToken))
       ) {
         return null;
       }

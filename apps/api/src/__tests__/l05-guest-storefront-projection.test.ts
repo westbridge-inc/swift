@@ -6,6 +6,7 @@ import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 77. The public storefront (GET /customer/vendors/:id) is a guest read.
@@ -56,7 +57,7 @@ beforeAll(async () => {
   vendorOwnerId = owner.id;
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: owner.id, name: `Shelf Store ${nanoid(6)}`, slug: `shelf-${nanoid(8).toLowerCase()}`, vendorType: 'STORE',
+      ownerId: owner.id, name: `Shelf Store ${wordFreeTag(8)}`, slug: `shelf-${nanoid(8).toLowerCase()}`, vendorType: 'STORE',
       phone: `+${rnd + 1}`, addressLine1: '1 Shelf St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

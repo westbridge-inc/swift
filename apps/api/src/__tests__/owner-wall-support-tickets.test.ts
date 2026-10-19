@@ -24,6 +24,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { testPrismaClient } from './helpers/test-prisma-client';
+import { sessionCredentialDigest } from '../lib/session-credential';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
@@ -60,7 +62,8 @@ const orders: string[] = [];
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
   await owner.session.create({ data: {
-    userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `owt-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
+    // [#1865] A raw client stores what the app stores: the credential digests.
+    userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), authMethod: 'OTP', deviceId: `owt-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
     expiresAt: new Date(Date.now() + DAY),
   } });
   return token;
@@ -167,6 +170,7 @@ afterAll(async () => {
       await owner.notification.deleteMany({ where: { userId: { in: users } } });
       await owner.order.deleteMany({ where: { id: { in: orders } } }).catch(() => undefined);
       await owner.session.deleteMany({ where: { userId: { in: users } } });
+      await purgeFixtureAuditTrail(owner, users, 'owner-wall-support-tickets');
       await owner.admin.deleteMany({ where: { userId: { in: users } } });
       if (ids.vendor) await owner.vendor.deleteMany({ where: { id: ids.vendor } }).catch(() => undefined);
       if (ids.vendorOwner) await owner.vendorOwner.deleteMany({ where: { id: ids.vendorOwner } }).catch(() => undefined);

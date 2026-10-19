@@ -21,6 +21,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { PrismaClient } from '@prisma/client';
 import { testPrismaClient } from './helpers/test-prisma-client';
+import { sessionCredentialDigest } from '../lib/session-credential';
 import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
@@ -55,7 +56,8 @@ const users: string[] = [];
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
   await owner.session.create({ data: {
-    userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `owd-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
+    // [#1865] A raw client stores what the app stores: the credential digests.
+    userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), authMethod: 'OTP', deviceId: `owd-${RUN}-${userId.slice(-6)}`, deviceType: 'test',
     expiresAt: new Date(Date.now() + DAY),
   } });
   return token;
