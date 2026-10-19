@@ -52,6 +52,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { servicesRoutes, PORTFOLIO_MAX } from '../modules/services/services.routes';
 import { providerChecklist } from '../modules/services/services.service';
+import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicStorePhotos, resetStorePhotoCachesForTests } from '../utils/public-store-photos';
 import { testPhone } from './helpers/fixture-ids';
@@ -90,10 +91,13 @@ async function makeProvider(verified: boolean) {
   const u = await makeUser();
   await send('POST', '/api/v1/services/providers', u.token, { trade: 'plumber', bio: 'Pipes and taps' });
   if (verified) {
-    for (const docType of await providerChecklist(app.prisma, u.userId)) {
-      await app.prisma.verificationDocument.create({
-        data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1' },
-      });
+    const checklist = await runWithoutTenant(() => providerChecklist(app.prisma, u.userId));
+    expect(checklist.length).toBeGreaterThan(0);
+    for (const docType of checklist) {
+      await runWithoutTenant(() => app.prisma.verificationDocument.create({
+        // COMMITTED: the evidence record the verification rule reads is kept from this row (document_record trigger).
+        data: { userId: u.userId, role: 'CUSTOMER', docType, fileUrl: `storage://t/${docType}.jpg`, status: 'APPROVED', state: 'COMMITTED', reviewedAt: new Date(), consentAt: new Date(), privacyNoticeVersion: 'v1' },
+      }));
     }
   }
   const res = await send('POST', '/api/v1/services/providers', u.token, { trade: 'plumber', bio: 'Pipes and taps' });
@@ -138,6 +142,12 @@ beforeAll(async () => {
   await app.register(servicesRoutes, { prefix: '/api/v1/services' });
   registerPublicStorePhotos(app, fake);
   await app.ready();
+  // The seeded market (CI seeds it; a bare database gets the same defaults): a provider's checklist comes from it.
+  await runWithoutTenant(() => app.prisma.countryConfig.upsert({ where: { code: 'GY' }, update: {}, create: {
+    code: 'GY', name: 'Guyana', currencyCode: 'GYD', currencySymbol: '$', usdExchangeRate: 208.5,
+    subscriptionTiers: { mover: 6000, smallVendor: 6000, largeVendor: 12000 },
+    documentChecklists: DEFAULT_DOCUMENT_CHECKLISTS,
+  } }));
 });
 
 beforeEach(() => { resetStorePhotoCachesForTests(); fake.stats.reads = 0; });
