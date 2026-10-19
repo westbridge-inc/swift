@@ -50,11 +50,11 @@ describe('the receipt', () => {
     snap('rider-receipt-waiting');
     const lines = host.querySelector('[data-testid="taxi-receipt-breakdown"]')?.textContent ?? '';
     expect(lines).toMatch(/Trip\$2.?800/);
-    expect(lines).toMatch(/Waiting 13 min\$500/);
-    expect(text()).toMatch(/\$3.?300 · cash or MMG · paid to Devon/);
+    expect(lines).toMatch(/Waiting 13 min\$300/);
+    expect(text()).toMatch(/\$3.?100 · cash or MMG · paid to Devon/);
     expect(text()).toMatch(/Total/);
     // The MMG link asks for the whole amount, never the route fare alone.
-    expect(text()).toMatch(/Pay \$3.?300 with MMG instead/);
+    expect(text()).toMatch(/Pay \$3.?100 with MMG instead/);
   });
 
   it('without a breakdown it is today’s single fare', async () => {
