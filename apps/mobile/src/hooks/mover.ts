@@ -323,14 +323,20 @@ export function useActiveJobs(kind: MoverKind | null) {
   const pv = usePreview();
   const single = useActiveJob(kind);
   const stacked = kind === 'RIDER' && !pv;
+  // [PERF partner #5] A rider's legs exist only while the rider has a job (the server keeps the
+  // active pointer on a live leg). An idle rider used to read both the active job and the legs
+  // every 12 s; now the legs are read only while the active job is there, and an idle rider is
+  // never shown a finished run's legs. The active read keeps its own poll (it also heals a
+  // stale pointer on the server).
+  const onJob = !!single.data;
   const legsQ = useQuery({
     queryKey: ['mover', 'active', kind, 'legs'],
     queryFn: activeLegsQueryFn,
-    enabled: stacked,
+    enabled: stacked && onJob,
     refetchInterval: POLL.moverLegs,
   });
   const fromSingle: any[] = single.data ? [single.data] : [];
-  if (!stacked) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  if (!stacked || !onJob) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
   return {
     legs: (legsQ.data?.legs as any[] | undefined) ?? fromSingle,
     run: legsQ.data?.run ?? null,
