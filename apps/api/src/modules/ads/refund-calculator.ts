@@ -4,6 +4,7 @@
 // it booking rows and executes the returned plan atomically.
 
 import { divideMinorHalfUp, majorDecimalToMinor, minorToMajorString } from './ads-money';
+import { weekStartInstant } from './ads-weeks';
 
 const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
@@ -67,9 +68,13 @@ export interface RefundPlan {
   total: number;
 }
 
-/** A booking's week phase relative to `now`. */
+/** A booking's week phase relative to `now`. The stored Monday is a calendar
+ *  date (UTC midnight of that day); the week itself runs Monday 00:00 →
+ *  Sunday 23:59 in Guyana (ads-weeks), so its bounds are the tenant-local
+ *  midnights — never UTC midnight, which ends the week at Sunday 20:00 in
+ *  Guyana and starts the next one four hours early. */
 function phase(weekStart: Date, now: Date): 'UNSTARTED' | 'LIVE' | 'PAST' {
-  const start = weekStart.getTime();
+  const start = weekStartInstant(weekStart).getTime();
   const end = start + WEEK_MS;
   if (now.getTime() < start) return 'UNSTARTED';
   if (now.getTime() < end) return 'LIVE';
@@ -127,7 +132,8 @@ export function refundCalculatorMinor(
       // Rows 2/3/4 — advertiser cancels.
       case 'ADVERTISER_CANCEL':
         if (bookingPhase === 'UNSTARTED') {
-          const startsAfterFullRefundWindow = booking.weekStart.getTime() - now.getTime() >= fullRefundLeadMs;
+          // The lead is measured to the week's real start (Monday 00:00 in Guyana).
+          const startsAfterFullRefundWindow = weekStartInstant(booking.weekStart).getTime() - now.getTime() >= fullRefundLeadMs;
           const amountMinor = startsAfterFullRefundWindow
             ? booking.amountMinor
             : divideMinorHalfUp(booking.amountMinor, 2n);
