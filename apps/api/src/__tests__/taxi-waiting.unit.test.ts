@@ -124,8 +124,8 @@ describe('the live clock (CONTRACT §8.3)', () => {
       status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
       stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(35 * MIN), arrivalVerified })],
     });
-    // Verified: 7 min at the pickup + 15 at the stop = 22 → two blocks.
-    expect(final(clock(true), at(40 * MIN))).toMatchObject({ waitingMinutes: 22, waitingCharge: 1000 });
+    // Verified: 7 min at the pickup + 15 at the stop = 22 → two full blocks.
+    expect(final(clock(true), at(40 * MIN))).toMatchObject({ waitingMinutes: 22, waitingCharge: 2 * GYD.chargePerBlock });
     // Not verified (or never answered): the stop adds nothing; the pickup's 7 minutes alone are no block.
     for (const unverified of [false, null]) {
       const tally = final(clock(unverified), at(40 * MIN));
