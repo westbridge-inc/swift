@@ -91,7 +91,7 @@ function anyAction(rnd: () => number, riders: number): Action {
  *  likely to act (the assigned one when there is one). */
 function sensible(status: string, r: number, rnd: () => number, refundOwed: boolean): Array<[number, Action]> {
   const wait: Action = { a: 'wait', ms: WAITS[Math.floor(rnd() * WAITS.length)]! };
-  const cancelish: Array<[number, Action]> = [[1, { a: 'cust.cancel' }], [0.5, { a: 'admin.cancel', refund: rnd() < 0.5 }]];
+  const cancelish: Array<[number, Action]> = [[0.4, { a: 'cust.cancel' }], [0.25, { a: 'admin.cancel', refund: rnd() < 0.5 }]];
   switch (status) {
     case 'PENDING': return [[5, { a: 'store.accept' }], [1, { a: 'store.reject' }], [2, wait], ...cancelish];
     case 'ACCEPTED': return [[3, { a: 'store.preparing' }], [2, { a: 'store.ready' }], [3, { a: 'rider.accept', r }], [2, wait], [0.5, { a: 'rider.offline', r }], ...cancelish];
@@ -211,6 +211,8 @@ async function snap(w: WalkWorld, orderId: string): Promise<Snap> {
   };
 }
 
+const PREP_STAMP_STATUSES: readonly OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
 /** Notices that are offers to movers, not news to a person: a fresh search may re-offer. */
 const OFFER_TITLES = /^🛵|order available|new delivery/i;
 
@@ -231,6 +233,11 @@ async function checkInvariants(
   if (s.logs[0] && s.logs[0] !== 'PENDING') v('EDGE', `first log ${s.logs[0]}`);
   for (let i = 1; i < s.logs.length; i += 1) {
     const from = s.logs[i - 1]!; const to = s.logs[i]!;
+    // A same-status row is a timeline note, not a transition — but only the
+    // store's "preparing / ready (rider already assigned)" stamps write one
+    // (vendor.routes recordPrepProgress), and only in these three statuses.
+    // Anywhere else a repeated status is a double write.
+    if (from === to && PREP_STAMP_STATUSES.includes(to)) continue;
     const ok = ORDER_TRANSITIONS[to].includes(from) || RECOVERY_TRANSITIONS[to].includes(from);
     if (!ok) v('EDGE', `${from}>${to} is not a declared edge`);
   }
@@ -400,20 +407,20 @@ export function runTrace(w: WalkWorld, trace: Trace, opts: RunOptions = {}): Pro
   return walk(w, trace.riders, (i) => trace.actions[i] ?? null, opts);
 }
 
-/** Walk a seed: 6–18 weighted actions chosen from the LIVE status (so the
+/** Walk a seed: 8–22 weighted actions chosen from the LIVE status (so the
  *  trace is recorded as it is walked), then — unless the order is finished —
  *  abandon (60%). The returned result's trace replays the walk exactly. */
 export function walkSeed(w: WalkWorld, seed: number): Promise<WalkResult> {
   const rnd = mulberry32(seed);
   const riders = 1 + Math.floor(rnd() * 2);
-  const length = 6 + Math.floor(rnd() * 13);
+  const length = 8 + Math.floor(rnd() * 15);
   return walk(w, riders, (i, s, assigned) => {
     if (i > length) return null;
     if (i === length) {
       if (isTerminalOrderStatus(s.status) || rnd() < 0.4) return null;
       return { a: 'abandon', ridersOnline: rnd() < 0.5 };
     }
-    if (rnd() < 0.2) return anyAction(rnd, riders);
+    if (rnd() < 0.15) return anyAction(rnd, riders);
     const r = assigned ?? Math.floor(rnd() * riders);
     return pick(rnd, sensible(s.status, r, rnd, s.refundOwed != null && s.refundPaid == null));
   });

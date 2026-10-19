@@ -46,7 +46,7 @@ import { makeDispatchService, reconcileStuckDispatch } from '../../modules/dispa
 import { autoCancelUnresponsiveOrder, inTenantOf, releaseHeldOrdersJob } from '../../jobs/queue';
 import { NotificationService } from '../../modules/notification/notification.service';
 import { loginWithOtp } from './otp';
-import { testPhone, fixtureTag } from './fixture-ids';
+import { testPhone, fixtureTag, wordFreeTag } from './fixture-ids';
 import { TEST_ADMIN_REASON } from './admin-reason';
 import { injectWithApproval } from './admin-approval';
 
@@ -210,7 +210,7 @@ export async function castWalk(w: WalkWorld, riderCount: number): Promise<Cast> 
   const owner = await w.app.prisma.vendorOwner.create({ data: { userId: vendorOwner.userId } });
   const vendor = await w.app.prisma.vendor.create({
     data: {
-      ownerId: owner.id, name: `Walk Kitchen ${tag}`, slug: `walk-kitchen-${tag}`, vendorType: 'RESTAURANT', phone: vendorOwner.phone,
+      ownerId: owner.id, name: `Walk Kitchen ${wordFreeTag(8)}`, slug: `walk-kitchen-${tag}`, vendorType: 'RESTAURANT', phone: vendorOwner.phone,
       addressLine1: '42 Walk Road', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: STORE_LAT, longitude: STORE_LNG,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

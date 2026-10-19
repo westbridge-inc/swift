@@ -30,7 +30,11 @@ import {
 // line and its pin, and the pin is what proves the fix (red before, gone after).
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SEEDS = [11, 23, 37, 58];
+/** Chosen by greedy coverage over seeds 1..40 (19 Oct): together they reach a
+ *  delivery, a handback, both custody findings and 72 of the 124 distinct
+ *  (status, action, outcome) / log-edge / violation features the 40 reached.
+ *  A wider sweep is `WALK_SEED_COUNT=40` locally (about 8 minutes). */
+const DEFAULT_SEEDS = [25, 24, 13, 11, 2];
 
 /** The smallest traces that produce each recorded finding (shrunk). */
 const PINNED: Array<{ finding: string; inv: string; why: string; trace: Trace }> = [
@@ -92,7 +96,10 @@ describe('[ORDER-FLOW] random walks over the order state machine', () => {
       try {
         const result = await run();
         results.push({ seed, result });
-        report([`walked seed ${seed}: ${result.finalStatus ?? 'no order'} · ${result.violations.length} violation(s)`]);
+        report([
+          `walked seed ${seed}: ${result.finalStatus ?? 'no order'} · ${result.violations.length} violation(s)`,
+          `json ${JSON.stringify({ seed, final: result.finalStatus, coverage: [...result.coverage.keys()], edges: [...result.edges], violations: result.violations.map(violationKey) })}`,
+        ]);
       } catch (err) {
         // A walk that THROWS is not a verdict on the product (a lost database
         // connection looks the same): it is named, and the run fails on it.
