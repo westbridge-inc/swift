@@ -13,7 +13,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { looksLikeDocument } from '../utils/images';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Security-spec gaps (task #16): uploads sniff content, checkout is idempotent.
@@ -25,7 +25,7 @@ let userId: string;
 let ownerUserId: string;
 let vendorId: string;
 let itemId: string;
-const marker = nanoid(6).toLowerCase();
+const marker = wordFreeTag(8);
 const createdOrderIds: string[] = [];
 const previousMasterKek = process.env['MASTER_KEK'];
 

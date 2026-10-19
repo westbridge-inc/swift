@@ -24,8 +24,9 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithoutTenant, beginRequestTenantContext } from '../plugins/tenant-context';
 import { PRODUCTION_TENANT, REAL_PEOPLE } from '../lib/production-only';
 import { platformStats } from '../modules/admin/platform-stats';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const phone = (n: number) => `+59279${NUM}${n}`;
 const REVIEW = `review-honest-${RUN}`;

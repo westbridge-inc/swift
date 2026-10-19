@@ -187,7 +187,7 @@ function harness() {
   };
   // Account erasure also drops the browser-basket upload receipts that ride
   // with the cart (POST /customer/cart/merge replay records).
-  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
+  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox']) {
     db[name] = { deleteMany: vi.fn() };
   }
   // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
@@ -1246,7 +1246,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

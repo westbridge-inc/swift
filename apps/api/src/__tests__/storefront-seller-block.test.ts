@@ -29,12 +29,13 @@ import { docStateMachineDdl } from '../modules/verification/doc-state';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
 /** Legal research E5, verbatim (owner 15 Oct 2026). */
 const STATUTORY = "This does not affect your rights under Guyana's Consumer Affairs Act 2011 to return goods or get a refund from the business.";
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const LINK = 'https://pay.example.com/pay/seller-block';

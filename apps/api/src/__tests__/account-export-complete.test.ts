@@ -11,10 +11,11 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { AccountService } from '../modules/user/account.service';
 import { EXPORT_NOTICE, EXPORT_PARTIAL_NOTICE, exportPersonalData } from '../modules/user/data-export';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 const userIds: string[] = [];
-const MARK = nanoid(8);
+const MARK = wordFreeTag(8);
 let seq = 0;
 const rooms: string[] = [];
 const service = () => new AccountService({ prisma: app.prisma, log: app.log, io: {} as never });
