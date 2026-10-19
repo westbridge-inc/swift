@@ -25,7 +25,9 @@ describe('MASTER-055 duplicate intake privacy', () => {
     const app = {
       prisma: {
         encryptedObject: {
-          findMany: vi.fn(async () => duplicate ? [{ createdBy: 'foreign-account', sha256 }] : []),
+          // The uploader's own recent uploads (the lost-reply retry lookup) are none here; the holder census sees the foreign copy.
+          findMany: vi.fn(async ({ where }: { where: { createdBy: unknown } }) => typeof where.createdBy === 'string' ? []
+            : duplicate ? [{ createdBy: 'foreign-account', sha256 }] : []),
           create: vi.fn(async () => ({ id: 'own-object' })),
         },
         // [Row 331 (c)] The closure census: an erased holder is no duplicate.
