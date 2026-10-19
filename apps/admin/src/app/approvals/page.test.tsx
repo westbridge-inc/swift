@@ -255,3 +255,29 @@ describe('[DS1111] your own decided request does not tell you it needs a second 
     expect(screen.queryByText(/needs a second person/)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [U26] A failed read printed the raw error AND, right under it, "Nothing is
+// waiting on a second signature." — an outage read as an empty queue.
+// ---------------------------------------------------------------------------
+describe('[U26] a failed read is never an empty queue', () => {
+  it('says the read failed, offers Retry, and never says nothing is waiting', async () => {
+    let fail = true;
+    mockApi((request: ApiRequest) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/approvals') {
+        return fail
+          ? { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Something went wrong' } } }
+          : { body: { success: true, data: [] } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<ApprovalsPage />);
+    expect(await screen.findByText(/Couldn.t load/)).toBeTruthy();
+    expect(screen.queryByText(/Nothing is waiting on a second signature/)).toBeNull();
+    expect(screen.queryByText(/Nothing in this view/)).toBeNull();
+
+    fail = false;
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(/Nothing is waiting on a second signature|Nothing in this view/)).toBeTruthy();
+  });
+});

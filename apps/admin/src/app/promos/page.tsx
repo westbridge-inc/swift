@@ -122,7 +122,7 @@ export default function PromosPage() {
       </div>
 
       {open && (
-        <Modal title="New promo code" onClose={() => setOpen(false)} busy={dirty}>
+        <Modal title="New promo code" onClose={() => setOpen(false)} busy={dirty} overlayTestId="promo-form-overlay">
           <div className="w-full max-w-md bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-6">
             <h2 className="text-lg font-semibold mb-4">New promo code</h2>
             <div className="space-y-3">

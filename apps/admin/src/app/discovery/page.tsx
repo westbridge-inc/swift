@@ -180,6 +180,7 @@ export default function DiscoveryPage() {
             key={t}
             type="button"
             onClick={() => { setTab(t); setActiveId(null); setMutationError(null); }}
+            aria-pressed={tab === t}
             className={`px-3 py-2 text-sm ${tab === t ? 'border-b-2 border-neutral-900 font-medium' : 'text-neutral-500'}`}
           >
             {t === 'requests' ? 'Requests' : 'Taxonomy'}
