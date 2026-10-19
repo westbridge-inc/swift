@@ -101,6 +101,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'incident-sla-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-weekly-digest': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'liveness-midshift': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'mmg-accept-expiry': { policy: 'SAFE_REPLAY', why: 'Each cancellation is the canonical locked ACCEPTED -> CANCELLED transition, re-decided on the locked row (still ACCEPTED, MMG, never marked paid, no rejected claim or open disagreement, 30 minutes since acceptance). A replay finds the order no longer ACCEPTED and changes nothing: no second status log, no second notice. The findMany is only a candidate list.' },
   'mmg-link-apply': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mover-revocation-outbox': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'offer-timeout': { policy: 'SAFE_REPLAY', why: 'The first action is removeOfferIfOwned, an atomic compare-consume of the exact offer generation: a redelivery reads removed === false and returns before the acceptance-rate decay, the declined-set add or the trailing dispatchOrder, so each consequence runs at most once.' },
@@ -168,6 +169,7 @@ export type JobName =
   | 'incident-sla-watch'
   | 'incident-weekly-digest'
   | 'liveness-midshift'
+  | 'mmg-accept-expiry'
   | 'mmg-link-apply'
   | 'mover-revocation-outbox'
   | 'offer-timeout'

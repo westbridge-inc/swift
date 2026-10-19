@@ -126,7 +126,7 @@ async function cleanupFixtures() {
 
 async function createSession(userId: string, role: 'CUSTOMER' | 'MOVER' | 'SUPER_ADMIN') {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
-  return app.prisma.session.create({
+  const session = await app.prisma.session.create({
     data: {
       userId,
       token,
@@ -137,6 +137,8 @@ async function createSession(userId: string, role: 'CUSTOMER' | 'MOVER' | 'SUPER
       expiresAt: new Date(Date.now() + 60 * 60_000),
     },
   });
+  // [Row 231] the row holds the digest; the credential a client presents is the plaintext
+  return { ...session, token };
 }
 
 async function createMoverFixture(phone: string): Promise<MoverFixture> {

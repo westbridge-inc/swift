@@ -47,6 +47,13 @@ let vendorId: string;
 let customer: { userId: string; token: string };
 let categoryId: string;
 
+/** A test item's name: a plain word and a counter. Never random letters: a random
+ *  draw can spell a prohibited word ("rum", "ale", "rx", "eno") and the gate then
+ *  hides the item (SUBSTITUTE_UNAVAILABLE instead of the case's own answer).
+ *  order-picking-names.test.ts holds every prefix to that. */
+let itemSeq = 0;
+const itemName = (prefix: string) => `${prefix} ${(itemSeq += 1)}`;
+
 async function makeItem(opts: { name: string; price?: number; stock?: number | null; group?: string }) {
   return app.prisma.item.create({
     data: {
@@ -438,8 +445,8 @@ describe('ALL MMG picking money is immutable — PENDING included [REPORT-006 F-
 
 describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 F-006-04/05]', () => {
   async function fixtureWithPendingSub(opts: { itemPrice: number; subPrice: number; itemStock?: number; subStock?: number }) {
-    const item = await makeItem({ name: `Orig ${nanoid(6)}`, price: opts.itemPrice, stock: opts.itemStock ?? 10 });
-    const sub = await makeItem({ name: `Sub ${nanoid(6)}`, price: opts.subPrice, stock: opts.subStock ?? 10 });
+    const item = await makeItem({ name: itemName('Orig'), price: opts.itemPrice, stock: opts.itemStock ?? 10 });
+    const sub = await makeItem({ name: itemName('Sub'), price: opts.subPrice, stock: opts.subStock ?? 10 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: opts.itemPrice }], 'PREPARING');
     await app.prisma.orderItem.update({
       where: { id: order.items[0]!.id },
@@ -567,8 +574,8 @@ describe('substitution approval is exactly-once and lifecycle-bound [REPORT-006 
 
 describe('refunding an APPROVED substitution returns the SUBSTITUTE [REPORT-007-v4 F-04]', () => {
   it('inventory identities stay true: substitute restocked, original untouched, audit targets the substitute', async () => {
-    const item = await makeItem({ name: `RefSwap ${nanoid(6)}`, price: 500, stock: 10 });
-    const sub = await makeItem({ name: `RefSwapSub ${nanoid(6)}`, price: 700, stock: 10 });
+    const item = await makeItem({ name: itemName('RefSwap'), price: 500, stock: 10 });
+    const sub = await makeItem({ name: itemName('RefSwapSub'), price: 700, stock: 10 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING');
     const lineId = order.items[0]!.id;
     await app.prisma.orderItem.update({
@@ -604,8 +611,8 @@ describe('refunding an APPROVED substitution returns the SUBSTITUTE [REPORT-007-
 
 describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () => {
   it('a refunded line restocks ONCE at picking — cancellation must not restock it again', async () => {
-    const item = await makeItem({ name: `Once ${nanoid(6)}`, price: 600, stock: 10 });
-    const keep = await makeItem({ name: `Keep ${nanoid(6)}`, price: 400, stock: 10 });
+    const item = await makeItem({ name: itemName('Once'), price: 600, stock: 10 });
+    const keep = await makeItem({ name: itemName('Keep'), price: 400, stock: 10 });
     const order = await makeOrderWithLines(
       [
         { itemId: item.id, name: item.name, qty: 1, price: 600 },
@@ -627,8 +634,8 @@ describe('cancellation restock is substitution-aware [REPORT-006 F-006-05]', () 
   });
 
   it('cancelling after an approved substitution returns the SUBSTITUTE to the shelf, not the original again', async () => {
-    const item = await makeItem({ name: `Swap ${nanoid(6)}`, price: 500, stock: 10 });
-    const sub = await makeItem({ name: `SwapSub ${nanoid(6)}`, price: 500, stock: 10 });
+    const item = await makeItem({ name: itemName('Swap'), price: 500, stock: 10 });
+    const sub = await makeItem({ name: itemName('SwapSub'), price: 500, stock: 10 });
     const order = await makeOrderWithLines([{ itemId: item.id, name: item.name, qty: 1, price: 500 }], 'PREPARING');
     await app.prisma.orderItem.update({
       where: { id: order.items[0]!.id },

@@ -185,7 +185,13 @@ model Session {
   id                   String    @id @default(cuid())
   userId               String
   user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// [Row 231] SHA-256 hex digest of the access token — never the token.
+  /// The prisma `sessionCredentialDigest` extension (src/lib/session-credential.ts)
+  /// digests every write and lookup that comes through Prisma (call sites pass
+  /// the plaintext the client presented); raw SQL digests explicitly; the CHECK
+  /// constraints `sessions_*_digest_check` refuse any other shape.
   token                String    @unique
+  /// [Row 231] SHA-256 hex digest of the current refresh token (same rules as `token`).
   refreshToken         String    @unique
   /// Durable authentication assurance for this exact session generation.
   /// Existing/pre-cutover rows intentionally remain LEGACY and can continue
@@ -196,6 +202,7 @@ model Session {
   // Refresh rotation theft detection: the token this one replaced, and when.
   // A replay of previousRefreshToken outside the race-grace window means the
   // token was stolen — the whole session is revoked (see AuthService.refreshTokens).
+  /// [Row 231] SHA-256 hex digest of the replaced refresh token, or NULL (same rules as `token`).
   previousRefreshToken String?   @unique
   rotatedAt            DateTime?
   deviceId             String
@@ -1568,6 +1575,18 @@ model Vendor {
   mmgPayUrlPendingAt DateTime?
   mmgPayUrlApplyAt   DateTime?
 
+  /// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's OWN MMG number (a +592 mobile,
+  /// checked by utils/mmg-number.ts): where a customer who chose MMG pays the order
+  /// directly, in MMG's own app. Shown ONLY to that order's customer, ONLY after the
+  /// store accepts; never on the storefront. Replaces the pay link for stores (the
+  /// link columns above stay, dormant, behind STORE_MMG_PAY_LINK). null = no MMG.
+  /// [ALG-34 parity] A change is staged in the three columns below, behind the same
+  /// cool-off as the link, with the live number paying the store until then.
+  mmgNumber          String?
+  mmgNumberPending   String?
+  mmgNumberPendingAt DateTime?
+  mmgNumberApplyAt   DateTime?
+
   /// [E02 · refund rail 1/8] The store's MMG checkout is paused (cash only)
   /// while `mmgCheckoutHeldAt` is set: the owner-approved consequence of
   /// missing the MMG refund deadline too often. Announced, reasoned and
@@ -1622,6 +1641,7 @@ model Vendor {
   @@index([tenantId])
   @@index([isSynthetic])
   @@index([mmgPayUrlApplyAt])
+  @@index([mmgNumberApplyAt])
   /// [SEARCH] Trigram GIN index on the store name (pg_trgm), see Item.
   @@index([name(ops: raw("gin_trgm_ops"))], type: Gin, map: "vendors_name_trgm_idx")
   @@map("vendors")
@@ -2039,6 +2059,10 @@ model Order {
   /// Immutable direct-payment destination committed under the vendor row lock.
   /// Never fall back to the vendor's mutable profile URL for an existing order.
   mmgPayUrlSnapshot       String?
+  /// [PAYMENT-SIMPLIFY] The store's MMG number committed under the vendor row lock at
+  /// checkout (pay-to-number orders). Shown to this order's customer only after the
+  /// store accepts; never the vendor's mutable profile number.
+  mmgNumberSnapshot       String?
   mmgRecipientNameSnapshot String?
   /// [W-25] A capture on this rail rests on the STORE's word: Swift holds no
   /// money and has no provider feed here. These three say so out loud — the

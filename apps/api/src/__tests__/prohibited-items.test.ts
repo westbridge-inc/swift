@@ -44,6 +44,7 @@ import { judgedWordsHash, STORE_WAITING_FOR_CHECK, STORE_WAITING_MESSAGE } from 
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { lockUserRoleAuthority } from '../modules/mover-authority';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // The index engine is the only thing replaced: what it returns is decided per
 // test, so the signed-in (index) path and the database fallback are both run.
@@ -58,7 +59,7 @@ vi.mock('../modules/search/search.service', () => ({ SearchService: class {
   async searchItems() { if (engine.fail) throw new Error('index down'); return { hits: engine.itemHits, estimatedTotalHits: engine.itemHits.length, processingTimeMs: 1 }; }
 } }));
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const TENANT = 'swift-default';

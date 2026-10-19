@@ -7,6 +7,8 @@ import {
   adoptCookieCredential,
   SIGNUP_CONTINUATION_COOKIE,
   clearSignupContinuationCookie,
+  carriesOwnSessionCookie,
+  sessionCookieNamesFor,
   resetBrowserOriginsForTests,
   setSessionCookies,
   setSignupContinuationCookie,
@@ -146,5 +148,29 @@ describe('browser signup continuation', () => {
     } finally {
       await app.close();
     }
+  });
+});
+
+describe('the browse gate and the cookie names agree on what a session cookie is', () => {
+  const PROD = { NODE_ENV: 'production' };
+  const req = (client?: string) => ({ headers: client ? { 'x-swift-client': client } : {} }) as unknown as FastifyRequest;
+
+  it('only the request\'s OWN pair is a session to authenticate: the console\'s __Host- pair for the console, the plain pair for the website and natives', () => {
+    const withCookie = (client: string | undefined, cookie: string) =>
+      ({ headers: { ...(client ? { 'x-swift-client': client } : {}), cookie } }) as unknown as FastifyRequest;
+    expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_at=a'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('admin-web', '__Host-swift_rt=r'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('admin-web', 'swift_at=a; swift_rt=r'), PROD)).toBe(false);
+    expect(carriesOwnSessionCookie(withCookie('web', '__Host-swift_at=a; __Host-swift_rt=r'), PROD)).toBe(false);
+    expect(carriesOwnSessionCookie(withCookie('web', 'swift_at=a'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie(undefined, 'swift_rt=r'), PROD)).toBe(true);
+    expect(carriesOwnSessionCookie(withCookie('web', 'other=x; swift_signup=s'), PROD)).toBe(false);
+  });
+
+  it('only the admin console under a Secure posture is host-bound; the web app and a native client keep the plain, path-scoped names', () => {
+    expect(sessionCookieNamesFor(req('admin-web'), PROD)).toEqual({ access: '__Host-swift_at', refresh: '__Host-swift_rt', accessPath: '/', refreshPath: '/' });
+    expect(sessionCookieNamesFor(req('web'), PROD)).toEqual({ access: 'swift_at', refresh: 'swift_rt', accessPath: '/api/v1', refreshPath: '/api/v1/auth' });
+    expect(sessionCookieNamesFor(req(), PROD).access).toBe('swift_at');
+    expect(sessionCookieNamesFor(req('admin-web'), { NODE_ENV: 'development', API_PUBLIC_URL: 'http://localhost:3000' }).access).toBe('swift_at');
   });
 });
