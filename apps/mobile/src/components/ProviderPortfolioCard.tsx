@@ -76,9 +76,9 @@ export function ProviderPortfolioCard({ photos }: { photos: string[] }) {
                 disabled={remove.isPending}
                 onPress={() => remove.mutate(photo)}
                 hitSlop={8}
-                style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0,0,0,0.55)' }}
+                style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: color.scrim }}
               >
-                <Feather name="x" size={14} color="#fff" />
+                <Feather name="x" size={14} color={color.white} />
               </Pressable>
             </View>
           );
