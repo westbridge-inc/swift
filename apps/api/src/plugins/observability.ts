@@ -275,7 +275,8 @@ export const adminAuditSnapshotCounter = new client.Counter({
 
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
- *  outside the CORS allowlist), body_tokens_refused. */
+ *  outside the CORS allowlist), body_tokens_refused; socket_cookie_auth / socket_cookie_rejected_origin (the
+ *  website's store socket presenting its access cookie, PERF row 8). */
 export const browserSessionCounter = new client.Counter({
   name: 'swift_browser_session_total',
   help: 'Browser cookie-session events (cookie_issued/cookie_refreshed/cookie_auth/cookie_cleared/cookie_rejected_header/cookie_rejected_origin)',
