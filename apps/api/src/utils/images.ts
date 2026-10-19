@@ -223,7 +223,7 @@ function stripJpeg(buf: Buffer): Buffer | null {
       // copying everything up to the end marker, is what removes the metadata hidden there.
       const start = i;
       while (i < buf.length) {
-        if (buf[i] !== 0xff) { i += 1; continue; }
+        if (buf[i] !== 0xff) { const ff = buf.indexOf(0xff, i); i = ff < 0 ? buf.length : ff; continue; } // native scan, not a JS loop per byte
         let n = i + 1;
         while (n < buf.length && buf[n] === 0xff) n += 1;
         if (n >= buf.length) return null;
