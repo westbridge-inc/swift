@@ -30,7 +30,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { withAdminReason } from './helpers/admin-reason';
 import { readOwnerWallFacts } from '../lib/owner-rls';
 import { insertTicketFor, orderCaseExists, closeOrderCase } from '../lib/owner-wall-tickets';
@@ -113,7 +113,7 @@ beforeAll(async () => {
   ids.goldOn = await mkUser(['CUSTOMER'], 'CUSTOMER');
   ids.vendorOwner = (await owner.vendorOwner.create({ data: { userId: ids.storeOwner } })).id;
   ids.vendor = (await owner.vendor.create({ data: {
-    ownerId: ids.vendorOwner, name: `Ticket Store ${RUN}`, slug: `ticket-store-${RUN}`, vendorType: 'RESTAURANT', tenantId: PRODUCTION,
+    ownerId: ids.vendorOwner, name: `Ticket Store ${wordFreeTag()}`, slug: `ticket-store-${RUN}`, vendorType: 'RESTAURANT', tenantId: PRODUCTION,
     phone: testPhone(), addressLine1: '1 Wall Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
     status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
   } })).id;
