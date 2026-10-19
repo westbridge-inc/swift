@@ -28,8 +28,9 @@ import { CountryConfigService } from '../modules/country/country-config.service'
 import { guyanaWallClockParts } from '../utils/guyana-day';
 import { EXTRA_DOC_TYPES, BUCKET_OF, DECLARATION_DOC_TYPE, REGISTRATION_DOC_TYPES } from '../modules/verification/doc-registry';
 import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-micro-vendor-tier-test');
 let app: FastifyInstance;

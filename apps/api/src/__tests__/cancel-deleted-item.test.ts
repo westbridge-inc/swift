@@ -7,12 +7,13 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 let app: FastifyInstance;
 let vendor: { id: string; tenantId: string };
 let categoryId: string;
 const sessions: string[] = [];
-const run = nanoid(10);
+const run = wordFreeTag(10);
 
 beforeAll(async () => {
   app = Fastify({ logger: false });

@@ -1,4 +1,5 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
@@ -467,6 +468,8 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
@@ -479,8 +482,8 @@ export async function riderRoutes(app: FastifyInstance) {
         stats: {
           totalDeliveries: rider.totalDeliveries,
           totalCourierJobs: rider.totalCourierJobs,
-          averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-          totalRatings: rider.totalRatings,
+          // [COORD 18 Oct, option S] from whole groups of 5 only (rating-groups.ts).
+          ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
           completionRate: rider.completionRate ? Number(rider.completionRate) : null,
           todayEarnings: Number(todayEarnings._sum.amount ?? 0),
           todayDeliveries,
@@ -517,7 +520,7 @@ export async function riderRoutes(app: FastifyInstance) {
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   /** PUT /profile — Update vehicle info, profile photo, rider type. */
@@ -606,7 +609,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return updated;
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   // =========================================================================
@@ -2289,8 +2292,7 @@ export async function riderRoutes(app: FastifyInstance) {
         currentOrderId: rider.currentOrderId,
         totalDeliveries: rider.totalDeliveries,
         totalCourierJobs: rider.totalCourierJobs,
-        averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-        totalRatings: rider.totalRatings,
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         completionRate: rider.completionRate ? Number(rider.completionRate) : null,
         onlineHoursToday,
         todayDeliveries,

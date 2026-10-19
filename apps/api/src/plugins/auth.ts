@@ -12,6 +12,7 @@ import {
   requiresPrivilegedSessionAssurance,
 } from '../modules/auth/session-assurance';
 import { adoptCookieCredential, bearerOrCookieToken } from '../modules/auth/browser-session';
+import { refuseUnexpectedPrincipal } from '../modules/auth/expected-principal';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -194,6 +195,10 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     // [STA-1 DL-9] Outside the try: a dead review session is a 410 through the
     // normal error path — never a 401, never a 503.
     if (reviewTenant) await reviewGate(app.prisma, request);
+    // [Row 225 · AUTH-PIN] A write from a page that expected another account
+    // (a tab left open while someone else signed in) is refused, never applied
+    // to the account the shared cookie now names. No header: unchanged.
+    refuseUnexpectedPrincipal(request, request.user.userId);
   });
 
   // Optional auth for public-but-personalizable routes (browsing). Attaches the
@@ -251,5 +256,8 @@ export const authPlugin = fp(async (app: FastifyInstance) => {
     // [STA-1 DL-9] A reviewer whose session died is told so even on a public
     // surface — production data is never the fallback.
     if (reviewTenant) await reviewGate(app.prisma, request);
+    // [Row 225 · AUTH-PIN] The same binding for a guest-capable write: a page
+    // that expected account A must not write as B, nor as a guest.
+    refuseUnexpectedPrincipal(request, request.authSessionId ? request.user.userId : null);
   });
 });

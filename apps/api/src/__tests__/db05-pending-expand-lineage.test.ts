@@ -20,10 +20,11 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { TENANT_TABLES, TENANT_LINEAGE_TABLES, allRlsDdl, appRoleDdl, tenantLineageDdl, rlsDdlFor, lineageBackfillSql } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const REVIEW = `db05-${RUN}`;
 const PRODUCTION = 'swift-default';

@@ -36,8 +36,9 @@ import { issueSyntheticHandoverPhoto, persistSessionFix, syntheticMoverSession }
 import { retainedPhonePrefix } from './helpers/retained-evidence';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 /** [SAFE-B · retained history] A phone namespace no other suite uses or purges, unique to the run. */
 const PHONE_PREFIX = retainedPhonePrefix('01');
