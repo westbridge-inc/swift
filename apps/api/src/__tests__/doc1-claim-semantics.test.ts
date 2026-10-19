@@ -28,8 +28,9 @@ import { assertMmgFulfilmentAllowed, MMG_MONEY_MOVED } from '../modules/order/or
 import { handoverAuthorityFor } from '../modules/order/handover-authority';
 import { isCapturedMmg } from '../modules/dispatch/rescue';
 import { renderReceiptHtml } from '../modules/order/receipt';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-claim-semantics-test');
 

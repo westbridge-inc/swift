@@ -39,9 +39,9 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     },
   },
   'lib/customer-search.ts': {
-    calls: ['searchCatalogue', 'searchSuggestions'],
+    calls: ['searchCatalogue', 'searchSuggestions', 'searchTrending'],
     imports: ["import { apiFetch } from './auth';", "import type { MarketItem } from './customer';"],
-    users: { 'app/(app)/order/search/page.tsx': "import { searchCatalogue, searchSuggestions, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';" },
+    users: { 'app/(app)/order/search/page.tsx': "import { searchCatalogue, searchSuggestions, searchTrending, TRENDING_SHOWN, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';" },
   },
   'lib/customer-courier.ts': {
     calls: ['courierEstimate', 'requestCourier'],
@@ -49,11 +49,13 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     users: { 'app/(app)/courier/page.tsx': "import { courierEstimate, requestCourier } from '@/lib/customer-courier';" },
   },
   'lib/customer-rides.ts': {
-    calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide'],
+    calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide', 'rideCapabilities', 'requestRide', 'rideSos'],
     imports: ["import { apiFetch } from './auth';"],
     users: {
-      'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide } from '@/lib/customer-rides';",
-      'app/(app)/taxi/taxi-fare-estimate.tsx': "import { rideEstimate } from '@/lib/customer-rides';",
+      'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';",
+      'app/(app)/taxi/taxi-fare-estimate.tsx': "import { activeRide, rideCapabilities, rideEstimate } from '@/lib/customer-rides';",
+      'app/(app)/taxi/taxi-booking.tsx': "import { requestRide, type WebRideRequest } from '@/lib/customer-rides';",
+      'components/taxi-trip-safety.tsx': "import { rideSos } from '@/lib/customer-rides';",
     },
   },
   'lib/customer-market.ts': {

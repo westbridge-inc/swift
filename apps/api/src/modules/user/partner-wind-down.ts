@@ -1,4 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { formatMoney } from '../../utils/currency-amount';
@@ -323,6 +324,9 @@ export async function windDownPartner(
       ? prisma.vendorStaff.deleteMany({ where: { vendorId: { in: vendorIds } } })
       : Promise.resolve({ count: 0 }),
   ]);
+
+  // [#1848 follow-up] Staged link/number changes close with the cleared destinations (store and driver).
+  await closeOpenMmgStagesFor(prisma, [...vendorIds, ...(driver ? [driver.id] : [])]);
 
   // Retain mover rows and their earnings/FKs, but remove live location,
   // vehicle identity and personal payment destinations after account closure.

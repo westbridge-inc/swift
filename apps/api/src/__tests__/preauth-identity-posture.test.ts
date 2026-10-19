@@ -31,6 +31,7 @@ import { storePasswordResetOtp, storeSignupOtp } from '../modules/auth/signup-co
 import { installDdl } from './helpers/install-ddl';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { getTenantContext } from '../plugins/tenant-context';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // [R048-001] this suite creates the NOLOGIN probe group and two LOGIN roles by raw DDL, as review-partner-strict-posture does.
 grantSuiteCapability('ddl');
@@ -84,8 +85,9 @@ async function account(tenant: Tenant, opts: { password?: boolean; reviewCredent
 async function session(userId: string) {
   const token = app.jwt.sign({ userId, role: 'CUSTOMER', jti: nanoid(8) });
   const refreshToken = nanoid(64);
+  // [Row 231] the suite's own connection bypasses the API's digest layer: it stores what the API stores — digests
   const row = await owner.session.create({ data: {
-    userId, token, refreshToken, authMethod: 'OTP', deviceId: `preauth-${RUN}`, deviceType: 'test',
+    userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(refreshToken), authMethod: 'OTP', deviceId: `preauth-${RUN}`, deviceType: 'test',
     expiresAt: new Date(Date.now() + 3_600_000),
   } });
   return { id: row.id, token, refreshToken };
@@ -256,7 +258,7 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     expect(res.json().error.code).toBe('INVALID_OTP');
     expect((await owner.user.findUniqueOrThrow({ where: { id: who.id } })).passwordHash).toBe(passwordHash);
     expect(await sessionsOf(who.id)).toBe(1);
-    expect((await owner.session.findUniqueOrThrow({ where: { id: existing.id } })).token).toBe(existing.token);
+    expect((await owner.session.findUniqueOrThrow({ where: { id: existing.id } })).token).toBe(sessionCredentialDigest(existing.token));
   });
 
   it.each(TENANTS)('%s: refresh rotates the session’s tokens', async (tenant) => {
@@ -266,7 +268,7 @@ describe('[L04 · R1 · OTA-016] sign-in under the production CONTRACT posture',
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().data.refreshToken).not.toBe(s.refreshToken);
     const row = await owner.session.findUniqueOrThrow({ where: { id: s.id }, select: { refreshToken: true, previousRefreshToken: true } });
-    expect(row.previousRefreshToken).toBe(s.refreshToken);
+    expect(row.previousRefreshToken).toBe(sessionCredentialDigest(s.refreshToken));
   });
 
   it.each(TENANTS)('%s: a bearer request and a browser-cookie request are both authenticated as the account', async (tenant) => {

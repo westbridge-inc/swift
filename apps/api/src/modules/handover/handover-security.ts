@@ -10,6 +10,8 @@
 // the SAME lockout instead of each re-implementing (or forgetting) it.
 // ---------------------------------------------------------------------------
 
+import { createHash, timingSafeEqual } from 'node:crypto';
+
 /** Five failed comparisons exhaust the proof budget. Pickup counts its
  * successful comparison too, then becomes terminal; delivery counts failures.
  * Check and consume under the canonical Order lock. A wrong result commits
@@ -50,6 +52,19 @@ export const HANDOVER_SECRETS_OMIT: {
   mmgNumberSnapshot: true,
   mmgPayUrlSnapshot: true,
 };
+
+/**
+ * [Row 207] THE comparison of a handover code (taxi ride PIN, delivery PIN,
+ * pickup code) with a guess. Both sides are hashed to fixed-length digests and
+ * compared with timingSafeEqual, so neither how much of a guess is right nor
+ * its length changes the time taken. A missing or empty secret never matches.
+ * Every handover path calls this; never write a second comparison.
+ */
+export function handoverCodeMatches(secret: string | null | undefined, guess: string): boolean {
+  const digest = (value: string) => createHash('sha256').update(value).digest();
+  const matches = timingSafeEqual(digest(secret ?? ''), digest(guess));
+  return matches && typeof secret === 'string' && secret.length > 0;
+}
 
 /**
  * Given how many wrong tries a code has ALREADY taken, decide the next verify.
