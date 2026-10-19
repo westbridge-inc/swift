@@ -34,6 +34,7 @@ import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone } from './helpers/fixture-ids';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
@@ -65,7 +66,8 @@ const tokens: Record<'vendor' | 'driver' | 'rider' | 'customer', string> = { ven
 
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
-  await owner.session.create({ data: { userId, token, refreshToken: nanoid(48), deviceId: `w0-${RUN}-${role}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+  // [Row 231] the suite's own connection bypasses the API's digest layer: it stores what the API stores — digests
+  await owner.session.create({ data: { userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), deviceId: `w0-${RUN}-${role}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   return token;
 }
 
