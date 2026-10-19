@@ -10,8 +10,8 @@
  *  - ERASURE_DEIDENTIFIED: the row stays and the erasure strips what identifies the person from it;
  *  - ERASURE_KEPT: they stay, pointing at the de-identified account row, for the reason given (a Privacy Policy
  *    §6 retention, the §7 administrative trail, or a row that holds nothing about the person but the link);
- *  - ERASURE_UNDECIDED: keeping them needs a retention the Privacy Policy does not state. Each waits on the
- *    owner (PRIVACY ASK 19 Oct 00:01Z); the list may only shrink.
+ *  - ERASURE_UNDECIDED: a row whose keeping would need a retention the Privacy Policy does not state, waiting
+ *    on the owner. Empty: the owner ruled every such row on 19 Oct (PRIVACY ASK 00:01Z, option A).
  * account-erasure-register.test.ts reads the schema (Prisma DMMF): a new table that holds a person's id is red
  * there until it is put in one of these lists.
  */
@@ -25,8 +25,7 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
   'MoneySurfaceCommand.userId': 'erasure transaction: staged payout and payment-setting commands with their notices (a command queue, not a money record)',
   'MoverRevocationOutbox.userId': 'erasure transaction: finished rows; a row still owed to other people (their re-dispatch and notices) stays until it is done, then the standing re-sweep deletes it',
   'GuardianCheckinDelivery.userId': 'erasure transaction: safety check-in deliveries, unless a safety deletion hold is open (kept until it ends; the standing re-sweep deletes them)',
-  'CardSession.userId': 'erasure transaction: card sessions that moved no money; one a payment or a confirmation hold names, or one still in flight, is settlement history (Privacy Policy §6)',
-  'PaymentInstrument.userId': 'erasure transaction: every saved card is revoked and its sealed token forgotten; the row goes unless a payment record names it (then it is settlement history, token gone)',
+  'CardSession.userId': 'card sessions that moved no money; kept because it is payment evidence (Privacy Policy §6 settlement history): one a payment, provider transaction, provider action, confirmation hold or observation names, or one still in flight',
   'RenewalSchedule.subjectId': 'erasure transaction: renewal reminders for documents the erasure purges',
   'Admin.userId': 'erasure transaction: staff permissions end with the account',
   'AdvertiserMember.userId': 'advertiser wind-down (seat removed)',
@@ -52,6 +51,24 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'ServiceProvider.userId': 'the profile row stays for job history; the bio and portfolio photo pointers are cleared (an uploaded photo goes with the unclaimed-upload erasure)',
   'Customer.userId': 'order totals stay; the referral link is cleared and the referral code retired',
   'CheckoutReceipt.userId': 'the replay record stays with its order ids and date (the amounts are on the kept orders); the frozen checkout response (names, phones, addresses, notes) and the request hash are replaced',
+  // Owner 19 Oct (PRIVACY ASK 00:01Z, option A for all three; no LEGAL_VERSION): G1 fraud and abuse marks.
+  'Strike.userId': 'G1: the strike stays on the de-identified account (reason code, order link, date); its phone and address key are dropped',
+  'EnforcementAction.accountId': 'G1: the decision stays (level, reason code, dates); the signals fired and the appeal note are dropped',
+  // G2 case and request free text.
+  'SupportTicket.userId': 'G2: the ticket stays (category, status, dates, order link); subject, message and staff note are replaced. Kept because server-written: the confirmed closure request (the support queue completes by its subject and text)',
+  'ComplianceViolation.userId': 'G2: the check stays (reason code, action, dates); its evidence is dropped',
+  'ComplianceReviewCase.userId': 'G2: the case stays (status, dates, decider); its note is dropped',
+  'RectificationRequest.userId': 'G2: the rights request stays (field code, dates, resolution); its note is replaced',
+  'ContentReport.reporterId': 'G2: the report stays (reason, status, dates); detail and resolution note are dropped once resolved. Kept because still being handled (the re-sweep clears it once resolved), or because preserved for or sent to the authorities (a legal retention duty, Privacy Policy §6)',
+  'RatingReport.reporterId': 'G2: the report stays (reason, status, dates); its note is dropped once resolved. Kept because still being handled (the re-sweep clears it once resolved)',
+  // G3 safety records: whole while open or held (SafetyDeletionHold, open DocLegalHold, case or bundle legal hold, read under the locks), else de-identified.
+  'SosAlert.actorUserId': 'G3: a closed SOS the person raised keeps status, dates and order link; trigger location, address, note and staff notes go, with its re-trigger rows. Kept whole because open or held',
+  'TripSafetySession.passengerUserId': 'G3: a closed trip safety session keeps status, dates, score and order link; risk factors and deviation (location) go. Kept whole because open, held, or escalated into an SOS that stays whole',
+  'TripSafetySession.driverUserId': 'G3: a closed trip safety session keeps status, dates, score and order link; risk factors and deviation (location) go. Kept whole because open, held, or escalated into an SOS that stays whole',
+  'IncidentCase.subjectUserId': 'G3: a closed case keeps number, status, severity, decision code, dates and order link; summary, details and decision notes go. Kept whole because open or under a legal hold',
+  'IncidentCase.reporterUserId': 'G3: a closed case keeps number, status, severity, decision code, dates and order link; summary, details and decision notes go. Kept whole because open or under a legal hold',
+  'EvidenceBundle.subjectUserId': 'G3: an unheld bundle of a closed case or SOS loses its unsealed items. Kept because sealed: sealed evidence is immutable at the database (safety spec §9.2) until the follow-up erasure exception; or whole because held',
+  'FraudCase.subjectUserId': 'G3: a confirmed case keeps reason code, dates and case link; the referral text and the other accounts it linked go. Kept whole because its legal hold is not released',
 };
 
 /** Link -> why the person's rows stay after erasure (they point at the de-identified account row). */
@@ -118,7 +135,7 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'StockMovement.actorId': "a store's stock ledger: who moved stock (the store's business record)",
   'SupportTicket.resolvedById': 'staff work: who resolved a ticket (administrative trail, Privacy Policy §7)',
   'OpsAlertRecipient.userId': 'staff work: who was paged for an operations alert and who acknowledged it (administrative trail, Privacy Policy §7)',
-  'CustodyRecoveryCase.ownerUserId': 'staff work: the staff member who owned a parcel recovery case (administrative trail, Privacy Policy §7)',
+  'CustodyRecoveryCase.ownerUserId': 'staff work: the staff member who owned a parcel recovery case (administrative trail, Privacy Policy §7). A resolved case the person held or relayed as a rider loses its location and note (owner 19 Oct G3)',
   'Advertiser.createdByUserId': "the business's record: a business closes through Support (Privacy Policy §6)",
   'VendorOwner.userId': "the business's record: the row holds only the link; a business closes through Support (Privacy Policy §6)",
   'ConsentRecord.subjectId': 'the consent ledger is kept as legal evidence after deletion (Privacy Policy §6); append-only',
@@ -132,27 +149,12 @@ export const ERASURE_KEPT: Readonly<Record<string, string>> = {
   'PersonProfile.accountId': 'the document register index (the custody record of purged documents)',
   'BusinessProfile.ownerAccountId': 'the document register index (the custody record of purged documents)',
   'AlgoDecision.subjectId': 'the log of automated dispatch and pricing steps (Privacy Policy §4); order and store ids, not the person',
+  'PaymentInstrument.userId': 'kept because settlement history and frozen at the database (PT-1: payments name the row; its binding, sealed token and card facts never change; no DELETE): the erasure REVOKES every active card and closes its unsent charges. Forgetting the token and card facts is the follow-up erasure exception (COORD 19 Oct 03:46Z)',
+  'MmgPayerEvidence.accountId': 'G1: kept because immutable at the database (safeb_payer_immutable): the payer hash is dropped by the follow-up erasure exception (owner 19 Oct G1). No new evidence is written for a closed account (the writer refuses DEACTIVATED)',
+  'TrialGrant.accountId': 'G1: the one-trial grant stays on the de-identified account (role, status, reason code, dates); it holds no phone, address or hash',
+  'SosAlert.counterpartyUserId': "another person's emergency record: it names this person only by the de-identified account id; the location and notes are the other person's",
+  'SosRetrigger.counterpartyUserId': "another person's emergency record: it names this person only by the de-identified account id (the re-triggers of an SOS this person raised go with it)",
 };
 
-/** Link -> what the rows hold and the question to the owner (PRIVACY ASK 19 Oct 00:01Z). May only shrink. */
-export const ERASURE_UNDECIDED: Readonly<Record<string, string>> = {
-  'Strike.userId': 'G1 fraud signal: strikes for fake or abusive orders carry a phone and an address key - keep de-identified, or keep for a stated fraud window',
-  'MmgPayerEvidence.accountId': 'G1 fraud signal: a keyed hash of the paying MMG number - keep de-identified, or keep for a stated fraud window',
-  'EnforcementAction.accountId': 'G1 fraud signal: enforcement decisions with the signals fired and the appeal note - keep de-identified, or keep for a stated fraud window',
-  'TrialGrant.accountId': 'G1 fraud signal: the one-trial-per-identity grant - keep de-identified, or keep for a stated fraud window',
-  'SupportTicket.userId': 'G2 case text: support history (incl. the closure ticket) - keep the row without its text, or keep the text for a stated window',
-  'ComplianceViolation.userId': 'G2 case text: mover compliance checks with their evidence - keep the row without its text, or keep for a stated window',
-  'ComplianceReviewCase.userId': 'G2 case text: compliance review cases with a note - keep the row without its text, or keep for a stated window',
-  'RectificationRequest.userId': 'G2 case text: a data-subject rectification request with its note - keep the row without its text, or keep for a stated window',
-  'ContentReport.reporterId': 'G2 case text: reports the person filed, with their detail - keep the row without its text, or keep for a stated window',
-  'RatingReport.reporterId': 'G2 case text: rating reports the person filed, with a note - keep the row without its text, or keep for a stated window',
-  'SosAlert.actorUserId': 'G3 safety record: SOS alerts with trigger location, address and note - hold rules, or a stated safety window',
-  'SosAlert.counterpartyUserId': 'G3 safety record: SOS alerts naming the other party - hold rules, or a stated safety window',
-  'SosRetrigger.counterpartyUserId': 'G3 safety record: SOS re-triggers naming the other party - hold rules, or a stated safety window',
-  'TripSafetySession.passengerUserId': 'G3 safety record: trip safety sessions (risk, deviation, check-ins) - hold rules, or a stated safety window',
-  'TripSafetySession.driverUserId': 'G3 safety record: trip safety sessions (risk, deviation, check-ins) - hold rules, or a stated safety window',
-  'IncidentCase.subjectUserId': 'G3 safety record: incident cases with summary and details - hold rules, or a stated safety window',
-  'IncidentCase.reporterUserId': 'G3 safety record: incident cases with summary and details - hold rules, or a stated safety window',
-  'EvidenceBundle.subjectUserId': 'G3 safety record: sealed evidence bundles - hold rules, or a stated safety window',
-  'FraudCase.subjectUserId': 'G3 safety record: confirmed fraud cases and their referral - hold rules, or a stated safety window',
-};
+/** Link -> an open question to the owner. Empty since the owner's 19 Oct rulings; it may only shrink, so it stays empty. */
+export const ERASURE_UNDECIDED: Readonly<Record<string, string>> = {};

@@ -14,8 +14,8 @@ import { personLinks } from './helpers/person-links';
 
 const ERASURE_SOURCES = ['modules/user/account.service.ts', 'modules/user/upload-erasure.ts', 'modules/user/mover-object-erasure.ts', 'modules/user/erasure-coverage.ts']
   .map((f) => readFileSync(join(__dirname, '..', f), 'utf8')).join('\n');
-/** 19 Oct measurement (the 18 Oct ceiling was 21 over the narrower census). Lower it when an entry is ruled; never raise it. */
-const UNDECIDED_CEILING = 19;
+/** 21 on 18 Oct; 0 since the owner's 19 Oct rulings. Never raise it. */
+const UNDECIDED_CEILING = 0;
 
 /** Every `Model.column` that holds a person's id, less the columns the export register proved are not a person. */
 function personIdColumns(): string[] {
