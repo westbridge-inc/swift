@@ -237,12 +237,12 @@ describe('[PERF row 8] the website opens the store socket with its access cookie
     expect(error).toBeUndefined();
     expect(socket.connected).toBe(true);
     // The rooms derive from the verified session, exactly as a phone's.
-    expect(app.io.sockets.adapter.rooms.get(`user:${owner.userId}`)?.has(socket.id)).toBe(true);
-    expect(app.io.sockets.adapter.rooms.get(`session:${owner.sessionId}`)?.has(socket.id)).toBe(true);
+    expect(app.io.sockets.adapter.rooms.get(`user:${owner.userId}`)?.has(socket.id ?? '')).toBe(true);
+    expect(app.io.sockets.adapter.rooms.get(`session:${owner.sessionId}`)?.has(socket.id ?? '')).toBe(true);
 
     const heard = new Promise<{ orderId?: string }>((resolve) => socket.once('order:new', resolve));
     socket.emit('vendor:subscribe', { vendorId });
-    for (let i = 0; i < 50 && !app.io.sockets.adapter.rooms.get(`vendor:${vendorId}`)?.has(socket.id); i += 1) {
+    for (let i = 0; i < 50 && !app.io.sockets.adapter.rooms.get(`vendor:${vendorId}`)?.has(socket.id ?? ''); i += 1) {
       await new Promise((r) => setTimeout(r, 20));
     }
     const sentAt = performance.now();
@@ -290,8 +290,8 @@ describe('[PERF row 8] the website opens the store socket with its access cookie
     expect(foreign.error).toBeUndefined();
     const both = await connect({ path: '/socket.io/', auth: { token: phone.token, client: 'web' }, headers: { origin: WEBSITE, cookie: `swift_at=${encodeURIComponent(owner.token)}` } });
     expect(both.error).toBeUndefined();
-    expect(app.io.sockets.adapter.rooms.get(`user:${phone.userId}`)?.has(both.socket.id)).toBe(true);
-    expect(app.io.sockets.adapter.rooms.get(`user:${owner.userId}`)?.has(both.socket.id) ?? false).toBe(false);
+    expect(app.io.sockets.adapter.rooms.get(`user:${phone.userId}`)?.has(both.socket.id ?? '')).toBe(true);
+    expect(app.io.sockets.adapter.rooms.get(`user:${owner.userId}`)?.has(both.socket.id ?? '') ?? false).toBe(false);
   });
 
   it('the alias serves WebSocket upgrades only: a plain request under /api/v1/socket.io/ is not the socket', async () => {
