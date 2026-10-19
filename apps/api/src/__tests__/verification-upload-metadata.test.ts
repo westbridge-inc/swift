@@ -195,8 +195,9 @@ describe('POST /verification/upload seals the photo without its metadata', () =>
 
   it('what the bytes ARE decides the clean-up: a PNG sent as image/jpeg loses its location too', async () => {
     const dirty = pngFromCamera(`mislabel-${marker}`);
-    const { plaintext } = await sealed(dirty, 'image/jpeg');
+    const { plaintext, row } = await sealed(dirty, 'image/jpeg');
     expect(plaintext.equals(REAL_PNG)).toBe(true);
+    expect(row.mimeType).toBe('image/png'); // the envelope records what is sealed, not the label
   });
 
   it('a PDF document is sealed exactly as it came (not a photo; the clean-up never touches it)', async () => {

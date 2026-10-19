@@ -178,6 +178,8 @@ export async function verificationRoutes(app: FastifyInstance) {
     // real decoder. What the bytes ARE decides it (a PDF passed the sniff above as a PDF: not a photo).
     const photo = await cleanStoredPhoto(buffer, file.mimetype);
     const sealedBytes = photo?.buffer ?? buffer;
+    // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
+    const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
     await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
@@ -193,7 +195,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       const sha256 = createHash('sha256').update(buffer).digest('hex');
       // [#1449 S4-1] A retry after a lost reply sends the same file again: answer with the
       // upload already stored, so no second copy of an ID document is kept (and no second review signal).
-      const retried = await retriedUpload(app.prisma, request.user.userId, sha256, file.mimetype);
+      const retried = await retriedUpload(app.prisma, request.user.userId, sha256, sealedType);
       if (retried) return { success: true, data: { url: retried } };
       // SWIFT-078: the SAME physical document already on ANOTHER account is a
       // fraud signal — one person opening several accounts, or a reused/forged
@@ -218,7 +220,7 @@ export async function verificationRoutes(app: FastifyInstance) {
           iv: new Uint8Array(iv),
           authTag: new Uint8Array(authTag),
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-          mimeType: file.mimetype,
+          mimeType: sealedType,
           sizeBytes: sealedBytes.length, // what is stored (and what a deletion receipt destroys)
           sha256,
           createdBy: request.user.userId,
