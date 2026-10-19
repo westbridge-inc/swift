@@ -57,6 +57,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { renderStorePhoto } from '../../utils/public-store-photos';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -717,6 +718,31 @@ function storeMoneySurfaceView(row: {
 function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
   const payBy = mmgAcceptedPayBy(order);
   return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
+}
+
+/**
+ * [IMAGES-E2E] What PUT /profile may do with the logo and cover addresses. They are
+ * photos the store uploads (POST /profile/logo|cover), so typed text may only take
+ * one down ('' = none) or send back the value already there (a client that echoes
+ * the profile). Anything else (an outside address, another store's key, a path into
+ * another folder) is refused: it would skip the scan and the redraw. undefined =
+ * leave the field as it is.
+ */
+export async function storePhotoFieldsForWrite(
+  app: FastifyInstance,
+  vendorId: string,
+  logoUrl: string | undefined,
+  coverImageUrl: string | undefined,
+): Promise<{ logoUrl?: string | null; coverImageUrl?: string | null }> {
+  if (logoUrl === undefined && coverImageUrl === undefined) return {};
+  const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { logoUrl: true, coverImageUrl: true } });
+  const one = (sent: string | undefined, now: string | null | undefined): string | null | undefined => {
+    if (sent === undefined) return undefined;
+    if (sent.trim() === '') return null;
+    if (sent === (now ?? '')) return undefined;
+    throw new AppError(400, 'STORE_PHOTO_UPLOAD_ONLY', 'Add the store\'s logo or cover by uploading a photo');
+  };
+  return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
 }
 
 export async function vendorRoutes(app: FastifyInstance) {
@@ -1413,6 +1439,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
     if (body.refundRule !== undefined) requireRole(access, 'OWNER');
     const refundRule = refundRuleForWrite(body.refundRule);
+    // [IMAGES-E2E] The logo and cover are photos the store UPLOADS (POST /profile/logo|cover:
+    // scanned, redrawn without metadata, kept where the public door serves them). Typed
+    // text may only take one down ('' = none) or repeat what is already there.
+    const photoFields = await storePhotoFieldsForWrite(app, vendorId, body.logoUrl, body.coverImageUrl);
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1432,8 +1462,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.region !== undefined && { region: body.region }),
           ...(body.latitude !== undefined && { latitude: body.latitude }),
           ...(body.longitude !== undefined && { longitude: body.longitude }),
-          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(photoFields.logoUrl !== undefined && { logoUrl: photoFields.logoUrl }),
+          ...(photoFields.coverImageUrl !== undefined && { coverImageUrl: photoFields.coverImageUrl }),
           ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
           ...(body.tags !== undefined && { tags: body.tags }),
           ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
@@ -3096,12 +3126,15 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
-  /** POST /items/:id/image — upload behind the StorageProvider interface */
-  app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
-    const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
-    if (!existing) throw new NotFoundError('Item', request.params.id);
-
+  /**
+   * [IMAGES-E2E] The one way a store's own photo (menu item, logo, cover) is kept:
+   * a JPEG/PNG/WebP whose bytes say so, scanned, then DRAWN AGAIN with the public
+   * door's own drawing (utils/public-store-photos renderStorePhoto: upright, sRGB,
+   * no metadata at all, EXIF/GPS/XMP/ICC included, long edge at most 1600 px), and
+   * kept in the store's photo folder `items/<store>/`, which is the only folder the
+   * public door serves. The storage seam strips again on the way in.
+   */
+  async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
     if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
@@ -3114,12 +3147,52 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     await scanUpload(buffer, { surface: 'store-media', log: request.log });
+    const drawn = await renderStorePhoto(buffer, null);
+    if (!drawn) throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    const ext = drawn.type === 'image/png' ? '.png' : drawn.type === 'image/webp' ? '.webp' : '.jpg';
     const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
+      buffer: drawn.body,
+      filename: `photo${ext}`,
+      mimeType: drawn.type,
       folder: `items/${vendorId}`,
     });
+    return url;
+  }
+
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers). */
+  for (const [slot, field] of [['logo', 'logoUrl'], ['cover', 'coverImageUrl']] as const) {
+    app.post(`/profile/${slot}`, auth, async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'MANAGER');
+      const url = await storeOwnPhoto(request, vendorId);
+      const vendor = await app.prisma.vendor.update({
+        where: { id: vendorId },
+        data: { [field]: url },
+        select: { id: true, logoUrl: true, coverImageUrl: true },
+      });
+      scheduleVendorSearchSync(app, vendorId);
+      return { success: true, data: vendor };
+    });
+
+    /** DELETE /profile/logo, /profile/cover — take it down (the door stops serving it at once). */
+    app.delete(`/profile/${slot}`, auth, async (request) => {
+      const { vendorId } = await requireVendor(app, request, 'MANAGER');
+      const vendor = await app.prisma.vendor.update({
+        where: { id: vendorId },
+        data: { [field]: null },
+        select: { id: true, logoUrl: true, coverImageUrl: true },
+      });
+      scheduleVendorSearchSync(app, vendorId);
+      return { success: true, data: vendor };
+    });
+  }
+
+  /** POST /items/:id/image — upload behind the StorageProvider interface */
+  app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
+
+    const url = await storeOwnPhoto(request, vendorId);
 
     const item = await app.prisma.item.update({
       where: { id: request.params.id, archivedAt: null },

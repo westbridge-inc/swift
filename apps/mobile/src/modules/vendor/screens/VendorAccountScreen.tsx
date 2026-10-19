@@ -31,6 +31,8 @@ import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StorePhotosCard } from '../../../components/StorePhotosCard';
+import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
@@ -190,8 +192,12 @@ export function VendorAccountScreen() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Store identity */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+          <View style={{ width: 56, height: 56, borderRadius: 28, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            {storePhotoUrl(store?.logoUrl, 160) ? (
+              <Image source={{ uri: storePhotoUrl(store?.logoUrl, 160)! }} style={{ width: 56, height: 56 }} contentFit="cover" accessibilityLabel="Store logo" />
+            ) : (
+              <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+            )}
           </View>
           <View style={{ flex: 1 }}>
             <T variant="heading" numberOfLines={1}>
@@ -203,6 +209,9 @@ export function VendorAccountScreen() {
             </T>
           </View>
         </Card>
+
+        {/* [IMAGES-E2E] The store's own logo and cover (managers): uploaded, redrawn without camera data. */}
+        {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />

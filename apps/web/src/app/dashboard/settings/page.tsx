@@ -8,6 +8,7 @@ import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscri
 import { MutationNotice } from '@/components/mutation-notice';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
+import { StorePhotosCard } from './store-photos-card';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -255,11 +256,12 @@ export default function SettingsPage() {
           </p>
           {p.description && <p className="mt-2 text-sm">{p.description}</p>}
           <p className="mt-3 text-xs text-[var(--swift-muted)]">
-            Name, description, photos, address and MMG details are edited in the Swift app (they go through review).
+            Name, description, address and MMG details are edited in the Swift app (they go through review).
           </p>
         </div>
       )}
 
+      <StorePhotosCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
       <SubscriptionCard />
       <SettlementsCard />
