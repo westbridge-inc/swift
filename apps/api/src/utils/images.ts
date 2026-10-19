@@ -98,6 +98,29 @@ function tooLarge() {
 }
 
 /**
+ * [Row 238 · M044] THE one clean-up for every photo Swift stores: the storage seam (plaintext
+ * uploads) and the document envelope (an ID photo is encrypted before the seam can see it), so
+ * no path keeps a camera's location and no second stripper is ever written.
+ *
+ * What the bytes ARE decides it, sniffed once (a declared type never picks the strip). The
+ * metadata is removed FAILING CLOSED, then the bytes that will be stored are read by the real
+ * decoder (type, size cap, plausible size). Returns null for bytes that are not a photo (a PDF,
+ * an encrypted envelope); a declared photo that is not one, or one that cannot be cleaned, is
+ * refused with IMAGE_UNREADABLE, never stored as it came.
+ */
+export async function cleanStoredPhoto(buffer: Buffer, declaredMimeType: string): Promise<{ buffer: Buffer; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' } | null> {
+  const sniffed = sniffImageType(buffer);
+  if (!sniffed) {
+    if (declaredMimeType.startsWith('image/')) throw unreadable();
+    return null;
+  }
+  const clean = stripImageMetadataStrict(buffer, sniffed);
+  if (!clean) throw unreadable();
+  await inspectImage(clean, sniffed);
+  return { buffer: clean, mimeType: sniffed };
+}
+
+/**
  * Document sniff (security spec §6): verification uploads accept PDFs too —
  * the content must match one of the allowed formats, never just the header.
  */
@@ -137,8 +160,9 @@ export function looksLikeDocument(buffer: Buffer, mimeType: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** JPEG APPn segments that carry no rendering information.
- *  KEPT: APP0 (JFIF density), APP2 (ICC colour profile), APP14 (Adobe colour
- *  transform — dropping it renders CMYK/YCCK JPEGs with inverted colour). */
+ *  KEPT: APP0 (JFIF density), APP2 when it is the ICC colour profile (MPF / FlashPix APP2
+ *  blocks are capture metadata and go), APP14 (Adobe colour transform — dropping it renders
+ *  CMYK/YCCK JPEGs with inverted colour). */
 const JPEG_DROP_MARKERS = new Set([
   0xe1, // APP1  — EXIF and XMP. The GPS lives here.
   0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, // APP3–APP11 — maker notes
@@ -148,8 +172,21 @@ const JPEG_DROP_MARKERS = new Set([
   0xfe, // COM   — free-text comment
 ]);
 
-/** PNG ancillary chunks carrying text or capture metadata. */
-const PNG_DROP_CHUNKS = new Set(['tEXt', 'zTXt', 'iTXt', 'eXIf', 'tIME']);
+const ICC_PROFILE_TAG = Buffer.from('ICC_PROFILE\0', 'latin1');
+
+function keepJpegSegment(marker: number, payload: Buffer): boolean {
+  if (JPEG_DROP_MARKERS.has(marker)) return false;
+  if (marker === 0xe2) return payload.subarray(0, ICC_PROFILE_TAG.length).equals(ICC_PROFILE_TAG);
+  return true;
+}
+
+/** PNG ancillary chunks that change how the pixels look. Every OTHER ancillary chunk (text,
+ *  eXIf, tIME, a camera's or an editor's private chunk) is metadata and goes; critical chunks
+ *  (upper-case first letter: IHDR, PLTE, IDAT, IEND) always stay. */
+const PNG_KEEP_ANCILLARY = new Set(['tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'pHYs', 'bKGD', 'cICP', 'mDCV', 'cLLI', 'mDCv', 'cLLi']);
+
+/** WebP chunks a decoder renders from; EXIF, XMP and anything unknown go. */
+const WEBP_KEEP_CHUNKS = new Set(['VP8X', 'VP8 ', 'VP8L', 'ALPH', 'ANIM', 'ANMF', 'ICCP']);
 
 function stripJpeg(buf: Buffer): Buffer | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
@@ -168,29 +205,38 @@ function stripJpeg(buf: Buffer): Buffer | null {
       i = m + 1;
       continue;
     }
-    if (marker === 0xd9) { out.push(buf.subarray(i)); return Buffer.concat(out); } // EOI
-    if (marker === 0xda) {
-      // SOS → the scans run to the end-of-image marker. Entropy-coded data never contains FF D9
-      // (an FF there is stuffed as FF 00, or is a restart marker), so the first FF D9 is the end.
-      // Anything after it is not this image ([Row 108] a polyglot's appended part, and whatever
-      // location it carries) and is dropped; no end marker at all means a truncated photo.
-      const eoi = buf.indexOf(JPEG_EOI, i + 2);
-      if (eoi < 0) return null;
-      out.push(buf.subarray(i, eoi + 2));
-      return Buffer.concat(out);
-    }
+    // EOI ends the image. Anything after it is not this image ([Row 108] a polyglot's appended
+    // part, a secondary MPF picture with its own EXIF) and is dropped.
+    if (marker === 0xd9) { out.push(buf.subarray(i, m + 1)); return Buffer.concat(out); }
+    if (marker === 0x00 || marker === 0xd8) return null; // a stuffed byte or a second SOI is no segment
     if (m + 2 >= buf.length) return null;
     const len = buf.readUInt16BE(m + 1);
     if (len < 2) return null;
     const end = m + 1 + len;
     if (end > buf.length) return null;
-    if (!JPEG_DROP_MARKERS.has(marker)) out.push(buf.subarray(i, end));
+    if (keepJpegSegment(marker, buf.subarray(m + 3, end))) out.push(buf.subarray(i, end));
     i = end;
+    if (marker === 0xda) {
+      // SOS: entropy-coded data follows, up to the next marker that is neither a stuffed byte
+      // (FF 00) nor a restart (RSTn). A progressive photo has many scans, and an APPn or COM
+      // segment may sit between ANY two of them ([Row 238]): walking on from scan to scan, never
+      // copying everything up to the end marker, is what removes the metadata hidden there.
+      const start = i;
+      while (i < buf.length) {
+        if (buf[i] !== 0xff) { const ff = buf.indexOf(0xff, i); i = ff < 0 ? buf.length : ff; continue; } // native scan, not a JS loop per byte
+        let n = i + 1;
+        while (n < buf.length && buf[n] === 0xff) n += 1;
+        if (n >= buf.length) return null;
+        const next = buf[n]!;
+        if (next === 0x00 || (next >= 0xd0 && next <= 0xd7)) { i = n + 1; continue; }
+        break;
+      }
+      if (i >= buf.length) return null; // no end marker: a truncated photo
+      out.push(buf.subarray(start, i));
+    }
   }
-  return Buffer.concat(out);
+  return null; // ran out before the end marker: a truncated photo cannot be shown to be clean
 }
-
-const JPEG_EOI = Buffer.from([0xff, 0xd9]);
 
 function stripPng(buf: Buffer): Buffer | null {
   const SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -202,7 +248,8 @@ function stripPng(buf: Buffer): Buffer | null {
     const type = buf.toString('ascii', i + 4, i + 8);
     const end = i + 12 + len; // length + type + data + crc
     if (len > buf.length || end > buf.length) return null;
-    if (!PNG_DROP_CHUNKS.has(type)) out.push(buf.subarray(i, end));
+    const critical = (buf[i + 4]! & 0x20) === 0;
+    if (critical || PNG_KEEP_ANCILLARY.has(type)) out.push(buf.subarray(i, end));
     i = end;
     if (type === 'IEND') break;
   }
@@ -222,7 +269,7 @@ function stripWebp(buf: Buffer): Buffer | null {
     const padded = size + (size % 2); // RIFF chunks pad to an even length
     const end = i + 8 + padded;
     if (end > limit) return null;
-    if (fourcc === 'EXIF' || fourcc === 'XMP ') { i = end; continue; }
+    if (!WEBP_KEEP_CHUNKS.has(fourcc)) { i = end; continue; } // EXIF, XMP, anything unknown
     if (fourcc === 'VP8X' && size >= 1) {
       // VP8X advertises which optional chunks follow. Leave those flags set
       // after removing the chunks and a strict decoder looks for bytes that
