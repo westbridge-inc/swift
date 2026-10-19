@@ -3173,7 +3173,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       return { success: true, data: vendor };
     });
 
-    /** DELETE /profile/logo, /profile/cover — take it down (the door stops serving it at once). */
+    /** DELETE /profile/logo, /profile/cover — take it down (the public door stops serving it once its 30-second decision window passes). */
     app.delete(`/profile/${slot}`, auth, async (request) => {
       const { vendorId } = await requireVendor(app, request, 'MANAGER');
       const vendor = await app.prisma.vendor.update({
