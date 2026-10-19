@@ -332,14 +332,14 @@ describe('the live wait on the driver’s trip (Rev 2 §8.3)', () => {
     snap('driver-active-trip-waiting');
     const card = byTestId('driver-waiting');
     expect(card?.textContent).toContain('13 min waited');
-    expect(card?.textContent).toMatch(/\$500 so far/);
-    expect(card?.textContent).toMatch(/Next \$500 in 6:30/);
+    expect(card?.textContent).toMatch(/\$300 so far/);
+    expect(card?.textContent).toMatch(/Next \$300 in 6:30/);
   });
 
   it('at the end, the trip fare and the waiting are itemised — never added on the phone', async () => {
     await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, waiting: { ...WAITING_LIVE, running: false, nextChargeAt: null } }));
-    expect(byTestId('driver-waiting')?.textContent).toMatch(/Collect cash or MMG: trip fare \$2.?400 and waiting \$500\./);
-    expect(text()).not.toMatch(/\$2.?900/);
+    expect(byTestId('driver-waiting')?.textContent).toMatch(/Collect cash or MMG: trip fare \$2.?400 and waiting \$300\./);
+    expect(text()).not.toMatch(/\$2.?700/);
   });
 
   it('nothing without the server’s waiting object', async () => {
