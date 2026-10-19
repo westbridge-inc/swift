@@ -72,6 +72,16 @@ const overdueMinMinutes = () => num('GUARDIAN_OVERDUE_MIN_MINUTES', 15);
  *  allowance (pulling in, the passenger getting out and back), on top of the
  *  measured wait at the stop itself. */
 const stopAllowanceMinutes = () => num('GUARDIAN_STOP_ALLOWANCE_MINUTES', 10);
+/** [TAXI multi-stop 5/8] The longest wait at a stop the detectors forgive: past
+ *  it, a car still parked at an arrived stop is watched like any other stop
+ *  (the long-stop timer arms, and the overdue clock stops being extended). */
+const stopMaxWaitMinutes = () => num('GUARDIAN_STOP_MAX_WAIT_MINUTES', 30);
+
+/** Whether the car has waited at this ARRIVED stop longer than the forgiven wait. */
+export function stopWaitBeyondCap(stop: Pick<GuardianStop, 'status' | 'arrivedAt'>, now: Date): boolean {
+  return stop.status === 'ARRIVED' && stop.arrivedAt != null
+    && now.getTime() - stop.arrivedAt.getTime() > stopMaxWaitMinutes() * 60_000;
+}
 const staleGpsMinutes = () => num('GUARDIAN_STALE_GPS_MINUTES', 3);
 /** §5.4 — how far from the destination a "completed" trip may end before it
  *  is flagged for post-trip review. Generous: addresses are imprecise and the
@@ -204,9 +214,10 @@ export function guardianTarget(
 /**
  * [TAXI multi-stop 5/8] The time a ride's stops add to its ETA allowance: a
  * fixed allowance per stop plus the measured wait at each (its arrival to its
- * departure or skip, or to now while the car is still there). A passenger
- * shopping at a stop the car waits for is not an overdue trip. Zero for a
- * ride without stops.
+ * departure or skip, or to now while the car is still there), each wait
+ * counted up to GUARDIAN_STOP_MAX_WAIT_MINUTES. A passenger shopping at a
+ * stop the car waits for is not an overdue trip; a car parked there for hours
+ * is. Zero for a ride without stops.
  */
 export function stopsAllowanceMs(stops: readonly GuardianStop[] | undefined, now: Date): number {
   if (!stops) return 0;
@@ -215,7 +226,7 @@ export function stopsAllowanceMs(stops: readonly GuardianStop[] | undefined, now
     ms += stopAllowanceMinutes() * 60_000;
     if (!s.arrivedAt) continue;
     const end = s.departedAt ?? s.skippedAt ?? (s.status === 'ARRIVED' ? now : null);
-    if (end) ms += Math.max(0, end.getTime() - s.arrivedAt.getTime());
+    if (end) ms += Math.min(stopMaxWaitMinutes() * 60_000, Math.max(0, end.getTime() - s.arrivedAt.getTime()));
   }
   return ms;
 }
@@ -599,6 +610,7 @@ export class GuardianService {
       // deviation), and a new target starts a new baseline: the ratchet only
       // ever compares the car with the place it is heading for now.
       const target = guardianTarget(order.stops, dest);
+      const targetStop = target && order.stops ? order.stops.find((st) => `STOP_${st.sequence}` === target.key) : undefined;
       if (target && state.targetKey !== target.key) {
         if (state.targetKey != null) pushEvent(state, now, 'TARGET_CHANGED', { from: state.targetKey, to: target.key });
         state.targetKey = target.key;
@@ -633,11 +645,13 @@ export class GuardianService {
       // endpoint (boarding/alighting are legitimate stops).
       // [TAXI multi-stop 5/8] The stop a ride is heading for is an endpoint too
       // (pulling in before the arrival tap, and the wait there: a stop the car
-      // waits at, ARRIVED, is always the next open one).
+      // waits at, ARRIVED, is always the next open one), but only for the
+      // forgiven wait: past GUARDIAN_STOP_MAX_WAIT_MINUTES the long-stop timer
+      // arms there like anywhere else.
       const nearEndpoint =
         distToDest < nearEndpointM() ||
         (pickup ? metersBetween(lat, lng, pickup.lat, pickup.lng) < nearEndpointM() : false) ||
-        (target ? distToTarget < nearEndpointM() : false);
+        (target && !(targetStop && stopWaitBeyondCap(targetStop, now)) ? distToTarget < nearEndpointM() : false);
       if (nearEndpoint) {
         state.stopAnchor = null;
         state.stopSinceMs = null;

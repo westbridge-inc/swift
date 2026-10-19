@@ -195,16 +195,40 @@ describe('Guardian aims at the next open stop', () => {
     // Planned 20 min; without stops the allowance is max(15, 10) = 15 → overdue after T+35.
     const { order } = await makeRide([{ at: MID, status: 'ARRIVED', arrivedAt: at(10) }], { pickedUpAt: at(0), taxiDuration: 20 });
     await sweep(at(0));
-    // Waiting at the stop since T+10: at T+50 the allowance is 15 + 10 + 40 = 65 → not overdue.
-    await sweep(at(50));
+    // Waiting at the stop since T+10: at T+40 the allowance is 15 + 10 + 30 = 55 → not overdue.
+    await sweep(at(40));
     expect((await flagsOf(order.id)).overdue, 'the passenger is at their stop').toBeUndefined();
-    // Left at T+60 (a 50-minute wait): allowance 15 + 10 + 50 = 75 → overdue after T+95.
-    await setStop(order.id, 1, { status: 'DEPARTED', departedAt: at(60) });
-    await sweep(at(94));
+    // Left at T+35 (a 25-minute wait): allowance 15 + 10 + 25 = 50 → overdue after T+70.
+    await setStop(order.id, 1, { status: 'DEPARTED', departedAt: at(35) });
+    await sweep(at(69));
     expect((await flagsOf(order.id)).overdue).toBeUndefined();
-    await sweep(at(96));
+    await sweep(at(71));
     expect((await flagsOf(order.id)).overdue).toBeTruthy();
-    await retire(order.id, at(97));
+    await retire(order.id, at(72));
+  });
+
+  it('the forgiven wait is capped at 30 minutes: a car parked at its ARRIVED stop past it arms the long-stop timer again', async () => {
+    const t0 = Date.now();
+    const { order, driver } = await makeRide([{ at: MID, status: 'ARRIVED', arrivedAt: new Date(t0) }]);
+    for (const min of [0, 10, 20, 29]) await tick(driver.id, t0, min * 60_000, MID);
+    expect((await flagsOf(order.id)).longStop, 'inside the forgiven wait').toBeUndefined();
+    await tick(driver.id, t0, 31 * 60_000, MID); // past the cap: the stop is no longer an endpoint, the timer anchors
+    await tick(driver.id, t0, 37 * 60_000, MID); // 6 minutes later (LOW budget 5 min)
+    expect((await flagsOf(order.id)).longStop, 'parked at the stop for 37 minutes').toBeTruthy();
+    await retire(order.id, new Date(t0 + 38 * 60_000));
+  });
+
+  it('the forgiven wait is capped at 30 minutes: a car that never leaves its ARRIVED stop is overdue in the end', async () => {
+    const T = Date.now();
+    const at = (min: number) => new Date(T + min * 60_000);
+    // Planned 20, arrived at T+10 and never left: allowance 15 + 10 + min(wait, 30) = 55 at most → overdue after T+75.
+    const { order } = await makeRide([{ at: MID, status: 'ARRIVED', arrivedAt: at(10) }], { pickedUpAt: at(0), taxiDuration: 20 });
+    await sweep(at(0));
+    await sweep(at(74));
+    expect((await flagsOf(order.id)).overdue).toBeUndefined();
+    await sweep(at(76));
+    expect((await flagsOf(order.id)).overdue, 'still parked at the stop 66 minutes on').toBeTruthy();
+    await retire(order.id, at(77));
   });
 
   it('a trip that ended unpaid at the stop the car waited at is not "completed far from its destination"', async () => {
