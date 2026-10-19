@@ -244,6 +244,63 @@ describe('BE-13 — the database enforces the books', () => {
     expect(second).toBeNull();
     expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: key } })).toBe(1);
   });
+
+  // [row 163 · DB-04] postLedger runs INSIDE the money mutation's transaction.
+  // It used to insert first and swallow ANY unique violation: in PostgreSQL
+  // that error aborts the caller's transaction (so the 'no-op' replay broke
+  // the rest of the mutation), and a different posting under a used key was
+  // swallowed as if it were the same one.
+  it('a replay inside the caller\'s transaction is a no-op that keeps the transaction', async () => {
+    const key = `txreplay:${run}`;
+    const entries = topupPostings(`txreplay-sub-${run}`, 555);
+    expect(await postLedger(app.prisma, { idempotencyKey: key, description: 'first', entries })).toBeTruthy();
+    const marker = `txreplay-rest:${run}`;
+    const again = await app.prisma.$transaction(async (tx) => {
+      const replay = await postLedger(tx, { idempotencyKey: key, description: 'second delivery', entries: [...entries].reverse() });
+      await postLedger(tx, { idempotencyKey: marker, description: 'the rest of the money mutation', entries: topupPostings(`txreplay-rest-sub-${run}`, 1) });
+      return replay;
+    });
+    expect(again).toBeNull();
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: key } })).toBe(1);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: marker } })).toBe(1);
+  });
+
+  it('a different posting under a used key is refused, never swallowed as a replay', async () => {
+    const key = `conflict:${run}`;
+    const sub = `conflict-sub-${run}`;
+    await postLedger(app.prisma, { idempotencyKey: key, description: 'first', entries: topupPostings(sub, 100) });
+    // Another amount, another account, another subledger: each is a different posting.
+    for (const entries of [topupPostings(sub, 200), topupPostings(sub, 100, 'CARD'), topupPostings(`${sub}-other`, 100)]) {
+      await expect(postLedger(app.prisma, { idempotencyKey: key, description: 'first', entries })).rejects.toThrow(/LEDGER_REPLAY_MISMATCH/);
+    }
+    // Inside a transaction the whole money mutation fails loudly: nothing of it commits.
+    const marker = `conflict-rest:${run}`;
+    await expect(app.prisma.$transaction(async (tx) => {
+      await postLedger(tx, { idempotencyKey: marker, description: 'the rest of the money mutation', entries: topupPostings(`${sub}-rest`, 1) });
+      await postLedger(tx, { idempotencyKey: key, description: 'first', entries: topupPostings(sub, 200) });
+    })).rejects.toThrow(/LEDGER_REPLAY_MISMATCH/);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: marker } })).toBe(0);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: key } })).toBe(1);
+  });
+
+  it('a writer that loses the race for a key outside a transaction compares the winner\'s posting', async () => {
+    const key = `race:${run}`;
+    const sub = `race-sub-${run}`;
+    await postLedger(app.prisma, { idempotencyKey: key, description: 'the winner', entries: topupPostings(sub, 300) });
+    // The loser read before the winner committed: its first read finds nothing, its insert hits the key.
+    const loser = () => {
+      let reads = 0;
+      const ledgerTransaction = new Proxy(app.prisma.ledgerTransaction, {
+        get: (target, prop, receiver) => (prop === 'findUnique'
+          ? (args: Parameters<typeof target.findUnique>[0]) => (reads++ === 0 ? Promise.resolve(null) : target.findUnique(args))
+          : Reflect.get(target, prop, receiver)),
+      });
+      return new Proxy(app.prisma, { get: (target, prop, receiver) => (prop === 'ledgerTransaction' ? ledgerTransaction : Reflect.get(target, prop, receiver)) });
+    };
+    expect(await postLedger(loser(), { idempotencyKey: key, description: 'the loser', entries: topupPostings(sub, 300) })).toBeNull();
+    await expect(postLedger(loser(), { idempotencyKey: key, description: 'the loser', entries: topupPostings(sub, 301) })).rejects.toThrow(/LEDGER_REPLAY_MISMATCH/);
+    expect(await app.prisma.ledgerTransaction.count({ where: { idempotencyKey: key } })).toBe(1);
+  });
 });
 
 describe('M-13 — live credit paths post balanced books in the same transaction', () => {

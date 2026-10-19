@@ -33,10 +33,11 @@ import crypto from 'node:crypto';
 import { encryptBuffer, generateDek, getKeyProvider, resetKeyProviderForTests } from '../providers/storage/envelope';
 import { packCiphertext } from '../modules/verification/extraction-ledger';
 import { OPERATOR as OPERATOR_FACTS, OPERATOR_ADDRESS } from '../modules/legal/operator';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const OPERATOR = { PLATFORM_LEGAL_NAME: 'Westbridge Inc.', PLATFORM_REGISTERED_ADDRESS: '1 Main Street, Georgetown, Guyana', SUPPORT_EMAIL: 'support@example.gy' };

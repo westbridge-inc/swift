@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { searchCatalogue, searchSuggestions, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';
+import { searchCatalogue, searchSuggestions, searchTrending, TRENDING_SHOWN, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';
+import type { MarketItem } from '@/lib/customer';
 import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { VendorCard, VendorGridSkeleton, EmptyNote, ItemCard, VENDOR_GRID } from '@/components/order-ui';
 import { MARKET_GRID } from '@/components/customer-skeletons';
@@ -27,6 +28,12 @@ import { MARKET_GRID } from '@/components/customer-skeletons';
  * category screens open Search with `{ q, type }`: the page starts with them.
  * As you type it also offers the engine's suggestions (GET /search/
  * suggestions) as tappable words, as the phone does ([B2] "did you mean").
+ *
+ * [B2 · the phone's SearchScreen] A search with no matches under All, Food or
+ * Groceries (the kinds the phone's engine search covers) also offers "Worth
+ * trying right now": the most ordered dishes in open stores (GET
+ * /search/trending), asked once, and only when nothing matched. A failed read
+ * shows none — like the suggestions, it is an invitation, never an error.
  */
 const KINDS: { key: string; label: string; types: string[] | null }[] = [
   { key: 'all', label: 'All', types: null },
@@ -37,6 +44,28 @@ const KINDS: { key: string; label: string; types: string[] | null }[] = [
 ];
 
 const NONE: CatalogueResults = { stores: [], items: [] };
+/** The kinds the phone's engine search (and so its "Worth trying") covers: everything, food, groceries. */
+const TRENDING_KINDS = new Set(['all', 'food', 'groceries']);
+
+/** Dishes and products as cards, each opening its own store at the item. */
+function DishGrid({ items }: { items: MarketItem[] }) {
+  return (
+    <ul className={MARKET_GRID}>
+      {items.map((item) => (
+        <li key={item.id} className="min-w-0">
+          <ItemCard
+            href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
+            name={item.name}
+            price={item.basePrice}
+            imageUrl={item.imageUrl}
+            meta={item.vendorIsCurrentlyOpen === false ? `${item.vendorName} · Closed right now` : item.vendorName}
+            isNew={item.isNew}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export default function SearchPage() {
   useOwnBackButton();
@@ -47,6 +76,8 @@ export default function SearchPage() {
   const [busy, setBusy] = useState(false);
   // A search that could not be asked is not "nothing matches" (DS1081 S4).
   const [failed, setFailed] = useState(false);
+  const [trending, setTrending] = useState<MarketItem[] | null>(null);
+  const trendingAsked = useRef(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sequence = useRef(0);
   const input = useRef<HTMLInputElement | null>(null);
@@ -88,6 +119,12 @@ export default function SearchPage() {
   const stores = (results?.stores ?? []).filter((v) => !types || types.includes(v.vendorType));
   const dishes = types ? [] : (results?.items ?? []);
   const nothingAtAll = results !== null && results.stores.length === 0 && results.items.length === 0;
+  const offerTrending = !busy && results !== null && !failed && stores.length === 0 && dishes.length === 0 && TRENDING_KINDS.has(kind);
+  useEffect(() => {
+    if (!offerTrending || trendingAsked.current) return;
+    trendingAsked.current = true;
+    searchTrending().then(setTrending, () => setTrending([]));
+  }, [offerTrending]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -124,6 +161,12 @@ export default function SearchPage() {
               ? `Nothing matches “${q.trim()}” — try a store’s name, a dish or a cuisine.`
               : `No ${current?.label.toLowerCase()} stores match “${q.trim()}”.`}</EmptyNote>
           ) : null}
+          {offerTrending && trending && trending.length > 0 ? (
+            <section aria-label="Worth trying right now" className="flex flex-col gap-3">
+              <h3 className="sw-heading">Worth trying right now</h3>
+              <DishGrid items={trending.slice(0, TRENDING_SHOWN)} />
+            </section>
+          ) : null}
           {stores.length > 0 ? (
             <section aria-label="Stores" className="flex flex-col gap-3">
               {dishes.length > 0 ? <h3 className="sw-heading">Stores</h3> : null}
@@ -133,20 +176,7 @@ export default function SearchPage() {
           {dishes.length > 0 ? (
             <section aria-label="Dishes and products" className="flex flex-col gap-3">
               <h3 className="sw-heading">Dishes and products</h3>
-              <ul className={MARKET_GRID}>
-                {dishes.map((item) => (
-                  <li key={item.id} className="min-w-0">
-                    <ItemCard
-                      href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
-                      name={item.name}
-                      price={item.basePrice}
-                      imageUrl={item.imageUrl}
-                      meta={item.vendorIsCurrentlyOpen === false ? `${item.vendorName} · Closed right now` : item.vendorName}
-                      isNew={item.isNew}
-                    />
-                  </li>
-                ))}
-              </ul>
+              <DishGrid items={dishes} />
             </section>
           ) : null}
         </>
