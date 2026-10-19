@@ -35,7 +35,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
@@ -52,6 +52,8 @@ const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localh
 const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND', 'OWNER_RLS_BIND'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+/** A store name the prohibited-items checker reads: digits only, so it can never spell a word (checked-names). */
+const STORE_NAME = `Wall Store ${wordFreeTag()}`;
 const PRODUCTION = 'swift-default';
 const DAY = 86_400_000;
 const CUID = /^c[0-9a-z]{24}$/;
@@ -96,7 +98,7 @@ const inbox = (userId: string) => owner.notification.findMany({ where: { userId 
 const invite = (userId: string, vendorId: string, extra: Record<string, unknown> = {}) => owner.notification.create({ data: {
   userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Team invite', body: `invite ${RUN}`,
   data: {
-    kind: STAFF_INVITE_KIND, vendorId, storeName: `Wall Store ${RUN}`, role: 'STAFF', invitedBy: ids.storeOwner,
+    kind: STAFF_INVITE_KIND, vendorId, storeName: STORE_NAME, role: 'STAFF', invitedBy: ids.storeOwner,
     expiresAt: EXPIRES, state: 'PENDING', audience: 'customer', ...extra,
   },
 } });
@@ -125,7 +127,7 @@ beforeAll(async () => {
   ids.goldOn = await mkUser(['CUSTOMER'], 'CUSTOMER');
   ids.vendorOwner = (await owner.vendorOwner.create({ data: { userId: ids.storeOwner } })).id;
   ids.vendor = (await owner.vendor.create({ data: {
-    ownerId: ids.vendorOwner, name: `Wall Store ${RUN}`, slug: `wall-store-${RUN}`, vendorType: 'RESTAURANT', tenantId: PRODUCTION,
+    ownerId: ids.vendorOwner, name: STORE_NAME, slug: `wall-store-${RUN}`, vendorType: 'RESTAURANT', tenantId: PRODUCTION,
     phone: testPhone(), addressLine1: '1 Wall Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
     status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
   } })).id;
@@ -287,7 +289,7 @@ describe('[item 20] notifications written for someone else', () => {
     const svc = new VerificationService(app.prisma, await notices(), getKycProvider());
     // The projection's own step (private): it runs inside the projection transaction, whoever's flow opened it.
     const ask = (svc as unknown as { askForPublishedPhone(db: Prisma.TransactionClient, userId: string, vendor: { id: string; name: string }): Promise<void> }).askForPublishedPhone.bind(svc);
-    const vendor = { id: `ask-${RUN}`, name: `Wall Store ${RUN}` };
+    const vendor = { id: `ask-${RUN}`, name: STORE_NAME };
     const asked = () => owner.notification.count({ where: { userId: ids.storeOwner, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] } });
     await asPerson(ids.other, () => app.prisma.$transaction((tx) => ask(tx, ids.storeOwner, vendor)));
     expect(await asked()).toBe(1);
@@ -298,8 +300,8 @@ describe('[item 20] notifications written for someone else', () => {
   it('a once-a-day notice to a store owner, from a customer\'s checkout, is still sent once', async () => {
     const { tellOwnerHomeVisitsPaused } = await import('../modules/verification/home-visits');
     const service = await notices();
-    expect(await asPerson(ids.target, () => tellOwnerHomeVisitsPaused(app.prisma, service, ids.storeOwner, `Wall Store ${RUN}`))).toBe(true);
-    expect(await asPerson(ids.target, () => tellOwnerHomeVisitsPaused(app.prisma, service, ids.storeOwner, `Wall Store ${RUN}`))).toBe(false);
+    expect(await asPerson(ids.target, () => tellOwnerHomeVisitsPaused(app.prisma, service, ids.storeOwner, STORE_NAME))).toBe(true);
+    expect(await asPerson(ids.target, () => tellOwnerHomeVisitsPaused(app.prisma, service, ids.storeOwner, STORE_NAME))).toBe(false);
   });
 });
 
