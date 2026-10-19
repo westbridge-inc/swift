@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -32,6 +32,17 @@ export interface StorageProvider {
 
   /** Read an object's raw bytes (the decrypting render path needs the ciphertext). */
   getObject(fileKey: string): Promise<Buffer>;
+}
+
+/** [IMAGES-E2E] A bounded read for the public store-photo door: at most `maxBytes`
+ *  of an object, null when it is missing or larger than that, honouring `signal`
+ *  (the caller's deadline). Both adapters below implement it. */
+export interface BoundedObjectReader {
+  getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null>;
+}
+
+export function canReadBounded(storage: StorageProvider): storage is StorageProvider & BoundedObjectReader {
+  return typeof (storage as Partial<BoundedObjectReader>).getObjectWithin === 'function';
 }
 
 /**
@@ -74,7 +85,7 @@ export function createOpaqueStorageName(filename: string): string {
 }
 
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
-export class LocalStorageProvider implements StorageProvider {
+export class LocalStorageProvider implements StorageProvider, BoundedObjectReader {
   private baseDir = localStorageBaseDir();
   // [M-37] Resolved through the keyring: production never falls open to the repository default.
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
@@ -121,13 +132,27 @@ export class LocalStorageProvider implements StorageProvider {
   async getObject(fileKey: string): Promise<Buffer> {
     return readFile(this.resolveKey(fileKey));
   }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    const abs = this.resolveKey(fileKey);
+    try {
+      const s = await stat(abs);
+      if (!s.isFile() || s.size > maxBytes) return null;
+      const bytes = await readFile(abs, { signal });
+      return bytes.length > maxBytes ? null : bytes;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
+  }
 }
 
 /**
  * S3-compatible adapter — works for AWS S3 and Cloudflare R2 (set AWS_S3_ENDPOINT
  * + path-style for R2). Objects are private; uploads request encryption at rest.
  */
-export class S3StorageProvider implements StorageProvider {
+export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
   private client: S3Client;
   private bucket = process.env['AWS_S3_BUCKET'] ?? '';
   private endpoint = process.env['AWS_S3_ENDPOINT']; // set for R2 / S3-compatible
@@ -174,6 +199,28 @@ export class S3StorageProvider implements StorageProvider {
     const bytes = await res.Body?.transformToByteArray();
     if (!bytes) throw new Error(`Empty object body for ${fileKey}`);
     return Buffer.from(bytes);
+  }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    let res;
+    try {
+      res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }), { abortSignal: signal });
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name === 'NoSuchKey' || name === 'NotFound') return null;
+      throw err;
+    }
+    const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
+    if (!body) return null;
+    if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) { body.destroy?.(); return null; }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) { body.destroy?.(); return null; }
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks, total);
   }
 }
 
