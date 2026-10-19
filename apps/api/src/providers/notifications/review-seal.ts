@@ -28,6 +28,7 @@
  * escalation outbox) retries it once the lookup answers.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import type { NotificationChannels, PushOptions, SmsProvider, PushProvider, EmailProvider } from './channels';
 import { SMS_REF_REVIEW_SUPPRESSED } from './sms-outcome';
 import { getTenantContext, runAsSystem } from '../../plugins/tenant-context';
@@ -84,7 +85,8 @@ async function destinationIsReview(channel: Channel, to: string[]): Promise<bool
       const u = await prisma.user.findFirst({ where: { email: to[0]! }, select: { tenant: { select: { kind: true } } } });
       return u?.tenant.kind === 'REVIEW';
     }
-    const owners = await prisma.deviceToken.findMany({ where: { token: { in: to } }, select: { user: { select: { tenant: { select: { kind: true } } } } } });
+    // [item 20] Whose devices these are, for the demo seal: the named capability under the owner wall.
+    const owners = await ownerWallSystem('push:review-seal-owners', () => prisma.deviceToken.findMany({ where: { token: { in: to } }, select: { user: { select: { tenant: { select: { kind: true } } } } } }));
     return owners.some((o) => o.user.tenant.kind === 'REVIEW');
   });
 }

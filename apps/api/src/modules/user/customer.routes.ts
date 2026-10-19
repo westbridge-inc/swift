@@ -1,5 +1,6 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -3584,11 +3585,13 @@ export async function customerRoutes(app: FastifyInstance) {
    *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
     const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
-    await app.prisma.deviceToken.upsert({
+    // [item 20] The token may still belong to the account last signed in on
+    // this device: moving it is a write on someone else's row (owner wall).
+    await ownerWallSystem('device:register', () => app.prisma.deviceToken.upsert({
       where: { token },
       create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
       update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
-    });
+    }));
     return { success: true, data: { message: 'Device registered' } };
   });
 
