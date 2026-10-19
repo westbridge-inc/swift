@@ -81,7 +81,7 @@ const STOP_FAR = { lat: 4.28, lng: -58.72 }; // the passenger's stop, AWAY from 
 
 type StopSpec = { at: { lat: number; lng: number }; status?: 'PENDING' | 'ARRIVED' | 'DEPARTED'; arrivedAt?: Date; departedAt?: Date };
 
-async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDuration?: number } = {}) {
+async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDuration?: number; status?: 'RIDE_IN_PROGRESS' | 'DRIVER_EN_ROUTE' } = {}) {
   const passenger = await makeUser(['CUSTOMER']);
   const driver = await makeDriver();
   const order = await prisma.order.create({
@@ -90,7 +90,7 @@ async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDurati
       orderType: 'TAXI',
       customerId: passenger.id,
       driverId: driver.id,
-      status: 'RIDE_IN_PROGRESS',
+      status: opts.status ?? 'RIDE_IN_PROGRESS',
       fulfillment: 'DELIVERY',
       pickupAddress: 'A', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
       deliveryAddress: 'B', deliveryLat: DEST.lat, deliveryLng: DEST.lng,
@@ -118,9 +118,11 @@ const tick = async (driverId: string, t0: number, ms: number, pos: { lat: number
   await putFix(driverId, new Date(t0 + ms), pos);
   await sweep(new Date(t0 + ms));
 };
-/** Ends a case's ride (cancelled: no completion check) so later ticks leave its session alone. */
+/** Ends a case's ride so later ticks leave its session alone. FAILED: the database
+ *  refuses any change that is not an edge of the order machine, and a trip in
+ *  progress ends DELIVERED or FAILED, never CANCELLED. */
 const retire = async (orderId: string, at: Date) => {
-  await prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED', cancelledAt: at } });
+  await prisma.order.update({ where: { id: orderId }, data: { status: 'FAILED' } });
   await sweep(at);
 };
 const setStop = (orderId: string, sequence: number, data: Record<string, unknown>) =>
@@ -246,7 +248,7 @@ describe('Guardian aims at the next open stop', () => {
 
 describe('the live ETA during the trip', () => {
   it('is to the next open stop, and to the destination once every stop is done', async () => {
-    const { order } = await makeRide([{ at: STOP_FAR }]);
+    const { order } = await makeRide([{ at: STOP_FAR }], { status: 'DRIVER_EN_ROUTE' });
     const mover = { lat: 4.295, lng: -58.705 }; // ~2.4 km from the stop, ~3.9 km from the destination, ~0.8 km from the pickup
     const minutesTo = async (target: { lat: number; lng: number }) => Math.max(1, Math.round((await getMapsProvider().etaMinutes(mover, [target]))[0]!));
     const toStop = await minutesTo(STOP_FAR);
@@ -254,8 +256,9 @@ describe('the live ETA during the trip', () => {
     const toPickup = await minutesTo(PICKUP);
     expect(new Set([toStop, toDest, toPickup]).size).toBe(3);
     // Before the trip the leg is to the pickup, stops or not.
-    await prisma.order.update({ where: { id: order.id }, data: { status: 'DRIVER_EN_ROUTE' } });
     expect(await computeActiveLegEta({ prisma } as never, order.id, mover)).toBe(toPickup);
+    // Forward along the order machine (the database refuses any other change).
+    await prisma.order.update({ where: { id: order.id }, data: { status: 'DRIVER_ARRIVED' } });
     await prisma.order.update({ where: { id: order.id }, data: { status: 'RIDE_IN_PROGRESS' } });
     expect(await computeActiveLegEta({ prisma } as never, order.id, mover)).toBe(toStop);
     await setStop(order.id, 1, { status: 'SKIPPED', skippedAt: new Date(), skipReason: 'Road closed' });
