@@ -419,6 +419,13 @@ export async function resolveMoverFeeHold(
   const tiers = await subscriptionTiersIn(tx, tariff.countryCode);
   const target = partnerRateFor(tiers, tariff.subject);
   const previousRate = Number(canonical.weeklyRate);
+  // [REVIEW-M #1844 S4-1] A weekly rate of 0 or less is legacy or hand-made data (no writer sets one, the
+  // card never prices one): it is never kept as the floor of a fee, and never quietly healed to the card
+  // rate either. The resolution is refused until finance corrects that source's weekly fee. (A negotiated
+  // or waived source never reaches this rate logic: both resolution paths refuse it first, REVIEW-M S4-2.)
+  if (!(previousRate > 0)) {
+    throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'The chosen source has no weekly fee above zero; correct its weekly fee before this resolution.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+  }
   // [COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A finance resolution never raises a weekly
   // fee at once: a higher card rate needs at least 14 days' in-app notice first, so the source keeps
   // the rate it was paying and the rise is HELD for the F2 notice (billing/fee-rise-notice.ts): the
