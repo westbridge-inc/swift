@@ -94,7 +94,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold font-mono">#{o.orderNumber}</h1>
-        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{o.status}</span>
+        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{String(o.status ?? '').replaceAll('_', ' ').toLowerCase()}</span>
         <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
           {String(o.orderType).replaceAll('_', ' ').toLowerCase()}
         </span>

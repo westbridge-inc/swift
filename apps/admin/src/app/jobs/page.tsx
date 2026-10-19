@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { discardDeadLetter, errorCode, fetchDeadLetters, requeueDeadLetter, type DeadLetter } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // ---------------------------------------------------------------------------
 // N4 / WS-8.1 — the dead letters, finally visible.
@@ -50,7 +50,6 @@ const MONEY_QUEUES = new Set(['subscription', 'settlement']);
 export default function JobsPage() {
   const queryClient = useQueryClient();
   const [queueFilter, setQueueFilter] = useState<string | null>(null);
-  const [confirmingDiscard, setConfirmingDiscard] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<unknown>(null);
 
@@ -75,7 +74,6 @@ export default function JobsPage() {
   // will just click the same stale row twice.
   const onActionError = (error: unknown) => {
     setMutationError(error);
-    setConfirmingDiscard(null);
     if (errorCode(error) === 'JOB_NO_LONGER_FAILED' || errorCode(error) === 'JOB_IDENTITY_MISMATCH') {
       queryClient.invalidateQueries({ queryKey: ['dlq'] });
     }
@@ -87,12 +85,36 @@ export default function JobsPage() {
     onError: onActionError,
     onSuccess: refresh,
   });
-  const discard = useMutation({
-    mutationFn: ({ row, reason }: { row: DeadLetter; reason: string }) => discardDeadLetter(row.queue, row.id, row, reason),
-    onMutate: () => setMutationError(null),
-    onError: onActionError,
-    onSuccess: refresh,
-  });
+  // Discarding is permanent and a reconciled retry repeats a job that may have
+  // half-finished: both are confirmed in the in-page panel, which runs the
+  // request once and keeps a refusal in view. Whatever the answer, the list is
+  // read again (a refusal often means the job moved on).
+  const actions = useActionRunner();
+  const discard = (row: DeadLetter) => void actions.run({
+    title: `Permanently discard ${row.name}?`,
+    body: <p>This job will never run. It is removed from the dead-letter list.</p>,
+    confirmLabel: `Discard ${row.name}`,
+    submit: ({ reason }) => discardDeadLetter(row.queue, row.id, row, reason),
+    success: () => `${row.name} discarded.`,
+  }).then((outcome) => { if (outcome) refresh(); });
+  // [U58] A RECONCILE_FIRST job may have half-finished before it failed. The
+  // server retries it only once the operator says they checked what that run
+  // already did; the console never offered that, so these jobs could not be
+  // retried at all. Two steps: the button names the precondition, the panel
+  // repeats why and asks for the confirmation.
+  const retryReconciled = (row: DeadLetter) => void actions.run({
+    title: `Retry ${row.name} after reconciling it?`,
+    body: (
+      <>
+        <p>{row.recovery?.why}</p>
+        <p>Confirm you checked what the failed run already did (for example a payment or a message it sent), so one more run cannot repeat it.</p>
+      </>
+    ),
+    reason: false,
+    confirmLabel: 'I have reconciled it: retry',
+    submit: () => requeueDeadLetter(row.queue, row.id, row, true),
+    success: () => `${row.name} queued to run once more.`,
+  }).then((outcome) => { if (outcome) refresh(); });
 
   const rows: DeadLetter[] = dlq.data?.data ?? [];
   const byQueue = rows.reduce<Record<string, number>>((acc, row) => {
@@ -101,7 +123,7 @@ export default function JobsPage() {
   }, {});
   const queues = Object.keys(byQueue).sort();
   const visible = queueFilter ? rows.filter((r) => r.queue === queueFilter) : rows;
-  const busy = requeue.isPending || discard.isPending;
+  const busy = requeue.isPending;
 
   // The queues live in the API process only when it runs them. When it does
   // not, the endpoint says so — and saying "no failed jobs" instead would be
@@ -118,6 +140,7 @@ export default function JobsPage() {
       </p>
 
       {mutationError ? <MutationError error={mutationError} label="job action" /> : null}
+      {actions.banner}
 
       {dlq.isLoading ? (
         <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] divide-y divide-[var(--border)]">
@@ -169,7 +192,9 @@ export default function JobsPage() {
         <>
           <div className="flex gap-2 mb-4 flex-wrap">
             <button
+              type="button"
               onClick={() => setQueueFilter(null)}
+              aria-pressed={queueFilter === null}
               className={`px-3 py-1.5 rounded-lg text-xs ${
                 queueFilter === null
                   ? 'bg-[var(--accent)] text-white'
@@ -181,7 +206,9 @@ export default function JobsPage() {
             {queues.map((q) => (
               <button
                 key={q}
+                type="button"
                 onClick={() => setQueueFilter(q)}
+                aria-pressed={queueFilter === q}
                 className={`px-3 py-1.5 rounded-lg text-xs ${
                   queueFilter === q
                     ? 'bg-[var(--accent)] text-white'
@@ -242,50 +269,46 @@ export default function JobsPage() {
                     </pre>
                   ) : null}
 
-                  {row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? (
+                  {row.recovery?.policy === 'RECONCILE_FIRST' ? (
+                    <p className="mt-2 text-xs text-amber-400">
+                      Reconcile first: {row.recovery.why}
+                    </p>
+                  ) : row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? (
                     <p className="mt-2 text-xs text-amber-400">
                       Not replayable: {row.recovery.why}
                     </p>
                   ) : null}
 
                   <div className="mt-3 flex gap-2 items-center flex-wrap">
-                    <button
-                      disabled={busy || (row.recovery ? row.recovery.policy !== 'SAFE_REPLAY' : false)}
-                      title={row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? row.recovery.why : undefined}
-                      onClick={() => requeue.mutate({ row })}
-                      className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
-                    >
-                      Retry this job
-                    </button>
-
-                    {confirmingDiscard === key ? (
-                      <>
-                        <span className="text-xs text-red-400">
-                          Discard permanently? This job will never run.
-                        </span>
-                        <button
-                          disabled={busy}
-                          onClick={() => { const reason = askReason({ action: `permanently discard this dead job`, subject: row.name }); if (reason) discard.mutate({ row, reason }); }}
-                          className="px-3 py-1.5 rounded-lg text-xs bg-red-600 text-white disabled:opacity-50"
-                        >
-                          Yes, discard {row.name}
-                        </button>
-                        <button
-                          onClick={() => setConfirmingDiscard(null)}
-                          className="px-3 py-1.5 rounded-lg text-xs bg-[var(--panel)] border border-[var(--border)] text-[var(--muted)]"
-                        >
-                          Keep it
-                        </button>
-                      </>
+                    {row.recovery?.policy === 'RECONCILE_FIRST' ? (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => retryReconciled(row)}
+                        className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
+                      >
+                        I have reconciled it: retry
+                      </button>
                     ) : (
                       <button
-                        disabled={busy}
-                        onClick={() => setConfirmingDiscard(key)}
-                        className="px-3 py-1.5 rounded-lg text-xs bg-[var(--panel)] border border-red-500/40 text-red-400 disabled:opacity-50"
+                        type="button"
+                        disabled={busy || (row.recovery ? row.recovery.policy !== 'SAFE_REPLAY' : false)}
+                        title={row.recovery && row.recovery.policy !== 'SAFE_REPLAY' ? row.recovery.why : undefined}
+                        onClick={() => requeue.mutate({ row })}
+                        className="px-3 py-1.5 rounded-lg text-xs bg-[var(--accent)] text-white disabled:opacity-50"
                       >
-                        Discard
+                        Retry this job
                       </button>
                     )}
+
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => discard(row)}
+                      className="px-3 py-1.5 rounded-lg text-xs bg-[var(--panel)] border border-red-500/40 text-red-400 disabled:opacity-50"
+                    >
+                      Discard
+                    </button>
                   </div>
                 </div>
               );

@@ -148,7 +148,7 @@ describe('order cancel and refund mutations', () => {
 
       expect((await within(panel).findByRole('alert')).textContent).toContain('Cannot cancel an order with status COMPLETED');
       expect(screen.getByRole('heading', { name: '#ORDER-TEST-1' })).toBeTruthy();
-      expect(screen.getByText('PENDING')).toBeTruthy();
+      expect(screen.getByText('pending')).toBeTruthy();
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
       expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
     },

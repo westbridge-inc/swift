@@ -30,6 +30,26 @@ const DATA_GATE = /\.length\b|\bdata\b|rows|items|list|=== 0|isEmpty|empty|count
 const dataPresent = (cond: string) => cond.split('&&').some((part) => /^\(?\s*[\w.?]*\b\w*(data|Data)\s*\)?$/.test(part.trim()));
 const EMPTY_PROPS = /^(empty|emptyText|emptyLabel|emptyTitle|emptyMessage)$/;
 
+/**
+ * [REVIEW-F S3-1] The attribute a literal is the value of. Not only its direct
+ * parent: `empty={f ? 'No x matches.' : 'No x yet.'}` (the form the list pages
+ * use) puts a ConditionalExpression and a JsxExpression in between, and the
+ * census used to see no empty prop there at all (caught only when the read
+ * happened to be named like data). Walks up through `?:` (a branch, never the
+ * condition), `(...)`, `{...}` and a `??` / `||` fallback.
+ */
+function attributeOf(n: ts.Node, sf: ts.SourceFile): ts.JsxAttribute | null {
+  let child: ts.Node = n;
+  for (let p: ts.Node | undefined = n.parent; p; child = p, p = p.parent) {
+    if (ts.isJsxAttribute(p)) return p;
+    const through = ts.isParenthesizedExpression(p) || ts.isJsxExpression(p)
+      || (ts.isConditionalExpression(p) && p.condition !== child)
+      || (ts.isBinaryExpression(p) && p.right === child && /^(\?\?|\|\|)$/.test(p.operatorToken.getText(sf)));
+    if (!through) return null;
+  }
+  return null;
+}
+
 let examined = 0;
 
 export interface Hit { file: string; line: number; kind: 'empty' | 'swallow'; text: string }
@@ -114,13 +134,14 @@ export function scan(file: string, source: string): Hit[] {
     else if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) text = n.text.trim();
     if (text && text.length >= 4 && EMPTY.test(text)) {
       const p = n.parent;
+      const attr = attributeOf(n, sf);
       const notShown = ts.isImportDeclaration(p) || ts.isExportDeclaration(p)
         || (ts.isBinaryExpression(p) && /^(===|!==|==|!=)$/.test(p.operatorToken.getText(sf)))
         || (ts.isCallExpression(p) && /toast|Error|console|throw|track|log/.test(p.expression.getText(sf)))
-        || (ts.isJsxAttribute(p) && /^(key|id|aria-|placeholder|testID)/.test(p.name.getText(sf)));
+        || (attr !== null && /^(key|id|aria-|placeholder|testID)/.test(attr.name.getText(sf)));
       if (!notShown) {
         const { conds, inRow, errorProp, component } = governing(n, sf);
-        const asEmptyProp = ts.isJsxAttribute(p) && EMPTY_PROPS.test(p.name.getText(sf));
+        const asEmptyProp = attr !== null && EMPTY_PROPS.test(attr.name.getText(sf));
         const dataGated = asEmptyProp || conds.some((c) => DATA_GATE.test(c.text));
         const failureAware = errorProp || conds.some((c) => FAILURE_AWARE.test(c.text))
           || conds.some((c) => !c.negated && dataPresent(c.text))
@@ -155,12 +176,7 @@ function sources(dir: string): string[] {
 const keyOf = (h: Hit) => `${h.file} | ${h.text.slice(0, 48)}`;
 
 /** Hits another lane is fixing right now: tolerated while present, never required. */
-const PENDING_ELSEWHERE: Record<string, string> = {
-  'app/approvals/page.tsx | Nothing is waiting on a second signature.': 'UI-FIX-ADMIN U26',
-  'app/approvals/page.tsx | Nothing in this view.': 'UI-FIX-ADMIN U26',
-  'app/cash/page.tsx | Nobody in this list.': 'UI-FIX-ADMIN U27',
-  'components/dashboard/LiveOrderFeed.tsx | No recent orders': 'UI-FIX-ADMIN U59',
-};
+const PENDING_ELSEWHERE: Record<string, string> = {};
 
 /** Reviewed: the message is true even when a read failed. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {};
@@ -205,6 +221,11 @@ describe('[BUG-GUARDS C3] a failed read is never shown as empty', () => {
     expect(verdict(`function P(){ const q = useQuery({}); if (q.isError) return <QueryFailed/>; const rows = q.data ?? [];
       if (rows.length === 0) return <p>No stores yet.</p>; return <ul/>; }`)).toEqual([]);
     expect(verdict(`function P(){ const q = useQuery({}); return <DataTable rows={q.data ?? []} error={q.error} empty="No stores yet." />; }`)).toEqual([]);
+    // [REVIEW-F S3-1] An empty prop chosen by a ternary is still an empty prop, whatever the read is named.
+    expect(verdict(`function P(){ const q = useQuery({}); const [f] = useState(''); return <DataTable rows={q.data ?? []} empty={f ? 'No stores match.' : 'No stores yet.'} />; }`)).toEqual(['empty', 'empty']);
+    expect(verdict(`function P(){ const q = useQuery({}); const [f] = useState(''); return <DataTable rows={q.data ?? []} error={q.error} empty={f ? 'No stores match.' : 'No stores yet.'} />; }`)).toEqual([]);
+    // ...and a literal chosen by a ternary under a placeholder is never an empty state.
+    expect(verdict(`function P(){ const q = useQuery({}); return <input placeholder={q.data ? 'No filter' : 'None yet'} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const { data } = useQuery({}); return data && data.claims.length === 0 ? <p>No claims</p> : null; }`)).toEqual([]);
     expect(verdict(`function P(){ useEffect(() => { load().then(setRows).catch(() => { setRows([]); setLoadFailed(true); }); }, []); return null; }`)).toEqual([]);
     // A child table: honest only when the parent renders it behind the failure check.

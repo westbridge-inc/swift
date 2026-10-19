@@ -16,7 +16,8 @@ import {
   type DiscoveryRequest,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
@@ -90,14 +91,31 @@ export default function DiscoveryPage() {
     mutationFn: (id: string) => rejectDiscoveryRequest(id, reason.trim()),
     onSuccess: done, onError: setMutationError,
   });
-  const toggleVisibility = useMutation({
-    mutationFn: (c: DiscoveryCategory) =>
-      updateDiscoveryCategory(c.id, { status: c.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE' }),
-    onSuccess: done, onError: setMutationError,
-  });
-  const merge = useMutation({
-    mutationFn: ({ id, targetId, reason }: { id: string; targetId: string; reason: string }) => mergeDiscoveryCategory(id, targetId, reason),
-    onSuccess: done, onError: setMutationError,
+  // [U60] Hiding a category takes it away from every customer, and merging is
+  // permanent. The status used to BE the toggle (one click hid it, no busy
+  // guard); now the status is a label and each act is confirmed in the panel,
+  // which runs it once and keeps a refusal in view.
+  const dialog = useActionDialog();
+  const actions = useActionRunner(done);
+  const toggleVisibility = (c: DiscoveryCategory) => {
+    const hide = c.status === 'ACTIVE';
+    void actions.run({
+      title: hide ? `Hide ${c.name} from customers?` : `Show ${c.name} to customers again?`,
+      body: hide
+        ? <p>Customers stop seeing it at once. Nothing is deleted; you can show it again.</p>
+        : <p>Customers see it again at once.</p>,
+      reason: false,
+      confirmLabel: hide ? 'Hide category' : 'Show category',
+      submit: () => updateDiscoveryCategory(c.id, { status: hide ? 'HIDDEN' : 'ACTIVE' }),
+      success: () => (hide ? `${c.name} is hidden from customers.` : `${c.name} is visible to customers.`),
+    });
+  };
+  const merge = (c: DiscoveryCategory, target: DiscoveryCategory) => void actions.run({
+    title: `Merge ${c.name} into ${target.name}?`,
+    body: <p>This is permanent: {c.name} redirects to {target.name}, and its old slug keeps resolving.</p>,
+    confirmLabel: 'Merge category',
+    submit: ({ reason }) => mergeDiscoveryCategory(c.id, target.id, reason),
+    success: () => `${c.name} now redirects to ${target.name}.`,
   });
   const backfill = useMutation({
     mutationFn: runDiscoveryBackfill,
@@ -134,7 +152,15 @@ export default function DiscoveryPage() {
         <div className="text-right">
           <button
             type="button"
-            onClick={() => backfill.mutate()}
+            onClick={async () => {
+              const go = await dialog.askWith({
+                title: 'Run the discovery backfill?',
+                body: <p>Existing items are matched against the taxonomy and suggested to their vendors for review. Re-running writes nothing new.</p>,
+                reason: false,
+                confirmLabel: 'Run the backfill',
+              });
+              if (go) backfill.mutate();
+            }}
             disabled={backfill.isPending}
             className="rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
@@ -171,6 +197,7 @@ export default function DiscoveryPage() {
                 key={s}
                 type="button"
                 onClick={() => setStatus(s)}
+                aria-pressed={status === s}
                 className={`rounded px-2 py-1 text-xs ${status === s ? 'bg-neutral-900 text-white' : 'bg-neutral-100'}`}
               >
                 {s}
@@ -218,6 +245,7 @@ export default function DiscoveryPage() {
                         <select
                           value={mapTarget}
                           onChange={(e) => setMapTarget(e.target.value)}
+                          aria-label="Existing category to map to"
                           className="rounded border border-neutral-300 px-2 py-1 text-sm"
                         >
                           <option value="">Choose a category…</option>
@@ -295,9 +323,12 @@ export default function DiscoveryPage() {
       ) : (
         <section className="space-y-3">
           {categories.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
+          {actions.banner}
           {categories.isError ? (
             <QueryFailed error={categories.error} what="the categories" onRetry={() => void categories.refetch()} retrying={categories.isFetching} />
           ) : null}
+          {categories.isSuccess && cats.length === 0 ? <p className="text-sm text-neutral-500">No categories yet.</p> : null}
+          {categories.isSuccess && cats.length > 0 ? (
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-neutral-500">
               <tr>
@@ -318,13 +349,19 @@ export default function DiscoveryPage() {
                     {c.mergedIntoId ? (
                       <span className="text-xs text-neutral-500">merged</span>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => toggleVisibility.mutate(c)}
-                        className={`rounded px-2 py-0.5 text-xs ${c.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-neutral-100 text-neutral-600'}`}
-                      >
-                        {c.status === 'ACTIVE' ? 'Visible' : 'Hidden'}
-                      </button>
+                      <span className="inline-flex items-center gap-2">
+                        <span className={`rounded px-2 py-0.5 text-xs ${c.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-neutral-100 text-neutral-600'}`}>
+                          {c.status === 'ACTIVE' ? 'Visible' : 'Hidden'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleVisibility(c)}
+                          aria-label={c.status === 'ACTIVE' ? `Hide ${c.name} from customers` : `Show ${c.name} to customers`}
+                          className="rounded border border-neutral-300 px-2 py-0.5 text-xs"
+                        >
+                          {c.status === 'ACTIVE' ? 'Hide' : 'Show'}
+                        </button>
+                      </span>
                     )}
                   </td>
                   <td className="text-right">
@@ -336,8 +373,7 @@ export default function DiscoveryPage() {
                           const targetId = e.target.value;
                           if (!targetId) return;
                           const target = cats.find((o) => o.id === targetId);
-                          const reason = askReason({ action: 'merge this category', subject: `${c.name} into ${target?.name ?? targetId}` });
-                          if (reason) merge.mutate({ id: c.id, targetId, reason });
+                          if (target) merge(c, target);
                         }}
                         className="rounded border border-neutral-200 px-1 py-0.5 text-xs"
                       >
@@ -352,6 +388,7 @@ export default function DiscoveryPage() {
               ))}
             </tbody>
           </table>
+          ) : null}
           <p className="text-xs text-neutral-500">
             Hiding a category un-ships it without deleting anything. Merging redirects one into another and
             keeps the old slug resolving — which is why a slug is never edited in place.
