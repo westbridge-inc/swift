@@ -27,6 +27,7 @@ import { initSentry } from './plugins/observability';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout } from './utils/async-lifecycle';
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
+import { setAppLogger } from './utils/logger';
 import { isProduction } from './utils/runtime-mode';
 import { createScopedProcessClient } from './plugins/prisma';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
@@ -42,6 +43,10 @@ async function main() {
   initSentry();
 
   const log = pino({ level: process.env['LOG_LEVEL'] ?? 'info', redact: loggerRedactConfig, serializers: loggerSerializers });
+  // [M013] Deep services log through utils/logger's log(), which is console
+  // until a process hands it a logger (app.ts does for the API). Without this
+  // every log() line inside a job printed raw error text with no redaction.
+  setAppLogger(log);
   const redis = new Redis(process.env['REDIS_URL'] ?? 'redis://localhost:6379', {
     maxRetriesPerRequest: null,
   });

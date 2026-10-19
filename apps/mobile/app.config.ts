@@ -190,6 +190,16 @@ const config: SwiftExpoConfig = {
     bundleIdentifier: 'gy.swift.app',
     supportsTablet: true,
     associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`],
+    // [RINGER · owner ruling 15 Oct] A new order or a job offer may break
+    // through a Focus the partner allows Swift in (the job push carries
+    // interruptionLevel 'time-sensitive', sent only to builds that have this
+    // entitlement). Time-sensitive, NOT critical alerts: critical alerts need
+    // Apple's approval and ignore the ring/silent switch; the owner ruled them
+    // out. The partner controls it in Settings > Notifications > Swift >
+    // Time Sensitive Notifications, and per Focus.
+    entitlements: {
+      'com.apple.developer.usernotifications.time-sensitive': true,
+    },
     privacyManifests,
     infoPlist: {
       CFBundleDisplayName: 'Swift',
@@ -308,10 +318,10 @@ const config: SwiftExpoConfig = {
     ],
     // Permissions pulled in transitively for capabilities Swift does not have.
     // Play scrutinises both: RECORD_AUDIO arrives with expo-camera/image-picker
-    // even though no audio API is used anywhere (no expo-av, no Audio.Recording,
-    // no expo-media-library), and SYSTEM_ALERT_WINDOW is a special permission
-    // nothing here asks for. Shipping a permission you cannot justify is a
-    // policy finding on its own.
+    // even though nothing records audio (expo-audio only PLAYS the job ring,
+    // its recorder is never used; no expo-av, no expo-media-library), and
+    // SYSTEM_ALERT_WINDOW is a special permission nothing here asks for.
+    // Shipping a permission you cannot justify is a policy finding on its own.
     blockedPermissions: [
       'android.permission.RECORD_AUDIO',
       'android.permission.SYSTEM_ALERT_WINDOW',
@@ -333,11 +343,29 @@ const config: SwiftExpoConfig = {
       {
         // The runtime registers this same channel before asking Expo for the
         // device token. It is the safe default for background FCM v1 messages;
-        // versioned loud-alert channels remain owned by their separate lane.
+        // the job ring posts to its own 'job_offers' channel (services/push.ts).
         defaultChannel: 'default',
         // Android notification icons are white silhouettes on transparency.
         icon: './assets/notification-icon.png',
         color: brandMaroon,
+        // [RINGER] Swift's own job ring (scripts/make-job-ring.mjs synthesizes
+        // it). Copied into the iOS bundle (a job push names it as its sound)
+        // and Android res/raw (the 'job_offers' channel plays it).
+        sounds: ['./assets/sounds/swift_job_ring.wav'],
+      },
+    ],
+    // [RINGER] expo-audio loops the job ring while a new order or an offer is
+    // on screen. Playback only: no microphone purpose string and no
+    // RECORD_AUDIO (Swift never records, as for expo-camera below), and no
+    // background audio: the ring stops when the app leaves the screen, and a
+    // closed app rings through the notification instead.
+    [
+      'expo-audio',
+      {
+        microphonePermission: false,
+        recordAudioAndroid: false,
+        enableBackgroundPlayback: false,
+        enableBackgroundRecording: false,
       },
     ],
     // react-native-maps ships its own config plugin, and Expo gives IT the

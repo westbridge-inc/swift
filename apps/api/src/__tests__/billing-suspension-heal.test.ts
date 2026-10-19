@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { nanoid } from 'nanoid';
-import { runBillingInvariants } from '../modules/billing/invariants';
+import { brokenInvariantCount, runBillingInvariants } from '../modules/billing/invariants';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { restoreBillingAccess } from '../modules/billing/billing-access';
 
@@ -22,10 +22,13 @@ const phoneBase = 592_009_300_000 + Math.floor(Math.random() * 600_000);
 
 /** A store billing suspended over a stale week, then paid through the future:
  *  exactly the state the wrongful-suspension detector exists to catch. */
-async function wronglySuspendedStore(vendorOver: Record<string, unknown> = {}) {
+async function wronglySuspendedStore(
+  vendorOver: Record<string, unknown> = {},
+  more: { user?: Record<string, unknown>; sub?: Record<string, unknown>; recorded?: boolean } = {},
+) {
   seq += 1;
   const user = await prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Heal', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: `+${phoneBase + seq}`, firstName: 'Heal', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true, ...more.user },
   });
   userIds.push(user.id);
   const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
@@ -45,11 +48,12 @@ async function wronglySuspendedStore(vendorOver: Record<string, unknown> = {}) {
       vendorId: vendor.id, type: 'RESTAURANT', status: 'SUSPENDED', suspendedAt: new Date(Date.now() - DAY),
       weeklyRate: 2100, billingMethod: 'CASH',
       currentPeriodStart: new Date(end.getTime() - 7 * DAY), currentPeriodEnd: end, nextBillingDate: end,
+      ...more.sub,
     },
   });
   subIds.push(sub.id);
   // The suspension billing recorded for the week it missed.
-  await prisma.billingEvent.create({
+  if (more.recorded !== false) await prisma.billingEvent.create({
     data: { subscriptionId: sub.id, type: 'SUSPENDED', idempotencyKey: `suspended:${sub.id}:${end.toISOString().slice(0, 10)}`, note: 'test: recorded billing suspension' },
   });
   return { vendorId: vendor.id, subId: sub.id };
@@ -121,5 +125,61 @@ describe('SUSPENSION-HEAL — the wrongful-suspension heal reopens the store it 
     const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
     expect(v.status).toBe('ACTIVE');
     expect(v.acceptingOrders).toBe(true);
+  });
+});
+
+// [row 167] A paid-through suspension the heal does not lift was skipped with
+// no report: the partner who paid stayed cut off and nobody was paged. Each
+// reason is now named in the report (and the nightly page counts it); the heal
+// still never lifts what another authority holds.
+describe('[row 167] the heal never skips a paid suspension silently', () => {
+  const leftHeld = (report: Awaited<ReturnType<typeof runBillingInvariants>>, subId: string) =>
+    report.paidSuspensionsLeftHeld.find((r) => r.subscriptionId === subId);
+  const unchanged = async (s: { vendorId: string; subId: string }, source: string | null) => {
+    expect((await prisma.subscription.findUniqueOrThrow({ where: { id: s.subId } })).status).toBe('SUSPENDED');
+    const v = await prisma.vendor.findUniqueOrThrow({ where: { id: s.vendorId } });
+    expect(v.status).toBe('SUSPENDED');
+    expect(v.suspensionSource).toBe(source);
+    expect(v.acceptingOrders).toBe(false);
+    expect(await prisma.billingEvent.count({ where: { subscriptionId: s.subId, type: 'REINSTATED' } })).toBe(0);
+  };
+
+  it.each([['ADMIN'], ['WIND_DOWN'], [null]])('a store held for another reason (%s) is reported, and stays held', async (source) => {
+    const s = await wronglySuspendedStore({ suspensionSource: source });
+    const report = await runBillingInvariants(prisma);
+    expect(leftHeld(report, s.subId)).toEqual({ subscriptionId: s.subId, reasons: ['STORE_HELD_FOR_ANOTHER_REASON'] });
+    expect(report.wrongfulSuspensions).not.toContain(s.subId);
+    await unchanged(s, source);
+  });
+
+  it('an owner whose own account is suspended is reported, never reinstated (owner 7 Oct)', async () => {
+    const s = await wronglySuspendedStore({}, { user: { status: 'SUSPENDED' } });
+    const report = await runBillingInvariants(prisma);
+    expect(leftHeld(report, s.subId)).toEqual({ subscriptionId: s.subId, reasons: ['OWNER_NOT_ACTIVE'] });
+    // The nightly page counts it: a report holding only this finding pages.
+    const only = { ...report, walletMismatches: [], wrongfulSuspensions: [], earlyBillingSuspensions: [], enforcementLeaks: [], unjudgedSubscriptions: [],
+      receiptGaps: [], ledgerTrialImbalance: null, ledgerWalletMismatches: [], refundPayableMismatches: [], paidSuspensionsLeftHeld: [leftHeld(report, s.subId)!] };
+    expect(brokenInvariantCount(only)).toBe(1);
+    await unchanged(s, 'BILLING');
+  });
+
+  it('auto-renew off, no recorded suspension and a billing date before the paid end are each reported', async () => {
+    const off = await wronglySuspendedStore({}, { sub: { autoRenew: false } });
+    const unrecorded = await wronglySuspendedStore({}, { recorded: false });
+    const early = await wronglySuspendedStore({}, { sub: { nextBillingDate: new Date(Date.now() + DAY) } });
+    const report = await runBillingInvariants(prisma);
+    expect(leftHeld(report, off.subId)?.reasons).toEqual(['AUTO_RENEW_OFF']);
+    expect(leftHeld(report, unrecorded.subId)?.reasons).toEqual(['NO_RECORDED_SUSPENSION']);
+    expect(leftHeld(report, early.subId)?.reasons).toContain('BILLING_DATE_BEFORE_PERIOD_END');
+    for (const s of [off, unrecorded, early]) await unchanged(s, 'BILLING');
+  });
+
+  it('a healed suspension is not reported as left held, and one that is no longer suspended is not reported at all', async () => {
+    const healed = await wronglySuspendedStore();
+    const paid = await wronglySuspendedStore({ suspensionSource: 'ADMIN' }, { sub: { status: 'ACTIVE', suspendedAt: null } });
+    const report = await runBillingInvariants(prisma);
+    expect(report.wrongfulSuspensions).toContain(healed.subId);
+    expect(leftHeld(report, healed.subId)).toBeUndefined();
+    expect(leftHeld(report, paid.subId)).toBeUndefined();
   });
 });

@@ -24,6 +24,7 @@ import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
@@ -42,6 +43,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -1243,6 +1245,8 @@ export class VerificationService {
    * is refused. A case another reviewer holds is not taken over (compare-and-set).
    */
   async claimReviewCase(caseId: string, reviewerId: string) {
+    // An id that is not a UUID names no case (review_cases.id is a uuid column): 404, not a failed query.
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     const kase = await this.prisma.reviewCase.findUnique({ where: { id: caseId }, select: { id: true, submissionId: true, closedAt: true } });
     if (!kase) throw new NotFoundError('ReviewCase', caseId);
     if (kase.closedAt) throw new AppError(409, 'CASE_CLOSED', 'This case is already decided');
@@ -1264,12 +1268,17 @@ export class VerificationService {
 
   /** Only the reviewer holding a case may hand it back to the queue. */
   async releaseReviewCase(caseId: string, reviewerId: string) {
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     return this.projectionTransaction(async (tx) => {
       const won = await tx.reviewCase.updateMany({
         where: { id: caseId, closedAt: null, assignedTo: reviewerId },
         data: { assignedTo: null, assignedAt: null },
       });
-      if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      if (won.count !== 1) {
+        // A case that does not exist is not a case someone else holds.
+        if (!(await tx.reviewCase.findUnique({ where: { id: caseId }, select: { id: true } }))) throw new NotFoundError('ReviewCase', caseId);
+        throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      }
       // [DOC-1 P5-1] X-RELEASE: handing the case back is IN_REVIEW → REVIEW_QUEUED.
       const kase = await tx.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
       await hopDocState(tx, { id: kase.submissionId }, 'IN_REVIEW', 'REVIEW_QUEUED');
@@ -1444,12 +1453,17 @@ export class VerificationService {
 
     const outcome = await this.projectionTransaction(async (tx) => {
       await assertNotRecused(tx, review.reviewerId, candidate.userId);
-      const users = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "users"
+      const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
+        SELECT "id", "phone" FROM "users"
         WHERE "id" = ${candidate.userId}
         FOR UPDATE /* verification-document-decision-authority */
       `;
       if (!users[0]) throw new NotFoundError('User', candidate.userId);
+      // [#1879 · REVIEW-F S3-2] An erased account (its erasure marker commits under this same lock) is decided
+      // nothing: a document a legal hold kept would otherwise re-create the outbox row, the notice and a trial.
+      if (users[0].phone === `deleted:${candidate.userId}`) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Its documents cannot be decided.');
+      }
 
       if (requestedStatus === 'APPROVED') {
         const pending = await this.lockApprovalSubject(tx, docId);
@@ -2602,11 +2616,10 @@ export class VerificationService {
     result: T,
   ): Promise<T & { collided?: boolean }> {
     const mine = await resolveVerificationObject(this.prisma, { fileKey, userId });
-    const other = await this.prisma.encryptedObject.findFirst({
-      where: { sha256: mine.sha256, createdBy: { not: userId } },
-      select: { createdBy: true },
-    });
-    if (!other) return result;
+    // [Row 331 (c)] The other holder is a LIVE account: an erased one is never linked again.
+    const [otherId] = await liveDuplicateHolders(this.prisma, mine.sha256, userId);
+    if (!otherId) return result;
+    const other = { createdBy: otherId };
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(this.prisma);
     const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';
@@ -2836,15 +2849,19 @@ export class VerificationService {
       try {
         if (row.command !== APPROVAL_TAIL) throw new Error(`unknown verification decision command ${row.command}`);
         const standing = await this.prisma.verificationDocument.findUnique({ where: { id: row.documentId }, select: { state: true } });
-        if (standing?.state === 'COMMITTED') await this.afterApproval(row.userId);
-        await this.prisma.verificationDecisionOutbox.update({
+        // [#1879] afterApproval honours the deletion write barrier: an account erased (or being erased) since
+        // the claim gets nothing, and the row closes as owed to no one.
+        const ran = standing?.state === 'COMMITTED' ? await this.afterApproval(row.userId) : false;
+        // updateMany: an account erasure deletes the person's rows (account.service), so a row this drain
+        // claimed may be gone by now; there is then nothing left to close.
+        await this.prisma.verificationDecisionOutbox.updateMany({
           where: { id: row.id },
-          data: { processedAt: new Date(), claimedAt: null, lastError: standing?.state === 'COMMITTED' ? null : 'approval no longer stands' },
+          data: { processedAt: new Date(), claimedAt: null, lastError: ran ? null : standing?.state === 'COMMITTED' ? 'account closed' : 'approval no longer stands' },
         });
         processed += 1;
       } catch (err) {
         log().error({ err, documentId: row.documentId, attempts: row.attempts + 1 }, '[S2-29] approval tail failed; retried by the sweep');
-        await this.prisma.verificationDecisionOutbox.update({
+        await this.prisma.verificationDecisionOutbox.updateMany({
           where: { id: row.id },
           data: {
             claimedAt: null,
@@ -2866,7 +2883,31 @@ export class VerificationService {
    * subscription. Vendors additionally get their display flag, and a store
    * suspended by a lapsed document re-opens when verification is restored.
    */
-  private async afterApproval(userId: string) {
+  /**
+   * [GUARDRAILS §2 · #1879] The deletion write barrier for work owed after an approval: the account erasure's
+   * own commit (status DEACTIVATED, or the deleted:<id> marker). Read
+   * under the person's row lock (FOR SHARE): an erasure holding FOR UPDATE commits first, so an account
+   * erased or being erased is seen closed here. The erasure deletes the outbox rows in that same transaction.
+   * Not covered: an erasure that begins after this read and commits while the tail runs (the tail's writes are
+   * their own transactions; holding this lock across them would deadlock with their own person locks).
+   */
+  private async openForOwedWork(userId: string): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const rows = await tx.$queryRaw<Array<{ status: string; phone: string }>>`
+        SELECT "status"::text AS "status", "phone" FROM "users" WHERE "id" = ${userId}
+        FOR SHARE /* approval-tail-deletion-barrier */
+      `;
+      const person = rows[0];
+      // [REVIEW-F S2-2] Only an erasure closes it: SUSPENDED and BANNED are reversible, and a reinstated
+      // person is still owed the trial. DEACTIVATED is the erasure's status commit; the marker is its tombstone.
+      return Boolean(person) && person!.phone !== `deleted:${userId}` && person!.status !== 'DEACTIVATED';
+    });
+  }
+
+  /** Returns false (and writes nothing) when the deletion write barrier closes the account. */
+  private async afterApproval(userId: string): Promise<boolean> {
+    if (!await this.openForOwedWork(userId)) return false;
     // [STRAND-1] One projection owns vendor activation truth (flags + the
     // PENDING_APPROVAL→ACTIVE promotion). Manual review already ran it inside
     // the decision transaction; the auto-approval path reaches it here. It is
@@ -2908,7 +2949,7 @@ export class VerificationService {
       if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-
+    return true;
   }
 
   /**

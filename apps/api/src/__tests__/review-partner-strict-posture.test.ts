@@ -36,6 +36,7 @@ import { assertTenantWall, attestationOf, readRlsFacts, appSideWallGaps } from '
 import { hashReviewCode } from '../modules/review/credentials';
 import { installDdl } from './helpers/install-ddl';
 import { testPhone } from './helpers/fixture-ids';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // [R048-001] this suite creates the NOLOGIN probe group and two LOGIN roles by raw DDL, exactly as tenant-wall-binds-app does.
 grantSuiteCapability('ddl');
@@ -153,8 +154,9 @@ describe('[OTA-016] the review tenant under the production CONTRACT posture', ()
 
   it('a session that already exists is accepted at the auth decorator: the account is read bound to its own tenant', async () => {
     const token = app.jwt.sign({ userId, role: 'RIDER', jti: nanoid(8) });
+    // [Row 231] the suite's own connection bypasses the API's digest layer: it stores what the API stores — digests
     await owner.session.create({ data: {
-      userId, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `strict-${RUN}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000),
+      userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), authMethod: 'OTP', deviceId: `strict-${RUN}`, deviceType: 'test', expiresAt: new Date(Date.now() + 3_600_000),
     } });
     const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { authorization: `Bearer ${token}` } });
     // Was OTA-016's second failure (503 AUTH_UNAVAILABLE): the session's account and tenant come from the

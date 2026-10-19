@@ -39,9 +39,9 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     },
   },
   'lib/customer-search.ts': {
-    calls: ['searchCatalogue', 'searchSuggestions'],
+    calls: ['searchCatalogue', 'searchSuggestions', 'searchTrending'],
     imports: ["import { apiFetch } from './auth';", "import type { MarketItem } from './customer';"],
-    users: { 'app/(app)/order/search/page.tsx': "import { searchCatalogue, searchSuggestions, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';" },
+    users: { 'app/(app)/order/search/page.tsx': "import { searchCatalogue, searchSuggestions, searchTrending, TRENDING_SHOWN, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';" },
   },
   'lib/customer-courier.ts': {
     calls: ['courierEstimate', 'requestCourier'],
@@ -51,7 +51,10 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
   'lib/customer-rides.ts': {
     calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide'],
     imports: ["import { apiFetch } from './auth';"],
-    users: { 'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide } from '@/lib/customer-rides';" },
+    users: {
+      'app/(app)/orders/[id]/page.tsx': "import { activeRide, getRide } from '@/lib/customer-rides';",
+      'app/(app)/taxi/taxi-fare-estimate.tsx': "import { rideEstimate } from '@/lib/customer-rides';",
+    },
   },
   'lib/customer-market.ts': {
     calls: ['getMarketItems', 'getMarketCategories'],

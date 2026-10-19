@@ -6,6 +6,7 @@ import { persistRiderCancellationNotice, drainRiderCancellationNotices } from '.
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -71,13 +72,15 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
-import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgNumber } from '../../utils/mmg-number';
+import { MMG_PAY_TO_STORE_NUMBER, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE, validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
+import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
 
 interface CheckoutInput {
   userId: string;
@@ -87,6 +90,10 @@ interface CheckoutInput {
    *  database even if Redis forgot. */
   idempotency?: { key: string; requestHash: string };
   paymentMethod: string;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY only: 'STORE_NUMBER' = the customer pays the
+   *  store's MMG number directly, shown on the order once the store accepts (build 12+, web). Absent =
+   *  an app that knows only the old pay link (builds 9-11), refused while STORE_MMG_PAY_LINK is off. */
+  mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
   deliveryInstructions?: string;
   tipAmount?: number;
   scheduledFor?: string; // ISO date string
@@ -209,8 +216,14 @@ export function assertPricesAsSeen(
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
-  const checked = validateMmgPayUrl(rawUrl);
+  const checked = validateOfferedStoreMmgPayUrl(rawUrl);
   if (checked.valid) return checked.url;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the store's MMG number.
+  // An app that still asks for the link (builds 9-11) is refused with an MMG_* code — which those
+  // builds already turn into "back to cash" — and a sentence that says what to do.
+  if (checked.reason === 'PAY_LINKS_OFF') {
+    throw new AppError(400, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE);
+  }
   if (checked.reason === 'MISSING') {
     throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
   }
@@ -218,6 +231,14 @@ function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName:
     throw new AppError(503, 'MMG_PAY_LINKS_NOT_CONFIGURED', 'MMG pay links are not configured for this environment yet — choose cash instead.');
   }
   throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
+}
+
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG NUMBER a pay-to-number checkout commits to,
+ *  re-checked from the stored row (never trusted as written). */
+function requireCheckoutMmgNumber(rawNumber: string | null | undefined, vendorName: string): string {
+  const number = safeMmgNumber(rawNumber);
+  if (number) return number;
+  throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
 }
 
 /** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
@@ -306,11 +327,18 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
 // paid customer→store OUTSIDE Swift, and only the store can attest the money
 // landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
-// order may not move through fulfilment: not accepted, prepared, readied,
+// order may not move through fulfilment: not prepared, readied,
 // claimed/assigned, taken into custody, delivered, self-delivered, or
 // pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
 // open, and the store's confirm-payment action never passes through here — it
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+//
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] ACCEPTED no longer waits
+// for the payment: the store ACCEPTS first ("we have it"), which shows the customer
+// the store's MMG number and the exact amount; the customer pays; the store taps
+// "Paid by MMG". Acceptance moves no goods and no rider — PREPARING onward and
+// every rider claim/assignment stay gated until the store confirms the money. A
+// DISPUTED payment (two claims that disagree) still holds acceptance too.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
@@ -363,7 +391,11 @@ export function assertCashDiscountSponsored(args: {
  * compiles, which is a stronger guarantee than any test could give.
  */
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
+  order: {
+    paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null;
+    /** [PAYMENT-SIMPLIFY · Q1] Read only for ACCEPTED; a caller that does not project it keeps the full gate. */
+    mmgAttestedRef?: string | null;
+  },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
@@ -381,6 +413,11 @@ export function assertMmgFulfilmentAllowed(
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
+  // [PAYMENT-SIMPLIFY · Q1] The store may accept an unpaid MMG order; nothing after acceptance may move.
+  // Only an order whose payment can still happen: a store claim an operator rejected ("did not pay",
+  // `mmgAttestedRef` kept on a reopened PENDING row) can never be paid on this order, so it is never
+  // accepted unpaid. Not projected (undefined) fails closed: the payment gate below applies.
+  if (target === 'ACCEPTED' && order.mmgAttestedRef === null) return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
@@ -600,6 +637,12 @@ export interface CanonicalOrderTransitionInput {
   /** Queue-only guard: the worker may cancel PENDING work only after its
    * checkout hold has elapsed. Revalidated from the locked source row. */
   requireHoldExpired?: boolean;
+  /** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] Queue-only guard: the sweep may
+   * cancel an ACCEPTED MMG order only while it is still unpaid (never marked
+   * "Paid by MMG", no rejected claim, no open disagreement) AND its 30 minutes
+   * from acceptance have run out. Re-decided on the locked source row — the
+   * store's "Paid by MMG" takes the same row lock, so the first commit wins. */
+  requireUnpaidMmgAcceptanceExpired?: boolean;
   /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
@@ -978,7 +1021,8 @@ export class OrderService {
       // a vendor row lock in the commit transaction, so a concurrent profile
       // edit cannot swap/remove the payment target after this decision.
       if (input.paymentMethod === 'MOBILE_MONEY') {
-        requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) requireCheckoutMmgNumber(vendor.mmgNumber, vendor.name);
+        else requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
       // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
@@ -1504,15 +1548,22 @@ export class OrderService {
       }
 
       let committedMmgPayUrl: string | null = null;
+      let committedMmgNumber: string | null = null;
       let committedMmgRecipientName: string | null = null;
       if (input.paymentMethod === 'MOBILE_MONEY') {
         const paymentPlan = plans[0]!; // multi-vendor MMG was rejected above
         await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${paymentPlan.vendor.id} FOR UPDATE`;
         const currentVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: paymentPlan.vendor.id },
-          select: { name: true, mmgPayUrl: true },
+          select: { name: true, mmgPayUrl: true, mmgNumber: true },
         });
-        committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        // [PAYMENT-SIMPLIFY] The destination is re-read and committed under the vendor row lock:
+        // a concurrent profile edit (or the cool-off applying a new number) cannot swap it.
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
+          committedMmgNumber = requireCheckoutMmgNumber(currentVendor.mmgNumber, currentVendor.name);
+        } else {
+          committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        }
         committedMmgRecipientName = currentVendor.name;
       }
 
@@ -1538,9 +1589,8 @@ export class OrderService {
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
         const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
-        const userUses = await tx.order.count({
-          where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-        });
+        // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+        const userUses = await tx.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promoCodeId) });
         if (userUses >= fresh.maxUsesPerUser) {
           throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
         }
@@ -1650,6 +1700,7 @@ export class OrderService {
             // both fields while the vendor row is locked so a later profile
             // edit cannot redirect an already-placed order or relabel its payee.
             mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
+            mmgNumberSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgNumber : null,
             mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
             // Minutes-to-promise for the legacy field; the promise itself is the truth.
@@ -2278,6 +2329,10 @@ export class OrderService {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
     }
+    if (input.requireUnpaidMmgAcceptanceExpired && !isExpiredUnpaidMmgAcceptance(source, now)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', 'Order is paid, or still within its MMG payment window');
+    }
     if (input.handover) {
       const failure = await verifyHandoverDecision(tx, source, input.handover);
       if (failure) return failure;
@@ -2886,7 +2941,7 @@ export class OrderService {
     // Send notifications
     const riderName = order.rider?.user?.firstName || 'Your rider';
     switch (status) {
-      case 'ACCEPTED':
+      case 'ACCEPTED': {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
@@ -2894,12 +2949,32 @@ export class OrderService {
         // the customer's slot inside this transition. Kitchen words on a
         // haircut were the phone's first sign that a SERVICE booking was riding
         // the food order spine.
-        if (order.fulfillment === 'APPOINTMENT') {
+        const mmgPayBy = mmgAcceptedPayBy(order);
+        const mmgClaimedPaid = isUnpaidMmgAcceptance(order) && order.customerMmgClaim === 'PAID';
+        if (mmgPayBy || mmgClaimedPaid) {
+          // [owner 18 Oct 2026 · REVIEW-F S2-1/S3-1b/S4-1] Accepted, not yet paid by MMG (an order or a booking):
+          // nothing goes ahead until "Paid by MMG", and the 30-minute clock starts now — the customer is told to
+          // pay, how much and by when; if they already said "I paid", that it waits for the store. Never the number.
+          const storeName = order.vendor?.name || 'The store';
+          const noun = mmgOrderNoun(order.fulfillment);
+          const payBy = mmgPayBy;
+          const copy = payBy
+            ? mmgAcceptedPushCopy(order.orderNumber, storeName, Number(order.totalAmount), order.currencyCode, payBy, noun)
+            : mmgAcceptedClaimedPushCopy(order.orderNumber, storeName, noun);
+          await this.notifications.send({
+            userId: order.customerId,
+            type: 'ORDER_UPDATE',
+            title: copy.title,
+            body: copy.body,
+            data: { orderId, orderNumber: order.orderNumber, status: 'ACCEPTED', paymentPending: 'MMG' },
+          });
+        } else if (order.fulfillment === 'APPOINTMENT') {
           await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         } else {
           await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         }
         break;
+      }
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;
@@ -3362,9 +3437,7 @@ export class OrderService {
     // enforcement point inside the checkout transaction (trial-integrity A5).
     const { clusterMemberIds } = await import('../integrity/identity.service');
     const promoMemberIds = await clusterMemberIds(this.prisma, userId);
-    const userUsage = await this.prisma.order.count({
-      where: { customerId: { in: promoMemberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    const userUsage = await this.prisma.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }

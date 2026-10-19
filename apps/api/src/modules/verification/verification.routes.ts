@@ -11,7 +11,36 @@ import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/doc
 import { createHash } from 'node:crypto';
 import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
 import { AppError } from '../../utils/errors';
+import { consentSurfaceOf } from '../legal/consent-surface';
+import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
+
+/** How long an identical re-send counts as a retry of the same upload. */
+export const UPLOAD_RETRY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * [#1449 S4-1] The same person's identical file (same bytes, same type), stored in the
+ * last few minutes and not yet claimed by anything, IS the upload a lost reply hid: its
+ * key is the answer. Anything already claimed (a document, a mover or recovery pointer)
+ * or erased is never reused: a deliberate re-submission gets its own upload.
+ */
+export async function retriedUpload(
+  db: FastifyInstance['prisma'], userId: string, sha256: string, mimeType: string, now = Date.now(),
+): Promise<string | null> {
+  const recent = await db.encryptedObject.findMany({
+    where: { createdBy: userId, sha256, mimeType, shreddedAt: null, wrappedDek: { not: null }, createdAt: { gte: new Date(now - UPLOAD_RETRY_WINDOW_MS) } },
+    orderBy: { createdAt: 'desc' }, select: { fileKey: true }, take: 5,
+  });
+  for (const { fileKey } of recent) {
+    const claimed = await db.verificationDocument.count({ where: { fileUrl: fileKey } })
+      + await db.rider.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.driver.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { vehicleInspectionUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.accountRecovery.count({ where: { OR: [{ idDocumentUrl: fileKey }, { selfieUrl: fileKey }] } });
+    if (claimed === 0) return fileKey;
+  }
+  return null;
+}
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -27,6 +56,8 @@ const statusQuerySchema = z.object({
 const consentFields = {
   consent: z.literal(true),
   privacyNoticeVersion: z.string().min(1).max(20),
+  /** [R17] the tick the client showed (website, phone build 12); recorded in the consent ledger. Builds 9-11 omit it. */
+  consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
 };
 
 const submitDocumentSchema = z.object({
@@ -105,6 +136,9 @@ export async function verificationRoutes(app: FastifyInstance) {
   /** POST /documents — submit one checklist document for a role. */
   app.post('/documents', auth, async (request, reply) => {
     const body = submitDocumentSchema.parse(request.body);
+    if (body.consentTick && body.consentTick !== 'document_v1') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to a document upload.');
+    }
     const doc = await verification.submitDocument(
       request.user.userId,
       body.role,
@@ -113,6 +147,10 @@ export async function verificationRoutes(app: FastifyInstance) {
       body.privacyNoticeVersion,
       request.user.role,
     );
+    // [R17] the tick the person gave, after the document is on file (a refused upload records no consent)
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: consentSubjectForRole(body.role), surface: consentSurfaceOf(request), ip: request.ip, docType: body.docType });
+    }
     reply.code(201);
     return { success: true, data: doc };
   });
@@ -152,13 +190,15 @@ export async function verificationRoutes(app: FastifyInstance) {
     const keys = getKeyProvider();
     if (keys) {
       const sha256 = createHash('sha256').update(buffer).digest('hex');
+      // [#1449 S4-1] A retry after a lost reply sends the same file again: answer with the
+      // upload already stored, so no second copy of an ID document is kept (and no second review signal).
+      const retried = await retriedUpload(app.prisma, request.user.userId, sha256, file.mimetype);
+      if (retried) return { success: true, data: { url: retried } };
       // SWIFT-078: the SAME physical document already on ANOTHER account is a
       // fraud signal — one person opening several accounts, or a reused/forged
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
-      const dup = await app.prisma.encryptedObject.findFirst({
-        where: { sha256, createdBy: { not: request.user.userId } },
-        select: { sha256: true },
-      });
+      // [Row 331 (c)] Only a LIVE account counts: an erased one is never a duplicate holder.
+      const dup = (await liveDuplicateHolders(app.prisma, sha256, request.user.userId)).length > 0;
 
       const dek = generateDek();
       const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
@@ -260,12 +300,19 @@ export async function verificationRoutes(app: FastifyInstance) {
    *  first), NOT_ACCEPTED. */
   app.post('/identity', auth, async (request, reply) => {
     const body = submitIdentitySchema.parse(request.body);
+    if (body.consentTick && body.consentTick !== 'customer_id_v1') {
+      throw new AppError(400, 'CONSENT_TICK_MISMATCH', 'That consent does not belong to an ID upload.');
+    }
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
       body.selfieUrl,
       body.privacyNoticeVersion,
     );
+    // [R17 · in-app ¶15] the customer's tick to keep the ID photo
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId: request.user.userId, tick: body.consentTick, subjectType: 'customer', surface: consentSurfaceOf(request), ip: request.ip, docType: 'customer_id' });
+    }
     reply.code(201);
     const idCheck = doc.status === 'APPROVED' ? 'ON_FILE' : doc.status === 'REJECTED' ? 'NOT_ACCEPTED' : 'WAITING';
     return { success: true, data: { ...doc, idCheck } };

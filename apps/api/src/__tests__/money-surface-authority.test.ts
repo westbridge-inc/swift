@@ -11,6 +11,7 @@ import {
   type MoneySurfaceDeps,
 } from '../modules/integrity/money-surface';
 import { moneySurfaceCounter } from '../plugins/observability';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [R048-007] A money-surface transition is ONE atomic authority record.
@@ -28,7 +29,7 @@ import { moneySurfaceCounter } from '../plugins/observability';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+const RUN = wordFreeTag(8);
 const OLD_LINK = `https://pay.mmg.gy/store-old-${RUN}`;
 const NEW_LINK = `https://pay.mmg.gy/store-new-${RUN}`;
 const NEWER_LINK = `https://pay.mmg.gy/store-newer-${RUN}`;

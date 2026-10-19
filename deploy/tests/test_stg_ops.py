@@ -996,6 +996,8 @@ class LiveCaddyReadinessWait(unittest.TestCase):
         self.assertEqual(source.count("wait_for_test_caddy(self, name, "), 3)
         self.assertEqual(source.count('lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403'), 2)
         self.assertEqual(source.count('raw_https(port, API_HOST, "/metrics")[0] == 403'), 1)
+        # The website gate's two live serves also wait for a handshake on every name they reach.
+        self.assertEqual(source.count("self.every_name_has_tls(lambda host: "), 2)
 
 
 @unittest.skipUnless(caddy_image_present(), "docker or the caddy:2.10 image is not available locally")
@@ -1635,7 +1637,15 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     # the console and echoes any Authorization header that reaches it. Caddy
     # takes ONE global options block, first in the file, and the file opens
     # with its own (the log filter), so the options join that block.
-    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n"
+    # storage_clean_interval off: a fresh Caddy cleans its storage at start, AT
+    # THE SAME TIME as it issues the names' first certificates, and the cleaner
+    # can delete a site folder whose key is still being written ("deleting site
+    # folder because key is empty", then "job failed: caching certificate after
+    # obtaining it: ... .key: no such file or directory"). That name then has no
+    # certificate until Caddy's next maintenance pass (minutes), so the test
+    # Caddy never answered (run 39175786618). A test container's storage is new
+    # and thrown away, so there is nothing to clean.
+    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n    storage_clean_interval off\n"
     STAND_IN = '\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}]" 200\n}\n'
 
     @classmethod
@@ -1675,6 +1685,19 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     def accounts(self, console) -> list:
         found = re.findall(r'"accounts": (\[.*?\])', json.dumps(console))
         return [account["username"] for listing in found for account in json.loads(listing)]
+
+    def test_the_live_caddy_never_cleans_its_storage_while_it_issues_the_first_certificates(self):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-admin-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS))
+        adapted = subprocess.run(["docker", "run", "--rm", "--network", "none", "-e", f"API_HOST={API_HOST}",
+                                  "-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                                  "caddy", "adapt", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+                                 text=True, capture_output=True, timeout=60)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        tls = json.loads(adapted.stdout)["apps"]["tls"]
+        self.assertIs(tls.get("disable_storage_clean"), True)
+        self.assertEqual(tls["automation"]["policies"][0]["issuers"], [{"module": "internal"}])
 
     def test_without_admin_host_it_validates_and_serves_exactly_what_it_did(self):
         for env in ({"API_HOST": API_HOST},
@@ -2475,8 +2498,20 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         started = subprocess.run(args, text=True, capture_output=True, timeout=60)
         self.assertEqual(started.returncode, 0, started.stderr[-400:])
         self.addCleanup(subprocess.run, ["docker", "rm", "-f", name], capture_output=True, timeout=60)
-        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403)
+        wait_for_test_caddy(self, name, lambda: self.fetch(name, f"https://{API_HOST}/metrics")[0] == 403
+                            and self.every_name_has_tls(lambda host: self.fetch(name, f"https://{host}/")[0] != 0))
         return name
+
+    # Caddy's internal issuer makes each name's certificate on its own, so the API
+    # answering says nothing about the website's name: until its certificate exists
+    # a handshake for it ends in "tlsv1 alert internal error". Every live test waits
+    # (by the same wall time) until each name it reaches completes a handshake with
+    # any HTTP status, then asserts exactly what it asserted before.
+    TLS_NAMES = (WEB_HOST, *PUBLIC_ALIASES.split(), ADMIN_HOST)
+
+    @classmethod
+    def every_name_has_tls(cls, answers_with_a_status, names=TLS_NAMES) -> bool:
+        return all(answers_with_a_status(host) for host in names)
 
     def reached_website(self, out, path, host=WEB_HOST, authorization=""):
         self.assertIn(f"authorization=[{authorization}] uri=[{path}] host=[{host}]", out)
@@ -2636,8 +2671,10 @@ class WebGateCaddyfileRenderedByCaddy(unittest.TestCase):
         port = int(mapped.stdout.split()[0].rsplit(":", 1)[1])
         def answers() -> bool:
             try:
-                return raw_https(port, API_HOST, "/metrics")[0] == 403
-            except OSError:
+                return (raw_https(port, API_HOST, "/metrics")[0] == 403
+                        and self.every_name_has_tls(lambda host: bool(raw_https(port, host, "/")[0]),
+                                                    (WEB_HOST, ADMIN_HOST)))
+            except OSError:  # ssl.SSLError (a name with no certificate yet) is an OSError
                 return False
         wait_for_test_caddy(self, name, answers)
         return port

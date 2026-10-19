@@ -121,18 +121,19 @@ describe('[W-08] the address page enforces it', () => {
   const code = code_(readFileSync(join(process.cwd(), 'src/app/(app)/order/location/page.tsx'), 'utf8'));
   const geo = code_(readFileSync(join(process.cwd(), 'src/lib/geolocate.ts'), 'utf8'));
 
-  it('editing the address clears the captured place', () => {
-    expect(code).toMatch(/if \(place && !placeMatches\(place, next\)\) setPlace\(null\)/);
+  // [PINS · row 107] The page no longer captures a device fix for typed words:
+  // it adds an address with the shared pin form (components/account/address-form,
+  // behaviour pinned in account.test.tsx and order/location/page.test.tsx), whose
+  // stored point is the pin the person placed on the map.
+  it('the page never pairs a device fix with the typed words', () => {
+    expect(code).not.toMatch(/currentFix|currentCoords|acceptFix/);
+    expect(code).toMatch(/import \{ AddressForm \} from '@\/components\/account\/address-form';/);
+    expect(code).toMatch(/<AddressForm\b/);
   });
 
-  it('save is impossible without a place bound to the text being saved', () => {
-    expect(code).toMatch(/if \(!canSave\(place, form\)\) return;/);
-    expect(code).toMatch(/disabled=\{busy \|\| !ready\}/);
-  });
-
-  it('the coordinates saved are the captured ones, never a fresh unrelated fix', () => {
-    expect(code).toMatch(/latitude: place!\.lat/);
-    expect(code).toMatch(/longitude: place!\.lng/);
+  it('the page sends no coordinates of its own: the saved point is the form’s pin', () => {
+    expect(code).not.toMatch(/latitude|longitude/);
+    expect(code).not.toMatch(/addAddress\(/);
     // the old shape: ask the browser inside save() and pair it with the form
     expect(code).not.toMatch(/const coords = await currentCoords/);
   });
@@ -141,12 +142,11 @@ describe('[W-08] the address page enforces it', () => {
     expect(code).not.toMatch(/getAddresses\(\)\.catch\(/);
     expect(code).toMatch(/<DataUnavailable/);
     // and it must not decide "first address" from a list that failed to load
-    expect(code).toMatch(/isDefault: addresses !== null && addresses\.length === 0/);
+    expect(code).toMatch(/fixedDefault=\{addresses !== null && addresses\.length === 0\}/);
   });
 
   it('the accuracy the browser reports is carried, not discarded', () => {
     expect(geo).toMatch(/accuracyM: typeof p\.coords\.accuracy === 'number'/);
-    expect(code).toMatch(/accuracyM: fix\.accuracyM/);
     // currentCoords still exists for other callers, and still has no fallback
     expect(geo).toMatch(/export function currentCoords/);
     expect(geo).not.toMatch(/6\.8013, -58\.1551\D*\)/);
@@ -231,15 +231,18 @@ describe('[W-18 / W-19] the shared location field enforces it', () => {
     expect(field.match(/if \(seq\.current\.accept\(mine\)\)/g) ?? []).toHaveLength(2);
   });
 
-  it('[W-18] courier uses the shared field and disabled taxi has no second box', () => {
-    for (const page of ['src/app/(app)/courier/page.tsx']) {
+  // [Row 117 · owner 16 Oct 2026] The taxi page now prices a route (a fare
+  // estimate, never a booking): its two boxes are the shared field too.
+  it('[W-18] courier and the taxi fare form use the shared field; taxi has no second box and no booking', () => {
+    for (const page of ['src/app/(app)/courier/page.tsx', 'src/app/(app)/taxi/taxi-fare-estimate.tsx']) {
       const t = readFileSync(join(process.cwd(), page), 'utf8');
       expect(t, `${page} must use the shared field`).toMatch(/from '@\/components\/location-field'/);
       expect(stripComments(t), `${page} must not re-declare the box`).not.toMatch(/placesAutocomplete\(/);
     }
-    const taxi = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
-    expect(taxi).not.toMatch(/LocationField|<input|placesAutocomplete|requestRide/);
-    expect(taxi).toContain('Taxi booking is unavailable on the web.');
+    const page = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/page.tsx'), 'utf8'));
+    const form = stripComments(readFileSync(join(process.cwd(), 'src/app/(app)/taxi/taxi-fare-estimate.tsx'), 'utf8'));
+    expect(page + form).not.toMatch(/<input|placesAutocomplete|requestRide|createRideRequest|\/rides\/(?:request|queue)/);
+    expect(page).toContain('Taxi booking is unavailable on the web.');
   });
 });
 

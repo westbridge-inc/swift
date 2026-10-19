@@ -174,7 +174,7 @@ export function BusinessSetup() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+          Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee and no commission on orders.
         </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg, marginBottom: space.md }}>
           <BizValuePill icon="check-decagram" label="Keep 100%" />
@@ -293,7 +293,7 @@ export function BusinessSetup() {
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], paddingHorizontal: space.md, paddingVertical: space.sm, marginTop: space.md }}>
           <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
           <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
-            You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+            You keep 100% of every sale — Swift charges a flat weekly fee and no commission on orders.
           </T>
         </View>
       </ScrollView>

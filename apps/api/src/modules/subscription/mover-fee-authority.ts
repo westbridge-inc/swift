@@ -418,12 +418,18 @@ export async function resolveMoverFeeHold(
   const tiers = await subscriptionTiersIn(tx, tariff.countryCode);
   const target = partnerRateFor(tiers, tariff.subject);
   const previousRate = Number(canonical.weeklyRate);
-  if (previousRate !== target.rate) {
-    await tx.subscription.update({ where: { id: canonical.id }, data: { weeklyRate: target.rate } });
+  // [COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A finance resolution never raises a weekly
+  // fee at once: a higher card rate needs at least 14 days' in-app notice first (the F2 fee-change
+  // notice, not built yet), so until that notice exists the source keeps the rate it was paying.
+  // A lower card rate applies at once: there is nothing to be told before a cut.
+  const nextRate = Math.min(previousRate, target.rate);
+  const heldRise = target.rate > previousRate ? { heldRise: target.rate, heldUntil: 'FEE_CHANGE_NOTICE_14_DAYS' } : {};
+  if (nextRate !== previousRate) {
+    await tx.subscription.update({ where: { id: canonical.id }, data: { weeklyRate: nextRate } });
     const sequence = await tx.billingEvent.count({ where: { subscriptionId: canonical.id, type: 'TIER_CHANGE' } }) + 1;
-    await tx.billingEvent.create({ data: { subscriptionId: canonical.id, type: 'TIER_CHANGE', amount: target.rate, currencyCode: canonical.currencyCode,
-      idempotencyKey: `tier:${canonical.id}:${sequence}:${previousRate}->${target.rate}`,
-      note: `Finance authority resolution changes the future weekly rate from ${previousRate} to ${target.rate}; issued charges and paid periods retained.` } });
+    await tx.billingEvent.create({ data: { subscriptionId: canonical.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: canonical.currencyCode,
+      idempotencyKey: `tier:${canonical.id}:${sequence}:${previousRate}->${nextRate}`,
+      note: `Finance authority resolution changes the future weekly rate from ${previousRate} to ${nextRate}; issued charges and paid periods retained.` } });
   }
   const aliasEvidence: Record<string, string> = {};
   const sourceEvidence: Record<string, string> = {};
@@ -434,5 +440,5 @@ export async function resolveMoverFeeHold(
   return persistDecision(tx, { ...authority, canonicalSubscriptionId: canonical.id, state: 'ACTIVE', holdReason: null },
     'MOVER_FEE_RESOLVED', input.actorUserId,
     { aliasEvidence, sourceEvidence, previousRevision: authority.revision, approvalId: input.approvalId,
-      futureRate: { before: previousRate, after: target.rate }, disposition: empty ? 'EMPTY_COMPATIBLE' : 'PAID_HISTORY_RETAINED' });
+      futureRate: { before: previousRate, after: nextRate, ...heldRise }, disposition: empty ? 'EMPTY_COMPATIBLE' : 'PAID_HISTORY_RETAINED' });
 }

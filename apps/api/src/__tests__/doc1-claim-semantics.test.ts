@@ -28,8 +28,9 @@ import { assertMmgFulfilmentAllowed, MMG_MONEY_MOVED } from '../modules/order/or
 import { handoverAuthorityFor } from '../modules/order/handover-authority';
 import { isCapturedMmg } from '../modules/dispatch/rescue';
 import { renderReceiptHtml } from '../modules/order/receipt';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-claim-semantics-test');
 
@@ -118,7 +119,14 @@ describe('[DOC-1 P31-2] claim, not fact', () => {
     // HOSTILE: a caller that did not project the column must fail loudly, never pass.
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', orderType: 'FOOD' } as never, 'RIDER_ASSIGNED'))
       .toThrow(/was not projected/);
+    // [PAYMENT-SIMPLIFY · COORD Q1, 17 Oct] The store may ACCEPT an unpaid MMG order (that is what shows the customer
+    // the store's MMG number); the first step that moves goods still waits for the store's word.
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD', mmgClaimMismatchAt: null, mmgAttestedRef: null }, 'ACCEPTED')).not.toThrow();
+    // ...but never for an attempt an operator rejected (the store's reference kept on a reopened PENDING row),
+    // and never for a caller that did not project the reference (fails closed: the payment gate applies).
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD', mmgClaimMismatchAt: null, mmgAttestedRef: 'MPREJECTED1' }, 'ACCEPTED')).toThrow(/can move only after/);
     expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD', mmgClaimMismatchAt: null }, 'ACCEPTED')).toThrow(/can move only after/);
+    expect(() => assertMmgFulfilmentAllowed({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING', orderType: 'FOOD', mmgClaimMismatchAt: null }, 'PREPARING')).toThrow(/can move only after/);
     expect(handoverAuthorityFor({ ...(after as unknown as Record<string, unknown>), paymentStatus: 'CLAIMED' } as never).permitted).toBe('DELIVER_NO_CASH');
     expect(isCapturedMmg({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' })).toBe(true);
     expect(MMG_MONEY_MOVED.has('CLAIMED') && MMG_MONEY_MOVED.has('CAPTURED') && !MMG_MONEY_MOVED.has('PENDING')).toBe(true);
