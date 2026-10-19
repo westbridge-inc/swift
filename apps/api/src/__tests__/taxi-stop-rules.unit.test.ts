@@ -80,6 +80,18 @@ describe('ending the trip unpaid while a stop is open', () => {
     expect(e).toMatchObject({ statusCode: 409, code: 'STOPS_REMAINING', details: { nextStopSequence: 2 } });
   });
 
+  it('arrive, skip and report a no-show at once: the grace still runs from that arrival (STOP_WAIT_NOT_ELAPSED), then the no-show is allowed', () => {
+    const rows = [departed(1), skipped(2, true)]; // stop 2 reached 20 minutes before T0, then skipped
+    const arrivedAt = rows[1]!.arrivedAt!;
+    const early = refusal(() => assertTripMayEndUnpaid(rows, 'no_show', new Date(arrivedAt.getTime() + 10 * MIN - 1)));
+    expect(early).toMatchObject({ statusCode: 409, code: 'STOP_WAIT_NOT_ELAPSED', details: { sequence: 2, retryAt: new Date(arrivedAt.getTime() + 10 * MIN).toISOString() } });
+    expect(refusal(() => assertTripMayEndUnpaid(rows, 'no_show', new Date(arrivedAt.getTime() + 10 * MIN)))).toBeNull();
+    // A refusal to pay is said with the passenger aboard: no grace applies.
+    expect(refusal(() => assertTripMayEndUnpaid(rows, 'refused', new Date(arrivedAt.getTime() + MIN)))).toBeNull();
+    // A stop skipped without arriving starts no grace.
+    expect(refusal(() => assertTripMayEndUnpaid([skipped(1)], 'no_show', T0))).toBeNull();
+  });
+
   it('a refusal to pay with a stop open, even after the grace: said at the destination (STOPS_REMAINING)', () => {
     for (const rows of [[pending(1)], [arrived(1)]]) {
       const e = refusal(() => assertTripMayEndUnpaid(rows, 'refused', at(60 * MIN)));

@@ -53,6 +53,24 @@ export function stopWaitOf(rows: readonly Pick<TaxiStopRow, 'sequence' | 'status
   return { sequence: stop.sequence, arrivedAt: stop.arrivedAt, noShowAvailableAt: new Date(stop.arrivedAt.getTime() + GRACE_MS) };
 }
 
+/** The most recent arrival at a stop the driver then skipped (null if none). */
+function lastSkippedArrival(rows: readonly Pick<TaxiStopRow, 'sequence' | 'status' | 'arrivedAt'>[]): { sequence: number; arrivedAt: Date } | null {
+  let last: { sequence: number; arrivedAt: Date } | null = null;
+  for (const s of rows) {
+    if (s.status !== 'SKIPPED' || !s.arrivedAt) continue;
+    if (!last || s.arrivedAt.getTime() > last.arrivedAt.getTime()) last = { sequence: s.sequence, arrivedAt: s.arrivedAt };
+  }
+  return last;
+}
+
+/** The refusal of a no-show inside the grace, with when to try again. */
+function stopWaitNotElapsed(at: { sequence: number; arrivedAt: Date }): AppError {
+  const retryAt = new Date(at.arrivedAt.getTime() + GRACE_MS);
+  return new AppError(409, 'STOP_WAIT_NOT_ELAPSED',
+    `The passenger still has time to come back to the car. If they don’t, you can end the trip from ${retryAt.toISOString()}.`,
+    { sequence: at.sequence, retryAt: retryAt.toISOString() });
+}
+
 /**
  * Whether the trip may end without the fare (the passenger did not come back,
  * or refused to pay) while it still has a stop to finish. A ride with no open
@@ -63,7 +81,9 @@ export function stopWaitOf(rows: readonly Pick<TaxiStopRow, 'sequence' | 'status
  *    destination, after the stops (409 STOPS_REMAINING, like "Fare collected");
  *  - a no-show needs the car waiting AT the next stop (ARRIVED) for the whole
  *    grace (else 409 STOP_WAIT_NOT_ELAPSED with when to try again); while that
- *    stop is not reached yet, it is finished first (409 STOPS_REMAINING).
+ *    stop is not reached yet, it is finished first (409 STOPS_REMAINING);
+ *  - once every stop is done, a no-show inside the grace of a stop the car
+ *    arrived at and then skipped is refused the same way.
  */
 export function assertTripMayEndUnpaid(
   rows: readonly Pick<TaxiStopRow, 'sequence' | 'status' | 'arrivedAt'>[],
@@ -71,13 +91,18 @@ export function assertTripMayEndUnpaid(
   now: Date,
 ): void {
   const next = nextStopSequence(rows);
-  if (next == null) return;
+  if (next == null) {
+    // A stop the car arrived at and then skipped: the passenger who got out
+    // there still has the whole grace from that arrival (arrive, skip and
+    // report a no-show at once must not sidestep it).
+    const skippedArrival = outcome === 'no_show' ? lastSkippedArrival(rows) : null;
+    if (skippedArrival && now.getTime() < skippedArrival.arrivedAt.getTime() + GRACE_MS) throw stopWaitNotElapsed(skippedArrival);
+    return;
+  }
   const wait = stopWaitOf(rows);
   if (outcome === 'no_show' && wait) {
     if (now.getTime() >= wait.noShowAvailableAt.getTime()) return;
-    throw new AppError(409, 'STOP_WAIT_NOT_ELAPSED',
-      `The passenger still has time to come back to the car. If they don’t, you can end the trip from ${wait.noShowAvailableAt.toISOString()}.`,
-      { sequence: wait.sequence, retryAt: wait.noShowAvailableAt.toISOString() });
+    throw stopWaitNotElapsed(wait);
   }
   throw new AppError(409, 'STOPS_REMAINING',
     'This ride still has a stop to finish. Arrive at it and continue, or skip it, before you end the trip.',

@@ -27,6 +27,7 @@ import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
 import { loadTaxiStops, offerItinerary, readRideItinerary, stopProgress } from '../rides/taxi-stops-read';
 import { declaresTaxiStops, stopWaitOf, type TaxiStopWait } from '../rides/taxi-stop-rules';
 import { moveTaxiStop, type TaxiStopAction } from '../rides/taxi-stop-progress';
+import { chatContentReason } from '../chat/content-filter';
 import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -898,6 +899,13 @@ export async function driverRoutes(app: FastifyInstance) {
     const driver = await getDriver(request.user.userId);
     const { id, seq } = stopParamsSchema.parse(request.params);
     const reason = action === 'skip' ? stopSkipSchema.parse(request.body ?? {}).reason : undefined;
+    // The passenger is sent the reason word for word: never a phone number, a
+    // link or abuse (the chat's own rule; the rejected text is never logged).
+    const refusedFor = reason ? chatContentReason(reason) : undefined;
+    if (refusedFor) {
+      throw new AppError(400, 'SKIP_REASON_REFUSED',
+        'The passenger is sent this reason. Say why without a phone number, a link or rude words.', { reason: refusedFor });
+    }
     const result = await moveTaxiStop(app.prisma, {
       orderId: id, driverId: driver.id, sequence: seq, action, reason, actorUserId: request.user.userId,
       fix: { lat: driver.currentLat, lng: driver.currentLng, at: driver.lastLocationUpdate },

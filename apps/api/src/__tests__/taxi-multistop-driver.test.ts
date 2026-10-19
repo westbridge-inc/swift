@@ -389,6 +389,11 @@ describe('the driver moves the ride through its stops', () => {
 
     // Skip stop 2: a reason is required, the passenger is told it, the destination is next.
     expect((await stopAction(driver, rideId, 2, 'skip', {})).statusCode, 'no reason').toBe(400);
+    // The reason is sent to the passenger word for word: never a phone number, a link or abuse.
+    const contact = await stopAction(driver, rideId, 2, 'skip', { reason: 'Call me on 600 1234 instead' });
+    expect(contact.statusCode).toBe(400);
+    expect(contact.json().error).toMatchObject({ code: 'SKIP_REASON_REFUSED', details: { reason: 'PHONE' } });
+    expect((await stopRows(rideId)).map((s) => s.status), 'a refused reason writes nothing').toEqual(['DEPARTED', 'PENDING']);
     const skip = await stopAction(driver, rideId, 2, 'skip', { reason: 'Road flooded at the landing' });
     expect(skip.statusCode, skip.body).toBe(200);
     expect(skip.json().data).toMatchObject({ nextStopSequence: null, stopWait: null, stop: { sequence: 2, status: 'SKIPPED', skipReason: 'Road flooded at the landing' } });
@@ -417,7 +422,7 @@ describe('the driver moves the ride through its stops', () => {
 
 // ===========================================================================
 describe('the passenger did not come back to the car at a stop', () => {
-  it('the trip ends unpaid only after the 10-minute grace at an arrived stop; before it, or heading for a stop, or a refusal mid-route, nothing is written', async () => {
+  it('the trip ends unpaid only after the 10-minute grace at an arrived stop (skipping it does not shorten that); before it, or heading for a stop, or a refusal mid-route, nothing is written', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
     const driver = await makeDriver(PICKUP, true);
     const customer = await makeCustomer();
@@ -446,6 +451,14 @@ describe('the passenger did not come back to the car at a stop', () => {
     const refused = await outcome('refused');
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error.code).toBe('STOPS_REMAINING');
+    await unchanged();
+
+    // Arriving, skipping the stop and reporting the no-show at once does not sidestep the grace.
+    const skip = await stopAction(driver, rideId, 1, 'skip', { reason: 'Passenger got out here' });
+    expect(skip.statusCode, skip.body).toBe(200);
+    const skippedEarly = await outcome('no_show');
+    expect(skippedEarly.statusCode, skippedEarly.body).toBe(409);
+    expect(skippedEarly.json().error).toMatchObject({ code: 'STOP_WAIT_NOT_ELAPSED', details: { sequence: 1, retryAt } });
     await unchanged();
 
     // The car has waited the whole grace (its arrival 10 minutes and a second ago).
