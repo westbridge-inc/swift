@@ -341,6 +341,25 @@ describe('a portfolio photo that goes is deleted from storage, not just unlinked
     }
   });
 
+  it('an upload whose save fails (a database error after the photo was kept) gets a deletion row and its photo is deleted [S4-1]', async () => {
+    const p = await makeProvider(true);
+    const before = new Set(fake.objects.keys());
+    let kept = '';
+    const save = vi.spyOn(app.prisma, '$transaction');
+    fake.hooks.afterUpload = async () => {
+      kept = [...fake.objects.keys()].find((k) => !before.has(k)) ?? '';
+      save.mockImplementationOnce((() => Promise.reject(new Error('database went away'))) as never);
+    };
+    const res = await uploadPortfolio(p.token, await cameraJpeg());
+    fake.hooks.afterUpload = null;
+    save.mockRestore();
+    expect(res.statusCode).toBe(500);
+    expect(kept).toMatch(new RegExp(`^portfolio/${p.providerId}/`));
+    expect(await portfolioOf(p.providerId)).toEqual([]);
+    expect(fake.objects.has(kept)).toBe(false);
+    expect((await orphanOf(kept))?.purgedAt).toBeInstanceOf(Date);
+  });
+
   it('account erasure deletes every portfolio photo and clears the list; a failed delete keeps the receipt pending until the retry', async () => {
     const p = await makeProvider(false);
     const a = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;

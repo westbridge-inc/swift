@@ -256,6 +256,19 @@ export async function servicesRoutes(app: FastifyInstance) {
     // [REVIEW-G S4-1 · REVIEW-F S2-1] Added under the account's and the row's locks (the order the
     // profile save and account erasure use): a closed account or a full portfolio does not take
     // the photo, and the bytes just kept are deleted rather than left behind.
+    // [REVIEW-G/F S4-1 on #1918] The bytes are kept before this transaction: if it fails (a DB
+    // error, a lost connection) they get their durable deletion row in a fresh transaction and are
+    // deleted, never left behind with no pointer and no row.
+    const discardKept = async (): Promise<void> => {
+      const orphanIds = await app.prisma.$transaction(async (tx) => {
+        const owner = await tx.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+        return owner ? queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, owner.tenantId, [url]) : [];
+      }).catch((err: unknown) => {
+        app.log.error({ err, providerId: provider.id }, 'portfolio upload: deletion row for unkept photo failed');
+        return [] as string[];
+      });
+      await deleteQueuedPhotos(orphanIds).catch(() => undefined);
+    };
     const added = await app.prisma.$transaction(async (tx) => {
       const users = await tx.$queryRaw<Array<{ status: string; tenantId: string }>>`
         SELECT "status"::text, "tenantId" FROM "users" WHERE "id" = ${userId}
@@ -283,6 +296,9 @@ export async function servicesRoutes(app: FastifyInstance) {
         select: { id: true, portfolioPhotos: true },
       });
       return { updated };
+    }).catch(async (error: unknown) => {
+      await discardKept();
+      throw error;
     });
     if ('refusal' in added) {
       await deleteQueuedPhotos(added.orphanIds ?? []);
