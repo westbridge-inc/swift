@@ -1377,6 +1377,15 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const anchor = await anchorAuditChain(ctx.prisma, new NotificationService(ctx.prisma, ctx.io));
         ctx.log.info({ headSeq: anchor ? String(anchor.headSeq) : null }, 'audit chain anchored');
       }
+      if (job.name === 'malware-scanner-watch') {
+        // [Row 312] The upload malware scanner: two failed PINGs in a row page ops
+        // (durable OpsAlert path); a healthy answer closes the page. Dark: nothing dialled.
+        const { watchMalwareScanner } = await import('../modules/ops/malware-scanner-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const result = await watchMalwareScanner({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        if (result.state === 'down') ctx.log.warn({ ...result }, 'malware scanner not answering');
+        return;
+      }
       if (job.name === 'backup-freshness') {
         // [75] A platform page: durable OpsAlert, SUPER_ADMINs in-app + push,
         // on-call phones texted, escalated until acknowledged.
@@ -2798,6 +2807,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
     repeat: { pattern: '45 23 * * *' },
     removeOnComplete: 30,
     removeOnFail: 30,
+  });
+
+  // [Row 312] The upload malware scanner: asked every two minutes; the second
+  // failed ask in a row pages ops. Nothing is dialled while MALWARE_SCAN is dark.
+  await queues.verificationQueue.add('malware-scanner-watch', {}, {
+    repeat: { pattern: '*/2 * * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
   });
 
   // Backup freshness: daily at 05:30, before the working day. Reads the
