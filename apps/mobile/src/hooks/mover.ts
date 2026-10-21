@@ -337,9 +337,15 @@ export function useActiveJobs(kind: MoverKind | null) {
   });
   const fromSingle: any[] = single.data ? [single.data] : [];
   if (!stacked || !onJob) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  // [S3-1] The legs cache can still hold the run that just finished when the next job starts. The
+  // current run's legs always include the active job (the server keeps the pointer on a live leg),
+  // so an answer without it is the old run's: until the new legs arrive, the active job is shown
+  // alone, never the old run's stops or cash to collect.
+  const activeId = (single.data as { id?: unknown }).id;
+  const current = (legsQ.data?.legs as any[] | undefined)?.some((leg) => leg?.id === activeId) ? legsQ.data : undefined;
   return {
-    legs: (legsQ.data?.legs as any[] | undefined) ?? fromSingle,
-    run: legsQ.data?.run ?? null,
+    legs: (current?.legs as any[] | undefined) ?? fromSingle,
+    run: current?.run ?? null,
     refetch: legsQ.refetch,
   };
 }

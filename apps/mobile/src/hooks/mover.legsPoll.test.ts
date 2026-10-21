@@ -98,6 +98,29 @@ describe('[PERF partner #5] a rider reads the legs of a run only while on a job'
     expect(r).toMatchObject({ legs: [], run: null });
   });
 
+  it('[S3-1] the next job never shows the last run\'s stops or cash to collect while its own legs load', () => {
+    // The run that just finished (legs A + B, cash to collect) is still in the legs cache;
+    // the rider's next job C is now active and its legs have not arrived yet.
+    const legC = { id: 'leg-c', status: 'RIDER_ASSIGNED' };
+    fx.data.set(ACTIVE, legC);
+    fx.data.set(LEGS, { legs: [legA, legB], run: { ...run, cashToCollect: 4500 } });
+    const r = useActiveJobs('RIDER');
+    expect(fx.opts.get(LEGS).enabled).toBe(true); // its own legs are on their way
+    expect(r.legs).toEqual([legC]);
+    expect(r.run).toBeNull();
+  });
+
+  it('[S3-1] once the new run\'s legs arrive (they hold the active job), they win', () => {
+    const legC = { id: 'leg-c', status: 'RIDER_ASSIGNED' };
+    const legD = { id: 'leg-d', status: 'RIDER_ASSIGNED' };
+    const runCD = { drops: 2, cashToCollect: 1200, next: { orderId: 'leg-c', vendorName: 'Shop', status: 'RIDER_ASSIGNED' } };
+    fx.data.set(ACTIVE, legC);
+    fx.data.set(LEGS, { legs: [legC, legD], run: runCD });
+    const r = useActiveJobs('RIDER');
+    expect(r.legs).toEqual([legC, legD]);
+    expect(r.run).toEqual(runCD);
+  });
+
   it('a driver never reads legs (one ride at a time), as before', () => {
     fx.data.set(JSON.stringify(['mover', 'active', 'DRIVER']), { id: 'ride-1' });
     const r = useActiveJobs('DRIVER');
