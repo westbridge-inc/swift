@@ -29,10 +29,10 @@ import { OWN_NAME_DECLARATION_V1 as MOBILE_WORDS } from '../../../mobile/src/lib
 import { OWN_NAME_DECLARATION_WEB as WEB_WORDS } from '../../../web/src/lib/own-name-copy';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
-import { ManualReviewKycProvider } from '../providers/kyc/kyc-provider';
+import { ManualReviewKycProvider, SandboxKycProvider } from '../providers/kyc/kyc-provider';
 import { reviewerTypedFields } from '../modules/verification/identity-signal-policy';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
-import { seedDocRegistry } from '../modules/verification/doc-registry';
+import { ALWAYS_REVIEW_LEGACY_CODES, OWN_NAME_DOC_TYPE, seedDocRegistry } from '../modules/verification/doc-registry';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { wordFreeTag } from './helpers/fixture-ids';
 
@@ -94,7 +94,7 @@ async function owner(firstName: string, lastName: string, storeName: string, ven
   await signupSelfieFixture(app.prisma, user.id);
   const vendorOwner = await runWithTenant('swift-default', () => app.prisma.vendorOwner.create({ data: { userId: user.id, vendors: { create: {
     name: storeName, slug: `own-${RUN.toLowerCase()}-${seq}`, vendorType, phone: `+5928${NUM}9${seq}`, addressLine1: '1 Own Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
-    latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL',
+    latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL', publicPhone: '+5926001234',
   } } }, include: { vendors: true } }));
   const token = app.jwt.sign({ userId: user.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
   await runWithTenant('swift-default', () => app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(24), deviceId: `own-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
@@ -216,5 +216,33 @@ describe('[ROLE-DOCS] the declaration replaces the business registration, checke
       consentAt: new Date(), privacyNoticeVersion: 'v1',
     } }));
     expect((await sign(registered)).json().error.code).toBe('ALREADY_REGISTERED');
+  });
+});
+
+describe('[ROLE-DOCS · security review] only the signed route creates an own-name declaration, and only a person approves it', () => {
+  it('the generic upload route and the generic service path refuse the type, before anything is recorded', async () => {
+    const o = await owner('Ramesh', 'Persaud', 'Persaud');
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { tradesUnderOwnName: true } }));
+    // the checklist names it, so without the guard the generic route would take an uploaded file as the declaration
+    expect((await statusOf(o)).checklist).toContain('own_name_declaration');
+    const res = await call('POST', '/api/v1/verification/documents', o, {
+      role: 'STORE', docType: 'own_name_declaration', fileUrl: await ownedVerificationFixture(app.prisma, o.userId, 'forged-declaration'), consent: true, privacyNoticeVersion: 'v1',
+    });
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('OWN_NAME_SIGNED_ONLY');
+    await expect(service.submitDocument(o.userId, 'STORE', 'own_name_declaration', await ownedVerificationFixture(app.prisma, o.userId, 'forged-2'), 'v1'))
+      .rejects.toMatchObject({ code: 'OWN_NAME_SIGNED_ONLY' });
+    expect(await system(() => app.prisma.verificationDocument.count({ where: { userId: o.userId, docType: 'own_name_declaration' } }))).toBe(0);
+  });
+
+  it('an engine that would approve it automatically never does: the declaration always waits for a person', async () => {
+    const o = await owner('Mark', 'Singh', 'M. Singh');
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { tradesUnderOwnName: true } }));
+    const auto = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
+    const doc = await auto.submitDocument(o.userId, 'STORE', 'own_name_declaration', await ownedVerificationFixture(app.prisma, o.userId, 'auto-approve-own'), 'v1', undefined, { ownNameSigned: true });
+    expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
+    expect(ALWAYS_REVIEW_LEGACY_CODES.has(OWN_NAME_DOC_TYPE)).toBe(true);
+    const row = await system(() => app.prisma.docType.findUniqueOrThrow({ where: { code: 'GY.own_name_declaration' } }));
+    expect(row.alwaysReview).toBe(true);
   });
 });

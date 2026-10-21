@@ -156,6 +156,9 @@ export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set([
   'vehicle_insurance', 'fitness_cert',
   // [TRADES] which council issued a premises certificate, and for which premises, is a person's judgement
   'eating_house_registration',
+  // [ROLE-DOCS · owner 21 Oct 2026 · security review] whether a store's name is its owner's true surname (BNA s.3)
+  // is read from the owner's ID by a person, never by a machine
+  'own_name_declaration',
 ]);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;

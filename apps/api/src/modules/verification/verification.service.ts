@@ -704,7 +704,14 @@ export class VerificationService {
     fileUrl: string,
     privacyNoticeVersion: string,
     authenticatedRole?: string,
+    /** [ROLE-DOCS · security review] Set ONLY by the signed own-name route (vendor.routes POST /onboarding/own-name). */
+    internal: { ownNameSigned?: true } = {},
   ) {
+    // [ROLE-DOCS · owner 21 Oct 2026 · security review] An own-name declaration is the signed words the owner ticked,
+    // filed by its own route — never an uploaded file. Refused before anything is read or recorded.
+    if (docType === OWN_NAME_DOC_TYPE && internal.ownNameSigned !== true) {
+      throw new AppError(400, 'OWN_NAME_SIGNED_ONLY', 'The own-name declaration is signed in the app, under Documents. It cannot be uploaded.');
+    }
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, countryCode: true, avatar: true, selfieCapturedAt: true, status: true, updatedAt: true },
@@ -841,6 +848,9 @@ export class VerificationService {
     // set, a collision, an unvalidated document, or unknown / low confidence.
     const { plan: extraction, type: registryType } = await this.planExtractionFor(user.countryCode, docType, result, { startedAt, finishedAt }, await this.validatorContextFor(userId, docType, authority));
     result = gateAutoApproval(result, extraction, registryType);
+    // [ROLE-DOCS · security review] Fail closed: no engine, auto-approval or auto-rejection decides an own-name
+    // declaration. A person compares the name with the owner's ID (approveDocument requires ownNameConfirmed).
+    if (docType === OWN_NAME_DOC_TYPE && result.status !== 'pending_manual') result = { ...result, status: 'pending_manual' as const };
 
     const autoExpiryDays = AUTO_APPROVE_EXPIRY_DAYS[docType];
     const doc = await this.createDocumentLively({
