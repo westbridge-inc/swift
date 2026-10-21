@@ -10,8 +10,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // [UI-SWEEP U22] The consoles had no offline notice at all.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ probe: vi.fn(), replace: vi.fn() }));
-vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace, push: vi.fn() }), usePathname: () => '/portal' }));
+// One router object for the whole test, as Next's useRouter() is stable across
+// renders (a fresh object per render would re-run every effect that lists it).
+const fx = vi.hoisted(() => {
+  const replace = vi.fn();
+  return { probe: vi.fn(), replace, router: { replace, push: () => {} } };
+});
+vi.mock('next/navigation', () => ({ useRouter: () => fx.router, usePathname: () => '/portal' }));
 vi.mock('@/lib/auth', async (importOriginal) => {
   const real = await importOriginal<typeof import('@/lib/auth')>();
   return { ...real, sessionProbe: fx.probe, setSelectedStore: vi.fn() };
@@ -21,7 +26,9 @@ vi.mock('@/lib/vendor-api', () => ({ getStores: vi.fn(() => new Promise(() => {}
 import { PortalShell } from './portal-shell';
 import { DashboardShell } from '../dashboard/dashboard-shell';
 
-beforeEach(() => { fx.probe.mockReset(); fx.replace.mockReset(); });
+// A browser that has a store chosen, so the store dashboard draws its page once
+// the gate opens (the earner office ignores it).
+beforeEach(() => { fx.probe.mockReset(); fx.replace.mockReset(); localStorage.setItem('swift_web_store', 'store-sample'); });
 
 const shells = [['the earner office', PortalShell], ['the store dashboard', DashboardShell]] as const;
 
@@ -49,12 +56,22 @@ describe('[U22] the consoles say when the browser is offline', () => {
   it('the earner office shows the phone\'s offline words when the connection drops', async () => {
     fx.probe.mockResolvedValue({ ok: true, user: { id: 'u1' } });
     render(<PortalShell><p>console body</p></PortalShell>);
-    await screen.findByText('console body');
-    expect(screen.queryByText('You’re offline.')).toBeNull();
-    act(() => { window.dispatchEvent(new Event('offline')); });
-    expect(await screen.findByText('You’re offline.')).toBeTruthy();
-    expect(screen.getByText('Some things may not load until you’re back online.')).toBeTruthy();
-    act(() => { window.dispatchEvent(new Event('online')); });
-    await waitFor(() => expect(screen.queryByText('You’re offline.')).toBeNull());
+    // The browser's own flag moves with the event, as in a real browser, so the
+    // notice is right whether its listener or its first read sees the change first.
+    let online = true;
+    Object.defineProperty(window.navigator, 'onLine', { configurable: true, get: () => online });
+    try {
+      await screen.findByText('console body');
+      expect(screen.queryByText('You’re offline.')).toBeNull();
+      online = false;
+      act(() => { window.dispatchEvent(new Event('offline')); });
+      expect(await screen.findByText('You’re offline.')).toBeTruthy();
+      expect(screen.getByText('Some things may not load until you’re back online.')).toBeTruthy();
+      online = true;
+      act(() => { window.dispatchEvent(new Event('online')); });
+      await waitFor(() => expect(screen.queryByText('You’re offline.')).toBeNull());
+    } finally {
+      delete (window.navigator as { onLine?: boolean }).onLine;
+    }
   });
 });
