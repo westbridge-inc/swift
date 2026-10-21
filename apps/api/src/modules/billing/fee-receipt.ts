@@ -74,6 +74,8 @@ export interface FeeReceiptDocument {
 }
 
 const day = (at: Date) => formatGuyanaTime(at, { day: 'numeric', month: 'long', year: 'numeric' });
+/** [REVIEW-F #1963 S4-2] A week's ends with their time: billing weeks start at any hour, so dates alone read as 8 days. */
+const dayTime = (at: Date) => formatGuyanaTime(at, { day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
 
 /** The receipt for one receipt number, or null. A caller acting for a tenant
  *  (an admin) passes its scope: a receipt of another tenant, or of a
@@ -116,7 +118,8 @@ export async function feeReceiptDocument(
     `Date: ${day(receipt.issuedAt)}`,
     `Partner: ${partnerName}`,
     ...receiptUsage(receipt.allocations, amount, currencyCode),
-    `Weekly fee: ${formatMoney(amount, currencyCode, { whole: false })}`,
+    // [REVIEW-F #1963 S4-5] The payment's amount, never labelled as the fee's price.
+    `Amount paid: ${formatMoney(amount, currencyCode, { whole: false })}`,
     ...(vat ? [`Price includes VAT at ${Math.round(VAT_RATE * 100)}%: ${formatMoney(included, currencyCode)}`] : [NOT_A_VAT_INVOICE]),
   ];
   return {
@@ -145,15 +148,19 @@ function receiptUsage(
   for (const a of allocations) {
     const c = cents(a.amount);
     used += c;
+    // [REVIEW-F #1963 S4-1/S4-2] The part of THIS payment that went to the week (a week paid from two payments
+    // shows each its own part), between the week's start and end instants. A WEEK row always has both ends
+    // (fee_receipt_allocations_period_check), so S4-4's no-period case cannot occur.
     if (a.kind === 'WEEK' && a.periodStart && a.periodEnd) {
-      out.push(`Week covered: ${day(a.periodStart)} to ${day(new Date(a.periodEnd.getTime() - 1))} (${money(c)})`);
+      out.push(`Week covered: ${dayTime(a.periodStart)} to ${dayTime(a.periodEnd)}: ${money(c)} of this payment`);
     } else if (a.kind === 'RETURNED') {
       returned += c;
     } else {
       setAside += c; // REFUND_SET_ASIDE adds, REFUND_RELEASED (negative) gives back
     }
   }
-  if (returned > 0) out.push(`Returned by MMG: ${money(returned)}`);
+  // [REVIEW-F #1963 S4-3] Says what MMG did, never where the money went.
+  if (returned > 0) out.push(`Payment reversed by MMG: ${money(returned)}`);
   if (setAside > 0) out.push(`Set aside for a refund: ${money(setAside)}`);
   const unused = cents(amount) - used;
   if (unused > 0) out.push(NOT_USED_YET(money(unused)));

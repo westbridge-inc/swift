@@ -32,8 +32,8 @@ let app: FastifyInstance;
 let billing: BillingService;
 let seq = 0;
 
-const day = (at: Date) => at.toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric' });
-const weekLine = (start: Date, amount: string) => `Week covered: ${day(start)} to ${day(new Date(start.getTime() + WEEK - 1))} (${amount})`;
+const dayTime = (at: Date) => at.toLocaleString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
+const weekLine = (start: Date, amount: string) => `Week covered: ${dayTime(start)} to ${dayTime(new Date(start.getTime() + WEEK))}: ${amount} of this payment`;
 
 /** A motorbike delivery rider paying cash, `weeklyRate` a week; the next fee is not due yet. */
 async function makeRider(weeklyRate = 6000) {
@@ -87,7 +87,7 @@ async function topUp(subId: string, amount: number): Promise<string> {
   return receipt.receiptNumber;
 }
 const lines = async (receiptNumber: string) => (await feeReceiptDocument(app.prisma, receiptNumber))!.lines;
-const usage = async (receiptNumber: string) => (await lines(receiptNumber)).filter((l) => /^(Week covered|Not used yet|Returned by MMG|Set aside for a refund|Paid toward)/.test(l));
+const usage = async (receiptNumber: string) => (await lines(receiptNumber)).filter((l) => /^(Week covered|Not used yet|Payment reversed by MMG|Set aside for a refund|Paid toward)/.test(l));
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -132,7 +132,7 @@ describe('[R12] a weekly-fee receipt names the week(s) its money covered', () =>
     expect(await usage(first)).toEqual([PAID_TOWARD]);
     const week1 = await billNextWeek(subId);
     expect(await usage(first)).toEqual([weekLine(week1, 'GY$6,000')]);
-    expect(await lines(first)).toContain('Weekly fee: GY$6,000');
+    expect(await lines(first)).toContain('Amount paid: GY$6,000');
     // The next payment pays the next week, on its own receipt; the first receipt keeps its week.
     const second = await bank(subId, 6000);
     expect(await usage(second)).toEqual([PAID_TOWARD]);
@@ -193,14 +193,14 @@ describe('[R12] a weekly-fee receipt names the week(s) its money covered', () =>
     const returned = await app.prisma.$transaction((tx) => billing.debitWalletForReversalInTx(tx, {
       subscriptionId: subId, amount: 3000, currencyCode: 'GYD', eventKey: `fee-receipt-week-return-${subId}`, note: 'test return', mmgRef: ref('B') }));
     expect('eventId' in returned).toBe(true);
-    expect(await usage(b)).toEqual(['Returned by MMG: GY$3,000']);
+    expect(await usage(b)).toEqual(['Payment reversed by MMG: GY$3,000']);
     expect(await usage(a)).toEqual([PAID_TOWARD]);
     // The 3,000 left is set aside for a refund, then released unpaid (the console's two steps).
     const aside = await setAsideCreditRefund(app.prisma, { adminId: userId, approvalId: `fee-receipt-week-aside-${subId}`, subscriptionId: subId, amount: 3000 });
     expect(await usage(a)).toEqual(['Set aside for a refund: GY$3,000']);
     await releaseCreditRefund(app.prisma, { adminId: userId, approvalId: `fee-receipt-week-release-${subId}`, subscriptionId: subId, amount: 3000, setAsideId: aside.billingEventId });
     expect(await usage(a)).toEqual([NOT_USED_YET('GY$3,000')]);
-    expect(await usage(b)).toEqual(['Returned by MMG: GY$3,000']);
+    expect(await usage(b)).toEqual(['Payment reversed by MMG: GY$3,000']);
   });
 
   it('what a payment paid is never rewritten', async () => {
