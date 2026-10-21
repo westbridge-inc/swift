@@ -630,6 +630,13 @@ backups. Before the first production backup:
    - When the restore is done, shred the decrypted file on BOTH machines
      (`shred -u <file>`, or `rm -P` on a Mac).
 
+   Every restore (drill, rehearsal or DR) also prints
+   `NOT erasure-complete for #1905/#1945 de-identifications`: the replay does not yet re-run the
+   app's own erasure passes, so those de-identifications (updates, not
+   deletes) are not re-applied to the copy. Until the follow-up lands, re-apply
+   them by hand for every closed account before anything from a restored copy
+   is used.
+
 ## 5. Restore drill, with no live overwrite
 
 Take a fresh backup through the unit (it holds the storage keys) and copy the

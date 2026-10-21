@@ -508,6 +508,10 @@ else
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
+# [#1984 COORD ruling 14:11Z] The replay covers documents, keys, receipts, tombstones, the closure's
+# rows and rating text; it does not yet re-run the app's own erasure passes, so the de-identifications
+# #1905 and #1945 add (updates, not deletes) are not replayed. Every restore says so until it does.
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used" | tee /dev/stderr
 if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
