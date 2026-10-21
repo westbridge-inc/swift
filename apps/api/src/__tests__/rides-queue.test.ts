@@ -411,6 +411,11 @@ describe('the scan', () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const queued = await join(c.token);
     expect(queued.statusCode).toBe(201);
+    // [PRICE-LOCK · row 448] The entry keeps the fare at the join; the racing
+    // quote below answers that same fare, so only the race is under test.
+    const kept = Number((await app.prisma.rideQueueEntry.findFirstOrThrow({
+      where: { customerId: c.userId, status: 'WAITING' },
+    })).quotedFare);
 
     // Both callers must finish the real pre-flight active-order read before
     // either can enter creation. This is an arrival barrier, not a sleep: on
@@ -420,7 +425,7 @@ describe('the scan', () => {
       estimateTiers: vi.fn(async () => {
         await atFareBarrier();
         return {
-          tiers: [{ rideClass: 'ECONOMY', fare: 2_000, capacity: 4, source: 'formula' }],
+          tiers: [{ rideClass: 'ECONOMY', fare: kept, capacity: 4, source: 'formula' }],
           currencyCode: 'GYD',
           distanceKm: 4,
           durationMin: 12,
