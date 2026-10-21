@@ -1408,7 +1408,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
-  const res = spawnSync('bash', [join(here, 'restore.sh'), ...(opts.args ?? ['--compare-source']), dump, scratch], {
+  // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
+  const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
     timeout: 120_000,
     env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
