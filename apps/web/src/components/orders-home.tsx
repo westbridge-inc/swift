@@ -24,6 +24,8 @@ import {
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
+import { instantSwitch } from '@/lib/instant-toggle';
+import { confirmedOrderFields } from '@/lib/vendor-order-view';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
@@ -374,8 +376,40 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
   // A store that is not live yet (being reviewed) cannot open: as in the app,
   // the switch is locked and Pause is not offered.
   const inPreview = store.status != null && store.status !== 'ACTIVE';
-  const openMut = useMutation({ mutationFn: () => toggleOpen(!open), onSettled: refresh });
-  const ordersMut = useMutation({ mutationFn: () => toggleOrders(!accepting), onSettled: refresh });
+  // [PERF row 562] Both controls move at the tap (dimmed until the server
+  // answers) and go back, with the server's words, if it refuses. The server
+  // FLIPS what it holds and answers with both flags: that answer is shown at
+  // once. A second tap waits for it, or, if an answer ever carries no flags,
+  // for the re-read (the flip rule above).
+  const profileKey = storeKey(storeId, 'profile');
+  const [unconfirmed, setUnconfirmed] = useState(false);
+  type Flag = 'isCurrentlyOpen' | 'acceptingOrders';
+  type Answer = { data?: { isCurrentlyOpen?: unknown; acceptingOrders?: unknown } } | undefined;
+  const withStore = (data: unknown, change: (_s: HubStore) => HubStore): unknown => {
+    const target = pickProfileStore(data, storeId);
+    const vendors = (data as { vendors?: HubStore[] } | null | undefined)?.vendors;
+    if (!target || !Array.isArray(vendors)) return data;
+    return { ...(data as object), vendors: vendors.map((v) => (v === target ? change(v) : v)) };
+  };
+  const confirmed = (answer: Answer) => typeof answer?.data?.isCurrentlyOpen === 'boolean' && typeof answer.data.acceptingOrders === 'boolean';
+  const flip = (field: Flag) => {
+    const base = instantSwitch<boolean, unknown, Answer>(
+      client, profileKey, (data, next, undo) => withStore(data, (v) => ({ ...v, [field]: undo ? !next : next })),
+      async () => { await refresh(); setUnconfirmed(false); },
+      (data, answer) => (confirmed(answer)
+        ? withStore(data, (v) => ({ ...v, isCurrentlyOpen: answer!.data!.isCurrentlyOpen as boolean, acceptingOrders: answer!.data!.acceptingOrders as boolean }))
+        : data),
+    );
+    return {
+      ...base,
+      onMutate: async (next: boolean) => { setUnconfirmed(true); await base.onMutate(next); },
+      onSuccess: (answer: Answer) => { base.onSuccess(answer); if (confirmed(answer)) setUnconfirmed(false); },
+      onError: (error: unknown, next: boolean) => { base.onError(error, next); setUnconfirmed(false); },
+    };
+  };
+  const openMut = useMutation({ mutationFn: (next: boolean) => toggleOpen(next) as Promise<Answer>, ...flip('isCurrentlyOpen') });
+  const ordersMut = useMutation({ mutationFn: (next: boolean) => toggleOrders(next) as Promise<Answer>, ...flip('acceptingOrders') });
+  const locked = readFailed || unconfirmed || openMut.isPending || ordersMut.isPending;
   const text = (
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-2 font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${open && accepting ? 'bg-[var(--swift-success)]' : 'bg-[var(--swift-muted)]'}`} aria-hidden="true" />
@@ -386,16 +420,15 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
   return (
     <section aria-label="Store status" className="sw-card p-5">
       {manager ? (
-        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || readFailed || openMut.isPending} onClick={() => openMut.mutate()}
+        <button type="button" role="switch" aria-label="Store open to customers" aria-checked={!inPreview && open} disabled={inPreview || locked} onClick={() => openMut.mutate(!open)}
           className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">{text}<Switch on={!inPreview && open} /></button>
       ) : <div className="flex min-h-12 items-center">{text}</div>}
-      {openMut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Store status didn’t update — check your connection and try again.</p>}
       {manager && !inPreview && (
-        <button type="button" disabled={readFailed || ordersMut.isPending} onClick={() => ordersMut.mutate()} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
+        <button type="button" disabled={locked} onClick={() => ordersMut.mutate(!accepting)} className="sw-btn sw-btn-md mt-4 w-full bg-[var(--swift-red-50)] text-[var(--swift-red-600)]">
           {accepting ? 'Pause new orders' : 'Resume orders'}
         </button>
       )}
-      <MutationNotice errors={[ordersMut.error]} className="mt-2" />
+      <MutationNotice errors={[openMut.error, ordersMut.error]} className="mt-2" />
       {manager && readFailed && <ReadFailed onRetry={onRetryRead} />}
     </section>
   );
@@ -451,6 +484,17 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       if (kind === 'ready') return markReady(order.id);
       if (kind === 'complete-appointment') return apiFetch(`/api/v1/vendor/orders/${order.id}/complete-appointment`, { method: 'PUT', body: '{}' });
       throw new Error(`Unknown action ${kind}`);
+    },
+    // [PERF row 562 · #1950] As in the order window: nothing moves before the
+    // server answers (dispatch never shows success early), and its confirmed
+    // answer shows on the card at once instead of after a re-read.
+    onSuccess: (answer) => {
+      const confirmed = confirmedOrderFields(answer, order.id);
+      if (!confirmed) return;
+      client.setQueryData<{ orders: VendorOrder[]; meta: unknown }>(storeKey(storeId, 'orders'), (data) => (data
+        ? { ...data, orders: data.orders.map((o) => (o.id === order.id ? { ...o, ...confirmed } : o)) }
+        : data));
+      client.setQueryData<VendorOrder>(storeKey(storeId, 'order', order.id), (o) => (o ? { ...o, ...confirmed } : o));
     },
     onSettled: refresh,
   });

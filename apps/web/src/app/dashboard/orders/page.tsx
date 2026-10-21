@@ -18,7 +18,7 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
-  customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
+  confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
 } from '@/lib/vendor-order-view';
 import {
   acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, getOrders,
@@ -54,8 +54,6 @@ function statusChip(s: string, paused = false) {
   );
 }
 
-/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
-const CONFIRMED_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt'] as const;
 
 /** Mirrors the mobile app's orderActions — one source of truth for what a
  *  vendor may do in each state (timestamps keep working after a rider claims). */
@@ -282,9 +280,8 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
     // round trip abroad. Only what the server just confirmed is taken from its answer; the page is
     // still re-read. Nothing shows before the answer: dispatch and money never show success early.
     onSuccess: (answer) => {
-      const row = (answer as { data?: Record<string, unknown> } | undefined)?.data;
-      if (!row || row['id'] !== id || typeof row['status'] !== 'string') return;
-      const confirmed = Object.fromEntries(CONFIRMED_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]));
+      const confirmed = confirmedOrderFields(answer, id);
+      if (!confirmed) return;
       // A read already on its way holds the old status: onSettled's re-read cancels it (cancelRefetch).
       queryClient.setQueryData<VendorOrder>(storeKey(storeId, 'order', id), (o) => (o ? { ...o, ...confirmed } : o));
     },

@@ -445,7 +445,7 @@ describe('the order window\'s payment rule matches the card', () => {
     const card = await screen.findByRole('article', { name: 'Order SW-7601' });
     await view.user.click(within(card).getByText('#SW-7601'));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
-    await within(dialog).findByText('Total (MMG)');
+    await within(dialog).findByText('MMG — the customer pays your store’s MMG account.');
     return dialog;
   }
   it('PENDING: the confirmation step, no Accept', async () => {
@@ -496,7 +496,7 @@ describe('no Accept entry point offers an unpaid MMG order', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(screen.queryByText(/View later/)).toBeNull();
     // 2. The order window.
-    await within(dialog).findByText('Total (MMG)');
+    await within(dialog).findByText('MMG — the customer pays your store’s MMG account.');
     expect(within(dialog).queryByRole('button', { name: 'Accept' })).toBeNull();
     expect(within(dialog).getByLabelText('MMG transaction reference')).toBeTruthy();
     // 3. The card.
