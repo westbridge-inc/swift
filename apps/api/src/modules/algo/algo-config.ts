@@ -178,6 +178,17 @@ export const ALGO_DEFAULTS = {
   // only if the founder sets an amount here.
   'rescue.incentiveGyd': 0,
   'rescue.incentiveFromCascade': 2,
+  /**
+   * [OF-33 · COORD ruling 21 Oct 2026] A rider who accepted and never picks
+   * up. Pickup is due at the later of the order's ready time and the rider's
+   * accept + `pickupTravelMinutes`; `pickupNudgeMinutes` past that the rider
+   * gets ONE push ("pick up now or release the order"); `pickupReleaseMinutes`
+   * past it, with no pickup confirmed, the order goes back to dispatch (never
+   * cancelled) and the acceptance counts as a no-show.
+   */
+  'rescue.pickupTravelMinutes': 20,
+  'rescue.pickupNudgeMinutes': 10,
+  'rescue.pickupReleaseMinutes': 20,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

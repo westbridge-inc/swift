@@ -2459,6 +2459,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // cutoff go to a person, cancelled by the system, marking nobody.
         const { sweepFoodAge } = await import('../modules/dispatch/rescue');
         const { NotificationService } = await import('../modules/notification/notification.service');
+        // [OF-33] A rider who accepted and never picks up (GPS alive): one
+        // nudge, then the leg goes back to dispatch as a no-show. Never a cancel.
+        const { sweepPickupOverdue } = await import('../modules/dispatch/pickup-overdue');
+        const overduePickups = await sweepPickupOverdue(
+          { prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) },
+          async (orderId) => { await queues.dispatchQueue.add('dispatch-order', { orderId }, { removeOnComplete: 100, removeOnFail: 50 }); },
+        );
+        if (overduePickups.released.length > 0) ctx.log.warn({ released: overduePickups.released }, 'pickup-overdue: rider no-shows released back to dispatch');
         const aged = await sweepFoodAge({ prisma: ctx.prisma, redis: ctx.redis, io: ctx.io, notifications: new NotificationService(ctx.prisma, ctx.io) });
         if (aged.retired.length > 0) ctx.log.warn({ retired: aged.retired }, 'rescue: orders too old to deliver were cancelled and handed to a person');
         if (dw.recovered.length + dw.flagged.length > 0) {

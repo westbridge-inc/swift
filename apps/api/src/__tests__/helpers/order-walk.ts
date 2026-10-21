@@ -338,12 +338,11 @@ async function checkInvariants(
  *  deletes its line here, and its pinned trace in the test turns red if the
  *  violation is still produced. */
 export function classify(x: Violation, s: Snap): string | null {
-  const noRider = s.riderId == null;
   // OF-01 (riderless never-ready exit + the dispatch notice loop) is FIXED:
   // it is no longer classified, so any recurrence fails the walk.
   if (x.inv === 'REFUND-OVER-CAPTURED' && s.paymentMethod === 'CASH' && s.paymentStatus === 'PENDING') return 'OF-02';
   if (x.inv === 'EXIT' && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(s.status)) return 'OF-12';
-  if (x.inv === 'EXIT' && ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(s.status) && !noRider) return 'OF-33';
+  // OF-33 (an assigned rider who never picks up) is FIXED: no longer classified.
   return null;
 }
 

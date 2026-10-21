@@ -482,6 +482,10 @@ export async function runSweeps(w: WalkWorld): Promise<void> {
     const { recoverStrandedDeliveries } = await import('../../modules/dispatch/delivery-watchdog');
     await recoverStrandedDeliveries(w.app.prisma, w.app.redis, w.app.io, enqueue);
   });
+  await guarded(w, 'stale-movers:pickup-overdue', async () => {
+    const { sweepPickupOverdue } = await import('../../modules/dispatch/pickup-overdue');
+    await sweepPickupOverdue({ prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: notifications() }, enqueue);
+  });
   await guarded(w, 'stale-movers:food-age', async () => {
     const { sweepFoodAge } = await import('../../modules/dispatch/rescue');
     await sweepFoodAge({ prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: notifications() });

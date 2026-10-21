@@ -48,11 +48,6 @@ const PINNED: Array<{ finding: string; inv: string; why: string; trace: Trace }>
     why: 'admin "record refund owed" on a cash order whose cash was never taken records the whole total as owed',
     trace: { riders: 1, actions: [{ a: 'admin.cancel', refund: true }] },
   },
-  {
-    finding: 'OF-33', inv: 'EXIT',
-    why: 'a rider who accepted and then never moves, GPS alive, holds the order forever (food-age reads riderless orders only)',
-    trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'store.preparing' }, { a: 'store.ready' }, { a: 'rider.accept', r: 0 }, { a: 'abandon', ridersOnline: true }] },
-  },
 ];
 
 /** Fixed findings: their old pinned traces must now walk CLEAN (no violation
@@ -62,6 +57,11 @@ const FIXED: Array<{ finding: string; why: string; trace: Trace; ends: string }>
     finding: 'OF-01', ends: 'CANCELLED',
     why: 'a store-accepted order nobody marks ready, with no rider, is told once, then cancelled after the grace — and nobody is told anything twice',
     trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'abandon', ridersOnline: false }] },
+  },
+  {
+    finding: 'OF-33', ends: 'CANCELLED',
+    why: 'a rider who accepted and never moves, GPS alive, is nudged once and then loses the order back to dispatch as a no-show; with no other rider it then ends like any riderless order',
+    trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'store.preparing' }, { a: 'store.ready' }, { a: 'rider.accept', r: 0 }, { a: 'abandon', ridersOnline: true }] },
   },
 ];
 
