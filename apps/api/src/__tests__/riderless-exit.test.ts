@@ -3,7 +3,8 @@ import { nanoid } from 'nanoid';
 import {
   advance, ageWorld, buildWalkWorld, call, castWalk, drainDue, placeCashOrder, releaseWorld, runSweeps, type Cast, type WalkWorld,
 } from './helpers/order-walk-world';
-import { readTooLateToDeliver } from '../modules/dispatch/rescue';
+import { RIDERLESS_TOLD_OUTCOME, readTooLateToDeliver, settleTooOldOrder, sweepFoodAge } from '../modules/dispatch/rescue';
+import { NotificationService, type NotificationPayload } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // [OF-01 / OF-17 · COORD ruling 19 Oct 2026] A riderless order ENDS, and is told
@@ -209,6 +210,83 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
     await advance(w, cast, 30 * MIN, SWEEP);
     const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
     expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ASSIGNED', riderId: r.riderId });
+  }, 300_000);
+});
+
+describe('[OF-01 · REVIEW-G S3-1/S3-2] the grace never hangs on a notice, and money is never told "free" or cancelled away', () => {
+  /** A notification service whose "cancel for free" notice can never be written —
+   *  what send() answers when its row cannot be persisted. */
+  class CutoffNoticeUnwritable extends NotificationService {
+    override async send(payload: NotificationPayload): Promise<string> {
+      if ((payload.data as Record<string, unknown> | undefined)?.['kind'] === 'riderless_cutoff') return '';
+      return super.send(payload);
+    }
+  }
+
+  it('a cutoff notice that can never be written still ends the order one grace later — the grace runs from a durable record', async () => {
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token);
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    const deps = { prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: new CutoffNoticeUnwritable(w.app.prisma, w.app.io) };
+    // Just past the cutoff: the told-at is recorded even though the notice is not.
+    await ageWorld(w, (prep + 46) * MIN);
+    await sweepFoodAge(deps);
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(0);
+    expect(await w.app.prisma.algoDecision.count({ where: { subjectId: id, outcome: RIDERLESS_TOLD_OUTCOME } })).toBe(1);
+    // Inside the grace, ticks re-try the notice and keep one record.
+    await ageWorld(w, 10 * MIN);
+    await sweepFoodAge(deps);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect(await w.app.prisma.algoDecision.count({ where: { subjectId: id, outcome: RIDERLESS_TOLD_OUTCOME } })).toBe(1);
+    // A grace after the record: cancelled, notice or no notice.
+    await ageWorld(w, (RIDERLESS_GRACE_MIN - 10) * MIN + 1_000);
+    await sweepFoodAge(deps);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
+  }, 300_000);
+
+  it('a paid MMG order is never told it can cancel for free: past the cutoff it is held for a person, not cancelled', async () => {
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+    // The state a confirmed MMG payment leaves (set directly: the MMG doors are not what this case is about).
+    await w.app.prisma.order.update({ where: { id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' } });
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    await advance(w, cast, (prep + 45 + RIDERLESS_GRACE_MIN + 10) * MIN, SWEEP);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect(row.status).not.toBe('CANCELLED');
+    expect(row.foodAgeHeldAt).not.toBeNull();
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(0);
+  }, 300_000);
+
+  it('cash a rider took between the sweep’s read and its lock is never cancelled away (the locked re-read, OF-07)', async () => {
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const order = await w.app.prisma.order.create({
+      data: {
+        orderNumber: `WALKP-${nanoid(8)}`, orderType: 'COURIER', customerId: cast.customer.userId,
+        status: 'READY_FOR_PICKUP', fulfillment: 'DELIVERY',
+        pickupAddress: 'Sender', pickupLat: 6.8013, pickupLng: -58.1551, deliveryAddress: 'Receiver', deliveryLat: 6.81, deliveryLng: -58.16,
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 800, totalAmount: 800, paymentMethod: 'CASH', paymentStatus: 'PENDING',
+      },
+    });
+    await w.app.prisma.orderStatusLog.create({ data: { orderId: order.id, status: 'READY_FOR_PICKUP', changedBy: cast.customer.userId, note: 'Parcel booked' } });
+    w.orderIds.add(order.id);
+    // The sweep read it unpaid; then a rider collected the fee (a handback
+    // leaves CAPTURED cash on a riderless parcel) before the cutoff took its lock.
+    const seen = await w.app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
+    await w.app.prisma.order.update({ where: { id: order.id }, data: { paymentStatus: 'CAPTURED' } });
+    const deps = { prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: new NotificationService(w.app.prisma, w.app.io) };
+    const outcome = await settleTooOldOrder(deps, seen as never, 80, 60, new Date(), 'PARCEL');
+    expect(outcome).not.toBe('RETIRED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('READY_FOR_PICKUP');
   }, 300_000);
 });
 
