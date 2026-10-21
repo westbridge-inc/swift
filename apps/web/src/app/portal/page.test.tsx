@@ -38,7 +38,7 @@ describe('portal money presentation', () => {
 // status a raw code. Words are the phone's (EarningsScreen). Synthetic only.
 // ---------------------------------------------------------------------------
 
-function riderHome(opts: { subscription?: Record<string, unknown>; ledger?: unknown; onConfirm?: (request: ApiRequest) => void } = {}) {
+function riderHome(opts: { subscription?: Record<string, unknown>; ledger?: unknown; onConfirm?: (_request: ApiRequest) => void } = {}) {
   return mockApi((request) => {
     const path = request.url.pathname;
     if (request.method === 'POST' && path.startsWith('/api/v1/rider/cash-settlements/')) {

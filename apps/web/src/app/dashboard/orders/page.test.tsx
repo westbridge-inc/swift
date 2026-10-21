@@ -787,7 +787,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
 // ("READY FOR PICKUP"). Synthetic people and places only.
 // ---------------------------------------------------------------------------
 
-function detailHandler(detail: Record<string, unknown>, onPost?: (request: ApiRequest) => unknown) {
+function detailHandler(detail: Record<string, unknown>, onPost?: (_request: ApiRequest) => unknown) {
   return (request: ApiRequest) => {
     if (request.method === 'POST' && onPost) return { body: { success: true, data: onPost(request) } };
     return boardHandler([wireVendorOrder(detail)], wireVendorOrderDetail(detail))(request);
@@ -802,7 +802,7 @@ async function rowAnywhere(user: UserEvent) {
   return rowFor('SW-1001');
 }
 
-async function openWindow(detail: Record<string, unknown>, onPost?: (request: ApiRequest) => unknown) {
+async function openWindow(detail: Record<string, unknown>, onPost?: (_request: ApiRequest) => unknown) {
   mockApi(detailHandler(detail, onPost));
   const rendered = renderWithQuery(<OrdersPage />);
   const row = await rowAnywhere(rendered.user);
