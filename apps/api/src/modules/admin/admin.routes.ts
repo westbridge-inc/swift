@@ -45,7 +45,7 @@ import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
-  fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
+  alreadyOpenMessage, fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
   type ApprovalSnapshotRow,
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
@@ -846,6 +846,13 @@ export async function adminRoutes(app: FastifyInstance) {
           details: { approvalId: outcome.approvalId },
         },
       });
+    }
+    if (outcome.outcome === 'already-open') {
+      // [U06] A second press, or a second admin, asking for an act that is
+      // already waiting: nothing was written, and the earlier ask is named.
+      adminApprovalCounter.labels('already_open', authority.cls).inc();
+      throw new AppError(409, 'APPROVAL_ALREADY_OPEN', alreadyOpenMessage(outcome.status, outcome.askedByYou),
+        { approvalId: outcome.approvalId, approvalStatus: outcome.status, askedByYou: outcome.askedByYou });
     }
     if (outcome.outcome === 'refused') {
       adminApprovalCounter.labels(outcome.code, authority.cls).inc();

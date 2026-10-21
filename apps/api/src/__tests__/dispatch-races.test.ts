@@ -1368,6 +1368,7 @@ describe('[DISPATCH 1/3] after the race: retries, give-backs and the words mover
       [new AppError(409, 'FLOAT_EXCEEDED', 'x'), 'mover-ineligible', true],
       [new AppError(409, 'STACK_INELIGIBLE', 'x'), 'mover-ineligible', true],
       [new AppError(409, 'SELF_OWN_ORDER', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'APP_UPDATE_REQUIRED', 'x'), 'mover-ineligible', true],
       // A database fault or a new code: never charged to a mover.
       [new Error('connection reset'), 'unknown', false],
       [new AppError(500, 'SOMETHING_NEW', 'x'), 'unknown', false],

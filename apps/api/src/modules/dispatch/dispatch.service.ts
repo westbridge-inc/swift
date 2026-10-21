@@ -14,6 +14,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { readOfferItinerary } from '../rides/taxi-stops-read';
+import { taxiStopsAppUpdateRequired } from '../rides/taxi-stop-rules';
 import { offerCardAddresses, type CoarseStop } from './board-privacy';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
@@ -392,6 +393,8 @@ const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['ORDER_NOT_READY', 
 const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'OFFER_TAKEN', 'ORDER_CANCELLED']);
 const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
   'MOVER_INACTIVE', 'CAPACITY_EXCEEDED', 'DRIVER_BUSY', 'FLOAT_EXCEEDED', 'STACK_INELIGIBLE', 'SELF_OWN_ORDER',
+  // [TAXI multi-stop 4/8] this driver's app cannot run a ride's stops; another driver's can.
+  'APP_UPDATE_REQUIRED',
 ]);
 
 export function classifyClaimRefusal(error: unknown): ClaimRefusal {
@@ -1074,6 +1077,10 @@ export class DispatchService {
      *  too (its bulk): the size gates the VEHICLE, this gates the rider's
      *  SERVICE type. Omitted = the historical reading (a size means a parcel). */
     courierWork?: boolean,
+    /** [TAXI multi-stop 4/8] The ride has stops: DRIVER candidates must be
+     *  on an app that declared it can run them (go-online). Omitted = any
+     *  driver, exactly as before. */
+    taxiStops?: boolean,
   ): Promise<DispatchCandidate[]> {
     // Stacking: the RIDER pool's live capacity (AlgoConfig, cached ~30s;
     // clamped 1..3; 1 = historical behaviour and the kill switch).
@@ -1140,6 +1147,7 @@ export class DispatchService {
             -- buses were hidden is never offered a ride.
             AND d."vehicleType"::text = ANY(${hireVehicleTypes()})
             ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
+            ${taxiStops ? Prisma.sql`AND d."taxiStopsCapable" = true` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -1415,7 +1423,7 @@ export class DispatchService {
       // gate always has. The visible half of the rule is checkout, which
       // tells the customer before placing when no such vehicle is near.
       const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;
-      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, requiredSize, order.customerId, order.taxiPassengerCount, searchVersion, order.orderType === 'COURIER');
+      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, requiredSize, order.customerId, order.taxiPassengerCount, searchVersion, order.orderType === 'COURIER', order.taxiStopCount != null);
       this.logLoadGate(order, requiredSize, candidates.length);
 
       const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
@@ -2610,8 +2618,10 @@ export class DispatchService {
         fulfillmentMode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' | null;
         fulfillmentModeVersion: number;
         cancelledBy: string | null;
+        taxiStopCount: number | null;
       }>>`
         SELECT "customerId", "taxiFareTotal", "mmgClaimMismatchAt", "fulfillmentMode"::text AS "fulfillmentMode",
+               "taxiStopCount",
                "fulfillmentModeVersion", "cancelledBy",
                "status"::text AS "status", "holdExpiresAt",
                "paymentMethod"::text AS "paymentMethod",
@@ -2648,9 +2658,14 @@ export class DispatchService {
       // find its User may have waited behind a vehicle change.
       const driverDocuments = pool === 'DRIVER' ? await lockMoverDocuments(tx, moverAuthority.userId, 'DRIVER') : null;
       const currentDriver = pool === 'DRIVER'
-        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true } }) : null;
+        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true, taxiStopsCapable: true } }) : null;
       // [R9] A hire is claimed only with a vehicle a hire may use (never a bus), read under the profile lock.
       if (currentDriver && !isVehicleOffered(currentDriver.vehicleType)) throw hireVehicleRefusal();
+      // [TAXI multi-stop 4/8] A ride with stops is claimed only from an app that
+      // declared it can run them: the board and the offer pool already hide it
+      // from the rest, and this locked read is the barrier (a forged or stale
+      // accept, or an app that went online again without the capability).
+      if (currentDriver && lockedOrder.taxiStopCount != null && !currentDriver.taxiStopsCapable) throw taxiStopsAppUpdateRequired();
       if (driverDocuments) assertMoverDocuments(driverDocuments);
       // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
       // discovery/board filters are conveniences — a 14-passenger GROUP ride

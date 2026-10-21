@@ -1,3 +1,4 @@
+import { accountErasedUnderLock } from '../user/account-closure';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
@@ -2258,6 +2259,10 @@ export class VerificationService {
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
+      // [#1879 S3-3 · REVIEW-G R1] An erased account's stores are projected nothing (no flags, no promotion, no
+      // trial): the person's row is locked after the identity lock (the activation order), so an erasure either
+      // commits first and is seen here, or waits and winds down what this wrote.
+      if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
     const owner = await db.vendorOwner.findUnique({
