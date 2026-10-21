@@ -120,6 +120,11 @@ describe('the iOS privacy manifest names every kind of data the app keeps (build
     expect(entryOf(await loadConfig(), 'Contacts')).toEqual(linkedForTheApp('Contacts'));
   });
 
+  it('declares a driver\'s vehicle details (Other Data Types, linked)', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    expect(entryOf(await loadConfig(), 'OtherDataTypes')).toEqual(linkedForTheApp('OtherDataTypes'));
+  });
+
   it('declares the app-hang reports the crash SDK sends (Performance Data, not linked, not tracking)', async () => {
     vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
     expect(entryOf(await loadConfig(), 'PerformanceData')).toEqual({
@@ -142,7 +147,7 @@ describe('the iOS privacy manifest names every kind of data the app keeps (build
       String(e['NSPrivacyCollectedDataType']).replace('NSPrivacyCollectedDataType', ''),
     );
     expect([...types].sort()).toEqual([
-      'Contacts', 'CrashData', 'CustomerSupport', 'DeviceID', 'EmailAddress', 'Name', 'OtherFinancialInfo',
+      'Contacts', 'CrashData', 'CustomerSupport', 'DeviceID', 'EmailAddress', 'Name', 'OtherDataTypes', 'OtherFinancialInfo',
       'OtherUserContent', 'PerformanceData', 'PhoneNumber', 'PhotosorVideos', 'PhysicalAddress', 'PreciseLocation',
       'PurchaseHistory', 'SensitiveInfo', 'UserID',
     ]);

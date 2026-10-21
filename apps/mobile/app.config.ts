@@ -92,6 +92,9 @@ const privacyManifests = {
     // [BUILD-12] The emergency contacts a person saves for SOS (name + phone),
     // kept on Swift's servers so an alert can reach them.
     collected('Contacts'),
+    // [BUILD-12] A driver's vehicle details (make, model, year, colour,
+    // licence plate) and the document types a partner files.
+    collected('OtherDataTypes'),
     // [L13 item 7] Crash reports: diagnostics only, scrubbed on the phone and
     // carrying no user, so NOT linked to the person (src/lib/crash-scrub.ts).
     {
