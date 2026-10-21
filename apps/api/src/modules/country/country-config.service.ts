@@ -376,10 +376,12 @@ export class CountryConfigService {
  */
 export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
 
-/** The mover lists: the code's lists UNDER the stored ones (a key added in code, such as MOVER_TAXI_EXTRA_OPTIONAL,
- *  exists without a re-seed; an edited stored list still wins), minus the retired keys. */
+/** The mover lists: the stored ones, with the code's OPTIONAL lists under them (a key added in code, such as
+ *  MOVER_TAXI_EXTRA_OPTIONAL, exists without a re-seed; an edited stored list still wins; the REQUIRED lists stay the
+ *  stored ones, exactly as before), minus the retired keys. */
 export function moverListsFrom(stored: unknown): Record<string, string[]> {
-  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  const codeOptional = Object.fromEntries(Object.entries(DEFAULT_DOCUMENT_CHECKLISTS).filter(([key]) => key.endsWith(OPTIONAL_LIST_SUFFIX)));
+  const lists: Record<string, string[]> = { ...codeOptional, ...((stored ?? {}) as Record<string, string[]>) };
   for (const key of RETIRED_LIST_KEYS) delete lists[key];
   return lists;
 }
