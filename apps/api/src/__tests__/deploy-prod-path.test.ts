@@ -1394,7 +1394,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
   psql(source, opts.fixture ?? FIXTURE);
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
-  copyFileSync(join(DEPLOY, 'restore.sh'), join(here, 'restore.sh'));
+  // [#1977] restore.sh replays the erasure ledger with the two SQL files that ship next to it.
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
   const dump = join(tmp, `${id}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
