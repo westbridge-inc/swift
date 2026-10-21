@@ -17,6 +17,19 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { EXPIRABLE_DOC_STATES } from '../modules/verification/expiry-sweep-report';
 
+// The provider heal is a module function: a switchable failure, the real heal otherwise.
+const heal = vi.hoisted(() => ({ fail: false }));
+vi.mock('../modules/services/services.service', async (original) => {
+  const actual = await original<typeof import('../modules/services/services.service')>();
+  return {
+    ...actual,
+    reconcileProviderVerifications: async (...args: Parameters<typeof actual.reconcileProviderVerifications>) => {
+      if (heal.fail) throw new Error('injected provider heal failure');
+      return actual.reconcileProviderVerifications(...args);
+    },
+  };
+});
+
 let app: FastifyInstance;
 let svc: VerificationService;
 const marker = nanoid(6).toLowerCase();
@@ -153,6 +166,7 @@ describe('[Row 209] the daily expiry sweep isolates every row', () => {
     const notices = await sweepNotices(since);
     expect(notices).toHaveLength(1);
     expect(notices[0]!.body).toMatch(/effects_failed=\d+/);
+    expect(notices[0]!.body, 'a follow-up is not retried: the notice says what that can mean').toContain('may still be online or listed');
   });
 
   it('a failed vendor heal never stops the expiry', async () => {
@@ -168,6 +182,21 @@ describe('[Row 209] the daily expiry sweep isolates every row', () => {
     const notices = await sweepNotices(since);
     expect(notices).toHaveLength(1);
     expect(notices[0]!.body).toMatch(/vendor_reconcile=1/);
+  });
+
+  it('a failed provider heal never stops the expiry', async () => {
+    const a = await makeUser('MOVER');
+    const doc = await lapsedDoc(a.id, 'MOVER');
+    const since = new Date();
+    heal.fail = true;
+    try {
+      await expect(svc.expireLapsedDocuments()).resolves.toBeGreaterThanOrEqual(1);
+    } finally { heal.fail = false; }
+    expect(await statusOf(doc.id)).toBe('EXPIRED');
+    const notices = await sweepNotices(since);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.body).toMatch(/provider_reconcile=1/);
+    expect(notices[0]!.body).not.toContain('may still be online');
   });
 
   it('rows that expire cleanly add no failure to the run notice', async () => {
