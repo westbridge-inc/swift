@@ -52,10 +52,10 @@ async function makeUser(roles: UserRole[], tenantId?: string) {
   return { userId: user.id, token, tenantId: user.tenantId };
 }
 
-async function makeOrder(customerId: string, tenantId?: string) {
+async function makeOrder(customerId: string, tenantId?: string, status: 'COMPLETED' | 'RIDE_IN_PROGRESS' = 'COMPLETED') {
   const order = await sys(() => app.prisma.order.create({
     data: {
-      orderNumber: `L10A-${nanoid(8)}`, orderType: 'TAXI', customerId, status: 'COMPLETED' as never, fulfillment: 'DELIVERY',
+      orderNumber: `L10A-${nanoid(8)}`, orderType: 'TAXI', customerId, status, fulfillment: 'DELIVERY',
       pickupAddress: 'A', pickupLat: 6.8, pickupLng: -58.15, deliveryAddress: 'B', deliveryLat: 6.82, deliveryLng: -58.13,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 0, totalAmount: 2000, taxiFareTotal: 2000, paymentMethod: 'CASH',
       ...(tenantId ? { tenantId } : {}),
@@ -272,8 +272,9 @@ describe('[M070] evidence is read only through a parent that still holds', () =>
       driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x', currentLat: 6.81, currentLng: -58.15, lastLocationUpdate: new Date(),
     } }));
     driverIds.push(driver.id);
-    const order = await makeOrder(subjectA.userId);
-    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { driverId: driver.id, status: 'RIDE_IN_PROGRESS' as never } }));
+    // [row 264] Born in progress: a COMPLETED ride never goes back (the database refuses it).
+    const order = await makeOrder(subjectA.userId, undefined, 'RIDE_IN_PROGRESS');
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { driverId: driver.id } }));
     const alert = await makeAlert(subjectA.userId, { orderId: order.id });
     await sys(() => app.prisma.sosAlert.update({ where: { id: alert.id }, data: { status: 'ACTIVE' } }));
     const kase = await sys(() => app.prisma.incidentCase.create({ data: { caseNumber: `INC-${nanoid(8).toUpperCase()}`, severity: 'S1', category: 'HARASSMENT', intake: 'OPS_CREATED', status: 'CLOSED', closedAt: new Date(), subjectUserId: subjectA.userId, sosAlertId: alert.id, summary: 'synthetic', slaAckBy: new Date(), slaDecideBy: new Date() } }));

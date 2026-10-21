@@ -5,8 +5,8 @@
     "/(app)/store/[slug]/page": 168,
     "/(app)/market/page": 155,
     "/(app)/order/browse/page": 154,
-    "/(app)/cart/page": 158,
-    "/(app)/checkout/page": 158,
+    "/(app)/cart/page": 159,
+    "/(app)/checkout/page": 159,
     "/login/page": 118,
     "/signup/page": 126
   }

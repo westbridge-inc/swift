@@ -7,24 +7,10 @@ import { describe, expect, it } from 'vitest';
 import { Prisma } from '@prisma/client';
 import { ACCOUNT_FIELDS, ALSO_COVERED, EXPORT_REGISTER, NOT_A_PERSON, OMIT_REASON_TEXT, OMIT_RULES, WITHHELD, WITHHELD_REASON_TEXT, type OmitReason } from '../modules/user/data-export-register';
 import { EXPORT_NOTICE, OMIT_REASONS_IN_USE } from '../modules/user/data-export';
+import { personLinks } from './helpers/person-links';
 
 const models = Prisma.dmmf.datamodel.models;
 const byName = new Map(models.map((m) => [m.name, m]));
-const PERSON_NAME = /(^|[a-z])([uU]serId|[cC]ustomerId|raterId|rateeId|[cC]reatedBy|reporterId|[sS]enderId|[rR]ecipientId|[aA]ccountId|subjectId|[sS]ubjectUserId|[pP]assengerUserId|[dD]riverUserId|requesterId|actorId|ownerUserId|accessorUserId|counterpartyUserId|setByUserId|[uU]serIds?)$/;
-const PROFILES = ['Rider', 'Driver', 'ServiceProvider'];
-
-/** Every `Model.column` that points at a person: a User relation, a person-named column, or a mover/provider profile. */
-function personLinks(): string[] {
-  const links = new Set<string>();
-  for (const m of models) {
-    if (m.name === 'User') continue;
-    for (const f of m.fields) {
-      if (f.kind === 'object' && (f.type === 'User' || PROFILES.includes(f.type))) for (const c of f.relationFromFields ?? []) links.add(`${m.name}.${c}`);
-      if (f.kind === 'scalar' && f.type === 'String' && (PERSON_NAME.test(f.name) || /^(riderId|driverId|providerId)$/.test(f.name))) links.add(`${m.name}.${f.name}`);
-    }
-  }
-  return [...links].sort();
-}
 
 function ruleReason(name: string) {
   return OMIT_RULES.find(([, re]) => re.test(name))?.[0];

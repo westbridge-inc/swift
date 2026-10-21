@@ -9,8 +9,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
-import { inspectImage, sniffImageType, stripImageMetadataStrict } from '../../utils/images';
-import { AppError } from '../../utils/errors';
+import { cleanStoredPhoto } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 import { assertDurableStorageConfig } from './storage-config';
@@ -59,19 +58,12 @@ export function canReadBounded(storage: StorageProvider): storage is StorageProv
  */
 async function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
   // [Row 108 · fixes a privacy gap on main] What the bytes ARE decides how a photo is handled,
-  // sniffed ONCE here: the declared type never chooses the strip or the size check, so a
-  // mislabelled photo (a renamed file, a PNG sent as image/jpeg) loses its location like any
-  // other. A photo that cannot be cleaned or read is refused, never stored as it came (fail closed).
-  const sniffed = sniffImageType(input.buffer);
-  if (!sniffed) {
-    if (input.mimeType.startsWith('image/')) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-    return input; // not a photo: a PDF, an encrypted envelope, a video
-  }
-  const buffer = stripImageMetadataStrict(input.buffer, sniffed);
-  if (!buffer) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-  // The bytes that are stored, read by the real decoder: the type it finds, the size cap, a plausible size.
-  await inspectImage(buffer, sniffed);
-  return { ...input, buffer, mimeType: sniffed };
+  // sniffed ONCE: the declared type never chooses the strip or the size check, so a mislabelled
+  // photo (a renamed file, a PNG sent as image/jpeg) loses its location like any other. A photo
+  // that cannot be cleaned or read is refused, never stored as it came (fail closed).
+  // [Row 238] The same helper cleans an ID photo before it is sealed, so there is one clean-up.
+  const photo = await cleanStoredPhoto(input.buffer, input.mimeType);
+  return photo ? { ...input, ...photo } : input; // not a photo: a PDF, an encrypted envelope, a video
 }
 
 const DEFAULT_TTL_SECONDS = 300;

@@ -73,8 +73,10 @@ export function CampaignDetailScreen() {
       const owner = requireAuthSessionSnapshot();
       const res = await adsApi.refundPreview(campaign.id, owner);
       requireAuthSessionForPrincipal(owner);
-      const plan = res?.data?.data as { total: number; items: Array<{ kind: string }> };
-      const refundTotal = plan?.total ?? 0;
+      const total = (res?.data?.data as { total?: unknown } | null | undefined)?.total;
+      // An answer without a readable total is a failed preview ("Could not load refund preview"), never "No refund is due".
+      const refundTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0 ? total : null;
+      if (refundTotal === null) throw new Error('refund preview without a readable total');
       Alert.alert(
         'Cancel this campaign?',
         refundTotal > 0

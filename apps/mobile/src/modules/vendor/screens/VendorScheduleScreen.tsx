@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
 import { useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { color, space } from '@swift/ui';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Feather } from '@expo/vector-icons';
 import {
   Card,
@@ -58,6 +59,8 @@ function AppointmentCard({ b }: { b: VendorBooking }) {
 export function VendorScheduleScreen({ navigation }: any) {
   const q = useVendorBookings();
   const exceptionsQ = useVendorBookingExceptions();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([q.refetch(), exceptionsQ.refetch()]));
   const createBlock = useCreateBookingException();
   const deleteBlock = useDeleteBookingException();
   const [dayKey, setDayKey] = useState(() => appointmentDayKey(new Date()));
@@ -109,7 +112,11 @@ export function VendorScheduleScreen({ navigation }: any) {
       ) : q.isError ? (
         <ErrorState message="We couldn't load your schedule. Check your connection and try again." onRetry={() => q.refetch()} />
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+        >
           {dayBlocks.map((e) => (
             <Card
               key={e.id}

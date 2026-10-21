@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { usePreventRemove } from '@react-navigation/native';
 import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
@@ -10,6 +11,7 @@ import * as ImagePicker from 'expo-image-picker';
 import {
   Card,
   Chip,
+  ConfirmDialog,
   IconChip,
   LabeledInput,
   LinkText,
@@ -24,6 +26,7 @@ import {
 import { DAY_LABELS, GUTTER, InlineInput, SubHeader } from '../shared';
 import { vendorApi } from '../../../services/api';
 import { toast } from '../../../kit/toast';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import {
   useVendorProfile,
   useSaveItem,
@@ -339,6 +342,25 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const [mode, setMode] = useState<'AT_BUSINESS' | 'MOBILE' | 'BOTH'>(existingBooking.serviceMode ?? 'AT_BUSINESS');
   const [radiusKm, setRadiusKm] = useState<string>(existingBooking.serviceRadiusKm != null ? String(existingBooking.serviceRadiusKm) : '5');
 
+  // [UI-SWEEP U67] Typed, unsaved changes are never thrown away silently.
+  // Back, a swipe, or a board door to the menu list (navigate + pop) stops on
+  // "Discard your changes?"; Discard lets that same navigation through. A
+  // change is a difference from how the editor opened (a toggle put back is
+  // not one); a saved item, or a read-only preview, leaves without an ask.
+  const formNow = JSON.stringify([
+    name, price, description, categoryId, available, popular, sku, unit, bulk, stock, lowStock,
+    duration, [...days].sort((a, b) => a - b), startTime, endTime, mode, radiusKm,
+  ]);
+  const [formAtOpen] = useState(formNow);
+  const [leaving, setLeaving] = useState(false);
+  const [discardAsk, setDiscardAsk] = useState<{ action: any } | null>(null);
+  const unsaved = !readOnly && !leaving && (formNow !== formAtOpen || localPhoto !== null);
+  usePreventRemove(unsaved, ({ data }) => setDiscardAsk({ action: data.action }));
+  // The ask is lifted (a render) before the saved editor closes itself.
+  useEffect(() => {
+    if (leaving) navigation.goBack();
+  }, [leaving, navigation]);
+
   const priceNum = Number(price);
   const valid =
     name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
@@ -435,7 +457,7 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
       current = requireAuthSessionForPrincipal(owner);
     }
     requireAuthSessionForPrincipal(current);
-    navigation.goBack();
+    setLeaving(true);
   };
 
   return (
@@ -673,6 +695,22 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
           />
         ) : null}
       </PopupCard>
+
+      {/* [UI-SWEEP U67] The ask before typed changes are thrown away. */}
+      <ConfirmDialog
+        open={discardAsk !== null}
+        title="Discard your changes?"
+        body="What you changed on this item is not saved."
+        confirmLabel="Discard"
+        cancelLabel="Keep editing"
+        destructive
+        onConfirm={() => {
+          const ask = discardAsk;
+          setDiscardAsk(null);
+          if (ask) afterDismiss(() => navigation.dispatch(ask.action));
+        }}
+        onClose={() => setDiscardAsk(null)}
+      />
     </Screen>
   );
 }

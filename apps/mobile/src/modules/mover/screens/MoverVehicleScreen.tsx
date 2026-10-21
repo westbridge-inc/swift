@@ -41,7 +41,9 @@ export function MoverVehicleScreen({ navigation }: any) {
               return;
             }
             toast.success('Vehicle changed', 'Add its documents — you can go online once they’re approved.');
-            navigation?.navigate?.('MoverDocuments');
+            // [UI-SWEEP U35] Documents REPLACE the finished vehicle form: Back
+            // goes to Account, never to a form whose change is already made.
+            navigation?.replace?.('MoverDocuments');
           }}
         />
       </ScrollView>

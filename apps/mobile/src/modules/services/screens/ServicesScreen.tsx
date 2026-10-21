@@ -7,6 +7,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
 import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { errorMessage } from '../../../lib/apiError';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
@@ -360,7 +361,8 @@ export function ServicesScreen({ navigation }: any) {
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
             setSentPopup(false);
-            navigation?.navigate?.('ServiceJobs');
+            // [UI-SWEEP U12] My jobs opens after the popup's teardown, never in its tick.
+            afterDismiss(() => navigation?.navigate?.('ServiceJobs'));
           }}
         />
         <PillButton label="Done" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSentPopup(false)} />

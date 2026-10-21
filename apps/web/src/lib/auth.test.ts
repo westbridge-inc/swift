@@ -233,7 +233,24 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
 
     const auth3 = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    expect(await auth3.sessionProbe()).toEqual({ ok: false });
+    // [UI-SWEEP U23] Not signed in, and also not known to be signed out: the console says Swift can't be reached.
+    expect(await auth3.sessionProbe()).toEqual({ ok: false, unreachable: true });
+  });
+
+  it('[UI-SWEEP U23] a server failure while checking is "unreachable", never a sign-out, and keeps the person', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    // [REVIEW-F2 #1968 S4-2 / REVIEW-M S4-1] A timeout (408) or a rate limit (429) says nothing about the session either.
+    for (const status of [500, 502, 503, 408, 429]) {
+      mockApi(() => ({ status, body: { success: false } }));
+      expect(await auth.sessionProbe(), String(status)).toEqual({ ok: false, unreachable: true });
+      expect(auth.getSessionPrincipal(), String(status)).toBe('u1');
+    }
+    // A real "no session" still forgets.
+    mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(auth.getSessionPrincipal()).toBeNull();
   });
 
   it('a 200 that names nobody is not a session — a shape change must not read as signed in', async () => {
