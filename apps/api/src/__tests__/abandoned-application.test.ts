@@ -230,6 +230,31 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect((await docOf(id.id)).purgedAt).toBeNull();
   });
 
+  it('[COORD security review 17:1xZ] a store whose full checklist was approved but is not activated yet is never swept', async () => {
+    const u = await person('VENDOR_OWNER');
+    const checklist = await system(() => (service([u]) as unknown as { checklistFor: (u: string, c: string, r: string) => Promise<string[]> }).checklistFor(u, 'GY', 'RESTAURANT'));
+    expect(checklist.length).toBeGreaterThan(1);
+    const docs = [];
+    for (const t of checklist) docs.push(await doc(u, 'VENDOR_OWNER', 'COMMITTED', 100, t));
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    for (const d of docs) expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
+  it('[REVIEW-M S3-1] one person who cannot be processed is counted and skipped; the people behind them are still swept', async () => {
+    const tag = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
+    const poisoned = await person('RIDER', `r249b${tag}`);
+    await doc(poisoned, 'RIDER', 'REJECTED', 200);
+    const z = await person('RIDER', `r249y${tag}`);
+    await doc(z, 'RIDER', 'REJECTED', 100);
+    const svc = service([poisoned, z]);
+    const step = (svc as unknown as { abandonedApplicationStep: (u: string, n: Date) => Promise<unknown> });
+    const real = step.abandonedApplicationStep.bind(svc);
+    step.abandonedApplicationStep = async (userId, now) => { if (userId === poisoned) throw new Error('synthetic poisoned person'); return real(userId, now); };
+    expect(await system(() => svc.sweepAbandonedApplications(new Date(), 1))).toMatchObject({ noticed: 1, failed: 1 });
+    expect(await notices(z)).toHaveLength(1);
+  });
+
   it('[COORD security review (2)] more than a page of excluded people still lets the person behind them be swept', async () => {
     const tag = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
     const excluded: string[] = [];

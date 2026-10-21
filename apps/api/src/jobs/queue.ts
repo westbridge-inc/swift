@@ -1560,15 +1560,19 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
           ctx.log.error({ err }, 'rejected-document retention scheduling failed; the reaper still runs');
         }
         // [Row 249] Abandoned applications (notice at day 76, documents at day 90 of the applicant's inactivity, never
-        // while anything waits on Swift) and uploads nobody claimed within 30 days. A failure never stops the reaper.
+        // while anything waits on Swift), then uploads nobody claimed within 30 days. Each in its own try: neither
+        // failing stops the other, and neither ever stops the reaper.
         try {
           const abandoned = await verification.sweepAbandonedApplications();
-          const { sweepStaleUnclaimedUploads } = await import('../modules/user/upload-erasure');
-          const { getStorageProvider } = await import('../providers/storage/storage-provider');
-          const uploads = await sweepStaleUnclaimedUploads(ctx.prisma, getStorageProvider(), { log: ctx.log });
-          ctx.log.info({ ...abandoned, uploadsErased: uploads.erased, uploadsHeld: uploads.held, uploadsPending: uploads.pending }, 'abandoned-application and unclaimed-upload sweep');
+          ctx.log.info(abandoned, 'abandoned-application sweep');
         } catch (err) {
-          ctx.log.error({ err }, 'abandoned-application / unclaimed-upload sweep failed; the reaper still runs');
+          ctx.log.error({ err }, 'abandoned-application sweep failed; the reaper still runs');
+        }
+        try {
+          const uploads = await verification.sweepStaleUnclaimedUploads(ctx.log);
+          ctx.log.info(uploads, 'unclaimed-upload sweep');
+        } catch (err) {
+          ctx.log.error({ err }, 'unclaimed-upload sweep failed; the reaper still runs');
         }
         // [DOC-1 §9.2 · P9-2] Reaper FAILURE is an LB-0 alarm the moment it happens — not after two cycles of silence.
         let purged: number;

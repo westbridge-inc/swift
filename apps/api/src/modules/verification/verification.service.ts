@@ -16,7 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, everVerifiedRoles, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -2804,11 +2804,11 @@ export class VerificationService {
    * days after the notice), never while anything of theirs waits on Swift, never for a role they were ever
    * verified for. Daily, before the reaper. One person failing never stops the others.
    */
-  async sweepAbandonedApplications(now = new Date(), page = 500): Promise<{ noticed: number; purged: number }> {
+  async sweepAbandonedApplications(now = new Date(), page = 500): Promise<{ noticed: number; purged: number; failed: number }> {
     // The cheap exclusions are in the query (synthetic, erased, anything waiting on Swift, nothing old enough), and every
     // run walks ALL candidates a page at a time (keyset on userId), so people the per-person checks exclude (a verified
     // role, an AML record) can never fill every page and starve the people behind them (COORD security review).
-    const total = { noticed: 0, purged: 0 };
+    const total = { noticed: 0, purged: 0, failed: 0 };
     for (let after: string | undefined; ;) {
       const people = await this.prisma.verificationDocument.findMany({
         where: {
@@ -2822,15 +2822,47 @@ export class VerificationService {
       if (!people.length) break;
       after = people[people.length - 1]!.userId;
       for (const { userId } of people) {
+        // [REVIEW-M S3-1] One person who cannot be processed (any error) is counted and left for the next run; it
+        // never stops the people behind them. Their documents stay: a failure only ever keeps.
         try {
           const r = await this.abandonedApplicationStep(userId, now);
           total.noticed += r.noticed; total.purged += r.purged;
         } catch (err) {
-          if (!(err instanceof AppError) || err.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw err;
+          total.failed += 1;
+          log().error({ errName: err instanceof Error ? err.name : typeof err, userId }, 'abandoned-application step failed; left for the next run');
         }
       }
     }
     return total;
+  }
+
+  /** [Row 249] The daily unclaimed-upload sweep (user/upload-erasure.ts), on this service's database and storage. */
+  async sweepStaleUnclaimedUploads(log?: Parameters<typeof import('../user/upload-erasure').sweepStaleUnclaimedUploads>[2]['log']) {
+    const { sweepStaleUnclaimedUploads } = await import('../user/upload-erasure');
+    return sweepStaleUnclaimedUploads(this.prisma, getStorageProvider(), { log });
+  }
+
+  /**
+   * [Row 249 · COORD 16:50Z + security review] Was this role's FULL required checklist approved at any time? Every
+   * required type needs a document Swift approved (approved, committed, expired since, or its image purged after review).
+   * Fails toward keeping: no person, an empty checklist or any error reads as complete, so nothing is swept.
+   */
+  private async everCompletedChecklist(userId: string, roleKey: ChecklistRole): Promise<boolean> {
+    try {
+      const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+      if (!user) return true;
+      const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+      if (checklist.length === 0) return true;
+      const roles: UserRole[] = roleKey === 'MOVER' ? [...MOVER_ROLES] : [this.roleKeyToUserRole(roleKey)];
+      const approved = await this.prisma.verificationDocument.findMany({
+        where: { userId, role: { in: roles }, docType: { in: checklist }, ...EVER_APPROVED_WHERE },
+        distinct: ['docType'], select: { docType: true },
+      });
+      const have = new Set(approved.map((d) => d.docType));
+      return checklist.every((t) => have.has(t));
+    } catch {
+      return true;
+    }
   }
 
   private async abandonedApplicationStep(userId: string, now: Date): Promise<{ noticed: number; purged: number }> {
@@ -2849,7 +2881,7 @@ export class VerificationService {
     const lastActivityAt = new Date(last);
     if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
     // The application's documents: partner documents of a role never verified, not held, not an AML record.
-    const verified = await everVerifiedRoles(this.prisma, userId, () => this.isRoleVerified(userId, 'MOVER'));
+    const verified = await everVerifiedRoles(this.prisma, userId, (roleKey) => this.everCompletedChecklist(userId, roleKey));
     const config = await this.countryConfig.getByCode(user.countryCode);
     const candidates = [];
     for (const d of await this.prisma.verificationDocument.findMany({

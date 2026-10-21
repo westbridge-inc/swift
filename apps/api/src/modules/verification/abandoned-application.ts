@@ -1,4 +1,5 @@
 import type { DocState, Prisma, PrismaClient, UserRole } from '@prisma/client';
+import type { ChecklistRole } from './verification.service';
 import { DAY_MS } from './retention-rules';
 
 /**
@@ -61,6 +62,11 @@ export function abandonPurgeDueAt(lastActivityAt: Date, noticeAt: Date): Date {
 
 type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvider' | 'subscription' | 'moverFeeAuthority'>;
 
+/** A document Swift approved at some point (it may since have lapsed, or its image gone). */
+export const EVER_APPROVED_WHERE: Prisma.VerificationDocumentWhereInput = {
+  OR: [{ state: { in: ['AUTO_APPROVED', 'APPROVED', 'COMMITTED', 'EXPIRED'] } }, { status: { in: ['APPROVED', 'EXPIRED'] } }, { imagePurgedAt: { not: null } }],
+};
+
 /** The mover roles: one person's riding and driving are one mover account, so a signal for either counts for all three. */
 export const MOVER_ROLES: readonly UserRole[] = ['RIDER', 'DRIVER', 'MOVER'];
 
@@ -69,13 +75,14 @@ export const MOVER_ROLES: readonly UserRole[] = ['RIDER', 'DRIVER', 'MOVER'];
  * only, never which id a subscription row happens to be keyed on; one approved document alone does NOT count (an
  * incomplete application is swept on the 76/90-day clock).
  *  - Mover (RIDER, DRIVER, MOVER together): the full checklist verified now or ever (documentsVerified / documentsVerifiedAt,
- *    or `moverChecklistComplete` now), a mover fee authority (born on activation), any subscription held by the person's
+ *    or every required document ever approved: `checklistComplete`), a mover fee authority (born on activation), any subscription held by the person's
  *    rider OR driver profile, or ever online in the role (online now, a location or a liveness pass on record, an order
  *    ever assigned).
- *  - Store (VENDOR_OWNER): any store verified now, ever activated (activationValidUntil), or holding a subscription.
- *  - Service provider (CUSTOMER partner documents): verified now, or ever given a job.
+ *  - Store (VENDOR_OWNER): any store verified now, ever activated (activationValidUntil), holding a subscription, or its
+ *    type's full checklist ever approved (waiting on activation or payment is not abandonment).
+ *  - Service provider (CUSTOMER partner documents): verified now, ever given a job, or the provider checklist ever approved.
  */
-export async function everVerifiedRoles(db: Db, userId: string, moverChecklistComplete?: () => Promise<boolean>): Promise<Set<UserRole>> {
+export async function everVerifiedRoles(db: Db, userId: string, checklistComplete?: (roleKey: ChecklistRole) => Promise<boolean>): Promise<Set<UserRole>> {
   const moverSelect = {
     id: true, documentsVerified: true, documentsVerifiedAt: true, isOnline: true, lastLocationUpdate: true,
     lastLivenessPassAt: true, _count: { select: { orders: true } },
@@ -83,7 +90,7 @@ export async function everVerifiedRoles(db: Db, userId: string, moverChecklistCo
   const [rider, driver, owner, provider, feeAuthority] = await Promise.all([
     db.rider.findUnique({ where: { userId }, select: moverSelect }),
     db.driver.findUnique({ where: { userId }, select: moverSelect }),
-    db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, isVerified: true, activationValidUntil: true } } } }),
+    db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true, isVerified: true, activationValidUntil: true } } } }),
     db.serviceProvider.findUnique({ where: { userId }, select: { isVerified: true, _count: { select: { jobs: true } } } }),
     db.moverFeeAuthority.findUnique({ where: { userId }, select: { userId: true } }),
   ]);
@@ -97,10 +104,15 @@ export async function everVerifiedRoles(db: Db, userId: string, moverChecklistCo
   const roles = new Set<UserRole>();
   const verifiedMover = movers.some((p) => p.documentsVerified || p.documentsVerifiedAt);
   const everOnline = movers.some((p) => p.isOnline || p.lastLocationUpdate || p.lastLivenessPassAt || p._count.orders > 0);
-  const mover = verifiedMover || everOnline || !!feeAuthority || moverSubscriptions > 0
-    || (movers.length > 0 && !!moverChecklistComplete && await moverChecklistComplete());
+  // The full checklist approved at any time, per role (verification.service everCompletedChecklist; fails toward keeping).
+  const complete = async (roleKey: ChecklistRole) => !!checklistComplete && await checklistComplete(roleKey);
+  const mover = verifiedMover || everOnline || !!feeAuthority || moverSubscriptions > 0 || await complete('MOVER');
   if (mover) for (const r of MOVER_ROLES) roles.add(r);
-  if (vendorSubscriptions > 0 || owner?.vendors.some((v) => v.isVerified || v.activationValidUntil)) roles.add('VENDOR_OWNER');
-  if (provider && (provider.isVerified || provider._count.jobs > 0)) roles.add('CUSTOMER');
+  let store = vendorSubscriptions > 0 || !!owner?.vendors.some((v) => v.isVerified || v.activationValidUntil);
+  // A store's own type; with no store row yet, every store type (fail toward keeping).
+  const storeTypes: ChecklistRole[] = owner?.vendors.length ? owner.vendors.map((v) => v.vendorType) : ['RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE'];
+  for (const t of storeTypes) if (!store && await complete(t)) store = true;
+  if (store) roles.add('VENDOR_OWNER');
+  if ((provider && (provider.isVerified || provider._count.jobs > 0)) || await complete('SERVICE_PROVIDER')) roles.add('CUSTOMER');
   return roles;
 }
