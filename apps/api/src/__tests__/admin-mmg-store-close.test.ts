@@ -22,6 +22,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
+import { seedSecondApproval } from './helpers/admin-approval';
 import { TERMINAL_ORDER_STATUSES, MOVER_HOLDING_STATUSES } from '../modules/order/order-status';
 import { assertOrderMayProceed } from '../modules/compliance/prohibited-gate';
 import { wordFreeTag } from './helpers/fixture-ids';
@@ -205,7 +206,15 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const cash = await order({ paymentMethod: 'CASH' });
     expect((await close(cash.id, 'ADMIN', 3, await approve(cash.id))).statusCode).toBe(409);
     const o = await order();
-    const a = await approve(o.id), b = await approve(o.id, 'SUPER_ADMIN');
+    const a = await approve(o.id);
+    // [U06] While that ask stands, a second ask for the same close is refused
+    // at the gate (one ask per act), whoever asks...
+    const second = await close(o.id, 'SUPER_ADMIN');
+    expect(second.statusCode, second.body).toBe(409);
+    expect(second.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...so a second independently approved request can only be one written
+    // before that rule. The close's own guard must still let exactly one act.
+    const b = await seedSecondApproval(app, a, { requestedBy: people['SUPER_ADMIN']!.id, approvedBy: people['ADMIN']!.id });
     const results = await Promise.all([close(o.id, 'ADMIN', 3, a), close(o.id, 'SUPER_ADMIN', 3, b)]);
     expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
     expect((await close(o.id, 'ADMIN', 3, await approve(o.id))).statusCode).toBe(409);
