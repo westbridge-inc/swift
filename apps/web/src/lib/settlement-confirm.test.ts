@@ -22,6 +22,7 @@ const vendorApi = read('src/lib/vendor-api.ts');
 const moverApi = read('src/lib/mover-api.ts');
 const storePage = read('src/app/dashboard/settings/page.tsx');
 const riderPage = read('src/app/portal/page.tsx');
+const ledgerView = read('src/lib/cash-settlement-view.ts');
 
 describe('[W-26] the confirmation carries its amount', () => {
   it('both clients send an amount, and neither posts an empty body', () => {
@@ -46,7 +47,9 @@ describe('[W-26] neither side closes a debt in one click', () => {
       expect(page, who).toMatch(/setPending\(id\)/);
       expect(page, who).toMatch(/pending === id \?/);
       // the confirming press is the only one that mutates
-      expect(page, who).toMatch(/confirm\.mutate\(\{ id, amount: String\(r\['amount'\] \?\? ''\) \}\)/);
+      // [UI-SWEEP U66] The figure sent is the ledger's own, exactly as the server wrote it.
+      expect(page, who).toMatch(/confirm\.mutate\(\{ id, amount: r\.rawAmount \}\)/);
+      expect(ledgerView).toMatch(/rawAmount: String\(r\['amount'\] \?\? ''\)/);
       // the old shape: the visible button fired the mutation directly
       expect(page, who).not.toMatch(/onClick=\{\(\) => confirm\.mutate\(id\)\}/);
     });
@@ -59,7 +62,8 @@ describe('[W-26] neither side closes a debt in one click', () => {
 
     it(`the ${who}'s armed row can be backed out of`, () => {
       expect(page, who).toMatch(/onClick=\{\(\) => setPending\(null\)\}/);
-      expect(page, who).toMatch(/Cancel/);
+      // [UI-SWEEP U47] The phone's word for backing out.
+      expect(page, who).toMatch(/Not yet/);
     });
   }
 });

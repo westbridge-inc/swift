@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { Bell, LogOut, Menu, RefreshCw, X, type LucideIcon } from 'lucide-react';
 import { SignOutButton } from '@/components/sign-out-button';
 import { Avatar, SwitchAppSheet, type ShellPerson } from '@/components/customer-shell';
+import { OfflineNotice } from '@/components/offline-notice';
 import { SwiftLogo } from '@/components/swift-logo';
 
 export type ConsoleNavItem = { href: string; label: string; icon: LucideIcon; exact: boolean; dock?: boolean };
@@ -72,7 +73,11 @@ export function ConsoleShell({ children, home, title, description, navigation, s
           {navigationContent(true)}
         </div>
       </div>}
-      <main key={contentKey} id="main" tabIndex={-1} className="sw-page sw-partner pb-6">{children}</main>
+      <main key={contentKey} id="main" tabIndex={-1} className="sw-page sw-partner pb-6">
+        {/* [UI-SWEEP U22] The consoles had no offline notice: the phone's words. */}
+        <OfflineNotice body="Some things may not load until you’re back online." />
+        {children}
+      </main>
       <footer className="sw-caption px-6 pb-[calc(88px_+_env(safe-area-inset-bottom))] pt-6 wide:px-10 wide:pb-8">Prices in GYD</footer>
     </div>
     <nav aria-label={`${title} tabs`} className="fixed inset-x-0 bottom-0 z-40 border-t border-[var(--swift-border)] bg-[var(--swift-card)] pb-[env(safe-area-inset-bottom)] wide:hidden">

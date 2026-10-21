@@ -4,6 +4,8 @@ import OrderDetailSkeleton from './loading';
 
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+// [UI-SWEEP U14] Cancellation codes read through the one shared plain-words map.
+import { cancellationReasonWords, ORDER_CANCELLED_WORDS } from '@swift/types';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   Banknote,
@@ -16,7 +18,7 @@ import {
   Star,
   Truck,
 } from 'lucide-react';
-import { Suspense, lazy, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { money } from '@/lib/customer';
 import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
 import { validPoint } from '@/lib/live-tracking';
@@ -26,10 +28,11 @@ import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type Sw
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [Row 117] A taxi ride's code, driver position and SOS — only while the server
 // says web booking is on; its code (and the map's) loads only for such a ride.
-const TaxiTripSafety = lazy(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
+const TaxiTripSafety = lazyRetry(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -534,7 +537,7 @@ export default function OrderDetailPage() {
           <p className={styles.eyebrow}>{vendorName} · {order.orderNumber}</p>
           <h1 ref={statusHeadingRef} tabIndex={-1} id="order-status-heading" className={styles.title}>{statusHeading(order)}</h1>
           <p className={styles.updateNote}>
-            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
+            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? cancellationReasonWords(order.cancellationReason, 'customer') ?? (cancelled ? ORDER_CANCELLED_WORDS : 'This order is closed.') : 'This page checks Swift for updates every few seconds.'}
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>

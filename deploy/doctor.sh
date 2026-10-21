@@ -273,6 +273,23 @@ elif [ "$(env_line PILOT_ENV)" = production ] && command -v docker >/dev/null 2>
   fi
 fi
 
+# [item 20] The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is switched
+# separately, after its own staging journey run — never with Phase C. Until
+# then deploy/.env names no OWNER_RLS_BIND and no role is a member of
+# swift_owner_wall: either half alone makes the API refuse to boot or every
+# owner-walled read come back empty. Read-only; a count, never a name.
+if [ -n "$(env_line OWNER_RLS_BIND)" ]; then
+  bad "deploy/.env sets OWNER_RLS_BIND: the owner wall is switched separately, after its own staging journey run (not with Phase C); remove the line"
+fi
+if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q postgres 2>/dev/null || true)" ]; then
+  OWNER_WALL_MEMBERS="$(db_query "SELECT count(*) FROM pg_auth_members m JOIN pg_roles w ON w.oid = m.roleid WHERE w.rolname = 'swift_owner_wall';" 2>/dev/null || true)"
+  case "$OWNER_WALL_MEMBERS" in
+    "") ;;
+    0) ok "no database role is a member of swift_owner_wall (the owner wall stays off)" ;;
+    *) bad "$OWNER_WALL_MEMBERS database role(s) are members of swift_owner_wall: the owner wall is switched separately, after its own staging journey run; revoke the grant before any deploy" ;;
+  esac
+fi
+
 # ── 5. The disk — the quietest killer on this machine's record ──────────────
 DISK=$(df -h / 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')
 if [ -n "${DISK:-}" ]; then

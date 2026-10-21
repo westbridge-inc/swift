@@ -7,7 +7,9 @@ vi.mock('react', async (original) => {
   const actual = await original<any>();
   return { ...actual, useMemo: (fn: () => unknown) => fn() };
 });
-vi.mock('react-native', () => ({ Platform: fx.platform, View: 'View', ScrollView: 'ScrollView', FlatList: 'FlatList' }));
+vi.mock('react-native', () => ({ Platform: fx.platform, View: 'View', ScrollView: 'ScrollView', FlatList: 'FlatList', RefreshControl: 'RefreshControl' }));
+// [UI-SWEEP U33] The chat list's pull to refresh (the hook is proven in hooks/usePullToRefresh tests).
+vi.mock('../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false, onRefresh: async () => {} }) }));
 vi.mock('expo-image', () => ({ Image: 'Image' }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: fx.navigate }) }));

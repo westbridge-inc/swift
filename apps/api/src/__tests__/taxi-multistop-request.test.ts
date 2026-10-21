@@ -69,7 +69,7 @@ const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","o
 const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
 const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'cashMath'];
 const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
-const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence'];
+const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence', 'stopWait'];
 
 let app: FastifyInstance;
 let osrmApp: FastifyInstance;
@@ -124,6 +124,9 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       isOnline: true, isAvailable: true, locationSessionId: u.sessionId,
       currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date(),
       averageRating: 4.9, acceptanceRate: 90,
+      // [TAXI multi-stop 4/8] This suite's drivers run an app that declared it can
+      // run stops (go-online): a ride with stops goes only to such an app.
+      taxiStopsCapable: true,
     } as never,
   }));
   // [#1405] Taking work re-checks the driver's current approved documents,

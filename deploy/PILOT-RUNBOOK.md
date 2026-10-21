@@ -1328,8 +1328,15 @@ The rehearsal, before the owner's go for Phase C, on the production host, as
 the deploy user, once `./deploy/pilot-up.sh --data-only "$APPROVED_SHA"` has
 built the API image and with production's database running:
 
+    ./deploy/wall/phase-c.sh preflight "$APPROVED_SHA"   # read-only; start the stack first: a stopped API holds on /health
+    ./deploy/wall/phase-c.sh snapshot  "$APPROVED_SHA"   # the BEFORE record of the live containers (one 0600 file in $HOME)
     ./deploy/wall/rehearsal.sh up "$APPROVED_SHA"
     ./deploy/wall/rehearsal.sh down     # removes only the rehearsal: its project, volumes, store and secrets
+    ./deploy/wall/phase-c.sh proof     "$APPROVED_SHA"   # nothing left over, the live stack unchanged
+
+and after the switch, `./deploy/wall/phase-c.sh verify "$APPROVED_SHA"` (the contract posture, the
+roles, both boot lines, /health). Every step ends `PHASE-C <STEP> OK` or `HOLD: <n> check(s)`; a
+HOLD stops Phase C.
 
 `up` builds an isolated copy under its own Compose project (`swift-rehearsal`,
 `deploy/docker-compose.rehearsal.yml`): an internal network with no route out,

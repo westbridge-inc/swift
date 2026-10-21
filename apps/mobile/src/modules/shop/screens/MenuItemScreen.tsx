@@ -15,8 +15,10 @@ import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppoin
 import {
   Photo,
   Chip,
+  EmptyState,
   CircleChip,
   ErrorState,
+  Header,
   IconChip,
   LabeledInput,
   LoadingBlock,
@@ -191,14 +193,33 @@ export function MenuItemScreen() {
     onAdd();
   }, [route.params?.addAfterSignIn, isAuthenticated, item, vendor.isLoading, vendor.isError, outOfStock, requiredUnmet, addToCart.isPending, selected, groups, isBooking, slot, daySlots, slotsQ.isError, slotsQ.isPending, navigation, onAdd]);
 
-  if (vendor.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (vendor.isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
   if (vendor.isError || !item) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
-        <ErrorState
-          onRetry={() => vendor.refetch()}
-          message={!item && !vendor.isError ? 'This item is no longer on the menu.' : undefined}
-        />
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        {vendor.isError ? (
+          <ErrorState onRetry={() => vendor.refetch()} />
+        ) : (
+          // The store answered and the item is gone: Retry cannot bring it back.
+          <EmptyState
+            icon="slash"
+            title="This item is no longer on the menu."
+            body="The store took it off. Pick something else from its menu."
+            // [#1915 review S4-1] Opened from Home, Market or Search, Back does not lead to the store.
+            actionLabel="Go back"
+            onAction={() => navigation.goBack()}
+          />
+        )}
       </View>
     );
   }
