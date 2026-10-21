@@ -7,7 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { ADS_TEAM_INVITES_PER_DAY, ADS_TEAM_INVITE_DAYS } from '../modules/ads/advertiser.service';
+import { ADS_TEAM_INVITES_PER_DAY, ADS_TEAM_INVITE_DAYS, AdvertiserService } from '../modules/ads/advertiser.service';
 import { closesByRequest } from '../modules/user/account.service';
 
 // ---------------------------------------------------------------------------
@@ -117,7 +117,7 @@ describe('an advertiser team grows by invitation and acceptance, never by a type
     expect(mine.statusCode).toBe(200);
     expect(mine.json().data).toEqual([expect.objectContaining({ advertiserId: a.id, companyName: a.companyName, role: 'ANALYST' })]);
     const notified = await app.prisma.notification.findMany({ where: { userId: invitee.userId } });
-    expect(notified.some((n) => (n.data as { kind?: string } | null)?.kind === 'advertiser_team_invite')).toBe(true);
+    expect(notified.some((n) => (n.data as { kind?: string } | null)?.kind === 'ad_team_invite')).toBe(true);
 
     const accepted = await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, invitee.token);
     expect(accepted.statusCode).toBe(200);
@@ -178,6 +178,16 @@ describe('an advertiser team grows by invitation and acceptance, never by a type
     expect(fresh!.acceptedAt).toBeNull();
     expect(Date.now() - fresh!.createdAt.getTime()).toBeLessThan(60_000);
     expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, invitee.token)).statusCode).toBe(200);
+  });
+
+  it('the lifecycle tick deletes an expired invitation (it holds the person\'s id); a live one and a member stay', async () => {
+    const owner = await makeUser(); const stale = await makeUser(); const fresh = await makeUser();
+    const a = await seedAdvertiser(owner.userId);
+    await invite(a.id, stale.phone, owner.token); await invite(a.id, fresh.phone, owner.token);
+    await app.prisma.advertiserMember.updateMany({ where: { advertiserId: a.id, userId: stale.userId }, data: { createdAt: new Date(Date.now() - (ADS_TEAM_INVITE_DAYS + 1) * 86_400_000) } });
+    expect(await new AdvertiserService(app.prisma, app.io).purgeExpiredTeamInvites()).toBeGreaterThanOrEqual(1);
+    const left = await app.prisma.advertiserMember.findMany({ where: { advertiserId: a.id }, select: { userId: true } });
+    expect(left.map((r) => r.userId).sort()).toEqual([owner.userId, fresh.userId].sort());
   });
 
   it('only the OWNER invites', async () => {

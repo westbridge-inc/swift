@@ -6141,7 +6141,8 @@ model AdvertiserMember {
   role         AdvertiserMemberRole @default(OWNER)
   createdAt    DateTime             @default(now())
   /// [ads security] null = an open invitation the person has not accepted: no access, never named.
-  acceptedAt   DateTime?            @default(now())
+  /// No default (fail closed): a row written without an acceptance is an invitation, never a member.
+  acceptedAt   DateTime?
   advertiser   Advertiser           @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
 
   @@id([advertiserId, userId])
