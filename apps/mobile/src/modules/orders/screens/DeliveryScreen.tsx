@@ -27,7 +27,7 @@ import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payL
 import { toast } from '../../../kit/toast';
 import { copyText } from '../../../lib/clipboard';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
-import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, Header, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
@@ -678,7 +678,15 @@ export function DeliveryScreen() {
     prevStatusRef.current = status;
   }, [isFocused, o?.status, o?.fulfillment]);
 
-  if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (order.isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
   // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
   // On a slow line a background refresh (the 15 s poll, a reconnect) can time
   // out; that used to swap the whole order, and the Cancel button under the
@@ -687,6 +695,8 @@ export function DeliveryScreen() {
   if (!o) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => order.refetch()} />
       </View>
     );

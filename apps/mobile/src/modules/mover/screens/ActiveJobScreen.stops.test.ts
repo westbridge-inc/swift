@@ -33,7 +33,7 @@ describe('the singular case is the old code path', () => {
   it('the legs query exists only for riders — taxi is one-at-a-time by law', () => {
     const legs = HOOK.slice(HOOK.indexOf('export function useActiveJobs('), HOOK.indexOf('export function useGoOnline('));
     expect(legs).toContain("const stacked = kind === 'RIDER' && !pv;");
-    expect(legs).toContain('enabled: stacked,');
+    expect(legs).toContain('enabled: stacked && onJob,');
     expect(legs).toContain("queryKey: ['mover', 'active', kind, 'legs'],");
   });
 });

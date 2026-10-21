@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
@@ -80,7 +81,8 @@ export async function drainHandoverNotices(
           // required only where a device could actually receive it.
           const customer = await deps.prisma.user.findFirst({ where: { id: payload['customerUserId'] as string, tenantId: row.tenantId }, select: { notificationPrefs: true } });
           const pushOn = (customer?.notificationPrefs as { push?: unknown } | null)?.push !== false;
-          const devices = pushOn ? await deps.prisma.deviceToken.count({ where: { userId: payload['customerUserId'] as string, isActive: true } }) : 0;
+          // [item 20] The customer's devices, counted by a job: the named capability under the owner wall.
+          const devices = pushOn ? await ownerWallSystem('handover:customer-push-devices', () => deps.prisma.deviceToken.count({ where: { userId: payload['customerUserId'] as string, isActive: true } })) : 0;
           return deps.notifications.publishPersisted(notice.id, { requirePush: devices > 0 });
         });
       }

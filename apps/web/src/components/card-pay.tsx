@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { CreditCard } from 'lucide-react';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { BROWSER_API_ORIGIN } from '@/lib/browser-api-origin';
@@ -9,9 +9,10 @@ import {
   CARD_CONSENT_VERSION, CARD_IDLE, CARD_TEST_LABEL, CardCheckoutSession, cardExpiry, cardLabel, cardMoney, cardPageReopenable, cardPaymentPending,
   cardRemovedWords, cardSessionOf, cardSessionTone, cardSessionWords, cardSpoken, type CardCheckoutView, type CardFamily, type CardPointer, type LiveCard,
 } from '@/lib/card-fee';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [CARD embed] Loaded only when a card page opens inside the page: no weight on the page otherwise.
-const CardPageFrame = lazy(() => import('./card-page-frame'));
+const CardPageFrame = lazyRetry(() => import('./card-page-frame'));
 
 // This tab's last card session: its id and its tap's key, never the page address. The
 // checkout-attempt prefix is the one auth.ts clears on every sign-in, sign-out and account change.

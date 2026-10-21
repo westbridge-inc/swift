@@ -27,6 +27,7 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
+import { batchClock } from '../../utils/batch-clock';
 import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
@@ -391,7 +392,12 @@ export class BillingService {
   }
 
   /** Bill everything due. One subscription's failure never kills the batch. */
-  async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
+  async runBillingCycle(at?: Date): Promise<BillingCycleResult> {
+    // [REVIEW-M #1832 S3-1] Each subscription is billed at the time it is really billed
+    // (utils/batch-clock.ts), never at the run's start instant; a caller standing at a
+    // chosen instant (`at`: a test, a replay) gets exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
@@ -429,7 +435,7 @@ export class BillingService {
     for (const sub of due) {
       result.processed += 1;
       try {
-        const outcome = await this.billSubscription(sub as SubWithRelations, now, usd);
+        const outcome = await this.billSubscription(sub as SubWithRelations, clock(), usd);
         result[outcome] += 1;
       } catch {
         // Partial failure mid-batch: record and continue
@@ -3303,8 +3309,9 @@ export class BillingService {
    * jittered), stamped BEFORE the provider call so a crash can't hot-loop.
    */
   async pollPendingMmgCharges(
-    now = new Date(),
+    at?: Date,
   ): Promise<{ settled: number; banked: number; adopted: number; failed: number; stillPending: number }> {
+    const now = at ?? new Date();
     const candidates = await this.prisma.subscriptionPayment.findMany({
       where: { status: { in: ['PENDING', 'UNKNOWN'] }, paymentMethod: 'MOBILE_MONEY' },
       orderBy: { lastPolledAt: { sort: 'asc', nulls: 'first' } },
@@ -3325,7 +3332,11 @@ export class BillingService {
     }
 
     const mmg = getMmgProvider();
+    // [REVIEW-M #1832 S3-1] Up to 200 network-bound items: each is looked up, expired and settled at
+    // the time it is really processed, never at the run's start instant (a chosen `at` stays exact).
+    const clock = batchClock(at);
     for (const payment of pending) {
+      const itemNow = clock();
       const sub = await this.prisma.subscription.findUnique({
         where: { id: payment.subscriptionId },
         include: {
@@ -3339,7 +3350,9 @@ export class BillingService {
       const ttlAt = payment.expiresAt ?? new Date(payment.createdAt.getTime() + MMG_REQUEST_TTL_MS);
 
       // Stamp the poll clock FIRST — a crash mid-item degrades to a slower
-      // retry, never a hot loop against the provider.
+      // retry, never a hot loop against the provider. (The backoff stamp keeps
+      // the run's start: the due filter above read it, and an earlier stamp
+      // only ever means a sooner retry.)
       await this.prisma.subscriptionPayment
         .updateMany({ where: { id: payment.id }, data: { lastPolledAt: now, pollBackoffSec: jitter(nextBackoff(payment.pollBackoffSec)) } })
         .catch(() => {});
@@ -3354,7 +3367,7 @@ export class BillingService {
             // contradict it. Both the observation and ID adoption serialize
             // with payer, subscription and payment authority.
             if (match.status === 'approved') {
-              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, now);
+              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, itemNow);
               if (observed === 'adopted') out.adopted += 1;
               else out.stillPending += 1;
             } else if (await this.adoptMmgHistoryId(sub as SubWithRelations, payment.id, match)) {
@@ -3366,7 +3379,7 @@ export class BillingService {
           out.stillPending += 1; // provider unreachable — UNKNOWN stays UNKNOWN [LAW M-5]
           continue;
         }
-        if (now >= ttlAt) {
+        if (itemNow >= ttlAt) {
           // A never-authorized reservation may expire. A dispatched request
           // remains UNKNOWN: an empty history page is not proof of absence.
           // [M-04] Terminal status and dunning outcome land in ONE transaction,
@@ -3375,7 +3388,7 @@ export class BillingService {
           try {
             const outcome = await this.terminalizeFailedPayment(
               sub as SubWithRelations, payment, { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'], providerAbsenceOnly: true },
-              'MMG request lost in transit — never confirmed at MMG', now, periodKey,
+              'MMG request lost in transit — never confirmed at MMG', itemNow, periodKey,
             );
             if (!outcome) { out.stillPending += 1; continue; }
             out.failed += 1;
@@ -3388,7 +3401,7 @@ export class BillingService {
         continue;
       }
 
-      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, now);
+      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, itemNow);
       if (!lookupSource?.externalRef) { out.stillPending += 1; continue; }
       let lookup: MmgTransaction;
       try {
@@ -3398,7 +3411,7 @@ export class BillingService {
         continue;
       }
       const status = lookup.status;
-      const expired = status === 'expired' || (status === 'pending' && now.getTime() >= ttlAt.getTime());
+      const expired = status === 'expired' || (status === 'pending' && itemNow.getTime() >= ttlAt.getTime());
 
       // SWIFT-AUD-D2-04, completed: settle is single-winner AND atomic. The
       // CAS claim now lives INSIDE the same transaction as the period advance
@@ -3410,7 +3423,7 @@ export class BillingService {
             sub as SubWithRelations,
             payment.id,
             lookup,
-            now,
+            itemNow,
           );
           if (result === 'lost') continue;
           if (result === 'held') {
@@ -3427,7 +3440,7 @@ export class BillingService {
           const outcome = await this.terminalizeFailedPayment(
             sub as SubWithRelations, payment,
             { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'], providerAbsenceOnly: status === 'pending', mmgLookup: this.mmgLookupObservation(lookupSource, lookup) },
-            `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey,
+            `MMG request ${expired ? 'expired unapproved' : status}`, itemNow, periodKey,
           );
           if (!outcome) { out.stillPending += 1; continue; }
           out.failed += 1;
