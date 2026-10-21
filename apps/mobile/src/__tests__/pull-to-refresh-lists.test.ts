@@ -16,6 +16,8 @@ const LISTS: Array<{ file: string; paged?: string }> = [
   { file: 'modules/mover/screens/EarningsScreen.tsx' },
   { file: 'modules/mover/screens/ClaimsScreen.tsx' },
   { file: 'modules/vendor/screens/VendorScheduleScreen.tsx' },
+  { file: 'modules/chat/screens/ChatListScreen.tsx' },
+  { file: 'modules/profile/screens/NotificationsScreen.tsx' },
   { file: 'modules/mover/screens/JobHistoryScreen.tsx', paged: "queryKey: ['mover', 'history', kind]" },
   { file: 'modules/vendor/screens/VendorOrderHistoryScreen.tsx', paged: "queryKey: ['vendor', 'orders', 'history']" },
 ];

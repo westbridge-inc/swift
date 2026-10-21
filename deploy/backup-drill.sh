@@ -36,6 +36,8 @@ SSH_KEY="${2:-}"
 OBJECT="${3:-}"
 SCRATCH="${4:-swift_drill_$(date -u +%Y%m%d%H%M%S)}"
 REMOTE_DIR="${SWIFT_REMOTE_DIR:-/opt/swift}"
+# [#1977 · copy run #5c] restore.sh never guesses which Compose stack it restores into; neither does the drill.
+PROJECT="${SWIFT_RESTORE_PROJECT:-}"
 
 [[ "$TARGET" =~ ^[a-z_][a-z0-9_-]*@[A-Za-z0-9.:-]+$ ]] || die "pass the host as user@host (the deploy user)"
 [ -n "$SSH_KEY" ] && [ -r "$SSH_KEY" ] || die "pass the SSH key file for that host"
@@ -44,6 +46,8 @@ REMOTE_DIR="${SWIFT_REMOTE_DIR:-/opt/swift}"
   die "pass the encrypted off-site object: s3://<bucket>/<prefix>/swift-<stamp>.dump.gpg"
 [[ "$SCRATCH" =~ ^[a-z][a-z0-9_]{0,62}$ ]] || die "the scratch database name must be a lowercase SQL identifier"
 [[ "$REMOTE_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "SWIFT_REMOTE_DIR must be an absolute path"
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] ||
+  die "set SWIFT_RESTORE_PROJECT to the Compose project that holds the host's Postgres (live is 'swift')"
 for tool in ssh gpg; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required on this computer"; done
 
 GNUPGHOME="$(mktemp -d)"
@@ -102,7 +106,7 @@ REMOTE_FETCH="sudo -n systemd-run --pipe --wait --collect --quiet --uid=swift-de
 -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
 -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
 $REMOTE_DIR/deploy/restore.sh --fetch-encrypted '$OBJECT'"
-REMOTE_RESTORE="cd $REMOTE_DIR && ./deploy/restore.sh --compare-source - '$SCRATCH'"
+REMOTE_RESTORE="cd $REMOTE_DIR && ./deploy/restore.sh --project '$PROJECT' --compare-source - '$SCRATCH'"
 SSH=(ssh -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes "$TARGET")
 # The fetch never reads this terminal (-n): only the restore reads, from the pipe.
 SSH_FETCH=(ssh -n -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes "$TARGET")
