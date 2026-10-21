@@ -399,6 +399,49 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
 // no money record, no rider float, no dispatch and no earning.
 // ---------------------------------------------------------------------------
 describe('[PAYMENT-SIMPLIFY · Q1 boundary] accepting an unpaid MMG order moves nothing else', () => {
+  // [#1848 follow-up · REVIEW-M S4-1] "Get a rider instead" (the fulfillment-mode switch) arms no dispatch either
+  // while the MMG payment is unconfirmed — like acceptance; "Paid by MMG" arms it.
+  it('the "get a rider instead" switch arms no dispatch on an unpaid MMG order', async () => {
+    const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
+    try {
+      const placed = await numberOrder();
+      expect((await accept(placed.order.id)).statusCode).toBe(200);
+      arm.mockClear();
+      const toRider = await call('PUT', `/api/v1/vendor/orders/${placed.order.id}/fulfillment-mode`, owner.token, { mode: 'PLATFORM_RIDER' }, store());
+      expect(toRider.statusCode, toRider.body).toBe(200);
+      expect(arm).not.toHaveBeenCalled();
+      expect(await sys(() => app.prisma.dispatchSearch.count({ where: { subjectId: placed.order.id } }))).toBe(0);
+    } finally {
+      arm.mockRestore();
+    }
+  });
+
+  // [#1875 · REVIEW-G/M S4] Decided on the committed row: a "Paid by MMG" that landed while the switch waited for
+  // the order lock is seen, and the rider search starts now (not minutes later from the reconciler).
+  it('a payment that lands before the switch takes the lock: the switch still starts the rider search', async () => {
+    const placed = await numberOrder();
+    expect((await accept(placed.order.id)).statusCode).toBe(200);
+    expect((await paidByMmg(placed.order.id)).statusCode).toBe(200);
+    const paidRow = await orderRow(placed.order.id);
+    expect(paidRow.paymentStatus).toBe('CLAIMED');
+    const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
+    // The route's pre-read is stale: it still sees the payment pending.
+    const realFindUnique = app.prisma.order.findUnique.bind(app.prisma.order);
+    const stale = vi.spyOn(app.prisma.order, 'findUnique').mockImplementation((async (args: { where?: { id?: string } }) => {
+      const row = await realFindUnique(args as never);
+      return row && args?.where?.id === placed.order.id ? { ...row, paymentStatus: 'PENDING' } : row;
+    }) as never);
+    try {
+      const toRider = await call('PUT', `/api/v1/vendor/orders/${placed.order.id}/fulfillment-mode`, owner.token, { mode: 'PLATFORM_RIDER' }, store());
+      expect(toRider.statusCode, toRider.body).toBe(200);
+      expect(stale).toHaveBeenCalled(); // the pre-read really was the stale one
+      expect(arm).toHaveBeenCalledTimes(1);
+    } finally {
+      stale.mockRestore();
+      arm.mockRestore();
+    }
+  });
+
   it('after acceptance: no prepare, no ready, no board listing, no rider claim, no dispatch offer, no money rows; "Paid by MMG" then arms dispatch once', async () => {
     const arm = vi.spyOn(DispatchService.prototype, 'prepareForPlatformDelivery');
     try {

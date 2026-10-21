@@ -24,9 +24,14 @@
  *     Redis TTL in the walk's database shrinks by Δ (a key whose TTL is under Δ
  *     is gone), and every recorded job comes Δ closer to due. People stay
  *     alive: an online rider's location is re-pinged after every step, and
- *     sessions, stores and documents are not aged. Tables whose rows the
- *     database freezes (evidence, stock movements) refuse the update and are
- *     skipped; the skip list is reported so it is never silent.
+ *     sessions, stores and documents are not aged. Aging is the clock, not a
+ *     change to the record: it runs in ONE transaction with
+ *     `session_replication_role = replica` (test DB, superuser), so the
+ *     append-only and immutability triggers (order_status_logs, evidence,
+ *     stock movements) let the timestamps move with everything else. A table
+ *     that still refuses FAILS the walk with the database's error: a world
+ *     whose clocks disagree (aged notices, unaged status logs) is not the
+ *     world production runs in.
  */
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -128,12 +133,15 @@ export interface WalkWorld {
   app: FastifyInstance;
   sched: WalkScheduler;
   admin: Person;
+  /** Wall-clock ms when the admin's access token was issued (it lives 15
+   *  minutes of REAL time: the walk clock never fakes Date). */
+  adminTokenAt: number;
   /** Every user and order a walk made, for ageing and cleanup. */
   userIds: Set<string>;
   orderIds: Set<string>;
   vendorIds: Set<string>;
-  /** Tables the database refused to age (immutability triggers). */
-  frozenTables: Set<string>;
+  /** Runs after every tick of the walk clock (the walk stamps new notices with the live status). */
+  onTick: (() => Promise<void>) | null;
   /** Total Δ the walk clock has advanced, ms. */
   clockMs: number;
   /** Errors a sweep or job threw (they never stop the walk; invariants read them). */
@@ -173,11 +181,11 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
   const adminUser = await app.prisma.user.create({
     data: { phone: adminPhone, firstName: 'Walk', lastName: 'Admin', roles: ['ADMIN'] as never, activeRole: 'ADMIN' as never, isPhoneVerified: true },
   });
-  const adminToken = (await loginWithOtp(app, adminPhone)).json().data.tokens.accessToken as string;
+  const adminToken = await accessTokenFor(app, adminPhone);
   const world: WalkWorld = {
     app, sched,
-    admin: { userId: adminUser.id, token: adminToken, phone: adminPhone },
-    userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), frozenTables: new Set(),
+    admin: { userId: adminUser.id, token: adminToken, phone: adminPhone }, adminTokenAt: Date.now(),
+    userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), onTick: null,
     clockMs: 0, jobErrors: [],
   };
   return world;
@@ -243,20 +251,45 @@ export async function placeCashOrder(w: WalkWorld, cast: Cast): Promise<{ orderI
   return { orderId, status: co.statusCode, body: co.body };
 }
 
-export function call(
+async function accessTokenFor(app: FastifyInstance, phone: string): Promise<string> {
+  const res = await loginWithOtp(app, phone);
+  const token = res.json()?.data?.tokens?.accessToken;
+  if (res.statusCode !== 200 || typeof token !== 'string') throw new Error(`walk: login for the walk admin answered ${res.statusCode}`);
+  return token;
+}
+
+/** Every walk caller holds a live token, so a 401 is never a product answer:
+ *  it means a walk token expired, and a door that answers it did nothing the
+ *  walk asked for. That fails the walk instead of passing as a refusal. */
+function refuseExpired(res: LightMyRequestResponse, method: string, url: string): LightMyRequestResponse {
+  if (res.statusCode === 401) throw new Error(`walk: ${method} ${url} answered 401 (a walk token expired): ${res.body.slice(0, 160)}`);
+  return res;
+}
+
+export async function call(
   w: WalkWorld, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown,
 ): Promise<LightMyRequestResponse> {
   const headers: Record<string, string> = { authorization: `Bearer ${token}` };
   if (payload !== undefined) headers['content-type'] = 'application/json';
-  return w.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+  const res = await w.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+  return refuseExpired(res, method, url);
 }
 
-export function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> {
-  return injectWithApproval(w.app, {
+/** The admin outlives the walks (one per run), so its token is renewed before
+ *  it can expire: a slow run (machine load) passes 15 minutes. */
+const ADMIN_TOKEN_RENEW_MS = 10 * 60_000;
+
+export async function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> {
+  if (Date.now() - w.adminTokenAt > ADMIN_TOKEN_RENEW_MS) {
+    w.admin = { ...w.admin, token: await accessTokenFor(w.app, w.admin.phone) };
+    w.adminTokenAt = Date.now();
+  }
+  const res = await (injectWithApproval(w.app, {
     method, url,
     headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${w.admin.token}`, 'content-type': 'application/json' },
     payload,
-  } as never) as Promise<LightMyRequestResponse>;
+  } as never) as Promise<LightMyRequestResponse>);
+  return refuseExpired(res, method, url);
 }
 
 // ─── Time ──────────────────────────────────────────────────────────────────
@@ -305,8 +338,7 @@ function ageTargets(): Array<[string, string, 'orders' | 'users']> {
 async function ageRows(w: WalkWorld, ms: number): Promise<void> {
   const orders = [...w.orderIds];
   const users = [...w.userIds];
-  const live = ageTargets().filter(([t]) => !w.frozenTables.has(t));
-  const parts = live
+  const parts = ageTargets()
     .map(([t, k, set], i) => {
       const stmt = ageStatement(t, k, set === 'orders' ? '$2' : '$3');
       return stmt ? `a${i} AS (${stmt} RETURNING 1)` : null;
@@ -314,21 +346,15 @@ async function ageRows(w: WalkWorld, ms: number): Promise<void> {
     .filter((x): x is string => x !== null);
   if (parts.length === 0) return;
   try {
-    // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
-    await w.app.prisma.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
-  } catch {
-    // An immutability trigger (evidence rows, stock movements) refuses ANY
-    // update and fails the whole statement: find the table(s) one by one,
-    // name them frozen (reported by the run), and age the rest.
-    for (const [t, k, set] of live) {
-      const stmt = ageStatement(t, k, '$2');
-      if (!stmt) continue;
-      try {
-        await w.app.prisma.$executeRawUnsafe(stmt, ms / 1000, set === 'orders' ? orders : users);
-      } catch {
-        w.frozenTables.add(t);
-      }
-    }
+    await w.app.prisma.$transaction(async (tx) => {
+      // Replica mode skips ordinary triggers for this transaction only, so the
+      // append-only guards on status logs and evidence do not refuse the clock.
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
+      await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
+    });
+  } catch (err) {
+    throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${err instanceof Error ? err.message : String(err)})`);
   }
 }
 
@@ -480,5 +506,6 @@ export async function advance(w: WalkWorld, cast: Cast, ms: number, sweepEveryMs
       await drainDue(w);
       sinceSweep.ms = 0;
     }
+    if (w.onTick) await w.onTick();
   }
 }

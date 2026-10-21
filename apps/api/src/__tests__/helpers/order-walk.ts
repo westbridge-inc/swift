@@ -216,7 +216,28 @@ const PREP_STAMP_STATUSES: readonly OrderStatus[] = ['RIDER_ASSIGNED', 'RIDER_EN
 /** Notices that are offers to movers, not news to a person: a fresh search may re-offer. */
 const OFFER_TITLES = /^🛵|order available|new delivery/i;
 
-interface CheckState { reportedNotice: Set<string>; jobErrorsSeen: number; prev: Snap | null }
+interface CheckState {
+  reportedNotice: Set<string>; jobErrorsSeen: number; prev: Snap | null;
+  /** notification id -> the status epoch in force when it first appeared (stamped every clock tick and step). */
+  noticeEpoch: Map<string, number>;
+}
+
+/** Status changes so far (a same-status timeline note is not a change). */
+const statusEpoch = (logs: readonly OrderStatus[]) => logs.reduce((n, l, i) => (i > 0 && l !== logs[i - 1] ? n + 1 : n), 0);
+
+/** Give every notice of the order not seen before the status epoch in force now. */
+async function stampNotices(w: WalkWorld, orderId: string, st: CheckState, logs?: readonly OrderStatus[]) {
+  const live = logs ?? (await w.app.prisma.orderStatusLog.findMany({
+    where: { orderId }, select: { status: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  })).map((l) => l.status);
+  const epoch = statusEpoch(live);
+  const rows = await w.app.prisma.$queryRawUnsafe<Array<{ id: string; userId: string; title: string }>>(
+    `SELECT n.id, n."userId", n.title FROM notifications n WHERE n.data->>'orderId' = $1`,
+    orderId,
+  );
+  for (const r of rows) if (!st.noticeEpoch.has(r.id)) st.noticeEpoch.set(r.id, epoch);
+  return rows;
+}
 
 async function checkInvariants(
   w: WalkWorld, cast: Cast, orderId: string, at: number, http: number, st: CheckState,
@@ -282,23 +303,26 @@ async function checkInvariants(
   if (sv.statusCode === 200 && sv.json()?.data?.status !== s.status) v('VIEW-STORE', `store sees ${sv.json()?.data?.status}, order is ${s.status}`);
 
   // NOTICE-ONCE: one notice per person, per title, per status the order was in.
-  const notes = await w.app.prisma.$queryRawUnsafe<Array<{ userId: string; title: string; epoch: number; n: number }>>(
-    `SELECT n."userId", n.title,
-            (SELECT count(*) FROM order_status_logs l WHERE l."orderId" = $1 AND l."createdAt" <= n."createdAt")::int AS epoch,
-            count(*)::int AS n
-       FROM notifications n
-      WHERE n.data->>'orderId' = $1
-      GROUP BY 1, 2, 3 HAVING count(*) > 1`,
-    orderId,
-  );
-  for (const n of notes) {
-    if (OFFER_TITLES.test(n.title)) continue;
-    const k = `${n.userId}|${n.title}|${n.epoch}`;
+  // A notice belongs to the status in force when it first appears: stamped
+  // after every tick of the walk clock and after every step (stampNotices),
+  // counted in status changes. Never by timestamp: aged notices read against
+  // log stamps aged by another rule would put a whole life in one status.
+  const rows = await stampNotices(w, orderId, st, s.logs);
+  const groups = new Map<string, { userId: string; title: string; epoch: number; n: number }>();
+  for (const r of rows) {
+    const e = st.noticeEpoch.get(r.id)!;
+    const k = `${r.userId}|${r.title}|${e}`;
+    const g = groups.get(k) ?? { userId: r.userId, title: r.title, epoch: e, n: 0 };
+    g.n += 1;
+    groups.set(k, g);
+  }
+  for (const [k, n] of groups) {
+    if (n.n < 2 || OFFER_TITLES.test(n.title)) continue;
     if (st.reportedNotice.has(k)) continue;
     st.reportedNotice.add(k);
     const who = n.userId === cast.customer.userId ? 'customer' : n.userId === cast.vendorOwner.userId ? 'store'
       : cast.riders.some((r) => r.userId === n.userId) ? 'rider' : 'admin';
-    v('NOTICE-ONCE', `${who} got "${n.title}" ${n.n}x in one status (log #${n.epoch})`);
+    v('NOTICE-ONCE', `${who} got "${n.title}" ${n.n}x in one status (status #${n.epoch})`);
   }
 
   // JOB-THREW: a sweep or job the production worker runs threw.
@@ -310,7 +334,7 @@ async function checkInvariants(
   return out;
 }
 
-/** Recorded findings (evidence/ORDER-FLOW-20261019/FINDINGS.txt). A fix PR
+/** Recorded findings (the order-flow findings list, OF-nn ids). A fix PR
  *  deletes its line here, and its pinned trace in the test turns red if the
  *  violation is still produced. */
 export function classify(x: Violation, s: Snap): string | null {
@@ -344,6 +368,7 @@ async function walk(w: WalkWorld, riders: number, next: Next, opts: RunOptions =
     // and an order it left unfinished is deleted — otherwise the NEXT walk's
     // sweeps would re-drive it to the next walk's riders. (A finished order
     // stays; nothing dispatches a terminal order.)
+    w.onTick = null;
     w.sched.pending = [];
     for (const r of cast.riders) {
       await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
@@ -371,7 +396,8 @@ async function walkCast(w: WalkWorld, cast: Cast, next: Next, opts: RunOptions):
   }
   result.orderId = orderId;
   await drainDue(w);
-  const st: CheckState = { reportedNotice: new Set(), jobErrorsSeen: w.jobErrors.length, prev: null };
+  const st: CheckState = { reportedNotice: new Set(), jobErrorsSeen: w.jobErrors.length, prev: null, noticeEpoch: new Map() };
+  w.onTick = async () => { await stampNotices(w, orderId, st); };
   result.violations.push(...await checkInvariants(w, cast, orderId, -1, 0, st));
 
   for (let i = 0; ; i += 1) {
