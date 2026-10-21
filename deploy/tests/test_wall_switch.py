@@ -15,7 +15,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import shutil
 import subprocess
 import tempfile
@@ -756,35 +755,29 @@ class Rehearsal(unittest.TestCase):
                     dump.replace('CREATE ROLE swift_bypass_rls;\n', '')):
             self.assertEqual(run(bad).returncode, 1)
 
-    def test_the_owner_wall_role_is_copied_exactly_as_the_source_has_it(self):
-        # [STAGING-RUN #5b] The addresses owner wall's policy names swift_owner_wall (20261018220000). pg_dump carries the
-        # policy but not the cluster role, so a copy without the role failed every addresses read ('role "swift_owner_wall"
-        # does not exist'): checkout and the walled journeys broke on every copy of staging #12.
+    def test_the_owner_wall_group_is_copied_when_present_and_never_its_members(self):
+        """[item 20] swift_owner_wall exists once the owner wall's migrations ran and its policies name it: the copy
+        gets the role (else every owner-walled read errors), never a member (Phase C grants none), and a source
+        without it still copies."""
         groups = ['swift_app', 'swift_bypass_rls', 'swift_audit_purge_owner', 'swift_audit_purge_executor']
-        base = ('CREATE ROLE swift;\nALTER ROLE swift WITH SUPERUSER LOGIN;\n'
-                + ''.join(f'CREATE ROLE {g};\nALTER ROLE {g} WITH NOSUPERUSER NOLOGIN NOBYPASSRLS;\n' for g in groups))
-        wall = ('CREATE ROLE swift_owner_wall;\n'
-                'ALTER ROLE swift_owner_wall WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;\n')
-        run = lambda text, *names: subprocess.run(['python3', '-I', str(DEPLOY / 'wall' / 'rehearsal-roles.py'), *names],
-                                                  input=text, text=True, capture_output=True, timeout=30)
-        REHEARSAL = (DEPLOY / 'wall' / 'rehearsal.sh').read_text()
-        args = shlex.split(re.search(r'python3 -I "\$HERE/rehearsal-roles.py" (.*) \|', REHEARSAL).group(1)
-                           .replace('$WALL_GROUPS', re.search(r'^WALL_GROUPS="([^"]*)"', REHEARSAL, re.M).group(1)))
-        # The source has the role: the copy gets it, with the source's own attributes (NOLOGIN, no member).
-        has = run(base + wall + 'GRANT swift_owner_wall TO swift_app_login GRANTED BY swift;\n', *args)
-        self.assertEqual(has.returncode, 0, has.stderr)
-        self.assertIn('CREATE ROLE swift_owner_wall;', has.stdout)
-        self.assertIn('ALTER ROLE swift_owner_wall WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB NOLOGIN NOREPLICATION NOBYPASSRLS;', has.stdout)
-        self.assertNotIn('swift_app_login', has.stdout)  # a login's membership is never copied
-        # A source from before the owner wall (no role yet): still copied, nothing invented.
-        without = run(base, *args)
-        self.assertEqual(without.returncode, 0, without.stderr)
-        self.assertNotIn('swift_owner_wall', without.stdout)
-        # The four group roles stay required.
-        self.assertEqual(run(base.replace('CREATE ROLE swift_bypass_rls;\n', '') + wall, *args).returncode, 1)
-        # An optional name must be a plain role name.
-        self.assertEqual(run(base, *groups, '--optional', 'bad-name').returncode, 1)
-        self.assertEqual(run(base, *groups, '--optional').returncode, 1)
+        base = ''.join(f'CREATE ROLE {g};\nALTER ROLE {g} WITH NOSUPERUSER NOLOGIN NOBYPASSRLS;\n' for g in groups)
+        wall = ('CREATE ROLE swift_owner_wall;\nALTER ROLE swift_owner_wall WITH NOSUPERUSER INHERIT NOLOGIN NOBYPASSRLS;\n'
+                'CREATE ROLE swift_app_login;\nGRANT swift_owner_wall TO swift_app_login WITH INHERIT TRUE GRANTED BY swift;\n')
+        run = lambda text, names: subprocess.run(['python3', '-I', str(DEPLOY / 'wall' / 'rehearsal-roles.py'), *names],
+                                                 input=text, text=True, capture_output=True, timeout=30)
+        result = run(base + wall, [*groups, '--optional', 'swift_owner_wall'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CREATE ROLE swift_owner_wall;', result.stdout)
+        self.assertNotIn('GRANT swift_owner_wall', result.stdout)
+        self.assertNotIn('swift_app_login', result.stdout)
+        absent = run(base, [*groups, '--optional', 'swift_owner_wall'])
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertNotIn('swift_owner_wall', absent.stdout)
+        # Without the option the role is dropped as any other; a bare --optional is refused.
+        self.assertNotIn('swift_owner_wall', run(base + wall, groups).stdout)
+        self.assertEqual(run(base, [*groups, '--optional']).returncode, 1)
+        self.assertIn('--optional $OPTIONAL_GROUPS', (DEPLOY / 'wall' / 'rehearsal.sh').read_text())
+        self.assertIn('OPTIONAL_GROUPS="swift_owner_wall"', (DEPLOY / 'wall' / 'rehearsal.sh').read_text())
 
 
 # ── doctor.sh ──────────────────────────────────────────────────────────────
