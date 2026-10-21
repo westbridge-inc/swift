@@ -133,6 +133,9 @@ export interface WalkWorld {
   app: FastifyInstance;
   sched: WalkScheduler;
   admin: Person;
+  /** Wall-clock ms when the admin's access token was issued (it lives 15
+   *  minutes of REAL time: the walk clock never fakes Date). */
+  adminTokenAt: number;
   /** Every user and order a walk made, for ageing and cleanup. */
   userIds: Set<string>;
   orderIds: Set<string>;
@@ -178,10 +181,10 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
   const adminUser = await app.prisma.user.create({
     data: { phone: adminPhone, firstName: 'Walk', lastName: 'Admin', roles: ['ADMIN'] as never, activeRole: 'ADMIN' as never, isPhoneVerified: true },
   });
-  const adminToken = (await loginWithOtp(app, adminPhone)).json().data.tokens.accessToken as string;
+  const adminToken = await accessTokenFor(app, adminPhone);
   const world: WalkWorld = {
     app, sched,
-    admin: { userId: adminUser.id, token: adminToken, phone: adminPhone },
+    admin: { userId: adminUser.id, token: adminToken, phone: adminPhone }, adminTokenAt: Date.now(),
     userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), onTick: null,
     clockMs: 0, jobErrors: [],
   };
@@ -238,20 +241,45 @@ export async function castWalk(w: WalkWorld, riderCount: number): Promise<Cast> 
   return { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
 }
 
-export function call(
+async function accessTokenFor(app: FastifyInstance, phone: string): Promise<string> {
+  const res = await loginWithOtp(app, phone);
+  const token = res.json()?.data?.tokens?.accessToken;
+  if (res.statusCode !== 200 || typeof token !== 'string') throw new Error(`walk: login for the walk admin answered ${res.statusCode}`);
+  return token;
+}
+
+/** Every walk caller holds a live token, so a 401 is never a product answer:
+ *  it means a walk token expired, and a door that answers it did nothing the
+ *  walk asked for. That fails the walk instead of passing as a refusal. */
+function refuseExpired(res: LightMyRequestResponse, method: string, url: string): LightMyRequestResponse {
+  if (res.statusCode === 401) throw new Error(`walk: ${method} ${url} answered 401 (a walk token expired): ${res.body.slice(0, 160)}`);
+  return res;
+}
+
+export async function call(
   w: WalkWorld, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown,
 ): Promise<LightMyRequestResponse> {
   const headers: Record<string, string> = { authorization: `Bearer ${token}` };
   if (payload !== undefined) headers['content-type'] = 'application/json';
-  return w.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+  const res = await w.app.inject({ method, url, headers, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+  return refuseExpired(res, method, url);
 }
 
-export function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> {
-  return injectWithApproval(w.app, {
+/** The admin outlives the walks (one per run), so its token is renewed before
+ *  it can expire: a slow run (machine load) passes 15 minutes. */
+const ADMIN_TOKEN_RENEW_MS = 10 * 60_000;
+
+export async function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: string, payload: Record<string, unknown>): Promise<LightMyRequestResponse> {
+  if (Date.now() - w.adminTokenAt > ADMIN_TOKEN_RENEW_MS) {
+    w.admin = { ...w.admin, token: await accessTokenFor(w.app, w.admin.phone) };
+    w.adminTokenAt = Date.now();
+  }
+  const res = await (injectWithApproval(w.app, {
     method, url,
     headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${w.admin.token}`, 'content-type': 'application/json' },
     payload,
-  } as never) as Promise<LightMyRequestResponse>;
+  } as never) as Promise<LightMyRequestResponse>);
+  return refuseExpired(res, method, url);
 }
 
 // ─── Time ──────────────────────────────────────────────────────────────────

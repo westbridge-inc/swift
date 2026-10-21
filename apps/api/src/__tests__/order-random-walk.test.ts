@@ -30,11 +30,15 @@ import {
 // line and its pin, and the pin is what proves the fix (red before, gone after).
 // ---------------------------------------------------------------------------
 
-/** Chosen by greedy coverage over seeds 1..40 (19 Oct): together they reach a
- *  delivery, a handback, both custody findings and 72 of the 124 distinct
- *  (status, action, outcome) / log-edge / violation features the 40 reached.
- *  A wider sweep is `WALK_SEED_COUNT=40` locally (about 8 minutes). */
-const DEFAULT_SEEDS = [25, 24, 13, 11, 2];
+/** Chosen by greedy coverage over seeds 1..40 (21 Oct, on a database with
+ *  every migration, the status-log append-only trigger included), with a
+ *  known finding weighted above a plain feature: together they reach a
+ *  delivery, a cancellation, a handback, both custody findings (OF-33, OF-12),
+ *  the OF-01 notice repeat and 82 of the 166 distinct (status, action,
+ *  outcome) / log-edge / violation features the 40 reached. A wider sweep is
+ *  `WALK_SEED_COUNT=40` locally (8 to 40 minutes, by machine load; past 30 the
+ *  test times out, so walk the rest with `WALK_SEEDS`). */
+const DEFAULT_SEEDS = [31, 11, 30, 2, 9];
 
 /** The smallest traces that produce each recorded finding (shrunk). */
 const PINNED: Array<{ finding: string; inv: string; why: string; trace: Trace }> = [
@@ -99,12 +103,15 @@ describe('[ORDER-FLOW] random walks over the order state machine', () => {
         report([
           `walked seed ${seed}: ${result.finalStatus ?? 'no order'} · ${result.violations.length} violation(s)`,
           `json ${JSON.stringify({ seed, final: result.finalStatus, coverage: [...result.coverage.keys()], edges: [...result.edges], violations: result.violations.map(violationKey) })}`,
+          // An unknown one is named at once, so a run cut short still says what it saw.
+          ...result.violations.filter((x) => x.finding === null).map((x) => `   ${fmtViolation(x)}`),
         ]);
       } catch (err) {
         // A walk that THROWS is not a verdict on the product (a lost database
         // connection looks the same): it is named, and the run fails on it.
-        crashed.push(`seed ${seed}: ${(err instanceof Error ? err.message : String(err)).split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300)}`);
-        report([`walked seed ${seed}: CRASHED`]);
+        const why = (err instanceof Error ? err.message : String(err)).split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 300);
+        crashed.push(`seed ${seed}: ${why}`);
+        report([`walked seed ${seed}: CRASHED · ${why}`]);
       }
     };
     if (replay) await one('trace', () => runTrace(w, JSON.parse(replay) as Trace));
