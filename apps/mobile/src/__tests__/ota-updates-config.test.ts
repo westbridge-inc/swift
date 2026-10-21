@@ -115,6 +115,20 @@ describe('the iOS privacy manifest names every kind of data the app keeps (build
     expect(entryOf(await loadConfig(), 'OtherFinancialInfo')).toEqual(linkedForTheApp('OtherFinancialInfo'));
   });
 
+  it('the phone number and e-mail also serve the opt-in marketing messages (Developer Advertising purpose)', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    const config = await loadConfig();
+    for (const type of ['PhoneNumber', 'EmailAddress']) {
+      expect(entryOf(config, type)).toEqual({
+        ...linkedForTheApp(type),
+        NSPrivacyCollectedDataTypePurposes: [
+          'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+          'NSPrivacyCollectedDataTypePurposeDeveloperAdvertising',
+        ],
+      });
+    }
+  });
+
   it('declares the emergency contacts a person saves for SOS (Contacts, linked)', async () => {
     vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
     expect(entryOf(await loadConfig(), 'Contacts')).toEqual(linkedForTheApp('Contacts'));

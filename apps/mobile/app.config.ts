@@ -34,8 +34,9 @@ const photosPermission =
  * declared here instead: `app.config.ts` is the only file that survives a
  * prebuild, because `ios/` is gitignored and regenerated.
  *
- * Everything below is `AppFunctionality` and nothing is tracking, which is the
- * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
+ * Everything below is `AppFunctionality` (the phone number and e-mail also
+ * `DeveloperAdvertising`: Swift's own opt-in marketing messages) and nothing
+ * is tracking, which is the honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
  * `src/lib/analytics.ts`, which is a deliberate no-op. The crash reporter
  * (L13 item 7, off unless a crash-report address is configured) is declared
  * below as CrashData, not linked to the person, in the same change that added
@@ -61,6 +62,11 @@ const collected = (
   NSPrivacyCollectedDataTypePurposes: purposes,
 });
 
+const marketingToo = [
+  'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+  'NSPrivacyCollectedDataTypePurposeDeveloperAdvertising',
+];
+
 const privacyManifests = {
   NSPrivacyTracking: false,
   NSPrivacyTrackingDomains: [],
@@ -71,8 +77,11 @@ const privacyManifests = {
   ],
   NSPrivacyCollectedDataTypes: [
     collected('Name'), // account holder, shown to the courier/driver on a job
-    collected('PhoneNumber'), // the login identity itself
-    collected('EmailAddress'), // optional at registration
+    // The login identity itself (and optional at registration). Both also carry
+    // the marketing texts / e-mails a person opts in to (Account > Marketing
+    // messages; withdrawn = none sent), so they name that purpose too.
+    collected('PhoneNumber', marketingToo),
+    collected('EmailAddress', marketingToo),
     collected('PhysicalAddress'), // delivery + pickup addresses
     collected('PreciseLocation'), // pickup, dispatch, live tracking
     collected('PhotosorVideos'), // delivery proof, document scans, chat images
