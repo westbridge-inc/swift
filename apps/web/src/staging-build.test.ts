@@ -139,11 +139,42 @@ describe('[Q11] the staging website build', () => {
     expect(Object.keys(config).sort()).toEqual(
       // `images` is the photo optimiser every build carries (W2b, owner ruling h4); the
       // image-build-only keys (output, typescript, eslint) must still be absent.
-      ['env', 'headers', 'images', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
+      // `webpack` adds one client chunk group for the customer app's shared code (size budget,
+      // PERF 21 Oct); see the chunking test below.
+      ['env', 'headers', 'images', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages', 'webpack'].sort(),
     );
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
       buildBrowserContentSecurityPolicy('production'),
     );
+  });
+});
+
+describe('[Size budget] the customer app\u2019s shared code is one chunk', () => {
+  type Group = { name: string; minChunks: number; minSize: number; chunks: (_c: { name?: string | null }) => boolean; test: (_m: { type?: string; nameForCondition?: () => string | null }) => boolean };
+  const run = async (isServer: boolean) => {
+    const config = await productionConfig(PUBLIC_SITE);
+    const base = { optimization: { splitChunks: { cacheGroups: { framework: { name: 'framework' } } } } };
+    const out = (config.webpack as (_c: unknown, _o: { isServer: boolean }) => typeof base)(structuredClone(base), { isServer });
+    return out.optimization.splitChunks.cacheGroups as Record<string, unknown>;
+  };
+
+  it('the browser build gains one group; Next\u2019s own groups stay; the server build is untouched', async () => {
+    const client = await run(false);
+    expect(Object.keys(client).sort()).toEqual(['customerAppShared', 'framework']);
+    expect(Object.keys(await run(true))).toEqual(['framework']);
+  });
+
+  it('customer pages only, the app\u2019s own JavaScript (and its icons), shared by at least 12 pages, one chunk', async () => {
+    const group = (await run(false)).customerAppShared as Group;
+    expect(group).toMatchObject({ name: 'customer-app-shared', minChunks: 12, minSize: 0 });
+    expect(group.chunks({ name: 'app/(app)/checkout/page' })).toBe(true);
+    expect(group.chunks({ name: 'app/(app)/layout' })).toBe(true);
+    for (const name of ['app/dashboard/layout', 'app/portal/page', 'app/login/page', 'app/layout', null]) expect(group.chunks({ name })).toBe(false);
+    const mod = (path: string, type = 'javascript/auto') => ({ type, nameForCondition: () => path });
+    expect(group.test(mod('/w/apps/web/src/lib/basket-state.ts'))).toBe(true);
+    expect(group.test(mod('/w/node_modules/.pnpm/lucide-react@0.475.0/node_modules/lucide-react/dist/esm/icons/x.js'))).toBe(true);
+    expect(group.test(mod('/w/node_modules/.pnpm/react-dom@19/node_modules/react-dom/index.js'))).toBe(false);
+    expect(group.test(mod('/w/apps/web/src/app/(app)/cart/cart.module.css', 'css/mini-extract'))).toBe(false);
   });
 });
