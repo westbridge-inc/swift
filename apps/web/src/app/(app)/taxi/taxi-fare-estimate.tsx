@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Pictogram } from '@/components/glyphs';
 import { LocationField } from '@/components/location-field';
@@ -12,10 +12,11 @@ import { signInPath, signUpPath } from '@/lib/customer-routes';
 import type { PickedPlace } from '@/lib/place';
 import { FARE_UNAVAILABLE, TAXI_TIER_META, readTaxiEstimate, taxiEstimateRefusal, type TaxiEstimate } from '@/lib/taxi-fare';
 import { TaxiBooking } from './taxi-booking';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [WEB-PIN] Either end may be pinned on the map, as on the courier page. The
 // map's code loads only when a pin is asked for.
-const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
+const PlacePinPanel = lazyRetry(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // ---------------------------------------------------------------------------
 // [Row 117 · owner 16 Oct 2026] A REAL taxi fare estimate on the website.
