@@ -330,6 +330,31 @@ describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance 
     expect((await docOf(d.id)).purgedAt).not.toBeNull();
   });
 
+  it('a case opened AFTER the notice still blocks the purge (checked again right before deleting)', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    const c = await incident(u);
+    expect(await sweep(later(14.01), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(40), u)).toMatchObject({ purged: 0 });
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+    await system(() => app.prisma.incidentCase.update({ where: { id: c.id }, data: { status: 'CLOSED', closedAt: new Date() } }));
+    expect(await sweep(later(41), u)).toMatchObject({ purged: 1 });
+  });
+
+  it('an unreadable case census reads as an open case: nothing is noticed or deleted', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const svc = service([u]);
+    const broken = new Proxy((svc as unknown as { prisma: object }).prisma, { get: (t, k) => (k === 'complianceReviewCase'
+      ? { count: async () => { throw new Error('synthetic census failure'); } } : Reflect.get(t, k)) });
+    (svc as unknown as { prisma: object }).prisma = broken;
+    expect(await system(() => svc.sweepAbandonedApplications(new Date()))).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
   it('an open compliance review keeps them too', async () => {
     const u = await person('DRIVER');
     const d = await doc(u, 'DRIVER', 'REJECTED', 100);

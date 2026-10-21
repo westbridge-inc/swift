@@ -2921,6 +2921,8 @@ export class VerificationService {
       return { noticed: 1, purged: 0 };
     }
     if (now.getTime() < abandonPurgeDueAt(lastActivityAt, notice.createdAt).getTime()) return none;
+    // [COORD 18:5xZ] Checked AGAIN immediately before the purge: a case opened after the notice still keeps everything.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     let purged = 0;
     for (const doc of candidates) {
       const outcome = await this.purgeDocumentNow(doc, ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, now, still: stillAbandoned(lastActivityAt) });
