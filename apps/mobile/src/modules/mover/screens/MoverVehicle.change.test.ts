@@ -57,8 +57,9 @@ describe('a saved vehicle can be changed', () => {
     expect(VEHICLE).toMatch(/<VehicleSetup\s+mode="change"/);
     expect(VEHICLE).toMatch(/guard=\{stepUp\.withStepUp\}/);
     expect(VEHICLE).toContain('{stepUp.sheet}');
-    // After a change the next stop is the new vehicle's papers.
-    expect(VEHICLE).toContain("navigation?.navigate?.('MoverDocuments');");
+    // After a change the next stop is the new vehicle's papers, IN PLACE of the
+    // finished form ([UI-SWEEP U35]; the stack itself: MoverVehicleScreen.documents.navigation.test.ts).
+    expect(VEHICLE).toContain("navigation?.replace?.('MoverDocuments');");
   });
 
   it('a working mover reaches it from Account', () => {

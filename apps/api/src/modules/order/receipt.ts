@@ -39,6 +39,8 @@ type ReceiptOrder = {
   currencyCode?: string | null;
   /** [TAXI waiting charge] A ride's frozen waiting, when it was charged one. */
   fareBreakdown?: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null;
+  /** [TAXI multi-stop 8/8] A ride's stops in order (absent for a ride without them). */
+  stops?: Array<{ sequence: number; address: string; skipped: boolean }> | null;
   /** [L02 · row 34] The cash the rider stated at the door, and how far short a
    *  handover was made (the rider bore the difference). */
   doorCashCollectedAmount?: unknown;
@@ -140,6 +142,7 @@ export function renderReceiptHtml(order: ReceiptOrder): string {
     ${order.vendor ? `${soldBy(order.vendor, order.seller ?? null)}<br>` : ''}
     ${new Date(order.placedAt).toLocaleString('en-GB', { dateStyle: 'long', timeStyle: 'short' })}<br>
     ${esc(paidHow)}
+    ${order.stops && order.stops.length > 0 ? `<br>Stops: ${order.stops.map((st) => `${st.sequence}. ${esc(st.address)}${st.skipped ? ' (skipped)' : ''}`).join(' · ')}` : ''}
   </div>
   <table>
     ${rows}

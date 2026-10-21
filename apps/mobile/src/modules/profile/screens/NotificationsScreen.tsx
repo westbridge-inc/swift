@@ -44,6 +44,13 @@ function canReach(navigation: NavigationProp<ParamListBase> | undefined, screen:
   return false;
 }
 
+/** The route this screen is mounted as (CustomerStack). */
+const INBOX_SCREEN = 'Notifications';
+function opensThisInbox(dest: { screen: string; params?: Record<string, unknown> }): boolean {
+  const nested = dest.params?.['screen'];
+  return (typeof nested === 'string' ? nested : dest.screen) === INBOX_SCREEN;
+}
+
 export function NotificationsScreen() {
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const notifications = useNotifications<any>();
@@ -102,6 +109,10 @@ export function NotificationsScreen() {
             // row is a plain card too.
             const dest = destinationFor(n?.data);
             if (!dest || dest.screen === HOME_SCREEN || !canReach(navigation, dest.screen)) return card;
+            // [UI-SWEEP U31] A push that opens THIS inbox (a store team invite:
+            // its Accept / Decline card is right here) is a plain card too; as a
+            // button it stacked a second, identical inbox.
+            if (opensThisInbox(dest)) return card;
             return (
               <PressableScale accessibilityRole="button" onPress={() => safeNavigate(dest.screen, dest.params)}>
                 {card}

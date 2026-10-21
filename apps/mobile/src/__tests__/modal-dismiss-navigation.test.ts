@@ -81,7 +81,15 @@ describe('modal exits close in their own tick — navigation is deferred', () =>
 // names the proof that must stay in its file.
 // ---------------------------------------------------------------------------
 
-const WIDE = /set[A-Za-z]+\((?:false|null)\);[ \t]*\n?[ \t]*navigation\??\.(?:navigate|goBack|replace|popToTop|popTo|push|pop|dispatch)\??\.?\(/g;
+// [REVIEW-F #1903 S4-1] Wider than the literal pair: any close call
+// (`setX(false|null|undefined)`, or another name such as `hide(false)`), up
+// to two plain statements in between (no block boundary), and any navigation
+// receiver: `navigation`, an alias (`nav`, `navigationRef`), a destructured
+// `navigate(…)`, or `safeNavigate(…)`.
+const CLOSE = String.raw`\b[A-Za-z_$][\w$]*\((?:false|null|undefined)\);`;
+const BETWEEN = String.raw`(?:[ \t]*\n?[ \t]*[^\n{}]*?;){0,2}`;
+const NAVIGATES = String.raw`[ \t]*\n?[ \t]*(?:\b[A-Za-z_$][\w$]*\??\.)?(?:navigate|goBack|replace|popToTop|popTo|push|pop|dispatch|safeNavigate)\??\.?\(`;
+const WIDE = new RegExp(CLOSE + BETWEEN + NAVIGATES, 'g');
 
 const AFTER_TEARDOWN: Array<{ file: string; setter: string; why: string; proof: RegExp[] }> = [
   {
@@ -117,6 +125,28 @@ describe('[UI-SWEEP U04, U12] no source file closes a popup and navigates in the
     for (const site of AFTER_TEARDOWN) {
       expect(hits.some((h) => h.file === site.file && h.shape.startsWith(site.setter)), `${site.file} ${site.setter}`).toBe(true);
     }
+  });
+
+  it('sees every way the wedge can be written (the reader is not blind)', () => {
+    const wedges = [
+      "setOpen(false);\n    navigation.navigate('Orders');",
+      "setOpen(false);\n    nav.goBack();",
+      "setRatePopup(null);\n    navigationRef.navigate('Delivery', { orderId });",
+      "setOpen(false);\n    toast.success('Saved');\n    navigation.goBack();",
+      "setOpen(false); track('closed'); navigate('Orders');",
+      "hidePopup(false);\n    navigation?.replace?.('Home');",
+      "setSheet(undefined);\n    safeNavigate('WeeklyFee');",
+    ];
+    for (const snippet of wedges) expect([...snippet.matchAll(WIDE)].length, snippet).toBe(1);
+    const notTheWedge = [
+      // the deferral seam itself
+      "setOpen(false);\n    afterDismiss(() => navigation.navigate('Orders'));",
+      // a different handler: the block boundary ends the window
+      "setOpen(false);\n  }}\n  onPress={() => navigation.goBack()}",
+    ];
+    for (const snippet of notTheWedge) expect([...snippet.matchAll(WIDE)], snippet).toEqual([]);
+    // The window is two statements; a longer handler is left to review.
+    expect([..."setOpen(false);\n    a();\n    b();\n    c();\n    navigation.goBack();".matchAll(WIDE)]).toEqual([]);
   });
 
   it('every same-tick close-then-navigate is one of the sites proven to run after the teardown', () => {

@@ -11,7 +11,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -237,9 +237,20 @@ export function ActiveJobScreen({ navigation }: any) {
   }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
+    // [BUG-GUARDS C3] Until the job read answers (loading, or failed with nothing cached) this is not
+    // "No active job": a driver mid-trip must never be told they have none.
+    const unanswered = active.data === undefined && (active.isLoading || active.isError);
     return (
       <Screen>
-        <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        {unanswered && active.isError ? (
+          <ErrorState message="We couldn't load your job. Check your connection and try again." onRetry={() => void active.refetch()} />
+        ) : unanswered ? (
+          <View accessibilityLabel="Loading your job" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Spinner size="large" />
+          </View>
+        ) : (
+          <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        )}
         <View style={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
           <PillButton label="Back" variant="soft" onPress={() => navigation?.goBack?.()} />
         </View>
