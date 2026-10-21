@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { CATEGORY_ICON_KEYS } from '@swift/types';
 import DiscoveryPage from './page';
@@ -73,7 +73,8 @@ describe('the discovery taxonomy finally has a curator', () => {
     // a slug is never edited afterwards.
     const mapButton = screen.getByRole('button', { name: 'Map' }) as HTMLButtonElement;
     expect(mapButton.disabled).toBe(true);
-    await user.selectOptions(screen.getByRole('combobox', { name: '' }) ?? screen.getAllByRole('combobox')[0]!, 'hardware-tools');
+    // [U61] the select is labelled now
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Existing category to map to' }), 'hardware-tools');
     await user.click(screen.getByRole('button', { name: 'Map' }));
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
@@ -170,7 +171,39 @@ describe('the discovery taxonomy finally has a curator', () => {
 
     await screen.findByText('Power Tools');
     await user.click(screen.getByRole('button', { name: 'Run the backfill' }));
+    // [S4] confirmed first (it used to run on one click)
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Run the backfill' }));
 
     expect(await screen.findByText(/background workers are not running/i)).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [U60] The Visible/Hidden pill WAS the toggle: one click hid a category from
+// every customer, with no confirmation and no busy guard. The status is now a
+// label; hiding is its own button, confirmed in the panel, run once.
+// ---------------------------------------------------------------------------
+describe('[U60] hiding a category from customers is confirmed', () => {
+  it('the status is a label; Hide asks first, and only the confirmation sends it', async () => {
+    const fetchMock = mockApi(handler((r) => (
+      r.method === 'PUT' && r.url.pathname === '/api/v1/admin/discovery/categories/cat-1'
+        ? { body: { success: true, data: { ...category, status: 'HIDDEN' } } }
+        : undefined
+    )));
+    const { user } = renderWithQuery(<DiscoveryPage />);
+    await screen.findByText('Power Tools');
+    await user.click(screen.getByRole('button', { name: 'Taxonomy' }));
+    const row = (await screen.findByText('Hardware & Tools')).closest('tr')!;
+    expect(within(row).getByText('Visible')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Visible' })).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Hide Hardware & Tools from customers' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Hide Hardware & Tools from customers?');
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+    await user.click(within(panel).getByRole('button', { name: 'Hide category' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
+    expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]?.body))).toEqual({ status: 'HIDDEN' });
+    expect(await screen.findByText('Hardware & Tools is hidden from customers.')).toBeTruthy();
   });
 });
