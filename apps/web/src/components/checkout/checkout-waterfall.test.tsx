@@ -123,6 +123,14 @@ describe('[PERF F6] the checkout shows what it knows without waiting on what it 
     await tapPlaceSendsNothing();
   });
 
+  it('a failed live-store read locks the order with its own message (#1958 review S4-1)', async () => {
+    api = ({ url }) => (url.pathname === '/api/v1/public/storefronts/fixture-bakery' ? { status: 500, body: { success: false, error: { message: 'store down' } } } : null);
+    openCheckout();
+    expect(await screen.findByText('Swift could not verify this saved cart against the live store menu. Checkout stays locked until that server truth is available.')).toBeTruthy();
+    expect(screen.queryByText('Swift is checking this saved cart against the live store menu.')).toBeNull();
+    await tapPlaceSendsNothing();
+  });
+
   it('a menu that does not hold the cart’s lines still locks the order (both reads must pass)', async () => {
     api = ({ url }) => (url.pathname === '/api/v1/customer/vendors/v1' ? ok({ ...STORE, categories: [{ id: 'c1', name: 'Breakfast', items: [] }] }) : null);
     openCheckout();
