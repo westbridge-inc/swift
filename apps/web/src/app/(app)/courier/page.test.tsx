@@ -208,6 +208,10 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     fireEvent.click(button('Request courier · $1,280'));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-2'));
     expect(calls('POST', '/api/v1/courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    // [UI-SWEEP U65] A parcel at a new fee is a new intent: a new request key.
+    const keys = calls('POST', '/api/v1/courier/order').map((c) => new Headers((c[1] as RequestInit).headers).get('Idempotency-Key'));
+    expect(keys.every((k) => typeof k === 'string' && /^[A-Za-z0-9._~-]{1,200}$/.test(k!))).toBe(true);
+    expect(keys[0]).not.toBe(keys[1]);
   });
 
   it('pins the pickup when the device location is refused; an unnamed spot is sent as "Dropped pin"', async () => {
@@ -350,5 +354,53 @@ describe('[owner #67] a parcel with no prohibited items', () => {
     fireEvent.click(button('Request courier · $1,160'));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', refusal);
     expect(state.push).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U65] The web parcel send carried no Idempotency-Key: a lost answer
+// and a second press booked a second parcel. One key per parcel intent, kept
+// across retries; the server replays the first booking for the same key.
+// ---------------------------------------------------------------------------
+describe('[U65] pressing send again never books a second parcel', () => {
+  it('a lost answer and a second press resend the SAME request key', async () => {
+    let orders = 0;
+    fetchMock = mockApi(({ url, method }) => {
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok([SAVED]);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: reverseLabel });
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([]);
+      if (url.pathname === '/api/v1/courier/estimate' && method === 'POST') return ok(ESTIMATE);
+      if (url.pathname === '/api/v1/courier/order' && method === 'POST') {
+        orders += 1;
+        if (orders === 1) return { status: 504, body: { success: false, error: { message: 'The answer was lost on the way back.' } } };
+        return ok({ orderId: 'co-1', orderNumber: 'SW-3001', fee: 1160, distanceKm: 3, trackingToken: 't', trackingUrl: 'https://example.test/t', expiresAt: null }, 201);
+      }
+      return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
+    });
+    device('ok');
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    await screen.findByDisplayValue('Current location');
+    await pinDropoff();
+    fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
+    loadMap();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Drop-off pin map' }), { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${reverseLabel}`);
+    fireEvent.click(button('Use this pin'));
+    expect(await screen.findByText('$1,160')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
+    declare();
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fireEvent.click(button('Request courier · $1,160'));
+    expect(await screen.findByText(/The answer was lost on the way back/)).toBeTruthy();
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fireEvent.click(button('Request courier · $1,160'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-1'));
+    const keys = calls('POST', '/api/v1/courier/order').map((c) => new Headers((c[1] as RequestInit).headers).get('Idempotency-Key'));
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]);
   });
 });
