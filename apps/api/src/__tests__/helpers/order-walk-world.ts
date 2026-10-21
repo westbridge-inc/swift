@@ -233,6 +233,16 @@ export async function castWalk(w: WalkWorld, riderCount: number): Promise<Cast> 
   return { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
 }
 
+/** The customer checks out ONE item, cash, through the real cart and checkout doors. */
+export async function placeCashOrder(w: WalkWorld, cast: Cast): Promise<{ orderId: string | null; status: number; body: string }> {
+  await call(w, 'DELETE', '/api/v1/customer/cart', cast.customer.token);
+  await call(w, 'POST', '/api/v1/customer/cart/items', cast.customer.token, { vendorId: cast.vendorId, itemId: cast.itemId, quantity: 1 });
+  const co = await call(w, 'POST', '/api/v1/customer/checkout', cast.customer.token, { paymentMethod: 'CASH' });
+  const orderId = co.statusCode === 200 ? (co.json()?.data?.order?.id as string | undefined) ?? null : null;
+  if (orderId) w.orderIds.add(orderId);
+  return { orderId, status: co.statusCode, body: co.body };
+}
+
 export function call(
   w: WalkWorld, method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown,
 ): Promise<LightMyRequestResponse> {

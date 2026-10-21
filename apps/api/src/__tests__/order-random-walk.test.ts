@@ -39,16 +39,6 @@ const DEFAULT_SEEDS = [25, 24, 13, 11, 2];
 /** The smallest traces that produce each recorded finding (shrunk). */
 const PINNED: Array<{ finding: string; inv: string; why: string; trace: Trace }> = [
   {
-    finding: 'OF-01', inv: 'EXIT',
-    why: 'a store-accepted order nobody marks ready, with no rider, never ends (staging: 19 days, 220 searches)',
-    trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'abandon', ridersOnline: false }] },
-  },
-  {
-    finding: 'OF-01', inv: 'NOTICE-ONCE',
-    why: 'the same order re-searches every ~6 h and tells the customer again each time (staging: 219 notices)',
-    trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'abandon', ridersOnline: false }] },
-  },
-  {
     finding: 'OF-02', inv: 'REFUND-OVER-CAPTURED',
     why: 'admin "record refund owed" on a cash order whose cash was never taken records the whole total as owed',
     trace: { riders: 1, actions: [{ a: 'admin.cancel', refund: true }] },
@@ -57,6 +47,16 @@ const PINNED: Array<{ finding: string; inv: string; why: string; trace: Trace }>
     finding: 'OF-33', inv: 'EXIT',
     why: 'a rider who accepted and then never moves, GPS alive, holds the order forever (food-age reads riderless orders only)',
     trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'store.preparing' }, { a: 'store.ready' }, { a: 'rider.accept', r: 0 }, { a: 'abandon', ridersOnline: true }] },
+  },
+];
+
+/** Fixed findings: their old pinned traces must now walk CLEAN (no violation
+ *  at all) and end where the fix says. */
+const FIXED: Array<{ finding: string; why: string; trace: Trace; ends: string }> = [
+  {
+    finding: 'OF-01', ends: 'CANCELLED',
+    why: 'a store-accepted order nobody marks ready, with no rider, is told once, then cancelled after the grace — and nobody is told anything twice',
+    trace: { riders: 1, actions: [{ a: 'store.accept' }, { a: 'abandon', ridersOnline: false }] },
   },
 ];
 
@@ -146,6 +146,14 @@ describe('[ORDER-FLOW] random walks over the order state machine', () => {
     expect(results.every(({ result }) => result.orderId !== null), 'every walk placed its order').toBe(true);
     expect(unknown, unknown.join('\n')).toEqual([]);
   }, 1_800_000);
+
+  for (const fixed of FIXED) {
+    it(`FIXED ${fixed.finding}: its pinned trace now walks clean and ends ${fixed.ends} (${fixed.why})`, async () => {
+      const result = await runTrace(w, fixed.trace);
+      expect(result.violations.map(fmtViolation)).toEqual([]);
+      expect(result.finalStatus).toBe(fixed.ends);
+    }, 300_000);
+  }
 
   // One run per distinct trace (a 24-hour abandon is the expensive part).
   const byTrace = new Map<string, typeof PINNED>();

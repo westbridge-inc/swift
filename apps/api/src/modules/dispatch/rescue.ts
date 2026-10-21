@@ -13,6 +13,7 @@ import { sweepPage } from '../../lib/sweep-cursor';
 import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId } from '../order/checkout-outbox';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import { isStoreOrder } from '../order/cancel-policy';
+import { dispatchTrigger } from './dispatch-trigger';
 import {
   deliveryGenerationSuffix,
   dispatchDeclinedKey,
@@ -93,7 +94,73 @@ export const SWEEP_PAGE = { retire: 200, holds: 50 };
 /** [RESCUE S1 · CX05] The two passes' durable cursors (`sweep_cursors` rows).
  *  The S-05 stalled-pass and repeat-poison pager covers them like every other
  *  sweep. */
-export const RESCUE_SWEEPS = { retire: 'rescue.food-age.retire', holds: 'rescue.food-age.holds' } as const;
+export const RESCUE_SWEEPS = {
+  retire: 'rescue.food-age.retire',
+  holds: 'rescue.food-age.holds',
+  /** [OF-01] Riderless store orders nobody has marked ready. */
+  unready: 'rescue.food-age.unready',
+  /** [OF-17] Riderless parcels. */
+  parcel: 'rescue.parcel-wait',
+} as const;
+
+/**
+ * [OF-01 · COORD ruling 19 Oct 2026] A riderless store order the store accepted
+ * but never marked ready had NO exit: the cutoff read `readyAt` only, so on
+ * staging one order re-searched for 19 days and told its customer 219 times.
+ * It is now timed from the store's own promise — accepted + the order's prep
+ * minutes (the Vendor default when the order carries none) — against the same
+ * per-vertical limit a ready order meets.
+ */
+export const DEFAULT_PREP_PROMISE_MIN = 30;
+/** [OF-17 · COORD ruling 19 Oct 2026] A parcel waits for a rider at most this
+ *  long from its start — placing, the end of its hold or its slot, whichever is
+ *  latest — the way a ride waits for a driver. Before, a parcel had no cutoff. */
+export const COURIER_WAIT_LIMIT_MIN = 60;
+/** [OF-01/17 · COORD ruling 19 Oct 2026] Past its cutoff the customer is told
+ *  ONCE that they can cancel for free; if no rider has come this long after
+ *  that notice, the system cancels. (A ready order keeps its immediate cutoff:
+ *  the food is already getting cold.) */
+export const RIDERLESS_GRACE_MIN = 15;
+/** [OF-17] The cancellation reason of a parcel nobody would carry. */
+export const NO_RIDER_FOR_PARCEL_REASON = 'NO_RIDER_FOR_PARCEL';
+
+/** What a wait is measured from: the food being ready, the store's prep
+ *  promise (never marked ready), or a parcel's start. */
+export type WaitBasis = 'READY' | 'PREP_PROMISE' | 'PARCEL';
+
+export interface WaitClockSubject {
+  readyAt: Date | null;
+  orderType?: string;
+  acceptedAt?: Date | null;
+  estimatedPrepTime?: number | null;
+  placedAt?: Date | null;
+  holdExpiresAt?: Date | null;
+  scheduledFor?: Date | null;
+}
+
+/** [OF-01] The prep-promise clock is about a rider nobody found, so it runs
+ *  only where riders are searched from acceptance (ON_ACCEPT, the default and
+ *  what staging runs). Under ON_READY nobody searches before the store marks it
+ *  ready: a never-ready order there is a late STORE, not a missing rider, and
+ *  "we still haven't found a rider" would be false — it keeps its old rule. */
+export function prepPromiseClockRuns(): boolean {
+  return dispatchTrigger() !== 'ON_READY';
+}
+
+/** THE start of a riderless wait (see `WaitBasis`); null when nothing has started it. */
+export function waitClock(order: WaitClockSubject): { start: Date; basis: WaitBasis } | null {
+  if (order.orderType === 'COURIER') {
+    const starts = [order.placedAt, order.holdExpiresAt, order.scheduledFor].filter((d): d is Date => d instanceof Date);
+    if (starts.length === 0) return null;
+    return { start: new Date(Math.max(...starts.map((d) => d.getTime()))), basis: 'PARCEL' };
+  }
+  if (order.readyAt) return { start: order.readyAt, basis: 'READY' };
+  if (order.acceptedAt) {
+    const prep = order.estimatedPrepTime != null && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    return { start: new Date(order.acceptedAt.getTime() + prep * 60_000), basis: 'PREP_PROMISE' };
+  }
+  return null;
+}
 
 /** A (time, id) keyset position, written as `<ISO time>|<id>`. */
 function keysetCursor(at: Date | null, id: string): string {
@@ -101,7 +168,7 @@ function keysetCursor(at: Date | null, id: string): string {
 }
 /** The rows strictly after a keyset position in (field, id) order. An
  *  unreadable cursor starts the pass from the top — never skips a row. */
-function afterKeyset(field: 'readyAt' | 'foodAgeHeldAt', cursor: string | null): Prisma.OrderWhereInput {
+function afterKeyset(field: 'readyAt' | 'foodAgeHeldAt' | 'acceptedAt' | 'placedAt', cursor: string | null): Prisma.OrderWhereInput {
   if (!cursor) return {};
   const bar = cursor.indexOf('|');
   const at = new Date(bar > 0 ? cursor.slice(0, bar) : Number.NaN);
@@ -151,10 +218,11 @@ export async function foodAgeLimitMinutes(prisma: PrismaClient, orderType: strin
   return Number.isFinite(v) && v > 0 ? v : null;
 }
 
-export function foodAge(order: { readyAt: Date | null }, limitMinutes: number | null, now = new Date()): { tooOld: boolean; ageMinutes: number | null } {
-  if (!order.readyAt || limitMinutes == null) return { tooOld: false, ageMinutes: null };
-  const ageMinutes = Math.floor((now.getTime() - order.readyAt.getTime()) / 60_000);
-  return { tooOld: ageMinutes > limitMinutes, ageMinutes };
+export function foodAge(order: WaitClockSubject, limitMinutes: number | null, now = new Date()): { tooOld: boolean; ageMinutes: number | null; basis: WaitBasis | null } {
+  const clock = waitClock(order);
+  if (!clock || limitMinutes == null) return { tooOld: false, ageMinutes: null, basis: null };
+  const ageMinutes = Math.floor((now.getTime() - clock.start.getTime()) / 60_000);
+  return { tooOld: ageMinutes > limitMinutes, ageMinutes, basis: clock.basis };
 }
 
 /** The fields the one-order cutoff reads; full order rows fit. */
@@ -167,23 +235,32 @@ export interface TooOldSubject {
   fulfillment: string;
   fulfillmentMode: string | null;
   readyAt: Date | null;
+  /** [OF-01] Required, not optional: a never-ready order is timed from these,
+   *  and a caller that omits them must fail to compile rather than tell the
+   *  customer "not free" while the sweep says "too late". */
+  acceptedAt: Date | null;
+  estimatedPrepTime: number | null;
   foodAgeWaivedAt: Date | null;
 }
 
 /**
  * [owner #46] The food-age cutoff as a fact about ONE order — "too late to
  * deliver". The same scope `sweepFoodAge` selects (riderless, still waiting,
- * ready, platform-rider delivery, cutoff not waived by an operator) and the
- * same tenant cutoff and age arithmetic, so the customer's free cancel and the
- * system's cancel can never disagree about which orders are too old.
+ * platform-rider delivery, cutoff not waived by an operator) and the same
+ * tenant cutoff and age arithmetic — from `readyAt`, or [OF-01] from the
+ * store's prep promise when nobody marked it ready — so the customer's free
+ * cancel and the system's cancel can never disagree about which orders are
+ * too old. (It is what makes the OF-01 "cancel free now" notice true.)
  */
 export async function isTooOldToDeliver(prisma: PrismaClient, order: TooOldSubject, now = new Date()): Promise<boolean> {
   if (order.riderId != null || order.driverId != null) return false;
   if (!(WAITING_STATUSES as readonly string[]).includes(order.status)) return false;
   if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
-  if (order.readyAt == null || order.foodAgeWaivedAt != null) return false;
+  if (order.foodAgeWaivedAt != null) return false;
+  if (order.readyAt == null && !prepPromiseClockRuns()) return false;
   const limit = await foodAgeLimitMinutes(prisma, order.orderType, order.tenantId);
-  return foodAge(order, limit, now).tooOld;
+  // A store order's wait: ready, or (never marked ready) the store's prep promise.
+  return foodAge({ readyAt: order.readyAt, acceptedAt: order.acceptedAt, estimatedPrepTime: order.estimatedPrepTime }, limit, now).tooOld;
 }
 
 /**
@@ -234,17 +311,41 @@ export async function retireTooOldOrder(deps: RescueDeps, order: RetireableOrder
 /** The cutoff's full verdict: RETIRED (cancelled by the system), HELD_PAID
  *  (too old, but the store already holds the money — a person decides) or
  *  UNTOUCHED (a rider claimed it, or it moved on). */
-export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, now = new Date()): Promise<RetireOutcome> {
+export async function settleTooOldOrder(
+  deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, now = new Date(), basis: WaitBasis = 'READY',
+): Promise<RetireOutcome> {
   const notice: RescueNotice = {
     orderId: order.id, tenantId: order.tenantId, effect: 'RETIRED', ageMinutes, limitMinutes,
-    deliveryAuthorityVersion: order.fulfillmentModeVersion ?? null,
+    deliveryAuthorityVersion: order.fulfillmentModeVersion ?? null, basis,
   };
+  const reason = basis === 'PARCEL' ? NO_RIDER_FOR_PARCEL_REASON : FOOD_TOO_OLD_REASON;
+  const sentence = basis === 'PARCEL'
+    ? `Waited ${ageMinutes} min for a rider against a ${limitMinutes}-min limit with none found: cancelled by the system and handed to a person — nobody is marked.`
+    : basis === 'PREP_PROMISE'
+      ? `Never marked ready; ${ageMinutes} min past the store's prep promise against a ${limitMinutes}-min limit with no rider found: cancelled by the system and handed to a person — nobody is marked.`
+      : `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found: too old to deliver, cancelled by the system and handed to a person — nobody is marked.`;
+  const note = basis === 'PARCEL'
+    ? `Parcel wait cutoff: waited ${ageMinutes} min, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`
+    : basis === 'PREP_PROMISE'
+      ? `Food-age cutoff: never marked ready, ${ageMinutes} min past the prep promise, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`
+      : `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`;
+  // [OF-09] The cancellation goes through THE canonical seam (restock, the
+  // dispatch searches and booking closed, the case synced, the MMG-unattested
+  // marker on the log), staged inside this transaction so it still commits
+  // with its decision row and its notice obligation or not at all. Imported
+  // lazily: order.service imports this module (the cancel predicate's
+  // too-late read).
+  const { OrderService } = await import('../order/order.service');
+  const orders = new OrderService(deps.prisma, deps.io, undefined, undefined, deps.redis);
   // [RESCUE S1 · CX04] The cancellation, its log line, its decision row and the
   // obligation to tell everyone commit together or not at all. A refused
   // record rolls the cancellation back: the order stays waiting and the next
   // tick (or dispatch pass) settles it again, whole.
   const outboxId = await deps.prisma.$transaction(async (tx) => {
-    const r = await tx.order.updateMany({
+    await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${order.id} FOR UPDATE`;
+    // The cutoff's own scope, re-read on the LOCKED row (the seam re-checks
+    // status, rider and fulfillment itself):
+    const live = await tx.order.findFirst({
       where: {
         id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
         // [REPORT-070 F-06] "No rider found" is only a fact about work that
@@ -252,29 +353,34 @@ export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder
         // riderless by design and must never be retired for it.
         fulfillment: 'DELIVERY',
         foodAgeHeldAt: null,
-        AND: [notSelfDeliveredFilter()],
-        // [TA-S0-001] The guard lives in the CAS, not only in the caller's
-        // snapshot: money captured between the caller's read and this write is
-        // respected by the database, not by luck.
-        NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        AND: [
+          notSelfDeliveredFilter(),
+          // [TA-S0-001] Money captured between the caller's read and this write
+          // is respected under the lock, not by luck: paid MMG is HELD for a
+          // person (below), and [OF-17] cash a rider already collected (a
+          // parcel fee taken before a handback) is never cancelled away.
+          { NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } } },
+          { NOT: { paymentMethod: 'CASH', paymentStatus: 'CAPTURED' } },
+        ],
       },
-      data: { status: 'CANCELLED', cancelledAt: now, cancelledBy: 'system', cancellationReason: FOOD_TOO_OLD_REASON },
+      select: { id: true },
     });
-    if (r.count === 0) return null;
-    await tx.orderStatusLog.create({
-      data: {
-        orderId: order.id, status: 'CANCELLED', changedBy: 'system',
-        note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`,
-      },
+    if (!live) return null;
+    await orders.stageCanonicalOrderTransition(tx, {
+      orderId: order.id, target: 'CANCELLED', allowedFrom: [...WAITING_STATUSES],
+      changedBy: 'system', note,
+      cancellation: { by: 'system', reason },
+      expectedRiderId: null, expectedFulfillment: 'DELIVERY',
     });
     // recordDecision never throws on a database refusal (it returns null); for
     // the cutoff a missing decision is a missing record, so it rolls back.
     const decisionId = await recordDecision(tx, {
-      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: 'FOOD_TOO_OLD',
-      sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found: too old to deliver, cancelled by the system and handed to a person — nobody is marked.`,
-      inputs: { ageMinutes, limitMinutes, orderType: order.orderType, readyAt: order.readyAt?.toISOString() ?? null },
+      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId,
+      outcome: basis === 'PARCEL' ? 'PARCEL_NO_RIDER' : 'FOOD_TOO_OLD',
+      sentence,
+      inputs: { ageMinutes, limitMinutes, basis, orderType: order.orderType, readyAt: order.readyAt?.toISOString() ?? null },
     });
-    if (!decisionId) throw new Error('rescue: the food-age decision row was refused; the cancellation rolls back with it');
+    if (!decisionId) throw new Error('rescue: the cutoff decision row was refused; the cancellation rolls back with it');
     return persistRescueNotice(tx, notice, now);
   });
   if (!outboxId) return holdPaidTooOldOrder(deps, order, ageMinutes, limitMinutes, now);
@@ -308,6 +414,9 @@ export interface RescueNotice {
   limitMinutes: number;
   /** The delivery generation whose dispatch keys the cleanup drops. */
   deliveryAuthorityVersion: number | null;
+  /** [OF-01/17] What the wait was measured from; an obligation written before
+   *  it existed reads as READY (the only cutoff there was). */
+  basis?: WaitBasis;
 }
 
 export interface RescueDelivery {
@@ -349,6 +458,7 @@ export function parseRescueNoticePayload(raw: unknown): RescueNotice {
     orderId: p['orderId'] as string, tenantId: p['tenantId'] as string, effect: 'RETIRED',
     ageMinutes: p['ageMinutes'] as number, limitMinutes: p['limitMinutes'] as number,
     deliveryAuthorityVersion: (version as number | null | undefined) ?? null,
+    basis: p['basis'] === 'PREP_PROMISE' || p['basis'] === 'PARCEL' ? p['basis'] : 'READY',
   };
 }
 
@@ -376,7 +486,8 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
     // have moved it on to REFUNDED (a declared edge) before an owed notice was
     // drained, and the notices are still owed then. Anything else — the order
     // gone, or not cancelled by the cutoff — closes the obligation, loudly.
-    const deliverable = !!order && order.cancellationReason === FOOD_TOO_OLD_REASON
+    const deliverable = !!order
+      && (order.cancellationReason === FOOD_TOO_OLD_REASON || order.cancellationReason === NO_RIDER_FOR_PARCEL_REASON)
       && (order.status === 'CANCELLED' || order.status === 'REFUNDED');
     if (!order || !deliverable) {
       log().warn({ orderId: notice.orderId, status: order?.status ?? null, reason: order?.cancellationReason ?? null }, 'rescue: an owed food-age notice was closed undelivered — the order is gone or no longer the cutoff\'s cancellation');
@@ -402,13 +513,21 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
         ? 'If you already paid by MMG, the store refunds you.'
         : 'Nothing is charged for it.';
     // send() answers '' when the inbox row could not be written: not delivered.
+    // [OF-01/17] The words follow what the wait was measured from: a ready
+    // order, an order the store never marked ready, or a parcel.
+    const basis = notice.basis ?? 'READY';
+    const reason = order.cancellationReason ?? FOOD_TOO_OLD_REASON;
     await attempt('customer', async () => Boolean(await deps.notifications.send({
       userId: order.customerId,
       type: 'ORDER_UPDATE',
-      title: 'We couldn’t find a rider in time',
-      body: `Order ${order.orderNumber} was ready but no rider could be found, so we cancelled it rather than deliver it cold. ${money} We’re sorry.`,
+      title: basis === 'PARCEL' ? 'No rider for your parcel' : 'We couldn’t find a rider in time',
+      body: basis === 'PARCEL'
+        ? `No rider could be found for your parcel ${order.orderNumber} in time, so we cancelled it. ${money} You can send it again any time.`
+        : basis === 'PREP_PROMISE'
+          ? `No rider could be found for order ${order.orderNumber} in time, so we cancelled it. ${money} We’re sorry.`
+          : `Order ${order.orderNumber} was ready but no rider could be found, so we cancelled it rather than deliver it cold. ${money} We’re sorry.`,
       audience: 'customer',
-      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
+      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason },
       dedupeKey: `food-too-old:customer:${order.id}`,
     })));
     const ownerUserId = order.vendor?.owner.userId;
@@ -416,10 +535,12 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
       await attempt('business', async () => Boolean(await deps.notifications.send({
         userId: ownerUserId,
         type: 'ORDER_UPDATE',
-        title: 'Order cancelled — too old to deliver',
-        body: `${order.orderNumber} was ready ${notice.ageMinutes} min ago and no rider could be found. It has been cancelled; it has been flagged for a Swift operator.`,
+        title: basis === 'PREP_PROMISE' ? 'Order cancelled — no rider in time' : 'Order cancelled — too old to deliver',
+        body: basis === 'PREP_PROMISE'
+          ? `${order.orderNumber} was not marked ready and no rider could be found ${notice.ageMinutes} min after your prep time. It has been cancelled; it has been flagged for a Swift operator.`
+          : `${order.orderNumber} was ready ${notice.ageMinutes} min ago and no rider could be found. It has been cancelled; it has been flagged for a Swift operator.`,
         audience: 'business',
-        data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
+        data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason },
         dedupeKey: `food-too-old:vendor:${order.id}`,
       })));
     }
@@ -428,9 +549,15 @@ export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice
     // per-admin key collapses a retry into the first delivery.
     await attempt('admin', async () => {
       await notifyAdmins(deps.prisma, deps.notifications, {
-        title: 'Food too old to deliver — cancelled, needs a person',
-        body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${notice.ageMinutes} min with no rider. Check supply in that area and whether the store should be paid.`,
-        data: { kind: 'ops_food_too_old', orderId: order.id },
+        title: basis === 'PARCEL'
+          ? 'Parcel found no rider — cancelled, needs a person'
+          : basis === 'PREP_PROMISE' ? 'No rider in time — cancelled, needs a person' : 'Food too old to deliver — cancelled, needs a person',
+        body: basis === 'PARCEL'
+          ? `Parcel ${order.orderNumber} waited ${notice.ageMinutes} min with no rider. Check courier supply in that area.`
+          : basis === 'PREP_PROMISE'
+            ? `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was never marked ready and had no rider ${notice.ageMinutes} min past the prep promise. Check supply in that area and whether the store should be paid.`
+            : `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${notice.ageMinutes} min with no rider. Check supply in that area and whether the store should be paid.`,
+        data: { kind: 'ops_food_too_old', orderId: order.id, basis },
         tenantId: notice.tenantId,
         dedupeKey: `food-too-old:ops:${order.id}`,
         requireAll: true,
@@ -627,7 +754,7 @@ async function deliverHoldEffects(deps: RescueDeps, order: RetireableOrder, ageM
   await opsPageOnce({ redis: deps.redis }, `food_too_old_paid:${order.id}`, 6 * 3600, () =>
     pageOperators(deps, {
       title: 'Paid MMG order too old to deliver — held for review, NOT cancelled',
-      body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${ageMinutes} min against a ${limitMinutes}-min limit with no rider, and the customer already paid by MMG. The system did not cancel it; it is held. Decide in the admin console (Orders → Held for review): deliver it anyway, which waives the cutoff for this order and sends it back to dispatch, or have the store refund the customer directly.`,
+      body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) ${order.readyAt ? 'was ready' : 'was never marked ready and is'} ${ageMinutes} min ${order.readyAt ? '' : 'past its prep promise '}against a ${limitMinutes}-min limit with no rider, and the customer already paid by MMG. The system did not cancel it; it is held. Decide in the admin console (Orders → Held for review): deliver it anyway, which waives the cutoff for this order and sends it back to dispatch, or have the store refund the customer directly.`,
       data: { kind: 'ops_food_too_old', orderId: order.id, held: true },
       tenantId: order.tenantId,
     }),
@@ -636,7 +763,7 @@ async function deliverHoldEffects(deps: RescueDeps, order: RetireableOrder, ageM
     userId: order.customerId,
     type: 'ORDER_UPDATE',
     title: 'We couldn’t find a rider in time',
-    body: `Order ${order.orderNumber} was ready but no rider could be found. You’ve already paid the store by MMG, so it was NOT cancelled automatically — it is flagged for review by Swift, and nothing more is charged. If it can’t be delivered, the store refunds you directly.`,
+    body: `Order ${order.orderNumber} ${order.readyAt ? 'was ready but no rider could be found' : 'found no rider in time'}. You’ve already paid the store by MMG, so it was NOT cancelled automatically — it is flagged for review by Swift, and nothing more is charged. If it can’t be delivered, the store refunds you directly.`,
     audience: 'customer',
     data: { orderId: order.id, orderNumber: order.orderNumber, reason: FOOD_TOO_OLD_REASON, held: true },
     dedupeKey: `food-too-old-paid:customer:${order.id}`,
@@ -646,7 +773,7 @@ async function deliverHoldEffects(deps: RescueDeps, order: RetireableOrder, ageM
       userId: order.vendor.owner.userId,
       type: 'ORDER_UPDATE',
       title: 'No rider found — the customer has already paid',
-      body: `${order.orderNumber} was ready ${ageMinutes} min ago and no rider could be found. The customer paid you by MMG, so it is NOT cancelled: it is flagged for a Swift operator to review. Keep it ready until Swift decides; if it cannot be delivered, you refund the customer directly.`,
+      body: `${order.orderNumber} ${order.readyAt ? `was ready ${ageMinutes} min ago and no rider could be found` : `was not marked ready and no rider could be found ${ageMinutes} min after the prep time`}. The customer paid you by MMG, so it is NOT cancelled: it is flagged for a Swift operator to review. Keep it ready until Swift decides; if it cannot be delivered, you refund the customer directly.`,
       audience: 'business',
       data: { orderId: order.id, orderNumber: order.orderNumber, reason: FOOD_TOO_OLD_REASON, held: true },
       dedupeKey: `food-too-old-paid:vendor:${order.id}`,
@@ -692,12 +819,56 @@ export async function releaseFoodAgeHold(
  *  order past its tenant's cutoff — HOLD, un-cancelled, the ones whose money
  *  the store already holds ([TA-S0-001]) — and re-deliver the effects of
  *  every existing hold whose notices may still be owed. */
-export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<{ retired: string[]; held: string[] }> {
+/** [OF-01/17] The one "cancel free now" notice's key: at most one per order, ever. */
+export function riderlessCutoffNoticeKey(orderId: string): string {
+  return `riderless-cutoff:customer:${orderId}`;
+}
+
+/**
+ * [OF-01/17 · COORD ruling 19 Oct 2026] Past its cutoff, a riderless order is
+ * not cancelled at once: the customer is told ONCE that they can cancel for
+ * free (true at this moment — the cancel predicate reads the same cutoff, and
+ * a parcel nobody took is always free), and the system cancels only when that
+ * notice is RIDERLESS_GRACE_MIN old and still no rider has come. The notice row
+ * itself is the durable "told at" (its key makes a second send collapse), so a
+ * restart never re-tells and never skips the grace. A paid MMG order is never
+ * told "free" (the store holds the money): it goes straight to the paid hold.
+ */
+async function settleAfterGrace(
+  deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, basis: WaitBasis, now: Date,
+): Promise<RetireOutcome | 'NOTIFIED' | 'WAITING'> {
+  if (isCapturedMmg(order)) return settleTooOldOrder(deps, order, ageMinutes, limitMinutes, now, basis);
+  const dedupeKey = riderlessCutoffNoticeKey(order.id);
+  const told = await deps.prisma.notification.findUnique({
+    where: { userId_dedupeKey: { userId: order.customerId, dedupeKey } },
+    select: { createdAt: true },
+  });
+  if (!told) {
+    const money = order.paymentMethod === 'CASH' ? ' You won’t pay anything.' : order.paymentMethod === 'MOBILE_MONEY' ? '' : ' Nothing is charged for it.';
+    await deps.notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: basis === 'PARCEL' ? 'No rider yet — you can cancel for free' : 'Still no rider — you can cancel for free',
+      body: basis === 'PARCEL'
+        ? `No rider has taken your parcel ${order.orderNumber} yet. You can cancel it now for free. If no rider takes it in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`
+        : `We still haven’t found a rider for order ${order.orderNumber}. You can cancel it now for free. If no rider is found in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`,
+      audience: 'customer',
+      data: { orderId: order.id, orderNumber: order.orderNumber, kind: 'riderless_cutoff', canCancelFree: true, cancelsInMinutes: RIDERLESS_GRACE_MIN },
+      dedupeKey,
+    });
+    return 'NOTIFIED';
+  }
+  if (now.getTime() - told.createdAt.getTime() < RIDERLESS_GRACE_MIN * 60_000) return 'WAITING';
+  return settleTooOldOrder(deps, order, ageMinutes, limitMinutes, now, basis);
+}
+
+export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<{ retired: string[]; held: string[]; notified: string[] }> {
   const retired: string[] = [];
   const held: string[] = [];
+  const notified: string[] = [];
   const select = {
     id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true, readyAt: true,
-    fulfillmentModeVersion: true,
+    fulfillmentModeVersion: true, acceptedAt: true, estimatedPrepTime: true, placedAt: true, holdExpiresAt: true, scheduledFor: true,
     vendor: { select: { name: true, owner: { select: { userId: true } } } },
   } as const;
   type WaitingRow = Prisma.OrderGetPayload<{ select: typeof select }>;
@@ -741,6 +912,65 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
   // re-running them repairs a crash after the claim or a page nobody took.
   // [RESCUE S1 · CX05] (foodAgeHeldAt, id): one tick holds many orders at the
   // same `now`, so held times tie by construction.
+  // [OF-01] A riderless store order the store accepted but never marked
+  // ready: timed from its prep promise; past the cutoff the customer is told
+  // ONCE that they can cancel for free, and the system cancels when no rider
+  // has come RIDERLESS_GRACE_MIN after that notice. An MMG order nobody has
+  // marked paid is not here: it is never dispatched, and its own 30-minute
+  // acceptance expiry closes it.
+  if (prepPromiseClockRuns()) await sweepPage<WaitingRow>(deps.prisma, RESCUE_SWEEPS.unready, {
+    pageSize: SWEEP_PAGE.retire,
+    cursorOf: (o) => keysetCursor(o.acceptedAt, o.id),
+    fetch: (after, limit) => deps.prisma.order.findMany({
+      where: {
+        riderId: null, status: { in: ['ACCEPTED', 'PREPARING'] }, readyAt: null, acceptedAt: { not: null },
+        fulfillment: 'DELIVERY', foodAgeHeldAt: null, foodAgeWaivedAt: null,
+        NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' },
+        AND: [notSelfDeliveredFilter(), afterKeyset('acceptedAt', after)],
+      },
+      select,
+      orderBy: [{ acceptedAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+    }),
+    handle: async (o) => {
+      const limit = await foodAgeLimitMinutes(deps.prisma, o.orderType, o.tenantId);
+      if (limit == null) return;
+      const age = foodAge(o, limit, now);
+      if (!age.tooOld || age.ageMinutes == null || age.basis == null) return;
+      const outcome = await settleAfterGrace(deps, o, age.ageMinutes, limit, age.basis, now);
+      if (outcome === 'RETIRED') retired.push(o.id);
+      else if (outcome === 'HELD_PAID') held.push(o.id);
+      else if (outcome === 'NOTIFIED') notified.push(o.id);
+    },
+    now,
+  });
+  // [OF-17] A riderless parcel: at most COURIER_WAIT_LIMIT_MIN from its start,
+  // then the same one notice and grace. A parcel whose fee a rider already
+  // collected (CAPTURED before a handback) is never cancelled here: a person
+  // holds that cash (OF-07).
+  await sweepPage<WaitingRow>(deps.prisma, RESCUE_SWEEPS.parcel, {
+    pageSize: SWEEP_PAGE.retire,
+    cursorOf: (o) => keysetCursor(o.placedAt, o.id),
+    fetch: (after, limit) => deps.prisma.order.findMany({
+      where: {
+        orderType: 'COURIER', riderId: null, status: 'READY_FOR_PICKUP',
+        fulfillment: 'DELIVERY', foodAgeHeldAt: null, foodAgeWaivedAt: null,
+        paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },
+        AND: [notSelfDeliveredFilter(), afterKeyset('placedAt', after)],
+      },
+      select,
+      orderBy: [{ placedAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+    }),
+    handle: async (o) => {
+      const age = foodAge(o, COURIER_WAIT_LIMIT_MIN, now);
+      if (!age.tooOld || age.ageMinutes == null || age.basis == null) return;
+      const outcome = await settleAfterGrace(deps, o, age.ageMinutes, COURIER_WAIT_LIMIT_MIN, age.basis, now);
+      if (outcome === 'RETIRED') retired.push(o.id);
+      else if (outcome === 'NOTIFIED') notified.push(o.id);
+    },
+    now,
+  });
   await sweepPage<WaitingRow & { foodAgeHeldAt: Date | null }>(deps.prisma, RESCUE_SWEEPS.holds, {
     pageSize: SWEEP_PAGE.holds,
     cursorOf: (h) => keysetCursor(h.foodAgeHeldAt, h.id),
@@ -764,7 +994,7 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
     },
     now,
   });
-  return { retired, held };
+  return { retired, held, notified };
 }
 
 // ---------------------------------------------------------------------------
