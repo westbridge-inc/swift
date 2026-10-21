@@ -121,7 +121,8 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
     const known = sessionPrincipal !== null;
@@ -137,6 +138,9 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       await endClosedDemo({ redirect: false });
       return forget();
     }
+    // [UI-SWEEP U23] A server failure says nothing about the session: it is
+    // "unreachable", never "signed out", and the principal is kept.
+    if (res.status >= 500) return { ok: false, unreachable: true };
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
@@ -158,7 +162,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
-    return { ok: false };
+    return { ok: false, unreachable: true };
   }
 }
 
@@ -186,7 +190,7 @@ export function adoptSession(principal: string | null) {
  * every page load. The shell calls this only when a signed-in answer is
  * actually needed — a private page, or an action like adding to the cart.
  */
-export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   if (!(await tryRefresh())) return { ok: false };
   return sessionProbe();

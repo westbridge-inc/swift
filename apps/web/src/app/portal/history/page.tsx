@@ -8,12 +8,23 @@ import { formatMoney as money, parseAmount } from '@/lib/money';
 
 const when = (iso: unknown) => (iso ? new Date(String(iso)).toLocaleString() : '—');
 
-function statusChip(s: string) {
+/** [UI-SWEEP U45] The phone's words (mover/shared.tsx JobStatusPill; a taxi ride
+ *  that the server closed as DELIVERED is "Completed", JobHistoryScreen), never a code. */
+function jobStatusWord(status: string, isRide: boolean): string {
+  const s = status.toUpperCase();
+  if (s === 'DELIVERED') return isRide ? 'Completed' : 'Delivered';
+  if (s === 'COMPLETED') return 'Completed';
+  if (s === 'CANCELLED') return 'Cancelled';
+  const words = s.replace(/_/g, ' ').toLowerCase();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'In progress';
+}
+
+function statusChip(s: string, isRide = false) {
   const done = ['DELIVERED', 'COMPLETED'].includes(s);
   const dead = s === 'CANCELLED';
   return (
-    <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'}`}>
-      {s.replaceAll('_', ' ')}
+    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold ${done ? 'bg-green-100 text-green-700' : dead ? 'bg-black/5 text-[var(--swift-muted)]' : 'bg-[var(--swift-red)]/10 text-[var(--swift-red)]'}`}>
+      {jobStatusWord(s, isRide)}
     </span>
   );
 }
@@ -105,7 +116,7 @@ function RidesTable() {
         <article key={String(r['id'])} aria-label={`Ride ${String(r['orderNumber'] ?? '')}`} className="min-w-0 sw-card p-4 text-sm sm:hidden">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <strong>#{String(r['orderNumber'] ?? '')}</strong>
-            {statusChip(String(r['status'] ?? ''))}
+            {statusChip(String(r['status'] ?? ''), true)}
           </div>
           <p className="mt-2 break-words text-[var(--swift-muted)]">{String(r['taxiPickupAddress'] ?? '')} → {String(r['taxiDropoffAddress'] ?? '')}</p>
           <p className="mt-2 font-semibold">Fare: {money(r['taxiFareTotal'] ?? r['totalAmount'])}</p>
@@ -141,7 +152,7 @@ function RidesTable() {
               <td className="max-w-72 px-4 py-3 text-[var(--swift-muted)]">
                 <span className="line-clamp-1">{String(r['taxiPickupAddress'] ?? '')} → {String(r['taxiDropoffAddress'] ?? '')}</span>
               </td>
-              <td className="px-4 py-3">{statusChip(String(r['status'] ?? ''))}</td>
+              <td className="px-4 py-3">{statusChip(String(r['status'] ?? ''), true)}</td>
               <td className="px-4 py-3 font-medium">{money(r['taxiFareTotal'] ?? r['totalAmount'])}</td>
               <td className="px-4 py-3 text-[var(--swift-muted)]">{(parseAmount(r['tipAmount']) ?? 0) > 0 ? money(r['tipAmount']) : '—'}</td>
             </tr>
@@ -179,6 +190,14 @@ export default function HistoryPage() {
       )}
       {rider.isLoading || driver.isLoading ? (
         <p className="text-sm text-[var(--swift-muted)]">Loading…</p>
+      ) : rider.isError || driver.isError ? (
+        // [UI-SWEEP U24] A failed profile read is not "no earner profile": the
+        // home page's branch (portal/page.tsx), so it says it could not check.
+        <DataUnavailable
+          what="your earner profile"
+          error={rider.error ?? driver.error}
+          onRetry={() => { void rider.refetch(); void driver.refetch(); }}
+        />
       ) : active === 'deliveries' && rider.data ? (
         <DeliveriesTable />
       ) : driver.data ? (

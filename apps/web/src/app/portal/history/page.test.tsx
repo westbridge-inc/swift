@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import HistoryPage from './page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
@@ -14,7 +14,8 @@ describe('phone history', () => {
     renderWithQuery(<HistoryPage />);
     const card = await screen.findByRole('article', { name: 'Delivery SW-1001' });
     expect(card.textContent).toContain('Fixture Market');
-    expect(card.textContent).toContain('DELIVERED');
+    expect(card.textContent).toContain('Delivered');
+    expect(card.textContent).not.toContain('DELIVERED');
     expect(card.textContent).toContain('$800');
     expect(card.textContent).not.toContain('GY$');
     expect(card.className).toContain('sm:hidden');
@@ -29,9 +30,38 @@ describe('phone history', () => {
     });
     renderWithQuery(<HistoryPage />);
     const card = await screen.findByRole('article', { name: 'Ride SW-2001' });
-    expect(card.textContent).toContain('COMPLETED');
+    expect(card.textContent).toContain('Completed');
+    expect(card.textContent).not.toContain('COMPLETED');
     expect(card.textContent).toContain('$2,500');
     expect(card.textContent).toContain('$200');
     expect(card.textContent).not.toContain('GY$');
+  });
+});
+
+// [UI-SWEEP U24] A failed profile read said "No earner profile on this account" — to a working driver.
+describe('[U24] a failed profile read is not "no earner profile"', () => {
+  it('says it could not check, and retries', async () => {
+    let calls = 0;
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/rider/profile') return ++calls === 1 ? { status: 503, body: { error: { message: 'Unavailable' } } } : { body: { data: { id: 'rider-1' } } };
+      if (url.pathname === '/api/v1/driver/profile') return { status: 404, body: { error: 'Absent' } };
+      if (url.pathname === '/api/v1/rider/orders') return { body: { data: [], meta: { total: 0, totalPages: 1 } } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const { user } = renderWithQuery(<HistoryPage />);
+    expect(await screen.findByText("Couldn't load your earner profile.")).toBeTruthy();
+    expect(screen.queryByText(/No earner profile/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByText("Couldn't load your earner profile.")).toBeNull());
+    expect(screen.queryByText(/No earner profile/)).toBeNull();
+  });
+
+  it('control: only a server "absent" on both says there is no earner profile', async () => {
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/rider/profile' || url.pathname === '/api/v1/driver/profile') return { status: 404, body: { error: 'Absent' } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderWithQuery(<HistoryPage />);
+    expect(await screen.findByText('No earner profile on this account.')).toBeTruthy();
   });
 });
