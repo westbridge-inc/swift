@@ -2837,7 +2837,7 @@ export class VerificationService {
   }
 
   /** [Row 249] The daily unclaimed-upload sweep (user/upload-erasure.ts), on this service's database and storage. */
-  async sweepStaleUnclaimedUploads(log?: Parameters<typeof import('../user/upload-erasure').sweepStaleUnclaimedUploads>[2]['log']) {
+  async sweepStaleUnclaimedUploads(log?: NonNullable<Parameters<typeof import('../user/upload-erasure').sweepStaleUnclaimedUploads>[2]>['log']) {
     const { sweepStaleUnclaimedUploads } = await import('../user/upload-erasure');
     return sweepStaleUnclaimedUploads(this.prisma, getStorageProvider(), { log });
   }
