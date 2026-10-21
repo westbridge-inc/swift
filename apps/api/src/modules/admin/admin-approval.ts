@@ -216,13 +216,18 @@ export function askTargetKey(subject: ApprovalSubject, fingerprint: string): str
   return `${subject.method.toUpperCase()} ${subject.routeUrl} ${target}`;
 }
 
+type StandingAsk = { id: string; status: OpenApprovalStatus; requestedBy: string };
+// What the ask transaction found: the ask already standing, or the one it wrote.
+// `askState` (not `kind`): the notification censuses read `kind:` literals as notification kinds.
+type AskResult = { askState: 'standing'; standing: StandingAsk } | { askState: 'created'; created: { id: string } };
+
 /** The ask for this act that still stands, if any. Call under the ask lock. */
 async function standingAskFor(
   db: Prisma.TransactionClient,
   subject: ApprovalSubject,
   fingerprint: string,
   now: Date,
-): Promise<{ id: string; status: OpenApprovalStatus; requestedBy: string } | null> {
+): Promise<StandingAsk | null> {
   const action = `${subject.method.toUpperCase()} ${subject.routeUrl}`;
   const params = subject.params ?? {};
   const hasTarget = Object.keys(params).length > 0;
@@ -324,20 +329,21 @@ export async function resolveApproval(
     // it is written under that refund's ask lock, so a release applying at the
     // same moment either sees it or has finished before it.
     const refundEntity = data.action === PAID_ACTION ? data.entityId : null;
-    const asked = await prisma.$transaction(async (tx) => {
+    const asked: AskResult = await prisma.$transaction(async (tx): Promise<AskResult> => {
       if (refundEntity) await lockCreditRefundAsks(tx, refundEntity);
       // [U06] One ask per act: two presses racing both wait here, and the
       // second sees the first's row.
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`privileged-approval-ask:${askTargetKey(subject, fingerprint)}`}, 0))`;
       const standing = await standingAskFor(tx, subject, fingerprint, now);
-      if (standing) return { kind: 'standing', standing } as const;
+      if (standing) return { askState: 'standing', standing };
       // [Review S2-1] Checked before it is written: an ask that could never be recorded is
       // refused now and never becomes a "payout reported" marker.
       if (refundEntity) await validatePaidAsk(tx, refundEntity, subject.body);
-      return { kind: 'created', created: await write(tx) } as const;
+      return { askState: 'created', created: await write(tx) };
     });
-    if (asked.kind === 'standing') {
-      return { outcome: 'already-open', approvalId: asked.standing.id, status: asked.standing.status, askedByYou: asked.standing.requestedBy === actor.userId };
+    if (asked.askState === 'standing') {
+      const { standing } = asked;
+      return { outcome: 'already-open', approvalId: standing.id, status: standing.status, askedByYou: standing.requestedBy === actor.userId };
     }
     return { outcome: 'requested', approvalId: asked.created.id, fingerprint };
   }
