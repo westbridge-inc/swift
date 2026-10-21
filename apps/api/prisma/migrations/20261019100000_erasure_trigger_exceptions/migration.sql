@@ -122,13 +122,18 @@ BEGIN
     IF TG_OP = 'DELETE' AND EXISTS (
       SELECT 1 FROM "EvidenceBundle" b
       WHERE b."id" = OLD."bundleId" AND NOT b."legalHold" AND b."subjectUserId" IS NOT NULL AND swift_erased_person(b."subjectUserId")
-        -- Its case (if any) is not kept whole; its SOS (if any) is over and no case on it is kept whole; no hold covers
-        -- the bundle or the person. "Kept whole" is the app's CASE_KEPT_WHOLE (erasure-coverage.ts), never weaker:
-        -- open, the case legal-hold flag, a legal_holds row on the case, or an unreleased document hold raised from it.
+        -- The same selection as the app (erasure-coverage.ts deidentifySafetyRecords), never weaker: its case (if any)
+        -- is one the person is subject or reporter of and is not kept whole; its SOS (if any) is the person's own, over,
+        -- with no case on it kept whole and no held bundle on it (one bundle per SOS today: kept for parity); no hold
+        -- covers the bundle or the person. "Kept whole" is the app's CASE_KEPT_WHOLE: open, the case legal-hold flag,
+        -- a legal_holds row on the case, or an unreleased document hold raised from it.
         AND (b."caseId" IS NULL OR EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."id" = b."caseId"
+          AND (c."subjectUserId" = b."subjectUserId" OR c."reporterUserId" = b."subjectUserId")
           AND c."status"::text = 'CLOSED' AND NOT c."legalHold" -- (a legal_holds row on it: the bundle line below)
           AND NOT EXISTS (SELECT 1 FROM doc_legal_hold d2 WHERE d2."incidentCaseId" = c."id" AND d2."releasedAt" IS NULL)))
         AND (b."sosAlertId" IS NULL OR EXISTS (SELECT 1 FROM "SosAlert" a WHERE a."id" = b."sosAlertId" AND a."status"::text IN ('RESOLVED', 'CANCELLED')
+          AND a."actorUserId" = b."subjectUserId"
+          AND NOT EXISTS (SELECT 1 FROM "EvidenceBundle" b2 WHERE b2."sosAlertId" = a."id" AND b2."legalHold")
           AND NOT EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND (c."status"::text <> 'CLOSED' OR c."legalHold"
             OR EXISTS (SELECT 1 FROM legal_holds l3 WHERE l3."caseId" = c."id")
             OR EXISTS (SELECT 1 FROM doc_legal_hold d3 WHERE d3."incidentCaseId" = c."id" AND d3."releasedAt" IS NULL)))))

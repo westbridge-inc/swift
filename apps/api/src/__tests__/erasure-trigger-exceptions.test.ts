@@ -4,7 +4,7 @@
  * Each exception opens ONLY for a person whose users row carries the erasure's marker (phone = 'deleted:' || id),
  * ONLY for the exact erased values, and every other write stays refused, for an erased person too.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
 import { randomBytes } from 'node:crypto';
@@ -94,6 +94,18 @@ describe('payment_instruments: an erased person\'s out-of-service card may be fo
     const named = await card(who, { status: 'REPLACED', revokedAt: null, replacedAt: new Date(), replacedById: c.id });
     await expect(drop(c.id)).rejects.toThrow(/cannot be deleted/); // a replacement names it
     expect(named.replacedById).toBe(c.id);
+  });
+
+  it('[REVIEW-G S4-1] an erased card a weekly-fee payment names cannot be deleted (no foreign key: the trigger is the only guard)', async () => {
+    const who = await payer(true);
+    const c = await card(who, { status: 'EXPIRED', revokedAt: null, expiredAt: new Date() });
+    await wipe(c.id);
+    const now = new Date();
+    const payment = await system(() => app.prisma.subscriptionPayment.create({ data: {
+      subscriptionId: who.subId, amount: 1000, status: 'FAILED', paymentMethod: 'CARD', instrumentId: c.id, periodStart: now, periodEnd: now,
+    } }));
+    onTestFinished(async () => { await system(() => app.prisma.subscriptionPayment.delete({ where: { id: payment.id } })); });
+    await expect(drop(c.id)).rejects.toThrow(/cannot be deleted/);
   });
 });
 
@@ -219,6 +231,20 @@ describe('EvidenceItem: a sealed item may be deleted only when its bundle is abo
     await expect(del(await onSos('CLOSED', 'row'))).rejects.toThrow(/sealed/);
     await expect(del(await onSos('CLOSED', 'doc'))).rejects.toThrow(/sealed/);
     await del(await onSos('CLOSED'));
+  });
+
+  it('[REVIEW-G S3-1] the database keeps a sealed item the app never selects: an SOS someone else raised, a case the person is neither subject nor reporter of', async () => {
+    const gone = await payer(true);
+    const other = await payer(false);
+    // Another person's emergency record (the register keeps it as theirs), even with the bundle about `gone`.
+    await expect(del(await sealedItem(gone.userId, { sosAlertId: await sos(other.userId, 'RESOLVED') }))).rejects.toThrow(/sealed/);
+    // A closed, unheld case about other people only.
+    await expect(del(await sealedItem(gone.userId, { caseId: await kase(other.userId, 'CLOSED') }))).rejects.toThrow(/sealed/);
+    // Control: the person reported the case (subject someone else): it is theirs too, so the item may go.
+    const reported = await kase(other.userId, 'CLOSED');
+    await system(() => app.prisma.incidentCase.update({ where: { id: reported }, data: { reporterUserId: gone.userId } }));
+    await del(await sealedItem(gone.userId, { caseId: reported }));
+    // (A second, held bundle on the same SOS cannot exist: EvidenceBundle.sosAlertId is unique. The trigger checks it anyway.)
   });
 });
 
