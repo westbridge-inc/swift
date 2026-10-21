@@ -80,6 +80,14 @@ export function MarketingConsentRow() {
     onError: () => toast.error('Marketing messages were not changed', 'Check your connection and try again.'),
     onSettled: () => qc.invalidateQueries({ queryKey: ['consent'] }),
   });
+  // [#1946 review S4-1] A change the server accepted (its success is the
+  // authority) is the choice until a newer read answers, so a failed
+  // confirming read never shows the old choice again.
+  const acceptedChange = toggle.isSuccess && consent.dataUpdatedAt < toggle.submittedAt;
+  const on = toggle.isPending || acceptedChange ? toggle.variables === true : granted;
+  // [#1946 review S4-2] Try again shows "Checking your choice…" until the
+  // answer: a refetch with no data puts the query back to pending.
+  const readFailed = unknown && consent.isError;
   return (
     <SettingsRow
       icon="gift"
@@ -88,22 +96,22 @@ export function MarketingConsentRow() {
       plain
       label="Marketing messages"
       sub={
-        unknown && consent.isError
+        readFailed
           ? 'Could not load your choice. Try again.'
           : unknown
             ? 'Checking your choice…'
-            : granted
+            : on
               ? 'On — offers and promos'
               : 'Off — service messages only'
       }
       onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
       right={
-        unknown && consent.isError ? (
+        readFailed ? (
           <Chip label="Try again" onPress={() => consent.refetch()} />
         ) : (
           <BrandSwitch
             label="Marketing messages"
-            value={toggle.isPending ? !granted : granted}
+            value={on}
             disabled={unknown || toggle.isPending}
             onChange={(next) => toggle.mutate(next)}
           />

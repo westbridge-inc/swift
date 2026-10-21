@@ -111,7 +111,7 @@ describe('actual tab render contracts', () => {
       '../../../stores/authStore': { useAuthStore: () => ({ isAuthenticated: authenticated, user: { id: 'fixture' } }) },
       '../../../lib/appQueryPolicy': { retryRead },
       '../../../lib/customerIdCopy': { profileIdRowSub },
-      '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' },
+      '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' }, '../../../kit/toast': { toast: { error() {}, success() {}, show() {} } },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },
       '../../../components/RoleSwitcherSheet': { RoleSwitcherSheet: 'RoleSwitcherSheet' },
       '../../../services/api': { API_URL: 'https://invalid.example' }, '../../../lib/payLink': {}, '@tanstack/react-query': {},

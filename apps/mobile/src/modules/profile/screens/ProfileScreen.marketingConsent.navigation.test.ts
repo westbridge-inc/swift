@@ -139,3 +139,47 @@ describe('[UI-SWEEP U71] the marketing switch never states a choice it does not 
     expect(fx.toastError).not.toHaveBeenCalled();
   });
 });
+
+describe('[#1946 review S4-1] an accepted change is never shown as the old choice', () => {
+  it('when the confirming re-read fails, the row keeps the choice the server accepted', async () => {
+    fx.getConsent.mockResolvedValueOnce(consentAnswer('withdrawn')).mockRejectedValueOnce(new Error('offline'));
+    fx.setMarketingConsent.mockResolvedValue({ data: { data: {} } });
+    await mount();
+    await settle();
+    expect(sub()).toMatch(/^Off/);
+    await act(async () => { toggle()!.click(); });
+    await settle();
+    expect(fx.getConsent, 'the change was followed by a re-read').toHaveBeenCalledTimes(2);
+    expect(sub()).toMatch(/^On/);
+    expect(toggle()!.checked).toBe(true);
+  });
+
+  it('a newer read that answers is the choice again', async () => {
+    fx.getConsent.mockResolvedValueOnce(consentAnswer('withdrawn')).mockResolvedValueOnce(consentAnswer('withdrawn'));
+    fx.setMarketingConsent.mockResolvedValue({ data: { data: {} } });
+    await mount();
+    await settle();
+    await act(async () => { toggle()!.click(); });
+    await settle();
+    expect(fx.getConsent).toHaveBeenCalledTimes(2);
+    expect(sub()).toMatch(/^Off/);
+    expect(toggle()!.checked).toBe(false);
+  });
+});
+
+// Already true on main (TanStack 5: a refetch with no data is pending again);
+// pinned so the row never keeps the failure words while it re-reads.
+describe('[#1946 review S4-2] Try again shows it is checking', () => {
+  it('while the re-read runs, the row says "Checking your choice…" and the Try again chip is gone', async () => {
+    fx.getConsent.mockRejectedValueOnce(new Error('offline')).mockReturnValueOnce(new Promise(() => {}));
+    await mount();
+    await settle();
+    expect(sub()).toContain('Could not load your choice');
+    const retry = Array.from(host.querySelectorAll('button')).find((b) => b.textContent === 'Try again')!;
+    await act(async () => { retry.click(); });
+    await settle();
+    expect(sub()).toBe('Checking your choice…');
+    expect(Array.from(host.querySelectorAll('button')).some((b) => b.textContent === 'Try again')).toBe(false);
+    expect(toggle()?.disabled ?? true).toBe(true);
+  });
+});
