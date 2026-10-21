@@ -122,6 +122,12 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
     UNION ALL SELECT 'supply_watches', id::text FROM supply_watches WHERE "customerId" = uid
     UNION ALL SELECT 'carts', id::text FROM carts WHERE "customerId" = uid
     UNION ALL SELECT 'cart_merge_receipts', id::text FROM cart_merge_receipts WHERE "userId" = uid
+    UNION ALL SELECT 'notifications', id::text FROM notifications WHERE "userId" = uid
+    UNION ALL SELECT 'mover_revocation_outbox', id::text FROM mover_revocation_outbox WHERE "userId" = uid
+    UNION ALL SELECT 'guardian_checkin_deliveries', id::text FROM guardian_checkin_deliveries WHERE "userId" = uid
+    UNION ALL SELECT 'card_sessions', id::text FROM card_sessions WHERE "userId" = uid
+    UNION ALL SELECT 'renewal_schedule', id::text FROM renewal_schedule WHERE "subjectId" = uid
+    UNION ALL SELECT 'admins', id::text FROM admins WHERE "userId" = uid
   ) k
 $$;
 CREATE OR REPLACE FUNCTION erasure_ledger_capture_closed_account() RETURNS trigger
@@ -173,6 +179,13 @@ CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON ride_queue_entries FOR
 CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON supply_watches FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('customerId', 'id');
 CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON carts FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('customerId', 'id');
 CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON cart_merge_receipts FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
+-- [#1905] what account erasure also clears now (account-erasure-register ERASURE_CLEARED)
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON notifications FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON mover_revocation_outbox FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON guardian_checkin_deliveries FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON card_sessions FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON renewal_schedule FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('subjectId', 'id');
+CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON admins FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
 
 -- The application reads the ledger (the stale-shipment alert) and never writes it: the default
 -- privileges hand swift_app full DML on a new table, so take the writes back (and the test-database
