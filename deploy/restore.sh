@@ -99,7 +99,7 @@ private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_D
 # scratch copy: not PUBLIC, not any application login. Checked, not assumed.
 quarantine_scratch() {
   db_psql postgres -q <<SQL
-REVOKE CONNECT ON DATABASE "$SCRATCH" FROM PUBLIC;
+REVOKE ALL ON DATABASE "$SCRATCH" FROM PUBLIC;
 DO \$\$ DECLARE r record; BEGIN
   FOR r IN SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user LOOP
     EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', '$SCRATCH', r.rolname);

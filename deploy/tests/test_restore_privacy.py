@@ -75,7 +75,7 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         r, calls = self.run_restore()
         self.assertEqual(r.returncode, 0, r.stderr)
         create = self.first(calls, 'CREATE DATABASE')
-        revoke = self.first(calls, 'REVOKE CONNECT ON DATABASE "swift_restore_privacy" FROM PUBLIC')
+        revoke = self.first(calls, 'REVOKE ALL ON DATABASE "swift_restore_privacy" FROM PUBLIC')
         restore = self.first(calls, 'pg_restore db=swift_restore_privacy')
         self.assertLess(create, revoke)
         self.assertLess(revoke, restore)
