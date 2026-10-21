@@ -2100,6 +2100,11 @@ export async function vendorRoutes(app: FastifyInstance) {
           fulfillmentMode: true,
           fulfillmentModeVersion: true,
           riderId: true,
+          // [#1875 · REVIEW-G/M S4] the MMG dispatch gate is judged on THIS locked row, not the route's pre-read
+          paymentMethod: true,
+          orderType: true,
+          paymentStatus: true,
+          mmgClaimMismatchAt: true,
         },
       });
       if (live.fulfillment !== 'DELIVERY') {
@@ -2132,7 +2137,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
     if (mode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
-    } else if (!committed.riderId) {
+    } else if (!committed.riderId && !mmgDispatchBlocked(committed)) {
+      // [#1848 follow-up · REVIEW-M S4-1] Like acceptance: an MMG order not yet "Paid by MMG" arms no
+      // dispatch here — "Paid by MMG" arms it. Decided on the committed row (the locked read, or the row the
+      // switch wrote), so a "Paid by MMG" that landed while the switch waited for the lock is seen.
       await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };

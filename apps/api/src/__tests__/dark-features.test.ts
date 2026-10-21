@@ -128,6 +128,8 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/ads/checkout.service.ts'),
       read('apps/api/src/modules/ads/refund.service.ts'),
       read('apps/api/src/utils/mmg-pay-url.ts'),
+      // [row 117] web taxi booking
+      read('apps/api/src/modules/rides/web-taxi-booking.ts'),
       // [row 312] the upload malware gate
       read('apps/api/src/lib/malware-scan.ts'),
     ].join('\n');
