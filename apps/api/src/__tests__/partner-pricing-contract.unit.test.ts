@@ -60,6 +60,7 @@ type Tiers = Record<string, unknown>;
 type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 60000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
@@ -257,12 +258,18 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
   const authority = authorityTables(() => [...moverRows, ...vendorRows].map((r) => ({ ...r, weeklyRate: rates.get(String(r['id'])) })),
     () => [...moverRows, ...vendorRows].map((r) => (r['rider'] as any)?.user ?? (r['driver'] as any)?.user ?? (r['vendor'] as any)?.owner.user));
   const transaction = async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => {
-    const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>>; held: Array<[string, unknown]> } = { updates: [], events: [], held: [] };
+    const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>>; config: Map<string, unknown> } = { updates: [], events: [], config: new Map() };
     const tx = {
       ...authority,
+      // [R27] Runtime records (held rises, lower-tier observations): staged like every other write.
       platformConfig: {
-        findUnique: vi.fn(async ({ where }: { where: { key: string } }) => (heldRows.has(where.key) ? { key: where.key, value: heldRows.get(where.key) } : null)),
-        upsert: vi.fn(async ({ where, create }: { where: { key: string }; create: { value: unknown } }) => { staged.held.push([where.key, create.value]); return create; }),
+        findUnique: vi.fn(async ({ where }: { where: { key: string } }) => {
+          const value = staged.config.has(where.key) ? staged.config.get(where.key) : heldRows.get(where.key);
+          return value == null ? null : { key: where.key, value };
+        }),
+        upsert: vi.fn(async ({ where, create }: { where: { key: string }; create: { value: unknown } }) => { staged.config.set(where.key, create.value); return create; }),
+        update: vi.fn(async ({ where, data }: { where: { key: string }; data: { value: unknown } }) => { staged.config.set(where.key, data.value); return data; }),
+        delete: vi.fn(async ({ where }: { where: { key: string } }) => { staged.config.set(where.key, null); return {}; }),
       },
       auditLog: { create: vi.fn(async () => ({})) },
       countryConfig: countryConfigFake(tiersByCountry),
@@ -294,9 +301,14 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
       keys.add(String(event['idempotencyKey']));
       events.push(event);
     }
-    for (const [key, value] of staged.held) {
-      heldRows.set(key, value);
-      held.set(key.slice(key.indexOf(':') + 1), Number((value as { to: number }).to));
+    for (const [key, value] of staged.config) {
+      if (value == null) heldRows.delete(key);
+      else heldRows.set(key, value);
+      const id = key.slice(key.indexOf(':') + 1);
+      if (key.startsWith('billing.fee_rise:')) {
+        if (value == null) held.delete(id);
+        else held.set(id, Number((value as { to: number }).to));
+      }
     }
     return result;
   };
@@ -337,13 +349,13 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
         where.isAvailable === true ? (itemCounts.get(where.vendorId) ?? 0) : 0,
       ),
     },
-    platformConfig: { findUnique: vi.fn(async ({ where }: { where: { key: string } }) => (heldRows.has(where.key) ? { key: where.key } : null)) },
+    platformConfig: { count: vi.fn(async ({ where }: { where: { key: { in: string[] } } }) => where.key.in.filter((k) => heldRows.has(k)).length) },
     $transaction: vi.fn(transaction),
   } as unknown as PrismaClient;
   const billing = new BillingService(prisma, {} as NotificationService, {} as PaymentProvider);
 
-  /** One pass of the REAL weekly re-tier. A subscription seen before keeps the rate the last pass committed. */
-  async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = []) {
+  /** One pass of the REAL weekly re-tier at `at`. A subscription seen before keeps the rate the last pass committed. */
+  async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = [], at = new Date()) {
     for (const s of [...movers, ...vendors]) if (!rates.has(s.id)) rates.set(s.id, s.weeklyRate);
     moverRows = movers.map((m) => {
       const person = { vehicleType: m.vehicleType, user: { id: `${m.id}-payer`, tenantId: 'swift-default', countryCode: m.countryCode ?? 'GY' } };
@@ -373,15 +385,22 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
       },
     }));
     itemCounts = new Map(vendors.map((v) => [`${v.id}-vendor`, v.activeItems]));
-    const moversChanged = movers.length ? await billing.recalculateMoverTiers() : 0;
-    const vendorsChanged = vendors.length ? await billing.recalculateVendorTiers() : 0;
+    const moversChanged = movers.length ? await billing.recalculateMoverTiers(at) : 0;
+    const vendorsChanged = vendors.length ? await billing.recalculateVendorTiers(at) : 0;
     return { moversChanged, vendorsChanged };
   }
 
-  return { run, updates, held, events, rates, prisma };
+  /** [R27] Two consecutive weekly passes (a lower tier moves only when it holds on both): the summed counts. */
+  async function weeks(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = [], start = new Date()) {
+    const first = await run(movers, vendors, start);
+    const second = await run(movers, vendors, new Date(start.getTime() + WEEK_MS));
+    return { moversChanged: first.moversChanged + second.moversChanged, vendorsChanged: first.vendorsChanged + second.vendorsChanged };
+  }
+
+  return { run, weeks, updates, held, events, rates, prisma };
 }
 
-/** Run the REAL BillingService weekly re-tier once over the given subscriptions. */
+/** Run the REAL BillingService weekly re-tier over the given subscriptions: two consecutive weekly passes. */
 async function retier(
   tiersByCountry: Record<string, unknown>,
   movers: MoverSubFixture[] = [],
@@ -389,7 +408,7 @@ async function retier(
   opts: RetierOptions = {},
 ) {
   const harness = retierHarness(tiersByCountry, opts);
-  const { moversChanged, vendorsChanged } = await harness.run(movers, vendors);
+  const { moversChanged, vendorsChanged } = await harness.weeks(movers, vendors);
   // targets: the rate the re-tier bills each partner: moved now (a lower fee) or held for the notice (a higher one).
   const targets = new Map([...harness.updates, ...harness.held]);
   return { updates: harness.updates, held: harness.held, targets, events: harness.events, rates: harness.rates, moversChanged, vendorsChanged };
@@ -1156,13 +1175,14 @@ describe('weekly re-tier — the rate and its audit event move together, keys ne
 
   it('the rate and its TIER_CHANGE event are written in one transaction, never as two bare writes', async () => {
     const harness = retierHarness({ GY: gy() });
-    await harness.run([{ id: 'bike', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: 10000 }], [{ id: 'shop', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }]);
+    await harness.weeks([{ id: 'bike', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: 10000 }], [{ id: 'shop', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }]);
     const prisma = harness.prisma as unknown as {
       $transaction: ReturnType<typeof vi.fn>;
       subscription: { update: ReturnType<typeof vi.fn> };
       billingEvent: { create: ReturnType<typeof vi.fn> };
     };
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    // Two weekly passes (the lower tier is seen, then confirmed), one transaction per subscription each.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(4);
     expect(prisma.subscription.update).not.toHaveBeenCalled();
     expect(prisma.billingEvent.create).not.toHaveBeenCalled();
     expect(Object.fromEntries(harness.updates)).toEqual({ bike: OWNER.courier, shop: OWNER.small });
@@ -1174,16 +1194,16 @@ describe('weekly re-tier — the rate and its audit event move together, keys ne
     const rider = (vehicleType: VehicleType): MoverSubFixture[] => [{ id: 'aba', kind: 'RIDER', vehicleType, weeklyRate: OWNER.courierHeavy }];
     // [R27] Sells the canter (down at once), a told rise moves the rate back up (fee-rise-notice.ts, not the
     // re-tier), sells again: two moves in one day to the same rate, each its own transition.
-    expect((await harness.run(rider('MOTORCYCLE'))).moversChanged).toBe(1);
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(1);
     harness.rates.set('aba', OWNER.courierHeavy);
-    expect((await harness.run(rider('MOTORCYCLE'))).moversChanged).toBe(1);
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(1);
     expect(harness.rates.get('aba')).toBe(OWNER.courier);
     const keys = harness.events.map((e) => String(e['idempotencyKey']));
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
     expect(harness.events.map((e) => Number(e['amount']))).toEqual([OWNER.courier, OWNER.courier]);
     // A pass with nothing to do writes nothing: idempotency is carried by the rate, not by the key.
-    expect((await harness.run(rider('MOTORCYCLE'))).moversChanged).toBe(0);
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(0);
     expect(harness.events).toHaveLength(2);
   });
 
@@ -1215,6 +1235,45 @@ describe('weekly re-tier — the rate and its audit event move together, keys ne
     expect(Object.fromEntries(updates)).toEqual({ first: OWNER.small, last: OWNER.service });
     expect(events.map((e) => e['subscriptionId'])).toEqual(['first', 'last']);
     expect(vendorsChanged).toBe(2);
+  });
+});
+
+// ── 11b. [R27 · security review] Shrink-and-restore around one pass moves nothing ──
+
+describe('weekly re-tier — a lower tier must hold on two consecutive weekly passes', () => {
+  const gy = () => seededTiers('GY');
+  const t0 = new Date('2026-11-02T09:00:00Z');
+  const at = (days: number) => new Date(t0.getTime() + days * 24 * 60 * 60 * 1000);
+
+  it('a vehicle sold just before one pass and bought back after it: no lower fee, no TIER_CHANGE', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const heavy = (vehicleType: VehicleType): MoverSubFixture[] => [{ id: 'flip', kind: 'RIDER', vehicleType, weeklyRate: OWNER.courierHeavy }];
+    await harness.run(heavy('MOTORCYCLE'), [], at(0));
+    await harness.run(heavy('CANTER_LONG'), [], at(7));
+    await harness.run(heavy('MOTORCYCLE'), [], at(14));
+    expect(harness.rates.get('flip')).toBe(OWNER.courierHeavy);
+    expect(harness.events).toEqual([]);
+  });
+
+  it('a second pass inside the same week never confirms; the next weekly pass does, at the higher of the two', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const shop = (activeItems: number): VendorSubFixture[] => [{ id: 'shop', vendorType: 'STORE', activeItems, weeklyRate: OWNER.department }];
+    await harness.run([], shop(1500), at(0));
+    await harness.run([], shop(12), at(1));
+    expect(harness.rates.get('shop')).toBe(OWNER.department);
+    await harness.run([], shop(12), at(7));
+    expect(harness.rates.get('shop')).toBe(OWNER.large);
+    expect(harness.events.map((e) => Number(e['amount']))).toEqual([OWNER.large]);
+  });
+
+  it('a missed week starts over: an observation older than 13 days confirms nothing', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const shop: VendorSubFixture[] = [{ id: 'late', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }];
+    await harness.run([], shop, at(0));
+    await harness.run([], shop, at(14));
+    expect(harness.rates.get('late')).toBe(OWNER.large);
+    await harness.run([], shop, at(21));
+    expect(harness.rates.get('late')).toBe(OWNER.small);
   });
 });
 

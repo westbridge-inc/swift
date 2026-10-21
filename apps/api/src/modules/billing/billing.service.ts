@@ -353,6 +353,20 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   throw error;
 }
 
+/** [R27 · security review] A lower tier is seen on one weekly pass and confirmed on the next one:
+ *  at least 6 days later (so a re-run in the same week never confirms it), at most 13 (a missed week
+ *  starts over). Runtime state, keyed like the held rise; the ':' keeps it out of the config editor. */
+export const RETIER_LOWER_PREFIX = 'billing.retier_lower:';
+export const retierLowerKey = (subscriptionId: string) => `${RETIER_LOWER_PREFIX}${subscriptionId}`;
+const RETIER_LOWER_CONFIRM_MIN_MS = 6 * 86_400_000;
+const RETIER_LOWER_CONFIRM_MAX_MS = 13 * 86_400_000;
+function readRetierLower(value: unknown): { rate: number; tier: string; seenAt: string; basis?: unknown } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v['rate'] !== 'number' || !(v['rate'] >= 0) || typeof v['tier'] !== 'string' || typeof v['seenAt'] !== 'string' || Number.isNaN(Date.parse(v['seenAt']))) return null;
+  return { rate: v['rate'], tier: v['tier'], seenAt: v['seenAt'], basis: v['basis'] };
+}
+
 /** [R27] What one weekly re-tier pass did to one subscription. */
 type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
 
@@ -4857,7 +4871,7 @@ export class BillingService {
    * at signup. Same shape as `recalculateVendorTiers` below, and it shares that
    * method's TIER_CHANGE event so one audit trail covers both.
    */
-  async recalculateMoverTiers(): Promise<number> {
+  async recalculateMoverTiers(now = new Date()): Promise<number> {
     const moverSubs = await this.prisma.subscription.findMany({
       where: { OR: [{ riderId: { not: null } }, { driverId: { not: null } }], status: { in: RETIER_STATUSES } },
       select: { id: true },
@@ -4875,7 +4889,8 @@ export class BillingService {
           const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
           const target = this.retierTarget(sub.id, tiers, tariff.subject);
           if (!target) return false;
-          return this.retierInTx(tx, sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`);
+          return this.retierInTx(tx, sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`,
+            { now, basis: { kind: tariff.subject.kind, vehicleType: tariff.subject.vehicleType } });
         });
         if (moved) changed += 1;
         if (moved) await this.afterRetier(candidate.id, moved);
@@ -4964,19 +4979,66 @@ export class BillingService {
     sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
     target: PartnerRate,
     note: string,
+    opts: { now: Date; lowerTarget?: PartnerRate; basis: Record<string, unknown> },
   ): Promise<RetierMove | false> {
     const from = Number(sub.weeklyRate);
     if (target.rate > from) {
       await lockSubscriptionPayer(tx, sub.id);
-      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: new Date() });
+      await this.clearRetierLowerInTx(tx, sub.id, opts, 'HIGHER_AGAIN');
+      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: opts.now });
       return held === 'held' ? { held: true } : false;
     }
+    // [R27 · security review: shrink-and-restore around one pass] A lower tier moves nothing until it
+    // holds on TWO consecutive weekly passes (RETIER_LOWER_CONFIRM_MIN_MS..MAX_MS apart), at the
+    // HIGHER of the two observations: then a held rise above it is dropped and the fee goes down.
+    // Every observation, confirmation and clearing is an audit row with its basis.
+    const lower = opts.lowerTarget && opts.lowerTarget.rate > target.rate ? opts.lowerTarget : target;
+    const heldRow = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) } });
+    const held = heldRow ? readHeldFeeRise(heldRow.value) : null;
+    if (!(lower.rate < from) && !(held && held.to > lower.rate)) {
+      await this.clearRetierLowerInTx(tx, sub.id, opts, 'NOT_LOWER');
+      return false;
+    }
+    await lockSubscriptionPayer(tx, sub.id);
+    const key = retierLowerKey(sub.id);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    const seen = row ? readRetierLower(row.value) : null;
+    const age = seen ? opts.now.getTime() - new Date(seen.seenAt).getTime() : NaN;
+    if (!seen || !(age <= RETIER_LOWER_CONFIRM_MAX_MS) || age < 0) {
+      const value = { rate: lower.rate, tier: lower.tier, seenAt: opts.now.toISOString(), basis: opts.basis };
+      await tx.platformConfig.upsert({ where: { key }, update: { value: value as unknown as Prisma.InputJsonValue }, create: { key, value: value as unknown as Prisma.InputJsonValue } });
+      await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, replaces: seen ?? null } as unknown as Prisma.InputJsonValue } });
+      return false;
+    }
+    if (age < RETIER_LOWER_CONFIRM_MIN_MS) {
+      // A second pass inside the same week: the lower tier must hold at every observation.
+      if (lower.rate > seen.rate) {
+        const value = { ...seen, rate: lower.rate, tier: lower.tier };
+        await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+        await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, raisedWithinWeek: opts.basis } as unknown as Prisma.InputJsonValue } });
+      }
+      return false;
+    }
+    const confirmed: PartnerRate = lower.rate >= seen.rate ? lower : { rate: seen.rate, tier: seen.tier as PartnerRate['tier'] };
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_CONFIRMED', entity: 'Subscription', entityId: sub.id,
+      changes: { from, to: confirmed.rate, first: seen, second: { rate: lower.rate, at: opts.now.toISOString(), basis: opts.basis } } as unknown as Prisma.InputJsonValue } });
     // The card rate is not higher any more: a rise held for a higher one no longer stands (dropped, and
     // the payer told it will not happen if they were told it would).
-    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, target.rate);
-    const lowered = target.rate < from && await this.applyTierChange(sub, target, note, tx);
+    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, confirmed.rate);
+    const lowered = confirmed.rate < from && await this.applyTierChange(sub, confirmed, note, tx);
     if (!lowered && !dropped) return false;
-    return { ...(lowered ? { lowered: { from, to: target.rate } } : {}), ...(dropped ? { dropped } : {}) };
+    return { ...(lowered ? { lowered: { from, to: confirmed.rate } } : {}), ...(dropped ? { dropped } : {}) };
+  }
+
+  /** [R27] A pending lower-tier observation that no longer stands is cleared, with an audit row. */
+  private async clearRetierLowerInTx(tx: Prisma.TransactionClient, subscriptionId: string, opts: { now: Date; basis: Record<string, unknown> }, why: string): Promise<void> {
+    const key = retierLowerKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    if (!row) return;
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_CLEARED', entity: 'Subscription', entityId: subscriptionId,
+      changes: { why, seen: row.value, at: opts.now.toISOString(), basis: opts.basis } as unknown as Prisma.InputJsonValue } });
   }
 
   /** [R27] A held rise whose new fee is above what the card now gives: dropped in the caller's transaction. */
@@ -5039,7 +5101,7 @@ export class BillingService {
    * Weekly tier check: vendor tier comes from catalogue size (active listing
    * count) and CountryConfig rates — NEVER from sales (zero-commission model).
    */
-  async recalculateVendorTiers(): Promise<number> {
+  async recalculateVendorTiers(now = new Date()): Promise<number> {
     const vendorSubs = await this.prisma.subscription.findMany({
       where: { vendorId: { not: null }, status: { in: RETIER_STATUSES } },
       include: {
@@ -5079,11 +5141,20 @@ export class BillingService {
           activeListings,
         });
         if (!target) continue;
-        // Nothing to move, and no held rise to judge: no transaction.
-        if (Number(sub.weeklyRate) === target.rate && !(await this.prisma.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) }, select: { key: true } }))) continue;
+        // Nothing to move, and no held rise or lower-tier observation to judge: no transaction.
+        if (Number(sub.weeklyRate) === target.rate
+          && (await this.prisma.platformConfig.count({ where: { key: { in: [feeRiseKey(sub.id), retierLowerKey(sub.id)] } } })) === 0) continue;
+        // [R27 · security review] A LOWER tier is judged on the week's largest catalogue: every listing
+        // available now, or made unavailable (or edited) in the last 7 days. Hiding listings around the
+        // pass never counts.
+        const weekListings = await this.prisma.item.count({
+          where: { vendorId: sub.vendor.id, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }] },
+        });
+        const weekTarget = this.retierTarget(sub.id, tiers, { kind: 'VENDOR', isService: sub.vendor.vendorType === 'SERVICE', activeListings: weekListings }) ?? target;
 
         const note = `${activeListings} active listings -> ${target.tier} tier`;
-        const moved = await this.prisma.$transaction((tx) => this.retierInTx(tx, sub, target, note));
+        const moved = await this.prisma.$transaction((tx) => this.retierInTx(tx, sub, target, note,
+          { now, lowerTarget: weekTarget, basis: { activeListings, weekListings } }));
         if (moved) changed += 1;
         if (moved) await this.afterRetier(sub.id, moved);
       } catch (error) {
