@@ -174,14 +174,8 @@ CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON supply_watches FOR EAC
 CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON carts FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('customerId', 'id');
 CREATE TRIGGER erasure_ledger_deleted_row AFTER DELETE ON cart_merge_receipts FOR EACH ROW EXECUTE FUNCTION erasure_ledger_capture_closed_row('userId', 'id');
 
--- The application reads the ledger (the stale-shipment alert) and never writes it.
-DO $$
-DECLARE role_name text;
-BEGIN
-  FOREACH role_name IN ARRAY ARRAY['swift_app', 'swift_bypass_rls'] LOOP
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
-      EXECUTE format('REVOKE ALL ON erasure_ledger_entry, erasure_ledger_shipment FROM %I', role_name);
-      EXECUTE format('GRANT SELECT ON erasure_ledger_entry, erasure_ledger_shipment TO %I', role_name);
-    END IF;
-  END LOOP;
-END $$;
+-- The application reads the ledger (the stale-shipment alert) and never writes it: the default
+-- privileges hand swift_app full DML on a new table, so take the writes back (and the test-database
+-- heal, appRoleDdl in src/lib/tenant-rls.ts, re-applies exactly these).
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.erasure_ledger_entry FROM swift_app;
+REVOKE INSERT, UPDATE, DELETE ON TABLE public.erasure_ledger_shipment FROM swift_app;

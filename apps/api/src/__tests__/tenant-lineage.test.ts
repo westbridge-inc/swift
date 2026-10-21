@@ -84,6 +84,8 @@ export const GRANDCHILD_OF: Record<string, string> = {
 
 /** Platform-wide by design — the reason a reviewer can check. */
 export const PLATFORM_WIDE: Record<string, string> = {
+  ErasureLedgerEntry: 'the off-site erasure ledger: one platform-wide append-only sequence written by triggers, ids and de-identified columns only, shipped by the host unit',
+  ErasureLedgerShipment: 'the shipment record of the off-site erasure ledger (one row per shipped entry)',
   ProviderPaymentAlias: 'immutable provider-reference reservations must remain visible when RLS hides the historical identity, so another tenant cannot create a second credit; the RESTRICT parent FK preserves the reservation, and no public API exposes it',
   DocType: 'the document registry (DOC-1 §4.2) — data keyed by country, like CountryConfig',
   DocField: 'fields of a registry document class',
