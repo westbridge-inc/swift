@@ -161,6 +161,10 @@ describe('§14.6 team', () => {
     expect(added.statusCode).toBe(200);
     expect(added.json().data.role).toBe('MANAGER');
 
+    // [SWITCHES · ads security] An add is an invitation: the person accepts it before they are a member.
+    expect((await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token)).statusCode).toBe(404);
+    expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, manager.token)).statusCode).toBe(200);
+
     // The new MANAGER can read the team…
     const list = await get(`/api/v1/ads/advertiser/${a.id}/members`, manager.token);
     expect(list.statusCode).toBe(200);
