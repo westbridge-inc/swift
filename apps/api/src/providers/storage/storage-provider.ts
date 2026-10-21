@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -9,8 +9,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
-import { inspectImage, sniffImageType, stripImageMetadataStrict } from '../../utils/images';
-import { AppError } from '../../utils/errors';
+import { cleanStoredPhoto } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 import { assertDurableStorageConfig } from './storage-config';
@@ -34,6 +33,17 @@ export interface StorageProvider {
   getObject(fileKey: string): Promise<Buffer>;
 }
 
+/** [IMAGES-E2E] A bounded read for the public store-photo door: at most `maxBytes`
+ *  of an object, null when it is missing or larger than that, honouring `signal`
+ *  (the caller's deadline). Both adapters below implement it. */
+export interface BoundedObjectReader {
+  getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null>;
+}
+
+export function canReadBounded(storage: StorageProvider): storage is StorageProvider & BoundedObjectReader {
+  return typeof (storage as Partial<BoundedObjectReader>).getObjectWithin === 'function';
+}
+
 /**
  * [S8/C4] The one place every stored byte passes through.
  *
@@ -48,19 +58,12 @@ export interface StorageProvider {
  */
 async function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
   // [Row 108 · fixes a privacy gap on main] What the bytes ARE decides how a photo is handled,
-  // sniffed ONCE here: the declared type never chooses the strip or the size check, so a
-  // mislabelled photo (a renamed file, a PNG sent as image/jpeg) loses its location like any
-  // other. A photo that cannot be cleaned or read is refused, never stored as it came (fail closed).
-  const sniffed = sniffImageType(input.buffer);
-  if (!sniffed) {
-    if (input.mimeType.startsWith('image/')) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-    return input; // not a photo: a PDF, an encrypted envelope, a video
-  }
-  const buffer = stripImageMetadataStrict(input.buffer, sniffed);
-  if (!buffer) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-  // The bytes that are stored, read by the real decoder: the type it finds, the size cap, a plausible size.
-  await inspectImage(buffer, sniffed);
-  return { ...input, buffer, mimeType: sniffed };
+  // sniffed ONCE: the declared type never chooses the strip or the size check, so a mislabelled
+  // photo (a renamed file, a PNG sent as image/jpeg) loses its location like any other. A photo
+  // that cannot be cleaned or read is refused, never stored as it came (fail closed).
+  // [Row 238] The same helper cleans an ID photo before it is sealed, so there is one clean-up.
+  const photo = await cleanStoredPhoto(input.buffer, input.mimeType);
+  return photo ? { ...input, ...photo } : input; // not a photo: a PDF, an encrypted envelope, a video
 }
 
 const DEFAULT_TTL_SECONDS = 300;
@@ -74,7 +77,7 @@ export function createOpaqueStorageName(filename: string): string {
 }
 
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
-export class LocalStorageProvider implements StorageProvider {
+export class LocalStorageProvider implements StorageProvider, BoundedObjectReader {
   private baseDir = localStorageBaseDir();
   // [M-37] Resolved through the keyring: production never falls open to the repository default.
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
@@ -121,13 +124,27 @@ export class LocalStorageProvider implements StorageProvider {
   async getObject(fileKey: string): Promise<Buffer> {
     return readFile(this.resolveKey(fileKey));
   }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    const abs = this.resolveKey(fileKey);
+    try {
+      const s = await stat(abs);
+      if (!s.isFile() || s.size > maxBytes) return null;
+      const bytes = await readFile(abs, { signal });
+      return bytes.length > maxBytes ? null : bytes;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
+  }
 }
 
 /**
  * S3-compatible adapter — works for AWS S3 and Cloudflare R2 (set AWS_S3_ENDPOINT
  * + path-style for R2). Objects are private; uploads request encryption at rest.
  */
-export class S3StorageProvider implements StorageProvider {
+export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
   private client: S3Client;
   private bucket = process.env['AWS_S3_BUCKET'] ?? '';
   private endpoint = process.env['AWS_S3_ENDPOINT']; // set for R2 / S3-compatible
@@ -174,6 +191,28 @@ export class S3StorageProvider implements StorageProvider {
     const bytes = await res.Body?.transformToByteArray();
     if (!bytes) throw new Error(`Empty object body for ${fileKey}`);
     return Buffer.from(bytes);
+  }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    let res;
+    try {
+      res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }), { abortSignal: signal });
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name === 'NoSuchKey' || name === 'NotFound') return null;
+      throw err;
+    }
+    const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
+    if (!body) return null;
+    if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) { body.destroy?.(); return null; }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) { body.destroy?.(); return null; }
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks, total);
   }
 }
 

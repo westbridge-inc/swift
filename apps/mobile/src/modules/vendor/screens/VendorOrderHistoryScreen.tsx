@@ -1,8 +1,10 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
+import { useQueryClient } from '@tanstack/react-query';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, Chip, EmptyState, ErrorState, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { useVendorOrderHistory, useVendorProfile } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
@@ -64,6 +66,14 @@ export function VendorOrderHistoryScreen({ navigation }: any) {
 
   const status = FILTERS[filter]?.status;
   const q = useVendorOrderHistory({ status, search: search || undefined, page });
+  const qc = useQueryClient();
+  // [UI-SWEEP U33] A pull reloads from the newest page: back to page 1 (the
+  // page-1 answer REPLACES the list) and every cached page of this history is
+  // re-read, so a pull deep in the list can never append a page twice.
+  const pull = usePullToRefresh(async () => {
+    setPage(1);
+    await qc.invalidateQueries({ queryKey: ['vendor', 'orders', 'history'] });
+  });
 
   // Accumulate pages; any filter change resets to page 1 and replaces the list.
   useEffect(() => {
@@ -100,7 +110,11 @@ export function VendorOrderHistoryScreen({ navigation }: any) {
         ))}
       </ScrollView>
 
-      <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+      <ScrollView
+        contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
+        showsVerticalScrollIndicator={false}
+        refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+      >
         {store?.name ? (
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: space.md }}>
             <MaterialCommunityIcons name="storefront-outline" size={14} color={color.brand[500]} />

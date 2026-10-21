@@ -270,6 +270,59 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(await mmgDestination(vendorId)).toEqual(MMG_CLEARED);
   });
 
+  // [#1848 follow-up · REVIEW-M S4] A change staged before the account closed would stay DECIDED forever (the
+  // executor never applies it once the field is cleared) and count as a pending change: it closes with the account.
+  const stageCommands = async (vendorId: string, userId: string) => {
+    for (const [generation, kind] of [[1, 'MMG_NUMBER_STAGE'], [2, 'MMG_LINK_STAGE']] as const) {
+      await app.prisma.moneySurfaceCommand.create({ data: { actor: 'VENDOR', entityId: vendorId, userId, kind, state: 'DECIDED', generation, oldDigest: 'old', newDigest: 'new' } });
+    }
+  };
+  const stageStates = async (vendorId: string) => (await app.prisma.moneySurfaceCommand.findMany({ where: { entityId: vendorId }, orderBy: { generation: 'asc' }, select: { kind: true, state: true } }));
+  const SUPERSEDED = [{ kind: 'MMG_NUMBER_STAGE', state: 'SUPERSEDED' }, { kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED' }];
+
+  it('winding a store down closes its staged MMG number and link changes', async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await stageCommands(vendorId, p.userId);
+    try {
+      await windDownPartner(app.prisma, p.userId);
+      expect(await stageStates(vendorId)).toEqual(SUPERSEDED);
+    } finally { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: vendorId } }); }
+  });
+
+  // [#1875 · REVIEW-G S4-1] The driver's staged pay-link change closes at wind-down too.
+  it("winding a driver down closes the driver's staged MMG link change", async () => {
+    const p = await makePartner(['CUSTOMER', 'DRIVER']);
+    const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: `PT${nanoid(5)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    await app.prisma.moneySurfaceCommand.create({ data: { actor: 'DRIVER', entityId: driver.id, userId: p.userId, kind: 'MMG_LINK_STAGE', state: 'DECIDED', generation: 1, oldDigest: 'old', newDigest: 'new' } });
+    try {
+      await windDownPartner(app.prisma, p.userId);
+      expect(await stageStates(driver.id)).toEqual([{ kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED' }]);
+    } finally {
+      await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: driver.id } });
+      await app.prisma.driver.delete({ where: { id: driver.id } }).catch(() => undefined);
+    }
+  });
+
+  it('the deletion cutoff itself closes the staged MMG changes', async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await stageCommands(vendorId, p.userId);
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let atCutoff: unknown;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      const result = await realTransaction(work, options);
+      if (atCutoff === undefined) atCutoff = await stageStates(vendorId);
+      return result;
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    } finally {
+      spy.mockRestore();
+    }
+    try {
+      expect(atCutoff).toEqual(SUPERSEDED);
+    } finally { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: vendorId } }); }
+  });
+
   it("the deletion cutoff itself clears the store's MMG payee details", async () => {
     const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
     const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;

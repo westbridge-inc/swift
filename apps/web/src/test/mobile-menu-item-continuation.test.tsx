@@ -29,6 +29,7 @@ vi.mock('../../../mobile/node_modules/@react-navigation/native', () => ({
 vi.mock('../../../mobile/src/kit', () => ({
   Photo: () => null, Money: () => null, IconChip: () => null,
   LoadingBlock: () => <div>Loading item</div>, ErrorState: () => <div>Item unavailable</div>,
+  Header: () => <button>Back</button>, EmptyState: ({ title }: any) => <div>{title}</div>,
   T: ({ children }: any) => <span>{children}</span>,
   SectionHeader: ({ title }: any) => <h2>{title}</h2>,
   PopupCard: ({ children, visible }: any) => visible ? <div>{children}</div> : null,
