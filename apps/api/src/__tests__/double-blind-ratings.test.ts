@@ -6,6 +6,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
 import { RatingService } from '../modules/rating/rating.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Double-blind ratings (marketplace §1): the written rating hides from the
@@ -25,7 +26,7 @@ let riderId: string;
 async function makeUser(first: string) {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59261${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: first, lastName: `DB${marker}`,
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true,

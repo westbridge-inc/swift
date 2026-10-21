@@ -1,4 +1,5 @@
-import { isNeverAcceptedDocType } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
+import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
@@ -13,6 +14,7 @@ type ProviderVerificationDb = PrismaClient | Prisma.TransactionClient;
 import {
   canonicalServiceTrade,
   isServiceCategoryOperational,
+  profileOffersDroneWork,
   type ServiceTradeId,
 } from './service-catalog';
 export {
@@ -111,24 +113,68 @@ function tradeChecklistKey(trade: ServiceTradeId): string {
 }
 
 /**
+ * The provider's country checklists: the code defaults under the stored JSON,
+ * as every other checklist reader merges them (a list added in code exists on a
+ * deployed row before any reseed; an edited stored list still wins). No country
+ * row means no checklist — never another market's defaults.
+ */
+async function providerLists(prisma: ProviderVerificationDb, userId: string) {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+  if (!user) return null;
+  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
+  if (!config) return null;
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists as Record<string, string[]>) ?? {}) };
+  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true, bio: true } });
+  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
+  if (!trade || !isServiceCategoryOperational(trade)) return null;
+  // [R15 · research A9] Drone and aerial work is held: a stored profile that offers it (saved before
+  // the profile check, or by any other writer) has no checklist, so it is never verified or listed.
+  if (profileOffersDroneWork(provider?.bio ?? null)) return null;
+  return { lists, trade };
+}
+
+/**
  * The full document checklist a provider must satisfy: the SERVICE_PROVIDER
  * base (identity + character) PLUS any trade-mandated extension from
  * CountryConfig (onboarding spec §3.5 — requirements are data, not code).
- * In Guyana that is exactly one trade: electrical work is illegal without a
- * GEI Electrical Contractor Licence, so electricians carry
- * `gei_electrical_licence` as a GATE, never a badge.
+ * Electrical work is illegal without a GEI Electrical Contractor Licence, so
+ * electricians carry `gei_electrical_licence` as a GATE, never a badge.
+ *
+ * [TRADES · owner 13 Oct 2026] A trade opened at launch also carries its legal
+ * floor (identity, police clearance and its own licences), which no stored
+ * edit can remove. A profile that offers drone or aerial work has no
+ * checklist at all (held, R15). The provider gate reads the lists and the floor
+ * here, never the DOC-1 registry facade (registryChecklist); a change that
+ * moves providers onto the registry must carry SERVICE_TRADE_LAUNCH_FLOOR too.
  */
 export async function providerChecklist(prisma: ProviderVerificationDb, userId: string): Promise<string[]> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
-  if (!user) return [];
-  const config = await prisma.countryConfig.findUnique({ where: { code: user.countryCode } });
-  const lists = (config?.documentChecklists as Record<string, string[]>) ?? {};
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
   const base = lists['SERVICE_PROVIDER'] ?? [];
-  const provider = await prisma.serviceProvider.findUnique({ where: { userId }, select: { trade: true } });
-  const trade = provider?.trade ? canonicalServiceTrade(provider.trade) : null;
-  if (!trade || !isServiceCategoryOperational(trade)) return [];
   const extra = lists[tradeChecklistKey(trade)] ?? [];
-  return [...new Set([...base, ...extra])].filter((docType) => !isNeverAcceptedDocType(docType));
+  const floor = SERVICE_TRADE_LAUNCH_FLOOR[trade] ?? [];
+  return [...new Set([...base, ...extra, ...floor])].filter((docType) => !isNeverAcceptedDocType(docType));
+}
+
+/**
+ * [TRADES] Documents a provider MAY add — the base `SERVICE_PROVIDER_OPTIONAL`
+ * list and their trade's `_OPTIONAL` list — never one their checklist already
+ * requires. Display and upload only: no gate reads it.
+ */
+export async function providerOptionalDocuments(
+  prisma: ProviderVerificationDb,
+  userId: string,
+  required: readonly string[],
+): Promise<string[]> {
+  const found = await providerLists(prisma, userId);
+  if (!found) return [];
+  const { lists, trade } = found;
+  const optional = [
+    ...(lists[`SERVICE_PROVIDER${OPTIONAL_LIST_SUFFIX}`] ?? []),
+    ...(lists[`${tradeChecklistKey(trade)}${OPTIONAL_LIST_SUFFIX}`] ?? []),
+  ];
+  return [...new Set(optional)].filter((docType) => !required.includes(docType) && !isNeverAcceptedDocType(docType));
 }
 
 /**
@@ -337,6 +383,11 @@ export function decodeProviderCursor(
   return (claims as ProviderCursorClaims).afterId;
 }
 
+/** How long an unanswered request counts as "the same request" when the
+ *  customer sends it again (a lost response, a second tap). Longer than any
+ *  client timeout plus a re-tap; far shorter than a real second ask. */
+export const SERVICE_JOB_RETRY_WINDOW_MS = 10 * 60 * 1000;
+
 export interface ServiceJobAuthorityObserver {
   /** Test-only observation seam. Production does not provide an observer. */
   afterAuthorityChecked?: (snapshot: Readonly<{
@@ -417,6 +468,30 @@ export async function createServiceJobWithLiveAuthority(
       trade,
     });
 
+    // [C2 server] A RETRIED REQUEST IS THE SAME REQUEST. The phone sends no
+    // Idempotency-Key here (builds 9/11 cannot be changed), so a response lost
+    // on a slow network, or a second tap, used to mint a second REQUESTED job
+    // and a second chat room for the same ask. The natural key is the ask
+    // itself: this customer, this provider, the same words and photos, still
+    // unanswered (REQUESTED), asked moments ago. The customer's User row is
+    // locked FOR UPDATE above, so two copies of one request run one after the
+    // other and the second one sees the first. It gets the first job back —
+    // same job, same room, and no second notice to the provider.
+    const earlier = await tx.serviceJob.findFirst({
+      where: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        providerId: provider.id,
+        description: input.description,
+        photos: { equals: input.photos },
+        status: 'REQUESTED',
+        chatRoomId: { not: null },
+        createdAt: { gte: new Date(Date.now() - SERVICE_JOB_RETRY_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (earlier) return { job: earlier, created: false as const };
+
     const job = await tx.serviceJob.create({
       data: {
         // [TA-S1-006] Both parties were just proven to live in input.tenantId;
@@ -440,6 +515,7 @@ export async function createServiceJobWithLiveAuthority(
         },
       },
     });
-    return tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    const linked = await tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    return { job: linked, created: true as const };
   });
 }

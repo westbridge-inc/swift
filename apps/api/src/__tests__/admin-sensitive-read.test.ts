@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
 import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-007] AN ADMIN COULD READ ANYONE AND LEAVE NOTHING BEHIND.
@@ -28,7 +29,7 @@ import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(6).toLowerCase();
+const RUN = wordFreeTag(8);
 const userIds: string[] = [];
 let token = '';
 
@@ -51,7 +52,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  const phone = `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Reader', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',
@@ -183,7 +184,7 @@ describe('[ADM-007] the law itself', () => {
 
 describe('[S1 response-shaping] GET /users/:id discloses no credential or location material', () => {
   it('returns no password hash, GPS, lockout state, KYC URLs or store contact', async () => {
-    const phone = `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const phone = testPhone();
     const subject = await app.prisma.user.create({
       data: {
         phone, firstName: 'Subject', lastName: `Redact${RUN}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER',

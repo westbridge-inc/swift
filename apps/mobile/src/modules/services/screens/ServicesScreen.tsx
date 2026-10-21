@@ -5,10 +5,12 @@ import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
 import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { errorMessage } from '../../../lib/apiError';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
+import { licenceLabel } from '../licenceLabel';
 import { useServiceCatalog } from '../useServiceCatalog';
 import { customerServiceCategories, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 
@@ -33,6 +35,8 @@ type ServiceProvider = {
   selfSkilled: boolean;
   certified: boolean;
   badges: string[];
+  /** [R7] The day a person on our team checked this provider's licence (null = none checked). */
+  licenceCheckedOn?: string | null;
 };
 
 type ProviderBrowse = {
@@ -235,8 +239,8 @@ export function ServicesScreen({ navigation }: any) {
                         />
                       </View>
                       <View style={{ marginTop: space.sm }}>
-                        {p.certified ? (
-                          <TonePill label="Certified qualification" tone="neutral" />
+                        {licenceLabel(p.licenceCheckedOn) ? (
+                          <TonePill label={licenceLabel(p.licenceCheckedOn)!} tone="neutral" />
                         ) : (
                           <T variant="caption" tone="muted">
                             {p.selfSkilled ? 'Self-skilled' : 'No trade credential shown'}
@@ -338,7 +342,8 @@ export function ServicesScreen({ navigation }: any) {
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
             setSentPopup(false);
-            navigation?.navigate?.('ServiceJobs');
+            // [UI-SWEEP U12] My jobs opens after the popup's teardown, never in its tick.
+            afterDismiss(() => navigation?.navigate?.('ServiceJobs'));
           }}
         />
         <PillButton label="Done" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSentPopup(false)} />

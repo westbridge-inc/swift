@@ -104,6 +104,16 @@ export interface VendorOrder {
   totalAmount: number | null;
   /** `Order.subtotalCustomer` — `Decimal(12,2)`; coerced by the seam below. */
   subtotalCustomer: number | null;
+  /** [U25] The money card's lines — `Decimal`s, coerced by the seam below. */
+  subtotalBase?: number | null;
+  deliveryFee?: number | null;
+  tipAmount?: number | null;
+  discount?: number | null;
+  /** [U25] Straight off the order record: why and when it was cancelled. */
+  cancellationReason?: string | null;
+  cancelledAt?: string | null;
+  /** [AF-MOB-006] Detail route only: the order's recovery case (lib/vendor-order-view recoveryView). */
+  custodyRecovery?: unknown;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   /** `Order.deliveryInstructions` — the order-level note the customer typed. */
@@ -123,6 +133,10 @@ export interface VendorOrder {
   /** Row 52: true when the caller's role at THIS order's store (owner or
    *  manager) may confirm an MMG payment. Both routes send it. */
   canConfirmPayment?: boolean;
+  /** [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes of
+   *  acceptance cancels: when (ISO) and the server's line for it. Null on every other order. */
+  mmgPayBy?: string | null;
+  mmgPayByLine?: string | null;
 
   // ── Never sent — kept as tombstones so the lie cannot come back ──────────
   /** PHANTOM. There is no `total` column; the order total is `totalAmount`. */
@@ -186,6 +200,10 @@ export function normalizeVendorOrder(raw: unknown): VendorOrder {
     ...(order as unknown as VendorOrder),
     totalAmount: toAmount(order['totalAmount']),
     subtotalCustomer: toAmount(order['subtotalCustomer']),
+    subtotalBase: toAmount(order['subtotalBase']),
+    deliveryFee: toAmount(order['deliveryFee']),
+    tipAmount: toAmount(order['tipAmount']),
+    discount: toAmount(order['discount']),
     // Both routes `include: { items: true }`, so this is always an array; the
     // guard only stops a malformed payload from crashing the whole board.
     items: Array.isArray(order['items']) ? order['items'].map(normalizeOrderLine) : [],
@@ -257,6 +275,9 @@ export const confirmPayment = (id: string, reference: string) =>
 export const completePickup = (id: string, code: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
+/** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
+export const confirmReturnReceived = (id: string) =>
+  apiFetch(`${V}/orders/${id}/recovery/return-received`, { method: 'POST', body: '{}' });
 
 // ── Shelf picking (grocery/goods) ────────────────────────────────────────────
 export const setPicked = (orderId: string, lineId: string, picked: boolean) =>

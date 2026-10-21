@@ -329,7 +329,7 @@ describe('taxi — quote = booked = driver offer = receipt = earning', () => {
     expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(0);
   });
 
-  it.todo('waiting: 500 per FULL 10 minutes, summed over every wait, itemised on the receipt — NOT on main; built only in #1443 (behind TAXI_WAITING_CHARGE, conflicting)');
+  it.todo('waiting: 300 per FULL 10 minutes, summed over every wait, itemised on the receipt — NOT on main; built only in #1443 (behind TAXI_WAITING_CHARGE, conflicting)');
 });
 
 // ===========================================================================

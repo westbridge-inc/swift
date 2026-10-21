@@ -766,7 +766,7 @@ class PilotUpSecretsPreflight(StoreHarness):
     ALL_WIRED = ("POSTGRES_PASSWORD\nMEILISEARCH_KEY\nJWT_SECRET\nOTP_HASH_SECRET\nMASTER_KEK\nSTORAGE_SIGNING_SECRET\n"
                  "CONSENT_IP_PEPPER\nTEST_CONTROL_SECRET\nMETRICS_TOKEN\nHEALTH_DETAIL_TOKEN\nATTRIB_SALT\nIDENTITY_SALT\n"
                  "SCAN_IP_SALT\nADS_EVENT_SECRET\nTWILIO_API_KEY_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\n"
-                 "SYSTEM_DATABASE_URL\n")
+                 "SYSTEM_DATABASE_URL\nEMERGENCY_POLICY_SIGNING_KEY\n")
 
     def test_passes_when_env_is_clean_and_every_wired_secret_is_stored(self):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED)
@@ -863,6 +863,14 @@ class PilotUpSecretsPreflight(StoreHarness):
         result = self.run_fragment(self.ENV_OK, missing_optional)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TWILIO_API_KEY_SECRET", result.stderr)
+        # [AUD-G7-023] The api is hardwired to the emergency-policy signing key:
+        # until the owner's tool has stored it, the deploy stops here, before
+        # pilot-up stops anything that is running.
+        missing_signing = self.ALL_WIRED.replace("EMERGENCY_POLICY_SIGNING_KEY\n", "")
+        result = self.run_fragment(self.ENV_OK, missing_signing)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("EMERGENCY_POLICY_SIGNING_KEY is wired as EMERGENCY_POLICY_SIGNING_KEY_FILE but is not in the encrypted store", result.stderr)
+        self.assertNotIn("systemctl restart swift-secrets.service", self.calls())
 
     def test_refuses_when_materialize_fails(self):
         result = self.run_fragment(self.ENV_OK, self.ALL_WIRED, SYSTEMCTL_STATUS="1")

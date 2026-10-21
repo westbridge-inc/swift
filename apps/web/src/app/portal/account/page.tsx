@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { DataUnavailable } from '@/components/data-unavailable';
 import { cancelPendingMmgPayUrl, getDriverProfile, getRiderProfile, updateDriverProfile } from '@/lib/mover-api';
 
 export default function AccountPage() {
@@ -49,6 +50,17 @@ export default function AccountPage() {
   });
 
   if (rider.isLoading || driver.isLoading) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
+  // [UI-SWEEP U24] A failed profile read used to render a blank page (the MMG
+  // pay-link card simply vanished): say it could not check, as the home does.
+  if (rider.isError || driver.isError) {
+    return (
+      <DataUnavailable
+        what="your earner profile"
+        error={rider.error ?? driver.error}
+        onRetry={() => { void rider.refetch(); void driver.refetch(); }}
+      />
+    );
+  }
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -64,7 +76,10 @@ export default function AccountPage() {
         </div>
       )}
 
-      {driver.data && (
+      {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Passengers pay the driver directly at
+          drop-off, cash or MMG: the card shows only while the server's
+          DRIVER_MMG_PAY_LINK switch is on (mmgPayLinkEnabled), never by default. */}
+      {driver.data && driver.data['mmgPayLinkEnabled'] === true && (
         <div className="sw-card p-6">
           <p className="font-bold">Your MMG pay link (taxi)</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">

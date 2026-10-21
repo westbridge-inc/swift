@@ -1,6 +1,6 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
-import { resumeVoluntaryObligationInTx } from './dunning-clock';
+import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
 import { enqueueFeeDemandInTx } from './fee-demand-delivery';
 import type { OnAudit } from '../../lib/audit-writer';
@@ -27,6 +27,9 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
+import { batchClock } from '../../utils/batch-clock';
+import { billingErrorCode } from './billing-error-code';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -58,7 +61,7 @@ const MAX_FAILED_ATTEMPTS = 3;
 
 /** [M-04] What a recorded failure decided — computed and applied inside one transaction. */
 /** `suspendsAt`: the shared clock's grace deadline, the instant access stops unless the fee is paid. */
-type FailureOutcome = { attempts: number; willSuspend: boolean; nextRetryAt: Date; suspendsAt: Date; finalWarning: boolean };
+type FailureOutcome = { attempts: number; willSuspend: boolean; nextRetryAt: Date; suspendsAt: Date; finalWarning: boolean; alreadySuspended?: boolean };
 /** The suspension moment as a notice states it (minute precision, UTC). */
 const suspensionMoment = (at: Date) => at.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
 type ChargeAttemptResult = (
@@ -221,6 +224,8 @@ export interface BillingCycleResult {
   errors: number;
   /** MMG merchant-initiated requests awaiting the payer's phone approval */
   pending: number;
+  /** [COORD 18 Oct 20:33Z] The `errors`, counted by error code (billing-error-code.ts). */
+  errorCodes: Record<string, number>;
 }
 
 /**
@@ -390,8 +395,16 @@ export class BillingService {
   }
 
   /** Bill everything due. One subscription's failure never kills the batch. */
-  async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
+  async runBillingCycle(at?: Date): Promise<BillingCycleResult> {
+    // [REVIEW-M #1832 S3-1] Each subscription is billed at the time it is really billed
+    // (utils/batch-clock.ts), never at the run's start instant; a caller standing at a
+    // chosen instant (`at`: a test, a replay) gets exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
+    // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
+    // rise whose date the next fee has reached moved in, before anything due is priced.
+    await this.sweepFeeRises(now).catch((err) => log().error({ err }, '[F2] the pass over held fee rises failed; billing goes on at the rates on record'));
     const due = await this.prisma.subscription.findMany({
       where: {
         autoRenew: true,
@@ -416,7 +429,7 @@ export class BillingService {
       },
     });
 
-    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0 };
+    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0, errorCodes: {} };
 
     // USD pricing (Part 20): ONE rate per billing run, resolved here and
     // stamped on every charge this run creates. Null = flag off → legacy.
@@ -425,11 +438,17 @@ export class BillingService {
     for (const sub of due) {
       result.processed += 1;
       try {
-        const outcome = await this.billSubscription(sub as SubWithRelations, now, usd);
+        const outcome = await this.billSubscription(sub as SubWithRelations, clock(), usd);
         result[outcome] += 1;
-      } catch {
-        // Partial failure mid-batch: record and continue
+      } catch (err) {
+        // Partial failure mid-batch: record and continue. [COORD 18 Oct 20:33Z] Never silently: a
+        // swallowed failure hid a dunning loop 2,768 times on staging. Each one is logged with the
+        // subscription and the error's code only (never its message: it can carry personal data),
+        // and counted by code for the run's summary line and its failure page.
+        const code = billingErrorCode(err);
         result.errors += 1;
+        result.errorCodes[code] = (result.errorCodes[code] ?? 0) + 1;
+        log().error({ subscriptionId: sub.id, code }, '[billing] one subscription failed in the billing run; the run goes on and retries it next hour');
       }
     }
 
@@ -556,7 +575,11 @@ export class BillingService {
     const periodKey = sub.nextBillingDate.toISOString().slice(0, 10);
     const attemptKey = `charge:${sub.id}:${periodKey}:a${sub.failedAttempts}`;
     const usd = usdCtx === undefined ? await this.loadUsdPricing() : usdCtx;
-    let priced = await this.priceEligibleFor(sub, usd);
+    // [BILLING-REANCHOR] A returning partner's payment buys the week that starts
+    // at the due date moved on by the time suspended (applySuccessfulChargeInTx),
+    // so that week's price, at its own start, is the one charged.
+    const returning = await returnReanchorProof(this.prisma, sub, now);
+    let priced = await this.priceEligibleFor(returning ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
 
     if (!reclaimedAttempt) try {
       const reserved = await this.prisma.$transaction(async (tx) => {
@@ -1385,7 +1408,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, paymentId, reported: { amountMinor: reported.amountMinor, currencyCode: reported.currencyCode }, intended }, '[PT-1] card provider reported a different amount or currency — held, nothing booked');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge held — the amount does not match',
+      title: 'Card charge held — the amount does not match',
       body: `The card provider reports ${reported.amountMinor} ${reported.currencyCode} (minor units) for payment ${paymentId}, but Swift asked for ${intended.amountMinor} ${intended.currencyCode}. Nothing was booked and the partner was not penalised. Reconcile against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-charge-amount-mismatch', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-amount-mismatch:${paymentId}`,
@@ -1404,7 +1427,7 @@ export class BillingService {
     log().error({ subscriptionId: sub.id, instrumentId: instrument.id, bound: describeBinding(bound), configured: describeBinding(configured) }, '[PT-1 C2] card instrument bound to another provider setup — refused, nothing charged');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card charge refused — the card belongs to another provider setup',
+      title: 'Card charge refused — the card belongs to another provider setup',
       body: `The saved card for subscription ${sub.id} was issued by ${describeBinding(bound)}, but this server is set up for ${describeBinding(configured)}. Nothing was charged and the partner was not penalised. Restore the configuration, or ask the partner to add their card again.`,
       data: { kind: 'billing_invariants', alert: 'card-instrument-binding-mismatch', subscriptionId: sub.id, instrumentId: instrument.id },
       dedupeKey: `card-binding:${instrument.id}:${describeBinding(configured)}`,
@@ -1611,7 +1634,7 @@ export class BillingService {
         log().error({ paymentId: row.id, subscriptionId: sub.id, providerRef: found.providerRef }, '[M-01] card charge captured by the processor with no local payment — settled by reconciliation');
         await notifyAdmins(this.prisma, this.notifications, {
           tenantId: await tenantOfSubscription(this.prisma, sub.id),
-          title: '💳 A card charge was captured with no local payment — repaired',
+          title: 'A card charge was captured with no local payment — repaired',
           body: `A captured card payment for subscription ${sub.id} now has a durable payment and ledger disposition. Current lifecycle authority chose a paid week or money kept for the next weekly fee; inspect payment ${row.id} and its billing events. Reconciliation did not override cancellation or deletion.`,
           data: { kind: 'billing_invariants', alert: 'card-captured-without-local-payment', subscriptionId: sub.id, paymentId: row.id },
         }).catch(() => {});
@@ -2035,8 +2058,10 @@ export class BillingService {
       const disposition = await this.applySuccessfulChargeInTx(tx, sub, amount, paymentRef, now, periodKey, settlePaymentId, usdTrio, spendPrepaid);
       if (inSettlement && (disposition === 'advanced' || disposition === 'banked')) await inSettlement(tx);
       if (disposition !== 'advanced') return { disposition };
-      const payment = settlePaymentId ? await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId } }) : null;
-      const settledPeriodKey = payment?.periodStart.toISOString().slice(0, 10) ?? periodKey;
+      // [BILLING-REANCHOR] The week booked is the one the subscription now stands
+      // in: a return pays the week it re-anchored to, not the week it was asked for.
+      const settledPeriodKey = (await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { currentPeriodStart: true } }))
+        .currentPeriodStart.toISOString().slice(0, 10);
       const event = await tx.billingEvent.findUnique({ where: { idempotencyKey: `success:${sub.id}:${settledPeriodKey}` } });
       if (!event) throw new Error('Successful charge has no durable success event');
       return { disposition, amount: Number(event.amount), currencyCode: event.currencyCode, periodKey: settledPeriodKey };
@@ -2063,7 +2088,7 @@ export class BillingService {
     if (payment.clientKey?.startsWith(CARD_PAY_NOW_KEY_PREFIX)) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: await tenantOfSubscription(this.prisma, sub.id),
-      title: '💳 Card payment held — its currency cannot be confirmed',
+      title: 'Card payment held — its currency cannot be confirmed',
       body: `A weekly card payment for subscription ${sub.id} was captured by the card provider (payment ${paymentId}, ${Number(payment.amount).toLocaleString()} in its issued currency), but its charge-attempt record is missing, so the currency it was issued in cannot be confirmed. Nothing was booked and the partner was not penalised. Reconcile it against the provider before any further action.`,
       data: { kind: 'billing_invariants', alert: 'card-capture-currency-unpinned', subscriptionId: sub.id, paymentId },
       dedupeKey: `card-unpinned:${paymentId}`,
@@ -2138,7 +2163,13 @@ export class BillingService {
           await this.holdUnpinnedCardCapture(tx, payment, paymentRef);
           return 'held';
         }
-        const bankCapture = mmgHeld || covered || !this.successfulChargeAuthorityAllowsAdvance(authority, sub);
+        // [BILLING-REANCHOR] A capture for a week a return re-anchor did not bill is kept as fee credit.
+        const forgiven = await weekForgivenByReturnInTx(tx, sub.id, payment.periodStart);
+        const allowsAdvance = this.successfulChargeAuthorityAllowsAdvance(authority, sub);
+        // [BILLING-REANCHOR] A capture that brings a suspended partner back is
+        // their return: kept as fee credit and spent at once on the return week.
+        const returning = !mmgHeld && !covered && !forgiven && allowsAdvance && await this.returnsInTx(tx, authority.status, sub.id, now);
+        const bankCapture = mmgHeld || covered || forgiven || returning || !allowsAdvance;
         if (bankCapture && await this.holdWalletCurrencyMismatch(tx, payment, currencyCode, paymentRef)) return 'held';
         const claimed = await tx.subscriptionPayment.updateMany({
           where: { id: payment.id, subscriptionId: sub.id, paymentMethod: 'CARD', status: payment.status, externalRef: payment.externalRef },
@@ -2155,17 +2186,46 @@ export class BillingService {
         if (bankCapture) {
           await this.creditWalletInTx(tx, {
             subscriptionId: sub.id, amount, currencyCode: sub.currencyCode,
-            eventKey: `bank:${payment.id}`, channel: 'CARD_LATE_APPROVAL', rail: 'CARD',
-            note: `Card payment received for ${periodKey}; banked without changing subscription lifecycle (payment ${payment.id})`,
+            eventKey: `bank:${payment.id}`, channel: returning ? 'CARD_RETURN' : 'CARD_LATE_APPROVAL', rail: 'CARD',
+            note: returning
+              ? `Card payment received for ${periodKey} from a suspended partner: their return; spent on the return week (the time suspended is not billed) (payment ${payment.id})`
+              : `Card payment received for ${periodKey}; banked without changing subscription lifecycle (payment ${payment.id})`,
           });
-          return 'banked';
+          if (!returning) return 'banked';
+          // The credit buys the return week through the prepaid path below, at
+          // that week's own price and never more than this capture.
+          ({ amount, usdTrio } = await this.returnWeekCharge(tx, sub, amount, usdTrio, now));
+          settlePaymentId = undefined;
+          spendPrepaid = amount;
+          paymentRef = 'prepaid';
         }
       }
     }
     if (mmgHeld) return 'held';
     if (!this.successfulChargeAuthorityAllowsAdvance(authority, sub)) return 'skipped';
     const current = { ...sub, status: authority.status } as SubWithRelations;
-    const periodStart = sub.nextBillingDate;
+    let periodStart = sub.nextBillingDate;
+    // [BILLING-REANCHOR · board row 151] A SUSPENDED or CHURNED partner was not
+    // operating while suspended: that time is not billed (no arrears), the
+    // grace they operated in before it is (COORD ruling 17 Oct). The obligation
+    // first moves on by exactly the time suspended, as its own proven
+    // transition (dunning-clock.ts), and the payment buys the week from there;
+    // a PAST_DUE partner keeps the week due.
+    // An issued instruction keeps its own week (billing_confirmation_source_immutable):
+    // the return reaches this point as fee credit spent on the return week (below).
+    const returnAt = !settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status) ? await reanchorAtReturnInTx(tx, sub.id, now) : null;
+    // [REVIEW-M #1832 S3-1] An issued instruction reaching here for a suspended
+    // partner did not prove a return (a proven one is banked and spent above): it
+    // pays its own week as it stands, and finance reviews it. Nothing below
+    // returns without booking (a failure throws and rolls this back with it).
+    if (settlePaymentId && RETURN_REANCHOR_STATUSES.includes(authority.status)) {
+      const method = (await tx.subscriptionPayment.findUnique({ where: { id: settlePaymentId }, select: { paymentMethod: true } }))?.paymentMethod;
+      await recordUnprovenReturnInTx(tx, sub.id, now, { rail: method === 'CARD' ? 'CARD' : method === 'MOBILE_MONEY' ? 'MMG_PUSH' : 'INSTRUCTION', paymentId: settlePaymentId });
+    }
+    if (returnAt) {
+      periodStart = returnAt;
+      periodKey = returnAt.toISOString().slice(0, 10);
+    }
     // [PROD-PATH] Owner ruling: the first fee after a way to pay comes back
     // covers the weeks nobody could pay and the week in progress — only that
     // week is billed. A settled intent keeps the period fixed when it was
@@ -2266,6 +2326,10 @@ export class BillingService {
     if (['PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(authority.status)) {
       await this.reinstateRows(tx, current, periodKey);
     }
+    // [F2 · fee-rise-notice.ts] The week just paid may be the last one before a
+    // told rise: it moves in with the period, in this transaction, so the coming
+    // week is quoted (and paid) at the told fee from this moment, never sooner.
+    await this.applyHeldFeeRiseInTx(tx, sub.id, now, { drop: false });
     return 'advanced';
   }
 
@@ -2740,6 +2804,35 @@ export class BillingService {
       && ['ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CHURNED'].includes(authority.status);
   }
 
+  /** [BILLING-REANCHOR · board row 151] Money confirmed for an instruction
+   *  issued while the partner was suspended (or before) brings them back: the
+   *  instruction keeps its own week (its identity is immutable), so the money
+   *  is kept as fee credit and spent at once on the return week. True
+   *  only when that return is proven (the suspension of the unpaid obligation). */
+  private async returnsInTx(tx: Prisma.TransactionClient, status: SubscriptionStatus, subscriptionId: string, now: Date): Promise<boolean> {
+    if (!RETURN_REANCHOR_STATUSES.includes(status)) return false;
+    return !!await returnReanchorProof(tx, await tx.subscription.findUniqueOrThrow({ where: { id: subscriptionId } }), now);
+  }
+
+  /** [BILLING-REANCHOR · board row 151] What the return week costs when money
+   *  already received (an MMG approval, a card capture, asked for the unpaid
+   *  week) brings a suspended partner back. That week starts at the due date
+   *  moved on by the time suspended, and it is priced at that start like every
+   *  week (a cut in force by then applies; a rise only as its 14-day notice
+   *  allows); it never costs more than was received: the amount Swift asked
+   *  for is honoured. Whatever is left stays the partner's fee credit. */
+  private async returnWeekCharge(
+    tx: Prisma.TransactionClient, sub: Subscription, received: number,
+    receivedTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined, now: Date,
+  ): Promise<{ amount: number; usdTrio: { amountUsd: number; fxRateId: string; fxRateUsed: number } | undefined }> {
+    const usd = await this.loadUsdPricing();
+    if (usd && usd.currency !== sub.currencyCode) return { amount: received, usdTrio: receivedTrio };
+    const obligation = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { nextBillingDate: true, suspendedAt: true } });
+    const priced = await this.priceEligibleFor({ ...sub, nextBillingDate: returnWeekStart(obligation, now) }, usd);
+    const price = Number(priced.amount);
+    return price < received ? { amount: price, usdTrio: priced.usdTrio } : { amount: received, usdTrio: receivedTrio };
+  }
+
   private async lockPaymentOutcomeAuthority(
     tx: Prisma.TransactionClient,
     sub: SubWithRelations,
@@ -3045,7 +3138,14 @@ export class BillingService {
         select: { id: true },
       });
       const otherApprovalHeld = await this.subscriptionHasConfirmationHold(tx, sub.id, payment.id, now);
-      if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
+      // [BILLING-REANCHOR] An approval for a week a return re-anchor did not bill
+      // is not owed for that week: it is kept as fee credit, never dropped.
+      const forgiven = await weekForgivenByReturnInTx(tx, sub.id, payment.periodStart);
+      // [BILLING-REANCHOR] An approval that brings a suspended partner back is their
+      // return: kept as fee credit and spent at once on the return week (below).
+      const returning = !covered && !forgiven && !authority.bankInsteadOfAdvance && !otherApprovalHeld
+        && await this.returnsInTx(tx, authority.status, sub.id, now);
+      if (covered || forgiven || returning || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const walletHold = await this.holdWalletCurrencyMismatch(tx, payment, originalAttempt!.currencyCode, evidence.transactionId);
         if (walletHold) return { kind: 'held' as const, reason: 'Captured payment currency differs from the money received for the next weekly fee', paymentId: payment.id, notify: walletHold.notify };
       }
@@ -3108,9 +3208,11 @@ export class BillingService {
         currencyCode: settlementCurrency,
       };
 
-      if (covered || authority.bankInsteadOfAdvance || otherApprovalHeld) {
+      if (covered || forgiven || returning || authority.bankInsteadOfAdvance || otherApprovalHeld) {
         const reason = covered
           ? `week ${periodKey} already covered`
+          : forgiven ? `week ${periodKey} was not billed (billing restarted when the partner returned)`
+          : returning ? 'the partner returned from a suspension: the time suspended is not billed (no arrears)'
           : otherApprovalHeld ? 'another payment requires manual reconciliation'
           : `subscription is ${authority.status}${authority.deletedAccount ? ' after account deletion' : ''}`;
         await this.creditWalletInTx(tx, {
@@ -3118,10 +3220,22 @@ export class BillingService {
           amount,
           currencyCode: settlementCurrency,
           eventKey: `bank:${payment.id}`,
-          note: `late MMG approval banked — ${reason} (payment ${payment.id})`,
-          channel: 'MMG_LATE_APPROVAL',
+          note: returning
+            ? `MMG approval received — ${reason}; spent on the return week (payment ${payment.id})`
+            : `late MMG approval banked — ${reason} (payment ${payment.id})`,
+          channel: returning ? 'MMG_PUSH_RETURN' : 'MMG_LATE_APPROVAL',
           mmgRef: evidence.transactionId,
         });
+        if (returning) {
+          // The credit buys the return week, through the prepaid path
+          // (its own new period row), in this same transaction, at that week's
+          // own price and never more than was received; the rest stays credit.
+          const week = await this.returnWeekCharge(tx, current, amount, usdTrio, now);
+          const applied = await this.applySuccessfulChargeInTx(tx, current, week.amount, 'prepaid', now, periodKey, undefined, week.usdTrio, week.amount);
+          if (applied !== 'advanced') throw new Error(`Locked MMG authority changed while applying the return of payment ${payment.id}`);
+          const returned = await tx.subscription.findUniqueOrThrow({ where: { id: sub.id }, select: { currentPeriodStart: true } });
+          return { kind: 'advanced' as const, current, amount, periodKey: returned.currentPeriodStart.toISOString().slice(0, 10) };
+        }
         return { kind: 'banked' as const, reason, notify: !authority.suppressNotice, amount, currencyCode: settlementCurrency };
       }
 
@@ -3204,8 +3318,9 @@ export class BillingService {
    * jittered), stamped BEFORE the provider call so a crash can't hot-loop.
    */
   async pollPendingMmgCharges(
-    now = new Date(),
+    at?: Date,
   ): Promise<{ settled: number; banked: number; adopted: number; failed: number; stillPending: number }> {
+    const now = at ?? new Date();
     const candidates = await this.prisma.subscriptionPayment.findMany({
       where: { status: { in: ['PENDING', 'UNKNOWN'] }, paymentMethod: 'MOBILE_MONEY' },
       orderBy: { lastPolledAt: { sort: 'asc', nulls: 'first' } },
@@ -3226,7 +3341,11 @@ export class BillingService {
     }
 
     const mmg = getMmgProvider();
+    // [REVIEW-M #1832 S3-1] Up to 200 network-bound items: each is looked up, expired and settled at
+    // the time it is really processed, never at the run's start instant (a chosen `at` stays exact).
+    const clock = batchClock(at);
     for (const payment of pending) {
+      const itemNow = clock();
       const sub = await this.prisma.subscription.findUnique({
         where: { id: payment.subscriptionId },
         include: {
@@ -3240,7 +3359,9 @@ export class BillingService {
       const ttlAt = payment.expiresAt ?? new Date(payment.createdAt.getTime() + MMG_REQUEST_TTL_MS);
 
       // Stamp the poll clock FIRST — a crash mid-item degrades to a slower
-      // retry, never a hot loop against the provider.
+      // retry, never a hot loop against the provider. (The backoff stamp keeps
+      // the run's start: the due filter above read it, and an earlier stamp
+      // only ever means a sooner retry.)
       await this.prisma.subscriptionPayment
         .updateMany({ where: { id: payment.id }, data: { lastPolledAt: now, pollBackoffSec: jitter(nextBackoff(payment.pollBackoffSec)) } })
         .catch(() => {});
@@ -3248,14 +3369,14 @@ export class BillingService {
       // ── UNKNOWN with no provider id: initiate timed out [tollgate 6.6] ──
       if (!payment.externalRef) {
         try {
-          const recent = await mmg.transactionHistory({ from: payment.createdAt, limit: 100 });
+          const recent = await mmg.transactionHistory({ from: payment.createdAt, to: ttlAt, limit: 100 });
           const match = payment.clientKey ? recent.find((t) => t.reference === payment.clientKey) : undefined;
           if (match) {
             // Positive history must become durable BEFORE a later lookup can
             // contradict it. Both the observation and ID adoption serialize
             // with payer, subscription and payment authority.
             if (match.status === 'approved') {
-              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, now);
+              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, itemNow);
               if (observed === 'adopted') out.adopted += 1;
               else out.stillPending += 1;
             } else if (await this.adoptMmgHistoryId(sub as SubWithRelations, payment.id, match)) {
@@ -3267,7 +3388,7 @@ export class BillingService {
           out.stillPending += 1; // provider unreachable — UNKNOWN stays UNKNOWN [LAW M-5]
           continue;
         }
-        if (now >= ttlAt) {
+        if (itemNow >= ttlAt) {
           // A never-authorized reservation may expire. A dispatched request
           // remains UNKNOWN: an empty history page is not proof of absence.
           // [M-04] Terminal status and dunning outcome land in ONE transaction,
@@ -3276,7 +3397,7 @@ export class BillingService {
           try {
             const outcome = await this.terminalizeFailedPayment(
               sub as SubWithRelations, payment, { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'], providerAbsenceOnly: true },
-              'MMG request lost in transit — never confirmed at MMG', now, periodKey,
+              'MMG request lost in transit — never confirmed at MMG', itemNow, periodKey,
             );
             if (!outcome) { out.stillPending += 1; continue; }
             out.failed += 1;
@@ -3289,7 +3410,7 @@ export class BillingService {
         continue;
       }
 
-      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, now);
+      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, itemNow);
       if (!lookupSource?.externalRef) { out.stillPending += 1; continue; }
       let lookup: MmgTransaction;
       try {
@@ -3299,7 +3420,7 @@ export class BillingService {
         continue;
       }
       const status = lookup.status;
-      const expired = status === 'expired' || (status === 'pending' && now.getTime() >= ttlAt.getTime());
+      const expired = status === 'expired' || (status === 'pending' && itemNow.getTime() >= ttlAt.getTime());
 
       // SWIFT-AUD-D2-04, completed: settle is single-winner AND atomic. The
       // CAS claim now lives INSIDE the same transaction as the period advance
@@ -3311,7 +3432,7 @@ export class BillingService {
             sub as SubWithRelations,
             payment.id,
             lookup,
-            now,
+            itemNow,
           );
           if (result === 'lost') continue;
           if (result === 'held') {
@@ -3328,7 +3449,7 @@ export class BillingService {
           const outcome = await this.terminalizeFailedPayment(
             sub as SubWithRelations, payment,
             { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'], providerAbsenceOnly: status === 'pending', mmgLookup: this.mmgLookupObservation(lookupSource, lookup) },
-            `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey,
+            `MMG request ${expired ? 'expired unapproved' : status}`, itemNow, periodKey,
           );
           if (!outcome) { out.stillPending += 1; continue; }
           out.failed += 1;
@@ -3776,26 +3897,32 @@ export class BillingService {
     }
     const scheduled = await scheduleDunningFailure(tx, sub.id, now);
     const attempts = sub.failedAttempts + 1;
-    const willSuspend = attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled && scheduled.maySuspend;
+    // [BILLING-REANCHOR] A partner already suspended for this obligation stays
+    // suspended when a retry fails. A failure never puts them back in the
+    // grace (a failed retry is not a return) and never suspends them a second
+    // time (one SUSPENDED record per obligation: it is what proves the return).
+    const alreadySuspended = sub.status === 'SUSPENDED';
+    const willSuspend = !alreadySuspended && attempts >= MAX_FAILED_ATTEMPTS && sub.autoSuspendEnabled && scheduled.maySuspend;
+    const suspended = willSuspend || alreadySuspended;
     const gracePeriodEnd = activeDeadline(scheduled.clock, FULL_FEE_GRACE_MS, now)!;
-    const nextRetryAt = attempts >= MAX_FAILED_ATTEMPTS && !willSuspend && sub.autoSuspendEnabled
+    const nextRetryAt = attempts >= MAX_FAILED_ATTEMPTS && !suspended && sub.autoSuspendEnabled
       ? gracePeriodEnd : activeDeadline(scheduled.clock, scheduled.clock.retryAtMs!, now)!;
-    if (attempts >= MAX_FAILED_ATTEMPTS && !willSuspend && sub.autoSuspendEnabled) {
+    if (attempts >= MAX_FAILED_ATTEMPTS && !suspended && sub.autoSuspendEnabled) {
       await tx.billingDunningClock.update({ where: { subscriptionId: sub.id }, data: { retryAtMs: BigInt(FULL_FEE_GRACE_MS) } });
     }
     await tx.subscription.update({
       where: { id: sub.id },
       data: {
-        status: (willSuspend ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
+        status: (suspended ? 'SUSPENDED' : 'PAST_DUE') as SubscriptionStatus,
         failedAttempts: attempts,
         nextRetryAt,
-        isInGracePeriod: !willSuspend,
+        isInGracePeriod: !suspended,
         gracePeriodEnd,
         ...(willSuspend ? { suspendedAt: now } : {}),
       },
     });
     if (willSuspend) await this.suspendAccessRows(tx, sub, periodKey, now);
-    else {
+    else if (!alreadySuspended) {
       const final = attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled;
       const payLine = await this.feePayLine(sub, null);
       // [§11] The final warning names the moment: the shared 48-hour grace
@@ -3812,7 +3939,7 @@ export class BillingService {
         ...(final ? { feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}` } : {}),
       });
     }
-    return { attempts, willSuspend, nextRetryAt, suspendsAt: gracePeriodEnd, finalWarning: attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled };
+    return { attempts, willSuspend, nextRetryAt, suspendsAt: gracePeriodEnd, finalWarning: !suspended && attempts === MAX_FAILED_ATTEMPTS - 1 && sub.autoSuspendEnabled, alreadySuspended };
   }
 
   /** [M-04] Post-commit notices for a failure outcome — best effort, never
@@ -3823,6 +3950,8 @@ export class BillingService {
       await this.suspendAccessNotices(sub);
       return;
     }
+    // Still suspended: the daily suspended reminder (sweepSuspended) speaks for it.
+    if (outcome.alreadySuspended) return;
     const { attempts, suspendsAt, finalWarning } = outcome;
     const payLine = await this.feePayLine(sub, null);
     if (finalWarning) {
@@ -4329,7 +4458,8 @@ export class BillingService {
           return true;
         }
         if (await hasConfirmationInTx(tx, sub.id, now, { checkoutId: checkout.id })) return false;
-        const priced = await this.priceEligibleFor(sub, usd);
+        // [BILLING-REANCHOR] A return buys the week from the due date moved on by the time suspended: price that week.
+        const priced = await this.priceEligibleFor(await returnReanchorProof(tx, sub, now) ? { ...sub, nextBillingDate: returnWeekStart(sub, now) } : sub, usd);
         const amount = sub.feeWaived ? 0 : Number(priced.amount);
         const balance = await tx.prepaidBalance.findUnique({ where: { subscriptionId: sub.id } });
         if (amount > 0 && (!balance || balance.currencyCode !== sub.currencyCode || Number(balance.balance) < amount)) return false;
@@ -4894,6 +5024,218 @@ export class BillingService {
   /** Billing notices belong to the surface that pays the fee. */
   private payerAudience(sub: SubWithRelations): 'earner' | 'business' {
     return sub.vendor ? 'business' : 'earner';
+  }
+
+  /**
+   * [F2 · GUARDRAILS §7 · fee-rise-notice.ts] The hourly pass over held
+   * weekly-fee rises: tell each payer not yet told, and move in each told rise
+   * whose date the next weekly fee has reached. One subscription's failure
+   * never stops the others or the billing run.
+   */
+  async sweepFeeRises(now = new Date()): Promise<{ told: number; applied: number; deferred: number; dropped: number }> {
+    const out = { told: 0, applied: 0, deferred: 0, dropped: 0 };
+    const rows = await this.prisma.platformConfig.findMany({ where: { key: { startsWith: FEE_RISE_PREFIX } }, select: { key: true, value: true }, orderBy: { key: 'asc' } });
+    for (const row of rows) {
+      const subscriptionId = row.key.slice(FEE_RISE_PREFIX.length);
+      try {
+        const held = readHeldFeeRise(row.value);
+        if (!held) {
+          log().error({ subscriptionId }, '[F2] an unreadable held fee rise: it applies to nothing until a person looks');
+          continue;
+        }
+        if (!held.noticeAt) {
+          const told = await this.tellFeeRise(subscriptionId, held, now);
+          if (told === 'dropped') out.dropped += 1;
+          if (told !== 'told') continue;
+          out.told += 1;
+        }
+        const result = await this.prisma.$transaction(async (tx) => {
+          await lockSubscriptionPayer(tx, subscriptionId);
+          return this.applyHeldFeeRiseInTx(tx, subscriptionId, now, { drop: true });
+        });
+        if (result === 'applied') out.applied += 1;
+        if (result === 'deferred') out.deferred += 1;
+        if (typeof result === 'object') {
+          out.dropped += 1;
+          await this.tellFeeRiseCancelled(subscriptionId, result.held, result.feeNow);
+        }
+      } catch (error) {
+        log().error({ err: error, subscriptionId }, '[F2] could not tell or apply this held fee rise; the next run retries');
+      }
+    }
+    return out;
+  }
+
+  /** Why a held rise no longer matches its subscription, or null while it still does. */
+  private feeRiseObstacle(sub: Subscription | null, held: HeldFeeRise): string | null {
+    if (!sub) return 'GONE';
+    if (sub.status === 'CANCELLED') return 'PLAN_ENDED';
+    if (sub.customRate !== null) return 'NEGOTIATED_RATE';
+    if (Number(sub.weeklyRate) !== held.from) return 'RATE_MOVED';
+    return null;
+  }
+
+  /**
+   * Tell the payer of a held rise, and only then date it: the first weekly fee
+   * at least FEE_RISE_NOTICE_DAYS after the notice reached their inbox. The
+   * inbox row is the notice; without one nothing is told and nothing applies
+   * (the next run retries). A retried send finds the first row by its dedupe
+   * key, so the date and the moment told are the ones that row holds.
+   */
+  private async tellFeeRise(subscriptionId: string, held: HeldFeeRise, now: Date): Promise<'told' | 'untold' | 'dropped'> {
+    const sub = await this.prisma.subscription.findUnique({
+      where: { id: subscriptionId },
+      include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+    });
+    if (this.feeRiseObstacle(sub, held) !== null || sub?.feeWaived) {
+      // Gone, negotiated, waived or moved under it before anyone was told: nothing to tell, nothing to apply.
+      const dropped = await this.prisma.$transaction(async (tx) => {
+        // A subscription that is gone has no payer to lock; its record is all that is left.
+        if (sub) await lockSubscriptionPayer(tx, subscriptionId);
+        const fresh = sub ? await tx.subscription.findUnique({ where: { id: subscriptionId } }) : null;
+        if (this.feeRiseObstacle(fresh, held) === null && !fresh?.feeWaived) return false;
+        return this.dropHeldFeeRiseInTx(tx, subscriptionId, held, fresh, true);
+      });
+      return dropped ? 'dropped' : 'untold';
+    }
+    // A fresh clock: a long run's start time never dates a notice sent later.
+    const at = new Date(Math.max(now.getTime(), Date.now()));
+    const appliesFrom = riseAppliesFrom(sub!.nextBillingDate, at);
+    const dedupeKey = feeRiseDedupeKey(subscriptionId, held);
+    const copy = feeRiseCopy('RISE', { from: held.from, to: held.to, currencyCode: held.currencyCode, date: appliesFrom });
+    const userId = this.payerUserId(sub as SubWithRelations);
+    const inboxId = await this.notifications.send({
+      userId, type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
+      data: {
+        kind: FEE_RISE_NOTICE_KIND, change: 'RISE', subscriptionId, weeklyFee: held.to, previousWeeklyFee: held.from,
+        currencyCode: held.currencyCode, appliesFrom: appliesFrom.toISOString(), toldAt: at.toISOString(),
+      },
+      dedupeKey,
+    });
+    if (!inboxId) {
+      log().warn({ subscriptionId }, '[F2] fee rise notice not delivered; the rise applies to nothing until it is');
+      return 'untold';
+    }
+    // The inbox row is what the payer was told: a retried send returns the first row, with its own date.
+    const inbox = await this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } });
+    const told = (inbox?.data ?? {}) as Record<string, unknown>;
+    const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null);
+    const toldFrom = iso(told['appliesFrom']);
+    const toldAt = iso(told['toldAt']);
+    if (!inbox || inbox.dedupeKey !== dedupeKey || !toldFrom || !toldAt) {
+      log().error({ subscriptionId, inboxId }, '[F2] the fee rise notice row could not be read back; the rise applies to nothing until it is');
+      return 'untold';
+    }
+    return this.prisma.$transaction(async (tx) => {
+      await lockSubscriptionPayer(tx, subscriptionId);
+      const key = feeRiseKey(subscriptionId);
+      const again = await tx.platformConfig.findUnique({ where: { key } });
+      const still = again ? readHeldFeeRise(again.value) : null;
+      if (!still || still.noticeAt || still.heldAt !== held.heldAt || still.from !== held.from || still.to !== held.to) return 'untold' as const;
+      const value: HeldFeeRise = { ...still, noticeAt: toldAt, appliesFrom: toldFrom, inboxId };
+      // The record refuses a told date sooner than 14 days after the notice: never written, never applied.
+      if (!readHeldFeeRise(value)) {
+        log().error({ subscriptionId, toldAt, toldFrom }, '[F2] a told date sooner than the notice period; the rise applies to nothing until a person looks');
+        return 'untold' as const;
+      }
+      await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+      await tx.auditLog.create({ data: {
+        action: 'BILLING_FEE_RISE_TOLD', entity: 'Subscription', entityId: subscriptionId,
+        changes: { from: still.from, to: still.to, currencyCode: still.currencyCode, noticeAt: toldAt, appliesFrom: toldFrom, inboxId, inboxCreatedAt: inbox.createdAt.toISOString(), userId },
+      } });
+      return 'told' as const;
+    });
+  }
+
+  /** Drop a held rise that no longer matches (payer locked). True when a row was dropped. */
+  private async dropHeldFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, held: HeldFeeRise, sub: Subscription | null, untold: boolean): Promise<boolean> {
+    const key = feeRiseKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    // Only the very rise judged: a newer one held since is left for the next pass.
+    if (!row || readHeldFeeRise(row.value)?.heldAt !== held.heldAt) return false;
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: {
+      action: 'BILLING_FEE_RISE_DROPPED', entity: 'Subscription', entityId: subscriptionId,
+      changes: {
+        from: held.from, to: held.to, told: !untold, appliesFrom: held.appliesFrom,
+        why: this.feeRiseObstacle(sub, held) ?? (sub?.feeWaived ? 'FEE_WAIVED' : 'NO_LONGER_HELD'),
+        rateNow: sub ? Number(sub.weeklyRate) : null,
+      },
+    } });
+    return true;
+  }
+
+  /**
+   * Move a told rise in, in the caller's transaction (the payer is locked),
+   * once every week that started before its told date is settled: the next
+   * weekly fee to be charged is due on or after that date. A whole week held
+   * in the fee credit at the old price keeps it: the rise moves one week
+   * later, once. `drop` = the hourly pass may drop a rise that no longer
+   * matches (the paid-week transaction leaves that to it).
+   */
+  private async applyHeldFeeRiseInTx(
+    tx: Prisma.TransactionClient, subscriptionId: string, now: Date, opts: { drop: boolean },
+  ): Promise<'none' | 'waiting' | 'deferred' | 'applied' | { dropped: true; held: HeldFeeRise; feeNow: number | null }> {
+    const key = feeRiseKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    if (!row) return 'none';
+    const held = readHeldFeeRise(row.value);
+    if (!held?.noticeAt || !held.appliesFrom) return 'waiting';
+    const sub = await tx.subscription.findUnique({ where: { id: subscriptionId } });
+    if (this.feeRiseObstacle(sub, held) !== null) {
+      if (!opts.drop) return 'waiting';
+      await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub, false);
+      return { dropped: true, held, feeNow: sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null };
+    }
+    const appliesFrom = new Date(held.appliesFrom);
+    if (sub!.nextBillingDate.getTime() < appliesFrom.getTime()) return 'waiting';
+    if (!held.deferredOnce) {
+      const credit = await tx.prepaidBalance.findUnique({ where: { subscriptionId }, select: { balance: true, currencyCode: true } });
+      if (credit && credit.currencyCode === sub!.currencyCode && Number(credit.balance) >= held.from) {
+        const later = new Date(sub!.nextBillingDate.getTime() + 7 * 86_400_000);
+        const value: HeldFeeRise = { ...held, appliesFrom: later.toISOString(), deferredOnce: true };
+        await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+        await tx.auditLog.create({ data: {
+          action: 'BILLING_FEE_RISE_DEFERRED', entity: 'Subscription', entityId: subscriptionId,
+          changes: { from: held.from, to: held.to, paidAtOldPrice: Number(credit.balance), weekKeepsOldPrice: sub!.nextBillingDate.toISOString(), appliesFrom: later.toISOString() },
+        } });
+        return 'deferred';
+      }
+    }
+    const won = await tx.subscription.updateMany({ where: { id: subscriptionId, weeklyRate: sub!.weeklyRate, customRate: null }, data: { weeklyRate: held.to } });
+    if (won.count !== 1) return 'waiting';
+    await tx.platformConfig.delete({ where: { key } });
+    const sequence = await tx.billingEvent.count({ where: { subscriptionId, type: 'TIER_CHANGE' } }) + 1;
+    await tx.billingEvent.create({ data: {
+      subscriptionId, type: 'TIER_CHANGE', amount: held.to, currencyCode: sub!.currencyCode,
+      idempotencyKey: `tier:${subscriptionId}:${sequence}:${held.from}->${held.to}`,
+      note: `Weekly fee rise told ${held.noticeAt.slice(0, 10)} (14-day notice) applies from the fee due ${sub!.nextBillingDate.toISOString().slice(0, 10)}: ${held.from} -> ${held.to}; weeks before it kept their price.`,
+    } });
+    await tx.auditLog.create({ data: {
+      action: 'BILLING_FEE_RISE_APPLIED', entity: 'Subscription', entityId: subscriptionId,
+      changes: { from: held.from, to: held.to, noticeAt: held.noticeAt, appliesFrom: held.appliesFrom, firstFeeAtNewRate: sub!.nextBillingDate.toISOString(), at: now.toISOString() },
+    } });
+    return 'applied';
+  }
+
+  /** A told rise that will not happen: the payer is told so, best-effort (it never raises what they pay). */
+  private async tellFeeRiseCancelled(subscriptionId: string, held: HeldFeeRise, feeNow: number | null): Promise<void> {
+    if (feeNow === null || !(feeNow < held.to)) return;
+    try {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+      });
+      if (!sub) return;
+      const copy = feeRiseCopy('CANCELLED', { from: feeNow, to: held.to, currencyCode: held.currencyCode, date: held.appliesFrom ? new Date(held.appliesFrom) : null });
+      await this.notifications.send({
+        userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations), ...copy,
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'CANCELLED', subscriptionId, weeklyFee: feeNow, currencyCode: held.currencyCode },
+        dedupeKey: `${feeRiseDedupeKey(subscriptionId, held)}:cancelled`,
+      });
+    } catch (error) {
+      log().warn({ err: error, subscriptionId }, '[F2] the fee rise cancellation notice could not be sent');
+    }
   }
 
   /** [owner rule 2026-09-29 · DS287 S3] The paying sentence of every fee

@@ -18,17 +18,28 @@ const FRESH = { staleTime: 0, refetchOnMount: 'always' } as const;
 // The resolver resumes the clock only when no authority hold and no other active confirmation hold
 // remain, and the partner may be a store or a mover: never promise more, never say "store".
 const NOT_PAID_CLOCK = "The partner's billing clock resumes with its remaining grace only when no other payment check or hold is still open.";
-const SOURCE: Record<string, string> = { MMG_CHECKOUT: 'MMG checkout', CARD_SESSION: 'Card session', PAYMENT: 'Payment', OBLIGATION: 'Legacy obligation' };
+const SOURCE: Record<string, string> = { MMG_CHECKOUT: 'MMG checkout', CARD_SESSION: 'Card session', PAYMENT: 'Payment', OBLIGATION: 'Legacy obligation', RETURN_REANCHOR: 'Return payment' };
 // Why a payment is held, in words. Two reasons mean the payment is already confirmed and being settled;
 // every other reason is a review code, shown as plain words (never the raw code) without guessing more.
 const REASON_WORDS: Record<string, string> = {
   SETTLEMENT_APPLY_PENDING: 'Confirmed as PAID; applying the MMG credit to this fee',
   VERIFIED_POSITIVE_CORRECTION: 'MMG confirmed this payment after it was closed as not paid; applying the credit to this fee',
 };
+// A suspended partner's payment that could not restart their billing at the return paid the week
+// that fell due as it stood (the server's re-anchor refusal): finance checks the days billed.
+const RETURN_PREFIX = 'RETURN_NOT_REANCHORED_';
+const RETURN_WHY: Record<string, string> = {
+  CLOCK_DISAGREES: 'the server clock and the database clock disagreed',
+  SUSPENSION_UNPROVEN_OR_USED: 'no unused suspension record proves the return',
+  OBLIGATION_HELD: 'the fee was held for review',
+  OBLIGATION_SOURCE_MISMATCH: 'the fee belongs to another fee source',
+  INSTRUCTION_KEEPS_ITS_WEEK: 'the payment kept the week it was issued for',
+};
 const ACRONYMS = new Set(['MMG']);
-const reasonWords = (code: string) => REASON_WORDS[code] ?? (/^[A-Z0-9_]+$/.test(code)
-  ? code.split('_').filter(Boolean).map((word, i) => (ACRONYMS.has(word) ? word : i === 0 ? word.charAt(0) + word.slice(1).toLowerCase() : word.toLowerCase())).join(' ')
-  : code);
+const codeWords = (code: string) => code.split('_').filter(Boolean).map((word, i) => (ACRONYMS.has(word) ? word : i === 0 ? word.charAt(0) + word.slice(1).toLowerCase() : word.toLowerCase())).join(' ');
+const reasonWords = (code: string) => REASON_WORDS[code] ?? (code.startsWith(RETURN_PREFIX)
+  ? `A suspended partner's payment paid the week that fell due as it stood (${RETURN_WHY[code.slice(RETURN_PREFIX.length)] ?? codeWords(code.slice(RETURN_PREFIX.length)).toLowerCase()}): the days they were suspended may have been billed`
+  : /^[A-Z0-9_]+$/.test(code) ? codeWords(code) : code);
 const when = (date: string) => new Date(date).toLocaleString('en-GB', { timeZone: 'America/Guyana' });
 const grace = (ms: number) => { const minutes = Math.max(0, Math.floor(ms / 60_000)); return `${Math.floor(minutes / 60)} h ${minutes % 60} min`; };
 function activeApproval(row: PaymentConfirmation, approvals: ApprovalRow[]) {
@@ -81,7 +92,7 @@ export default function PaymentConfirmationsPage() {
                 {row.source === 'MMG_CHECKOUT' && row.sourceId && <Link className="underline text-[var(--accent)]" href={`/mmg-payments?checkout=${encodeURIComponent(row.sourceId)}`}>MMG timeline</Link>}</td>
               <td className="p-4"><p className={row.overdue ? 'text-amber-400 font-semibold' : ''}>{row.overdue ? 'Overdue for review' : 'Review due'} · {when(row.reviewDueAt)}</p><p className="text-[var(--muted)]">Began {when(row.beganAt)}</p><p>{reasonWords(row.reason)}</p></td>
               <td className="p-4 whitespace-nowrap">{grace(row.remainingGraceMs)}</td>
-              <td className="p-4">{!row.resolvable || !row.sourceId ? <p>Read-only. Review through the existing obligation workflow.</p> : waiting ? <div role="status">
+              <td className="p-4">{row.source === 'RETURN_REANCHOR' ? <p>Read-only. Compare the days billed with the time this partner was suspended, and correct any difference through the existing billing workflow.</p> : !row.resolvable || !row.sourceId ? <p>Read-only. Review through the existing obligation workflow.</p> : waiting ? <div role="status">
                 <p>{approval?.status === 'APPROVED' ? 'Approved; waiting for the requester to apply it on Approvals.' : 'Waiting for approval: a second admin, or solo approval on Approvals. Nothing has changed yet.'}</p>
                 <Link className="underline text-[var(--accent)]" href="/approvals">Open Approvals</Link>
               </div> : row.status === 'SETTLEMENT_APPLY_PENDING' ? <p role="status">This payment is confirmed as PAID and its MMG credit is being applied to this fee. Nothing to request.</p> : <div className="flex flex-wrap gap-2">
@@ -151,7 +162,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
     <p>{decision === 'UNPAID'
       ? `Close as NOT PAID: ${mmg ? 'the checkout becomes NOT_PAID' : 'the payment becomes failed'}; nothing is credited. ${NOT_PAID_CLOCK}`
       : mmg ? "Mark PAID: only with MMG's transaction id; credits once" : 'Mark PAID: only with recorded settlement evidence; credits once.'}</p>
-    {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing settlement record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
+    {decision === 'PAID' && <p className="text-sm text-[var(--muted)]">Swift rechecks the existing confirmation record before applying the decision. Entering a reference cannot create credit or credit a payment twice.</p>}
     {decision === 'PAID' && mmg && <label className="block text-sm">MMG transaction ID<select className={inputClass} value={paymentId} onChange={(e) => setPaymentId(e.target.value)} disabled={busy || stale}>
       <option value="">Select a recorded MMG transaction</option>{row.settlementPayments?.map((payment) => <option key={payment.providerPaymentId} value={payment.providerPaymentId}>{payment.mmgTransactionId}</option>)}
     </select></label>}

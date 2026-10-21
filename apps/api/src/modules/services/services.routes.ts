@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingTotals, shownRatingsFor, shownSurface } from '../rating/rating-groups';
 import type { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { RatingService } from '../rating/rating.service';
@@ -21,8 +22,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
-import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
-import { isServiceCategoryOperational } from './service-catalog';
+import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
 import {
@@ -147,6 +147,9 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (offersLegalServices(body.bio)) {
       throw new AppError(409, 'SERVICE_NOT_ALLOWED', 'Swift doesn\'t list legal services. Remove them from your profile to continue.');
     }
+    // [TRADES · GUARDRAILS §8] Refused before anything is written: no gas or fuel supply,
+    // no protected title the trade's checklist does not prove.
+    assertProviderProfileWording(trade, body.bio);
     const userId = request.user.userId;
     const provider = await app.prisma.$transaction(async (tx) => {
       // One profile per human is the idempotency boundary. Lock the owning user
@@ -184,7 +187,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       await projectProviderVerificationLocked(tx, userId);
       return tx.serviceProvider.findUniqueOrThrow({ where: { userId } });
     });
-    return { success: true, data: provider };
+    // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+    return { success: true, data: { ...provider, ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)) } };
   });
 
   app.get('/providers/me', auth, async (request) => {
@@ -205,6 +209,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...provider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)),
         tradeLabel: serviceTradeLabel(provider.trade),
         categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
         selfSkilled: !certified,
@@ -294,7 +300,7 @@ export async function servicesRoutes(app: FastifyInstance) {
       include: {
         qualifications: {
           where: { status: 'VERIFIED', verifiedAt: { not: null }, trade },
-          select: { type: true, trade: true },
+          select: { type: true, trade: true, verifiedAt: true },
         },
       },
     });
@@ -313,7 +319,10 @@ export async function servicesRoutes(app: FastifyInstance) {
     // (`totalRatings > 0`) — a THIRD definition of the same rule, and one that
     // let a single 1-star rating brand a provider on the browse page.
     const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
-    const surfaces = await ratingSurfaces(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.id));
+    // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
+    // ranking below still reads the true mean (display only).
+    const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
+    const rankMean = new Map(visible.map((p) => [p.id, p.averageRating]));
 
     const ranked = visible
       .map((provider) => {
@@ -329,18 +338,22 @@ export async function servicesRoutes(app: FastifyInstance) {
           // The honest star line (displayRating / ratingBucket / topRated).
           // Kept alongside the raw fields, which the sort still uses as a
           // tie-break — ranking may read the true mean; DISPLAY may not.
-          ...(surfaces.get(provider.id) ?? NEW_ACTOR_SURFACE),
-          averageRating: provider.averageRating,
-          totalRatings: provider.totalRatings,
+          ...shownSurface(shown.get(provider.userId)!),
+          averageRating: shown.get(provider.userId)!.average,
+          totalRatings: shown.get(provider.userId)!.ratingCount,
           selfSkilled: qualifications.length === 0,
           certified: qualifications.length > 0,
           badges: qualifications.map((qualification) => qualification.type),
+          // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
+          licenceCheckedOn: qualifications.reduce<Date | null>(
+            (latest, q) => (q.verifiedAt && (!latest || q.verifiedAt > latest) ? q.verifiedAt : latest), null,
+          )?.toISOString() ?? null,
         };
       })
       // Surface licensed (certified) providers first — strongest signal for high-risk trades.
       .sort((a, b) => (
         Number(b.certified) - Number(a.certified)
-        || b.averageRating - a.averageRating
+        || rankMean.get(b.id)! - rankMean.get(a.id)!
         || a.id.localeCompare(b.id)
       ));
 
@@ -367,13 +380,19 @@ export async function servicesRoutes(app: FastifyInstance) {
     const body = jobRequestSchema.parse(request.body);
     const customerId = request.user.userId;
     const tenantId = authenticatedTenant();
-    const job = await createServiceJobWithLiveAuthority(app.prisma, {
+    const { job, created } = await createServiceJobWithLiveAuthority(app.prisma, {
       customerId,
       tenantId,
       providerId: body.providerId,
       description: body.description,
       photos: body.photos ?? [],
     });
+    // A retry of a request that already landed gets the first job back with
+    // the same answer, and the provider is not told twice.
+    if (!created) {
+      reply.code(201);
+      return { success: true, data: job };
+    }
 
     // THE FIRST STEP WAS THE ONE THAT DIDN'T RING.
     //

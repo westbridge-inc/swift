@@ -4,6 +4,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { computeActiveLegEta, refreshLegEta, cachedLegEta } from '../modules/dispatch/live-eta';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // SWIFT-UG-RT-01 — live tracking previously streamed only the mover's
@@ -87,7 +88,7 @@ describe('live-eta — active-leg targeting + cache [SWIFT-UG-RT-01]', () => {
   });
 
   it('switches the target to the DROPOFF once picked up (much larger ETA)', async () => {
-    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'EN_ROUTE_DELIVERY' } });
+    await walkOrderStatus(app.prisma, orderId, 'EN_ROUTE_DELIVERY');
     const eta = await computeActiveLegEta(app, orderId, MOVER);
     expect(eta).not.toBeNull();
     expect(eta!).toBeGreaterThan(30); // ~35 km out — clearly the other leg

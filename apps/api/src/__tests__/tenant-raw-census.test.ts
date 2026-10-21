@@ -30,6 +30,8 @@ import { join, relative } from 'node:path';
 type Role = 'INFRA' | 'REQUEST' | 'JOB' | 'JOB_PENDING' | 'SHARED';
 const CENSUS: Record<string, { sites: number; role: Role }> = {
   'app.ts': { sites: 1, role: 'INFRA' },
+  // [item 20] The owner wall's boot attestation: catalogue reads only (role membership, row security, the policy).
+  'lib/owner-rls.ts': { sites: 2, role: 'INFRA' },
   'lib/rls-attestation.ts': { sites: 5, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },
@@ -41,6 +43,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // Payment-confirmation review queue: one tenant-filtered read of matching credited MMG records,
   // reached from the authenticated admin queue route; the file is also imported by billing jobs.
   'modules/billing/confirmation-finance.ts': { sites: 1, role: 'SHARED' },
+  // [BILLING-REANCHOR] SELECT now() only (the database's clock for a return re-anchor); reads no table.
+  'modules/billing/dunning-clock.ts': { sites: 1, role: 'SHARED' },
   'modules/billing/invariants.ts': { sites: 3, role: 'JOB_PENDING' },
   'modules/billing/provider-identity-backfill.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/billing/receipts.ts': { sites: 1, role: 'SHARED' },

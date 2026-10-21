@@ -10,6 +10,7 @@ import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
+import { boardPaused, recentBoard } from '../../../lib/moverBoard';
 import {
   useMoverKind,
   useMoverStats,
@@ -50,6 +51,8 @@ import { offerEarnings } from './offer-earnings';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
+import { useJobRing } from '../../../hooks/useJobRing';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -95,6 +98,18 @@ export function DispatchOfferCard({
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer.orderId, total, deadlineAt]);
+
+  // [RINGER · owner ruling 15 Oct] The offer rings (Swift's tone on build 12,
+  // the buzz on every build) from the moment the card shows until Accept is
+  // tapped, Decline unmounts the card, or the offer's clock runs out; never
+  // in the background. The deadline is fixed when each offer opens.
+  const ringDeadline = useMemo<number | undefined>(
+    () => deadlineAt ?? (total ? Date.now() + total * 1000 : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [offer.orderId, deadlineAt, total],
+  );
+  const clockOpen = ringDeadline === undefined || secs > 0;
+  useJobRing(!accepting && clockOpen, ringDeadline);
 
   const isDriver = kind === 'DRIVER';
   const fare = job ? jobAmount(job) : null;
@@ -396,6 +411,14 @@ function MoverKindChoiceScreen({
 export function MoverHomeScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const insets = useSafeAreaInsets();
+  // [STORE-ALERT] Offers ring a mover's phone: ask while the OS still can
+  // (once per app session). A preview rings nothing, so it never asks.
+  useEffect(() => {
+    if (preview) return;
+    void Promise.all([import('../../../services/notification-priming'), import('../../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('mover_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [preview]);
   const {
     kind,
     profile,
@@ -423,7 +446,8 @@ export function MoverHomeScreen({ navigation }: any) {
   // [B6] The run strip: server-computed, rendered as-is. Null unless stacked.
   const run = useActiveJobs(kind).run;
   const online = !!profile?.isOnline;
-  const available = useAvailableJobs(kind, online);
+  // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
+  const available = useAvailableJobs(kind, online, !!active.data);
   const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
@@ -480,7 +504,9 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
-  const jobs: any[] = available.data ?? [];
+  // While the board rests, its last answer is not shown (no stale pins on the map).
+  // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
+  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
   // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
   // 428 wants a selfie check (there's a screen for that now); 423 means only
@@ -736,6 +762,9 @@ export function MoverHomeScreen({ navigation }: any) {
               </Pressable>
             ) : null}
           </View>
+
+          {/* [STORE-ALERT] Says so when this phone cannot ring for offers. */}
+          {!preview ? <PushOffStrip audience="mover" style={{ marginTop: space.lg }} /> : null}
 
           {!online && !activeJob && demandOpportunity ? (
             <DemandBand

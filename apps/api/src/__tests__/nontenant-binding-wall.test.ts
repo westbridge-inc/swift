@@ -33,6 +33,8 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, by raw DDL.
 grantSuiteCapability('ddl');
@@ -40,11 +42,11 @@ grantSuiteCapability('ddl');
 const TEST_URL = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
 const ENV_KEYS = ['DATABASE_URL', 'SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_BIND'] as const;
 const priorEnv: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>> = {};
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const PRODUCTION = 'swift-default';
 const REVIEW = `w0-review-${RUN}`;
 const DAY = 86_400_000;
-const phone = () => `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`;
+const phone = () => testPhone();
 
 type PrismaModule = typeof import('../plugins/prisma');
 type TenantModule = typeof import('../plugins/tenant-context');
@@ -64,7 +66,8 @@ const tokens: Record<'vendor' | 'driver' | 'rider' | 'customer', string> = { ven
 
 async function sessionFor(userId: string, role: string): Promise<string> {
   const token = app.jwt.sign({ userId, role, jti: nanoid(8) });
-  await owner.session.create({ data: { userId, token, refreshToken: nanoid(48), deviceId: `w0-${RUN}-${role}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
+  // [Row 231] the suite's own connection bypasses the API's digest layer: it stores what the API stores — digests
+  await owner.session.create({ data: { userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(nanoid(48)), deviceId: `w0-${RUN}-${role}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
   return token;
 }
 

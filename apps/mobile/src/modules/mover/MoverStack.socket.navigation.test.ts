@@ -106,6 +106,8 @@ vi.mock('../../hooks', () => ({
   useMoverKind: () => ({ kind: 'DRIVER', profile: { isOnline: true } }),
   useVerificationStatus: () => ({ data: { roleVerified: true }, isLoading: false }),
 }));
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../../stores/authStore', () => ({
   getAuthSessionSnapshot: () => ({ ...fx.owner }),
   useAuthStore: (selector: (state: unknown) => unknown) => selector({ setIntent: vi.fn() }),

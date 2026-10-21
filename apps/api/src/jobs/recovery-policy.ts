@@ -90,6 +90,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'eta-pad-weekly': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'evidence-retention': { policy: 'SAFE_REPLAY', why: 'Repairs holds, drains the legal-hold VAULT OUTBOX (idempotent by construction) and deletes only unsealed, case-less bundles past their window; the database triggers refuse anything else.' },
   'expiry-sweep': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'verification-decision-outbox': { policy: 'SAFE_REPLAY', why: 'Lease-claimed outbox drain: a row is claimed under a 60 s lease and marked processed once; the approval tail it runs (afterApproval) returns an existing subscription instead of starting a second, and an approval that no longer stands closes its row without starting anything.' },
   'image-policy-sweep': { policy: 'SAFE_REPLAY', why: 'Purges the images of committed, extracted PERSONAL documents of active types through purgeImageAfterReview, which refuses an already-purged, held or uncommitted submission; a replay finds nothing left to purge. Receipts append.' },
   'handover-claims-reconcile': { policy: 'SAFE_REPLAY', why: 'Reads settlements older than the claim window and reports the unmatched pairs: one audit row per run and at most one admin notice per day. It settles nothing and fails nothing; a replay reports the same pairs.' },
   'rlp-sweep': { policy: 'SAFE_REPLAY', why: 'Flags approved-but-unpaid claims past the pay-out SLA (a flag pushed at most once, guarded by the WHERE), lists the countries whose reserve is below its floor, writes one audit row per run and at most one admin notice per day per finding; it pays nothing and changes no status.' },
@@ -100,6 +101,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'incident-sla-watch': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'incident-weekly-digest': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'liveness-midshift': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'mmg-accept-expiry': { policy: 'SAFE_REPLAY', why: 'Each cancellation is the canonical locked ACCEPTED -> CANCELLED transition, re-decided on the locked row (still ACCEPTED, MMG, never marked paid, no rejected claim or open disagreement, 30 minutes since acceptance). A replay finds the order no longer ACCEPTED and changes nothing: no second status log, no second notice. The findMany is only a candidate list.' },
   'mmg-link-apply': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'mover-revocation-outbox': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'offer-timeout': { policy: 'SAFE_REPLAY', why: 'The first action is removeOfferIfOwned, an atomic compare-consume of the exact offer generation: a redelivery reads removed === false and returns before the acceptance-rate decay, the declined-set add or the trailing dispatchOrder, so each consequence runs at most once.' },
@@ -120,6 +122,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'route-match': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'scheduler-heartbeat': { policy: 'SAFE_REPLAY', why: 'Writes one Redis key and pages on pool saturation through opsPageOnce, which dedupes. A second run overwrites the same key.' },
   'stale-movers': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
+  'substitution-expiry': { policy: 'SAFE_REPLAY', why: 'Removes (or, on MMG, withdraws) swap questions past their deadline. Every write is a compare-and-set on the open question with its deadline already passed (subStatus PENDING, substituteDecideBy <= now) under the order-row lock; a closed question no longer matches, so a replay changes nothing and sends nothing. The customer is told only by the compare-and-set winner. A question with no deadline gets one by a compare-and-set on NULL, so a replay cannot extend a running wait.' },
   'supply-watch-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'sync-vendor': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file. (Dispatched behind a !== guard, so the census missed it until it learned that form.)' },
   'tier-recalc': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -155,6 +158,7 @@ export type JobName =
   | 'eta-pad-weekly'
   | 'evidence-retention'
   | 'expiry-sweep'
+  | 'verification-decision-outbox'
   | 'image-policy-sweep'
   | 'handover-claims-reconcile'
   | 'rlp-sweep'
@@ -165,6 +169,7 @@ export type JobName =
   | 'incident-sla-watch'
   | 'incident-weekly-digest'
   | 'liveness-midshift'
+  | 'mmg-accept-expiry'
   | 'mmg-link-apply'
   | 'mover-revocation-outbox'
   | 'offer-timeout'
@@ -185,6 +190,7 @@ export type JobName =
   | 'route-match'
   | 'scheduler-heartbeat'
   | 'stale-movers'
+  | 'substitution-expiry'
   | 'supply-watch-scan'
   | 'sync-vendor'
   | 'tier-recalc'

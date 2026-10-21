@@ -167,11 +167,16 @@ describe('queue gates (mirror the request path — failure first)', () => {
     expect(res.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
   });
 
-  it('rejects a customer with no signup selfie', async () => {
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] The queue mirrors the request path, which
+  // no longer asks a customer for a photo: an L2 customer with no signup selfie joins like any other
+  // (the ID on file is the only identity gate, the L1 case above).
+  it('admits a customer with no signup selfie (customers take no photos), never SELFIE_REQUIRED', async () => {
     const noSelfie = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER', { selfieCapturedAt: null });
     const res = await join(noSelfie.token);
-    expect(res.statusCode).toBe(403);
-    expect(res.json().error.code).toBe('SELFIE_REQUIRED');
+    expect(res.json().error?.code).not.toBe('SELFIE_REQUIRED');
+    expect(res.statusCode).toBe(201);
+    // Cleanup: leave, so later position and scan assertions start from an empty queue.
+    await app.prisma.rideQueueEntry.updateMany({ where: { customerId: noSelfie.userId }, data: { status: 'LEFT' } });
   });
 
   it('rejects joining with a ride already active', async () => {

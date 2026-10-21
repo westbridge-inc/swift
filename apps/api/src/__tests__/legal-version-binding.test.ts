@@ -176,6 +176,28 @@ const PUBLISHED: Record<
     driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
     vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
   },
+  // [Owner rulings: identity checks by a person only + face matching off; customers take no photos (16 Oct);
+  // R28] Privacy: no outside identity-verification company and no automated document-reading or face
+  // matching (production refuses both), how partner documents and customer IDs are handled, partners-only
+  // registration selfie, a customer is never shown by photo, "confirmation records"; Terms: the taxi
+  // profile-photo sentence gone. The two agreements' words are unchanged: putting 16 October back
+  // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
+  '2026-10-17': {
+    terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
+    privacy: '4dfb9d4e5bff08df9a8f11a9c50a05255f8f2c650f757ad9fe99a220e1465c46',
+    driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
+    vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
+  },
+  // [#1614 leftover, COORD 17 Oct] Privacy s.6: a customer's own ID is kept while the account is open and
+  // deleted when the account is deleted (it is not on the partner purge schedule). Nothing else changed:
+  // putting 17 October back and removing that one sentence reproduces all four 2026-10-17 pins exactly.
+  // The date re-pins Terms and the two agreements.
+  '2026-10-18': {
+    terms: '7cdf29225b5e5ab6378389ef5a40d805195ef1621fe250efac2b771aee17e65e',
+    privacy: '45a9fa92f2e17c4599fd5e39c78c4551353fde75928a412e5372b3d68c118cdc',
+    driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
+    vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

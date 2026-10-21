@@ -1,10 +1,11 @@
 import { useState } from 'react';
-import { View, ScrollView, ActivityIndicator } from 'react-native';
+import { View, ScrollView, ActivityIndicator, Pressable } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
-import { Card, PillButton, T } from '../../../kit';
+import { BrandCheckbox, Card, PillButton, T } from '../../../kit';
+import { CUSTOMER_ID_CONSENT_TEXT } from '../../../lib/uploadConsentCopy';
 import { Badge } from '../../../kit/badge';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { useUploadFile, useSubmitIdentity } from '../../../hooks/verification';
@@ -50,32 +51,35 @@ export function IdentityVerificationScreen({ navigation }: any) {
   const [idUrl, setIdUrl] = useState<string | undefined>(undefined);
   const [picking, setPicking] = useState<'id' | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  // [R17 · in-app ¶15] starts unticked; Send stays off until the person agrees
+  const [agreed, setAgreed] = useState(false);
+  const [lastUploadKind, setLastUploadKind] = useState<'id' | null>(null);
   const [outcome, setOutcome] = useState<CustomerIdCheck | null>(null);
   const [permErr, setPermErr] = useState<string | null>(null);
 
   const pick = async (kind: 'id') => {
     try {
-      const owner = requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const saved = upload.isError && lastUploadKind === kind ? upload.variables : undefined;
+      const owner = saved?.authSession ?? requireAuthSessionSnapshot();
       requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        // [G9 · #917's law] A denied permission explains itself — this was
-        // the LAST silent library denial in the app.
-        setPermErr('Photo access needed — allow it in Settings to upload your documents.');
-        return;
+      let file = saved;
+      if (!file) {
+        const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        requireAuthSessionForPrincipal(owner);
+        if (!perm.granted) {
+          setPermErr('Photo access needed — allow it in Settings to upload your documents.');
+          return;
+        }
+        setPermErr(null);
+        const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
+        requireAuthSessionForPrincipal(owner);
+        if (res.canceled || !res.assets?.[0]) return;
+        const a = res.assets[0];
+        file = { uri: a.uri, name: a.fileName ?? `${kind}.jpg`, type: a.mimeType ?? 'image/jpeg', authSession: owner };
       }
-      setPermErr(null);
-      const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, quality: 0.8 });
-      requireAuthSessionForPrincipal(owner);
-      if (res.canceled || !res.assets?.[0]) return;
-      const a = res.assets[0];
       setPicking(kind);
-      const url = await upload.mutateAsync({
-        uri: a.uri,
-        name: a.fileName ?? `${kind}.jpg`,
-        type: a.mimeType ?? 'image/jpeg',
-        authSession: owner,
-      });
+      setLastUploadKind(kind);
+      const url = await upload.mutateAsync(file);
       requireAuthSessionForPrincipal(owner);
       setIdUrl(url);
     } catch (pickError) {
@@ -122,21 +126,34 @@ export function IdentityVerificationScreen({ navigation }: any) {
             surface. Only the submit error rendered; a failed photo UPLOAD was
             silent and the row simply stayed empty. */}
         {permErr ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>{permErr}</T> : null}
-        {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the card and try again.</T> : null}
+        {upload.isPending ? <T variant="label" tone="muted" center>Still uploading — keep this screen open.</T> : null}
+        {upload.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>That photo didn&apos;t upload — tap the same card to retry the saved photo.</T> : null}
         {submit.isError ? <T variant="label" tone="error" center style={{ marginTop: space.sm }}>Couldn&apos;t submit. Please try again.</T> : null}
+
+        {/* [R17 · in-app ¶15] the customer agrees to Swift keeping the ID photo — an unticked tick, recorded */}
+        <Pressable
+          onPress={() => setAgreed((a) => !a)}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: agreed }}
+          accessibilityLabel={CUSTOMER_ID_CONSENT_TEXT}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.lg }}
+        >
+          <BrandCheckbox checked={agreed} onToggle={() => setAgreed((a) => !a)} />
+          <T variant="label" tone="muted" style={{ flex: 1 }}>{CUSTOMER_ID_CONSENT_TEXT}</T>
+        </Pressable>
 
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
-          label={!idUrl ? 'Upload your ID first' : 'Send my ID'}
+          label={!idUrl ? 'Upload your ID first' : !agreed ? 'Tick the box to send' : 'Send my ID'}
           loading={submit.isPending}
           style={{ marginTop: space.lg }}
-          disabled={!idUrl}
+          disabled={!idUrl || !agreed}
           onPress={() =>
             submit.mutate({ idDocumentUrl: idUrl as string }, { onSuccess: (result) => { setOutcome(idCheckOf(result as never)); setSubmitted(true); } })
           }
         />
         <T variant="micro" tone="muted" center style={{ marginTop: space.md }}>
-          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it (DPA 2023).
+          Your ID picture is stored encrypted. Our Privacy Policy says how long we keep it.
         </T>
       </ScrollView>
     </SafeAreaView>

@@ -4,6 +4,9 @@ import NewOrderTakeover from './NewOrderTakeover';
 import { mockApi, renderWithQuery, stubAudioContext } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
 import { normalizeVendorOrder } from '@/lib/vendor-api';
+import { storeKey } from '@/lib/store-scope';
+import { getSelectedStore, setSelectedStore } from '@/lib/auth';
+import { axeViolations } from '@/test/axe';
 
 /**
  * The full-screen new-order takeover is the loudest money surface the vendor
@@ -62,7 +65,8 @@ describe('new-order takeover', () => {
     rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
 
     await screen.findByText(/NEW ORDER/);
-    await user.click(screen.getByRole('button', { name: 'Reject' }));
+    await user.click(screen.getByRole('button', { name: 'Reject — tell us why' }));
+    await user.click(screen.getByRole('button', { name: 'Out of stock' }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/orders/order-live/reject'));
@@ -83,8 +87,9 @@ describe('new-order takeover', () => {
     rerender(<NewOrderTakeover orders={[normalizeVendorOrder(raw)]} />);
 
     await screen.findByText('NEW BOOKING');
-    expect(screen.queryByRole('option', { name: 'Kitchen is too busy' })).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Decline' }));
+    await user.click(screen.getByRole('button', { name: 'Decline — tell us why' }));
+    expect(screen.queryByRole('button', { name: 'Kitchen is too busy' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Fully booked at that time' }));
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/orders/order-live/reject'));
@@ -102,22 +107,100 @@ describe('new-order takeover', () => {
     expect(await screen.findByText('NEW BOOKING')).toBeTruthy();
     expect(screen.getByText(/9:00 AM/)).toBeTruthy();
     expect(screen.queryByText('20 min prep')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Decline' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Decline — tell us why' })).toBeTruthy();
   });
 
   it('stacks full-width, touch-sized decisions on a narrow phone', async () => {
-    const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    const { rerender, user } = renderWithQuery(<NewOrderTakeover orders={[]} />);
     rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
     await screen.findByText('NEW ORDER');
     const accept = screen.getByRole('button', { name: 'Accept' });
-    const reject = screen.getByRole('button', { name: 'Reject' });
-    const prep = screen.getByRole('option', { name: '20 min prep' }).closest('select')!;
-    const reason = screen.getByRole('combobox', { name: 'Reject reason' });
-    for (const control of [prep, accept, reason, reject]) {
+    const reject = screen.getByRole('button', { name: 'Reject — tell us why' });
+    const prep = screen.getByRole('combobox', { name: 'Preparation time' });
+    for (const control of [prep, accept, reject]) {
       expect(control.className).toContain('w-full');
       expect(control.className).toContain('min-h-11');
     }
     expect(accept.parentElement?.className).toContain('flex-col');
+    // The reasons, once asked for, are touch-sized full-width presses too.
+    await user.click(reject);
+    for (const name of ['Out of stock', 'Kitchen is too busy', 'Closing soon', 'Back']) {
+      const control = screen.getByRole('button', { name });
+      expect(control.className, name).toContain('w-full');
+      expect(control.className, name).toContain('min-h-11');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U21] A rejection cannot be undone and the customer is told at once.
+// The popup rejected on ONE tap with a preselected reason; the phone asks in two
+// steps ("Reject — tell us why", then the reason, with Back). And the popup was
+// not a dialog: no role, focus stayed on the page behind it, Tab walked out.
+// [U48] After a decision the popup refreshed ['orders'], a key the store-scoped
+// board never uses, so the order sat under "New" until the next poll.
+// ---------------------------------------------------------------------------
+describe('new-order popup: a decision is deliberate, and the popup is a dialog', () => {
+  beforeEach(() => { stubAudioContext(); });
+
+  const arrive = async () => {
+    const rendered = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    rendered.rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder())]} />);
+    await screen.findByText('NEW ORDER');
+    return rendered;
+  };
+
+  it('one stray press never rejects: the first press only asks why, and Back undoes it', async () => {
+    const fetchMock = mockApi(() => ({ body: { success: true, data: {} } }));
+    const { user } = await arrive();
+    await user.click(screen.getByRole('button', { name: 'Reject — tell us why' }));
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole('group', { name: 'Why are you rejecting?' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Closing soon' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.queryByRole('button', { name: 'Closing soon' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Reject — tell us why' })).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('is a labelled modal dialog that takes focus on Accept', async () => {
+    await arrive();
+    const dialog = screen.getByRole('alertdialog', { name: 'NEW ORDER' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Accept' }));
+    expect(await axeViolations(dialog)).toEqual([]);
+  });
+
+  it('keeps Tab inside, and a reflex Escape neither dismisses it nor leaks to the page', async () => {
+    const leaked = vi.fn();
+    document.addEventListener('keydown', leaked);
+    try {
+      const { user } = await arrive();
+      const dialog = screen.getByRole('alertdialog', { name: 'NEW ORDER' });
+      const later = screen.getByRole('button', { name: /View later/ });
+      later.focus();
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      await user.tab({ shift: true });
+      expect(document.activeElement).toBe(later);
+      await user.keyboard('{Escape}');
+      expect(screen.getByRole('alertdialog', { name: 'NEW ORDER' })).toBeTruthy();
+      expect(leaked.mock.calls.some(([e]) => (e as KeyboardEvent).key === 'Escape')).toBe(false);
+    } finally {
+      document.removeEventListener('keydown', leaked);
+    }
+  });
+
+  it('after a decision it refreshes the store\'s own board, not a key nobody reads', async () => {
+    mockApi(() => ({ body: { success: true, data: { id: 'order-live', status: 'ACCEPTED' } } }));
+    setSelectedStore('store-1');
+    const { user, queryClient } = await arrive();
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    await user.click(screen.getByRole('button', { name: 'Accept' }));
+    await waitFor(() => expect(invalidate).toHaveBeenCalled());
+    const keys = invalidate.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+    expect(keys).toContain(JSON.stringify(storeKey(getSelectedStore(), 'orders')));
+    expect(keys).not.toContain(JSON.stringify(['orders']));
   });
 });
 

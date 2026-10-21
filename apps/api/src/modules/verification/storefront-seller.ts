@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
-import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgNumber } from '../../utils/mmg-number';
+import { offeredStoreMmgPayUrl } from '../../utils/store-mmg';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure, type DisclosureBlock } from './storefront-disclosure';
 
@@ -10,8 +11,9 @@ type Db = Prisma.TransactionClient | PrismaClient;
  * page shows — the app's store screen and the website's store page read this ONE projection:
  *  - who sells: the store's legal name, business address and phone, from the compiled supplier-information block
  *    (storefront-disclosure.ts: VALID records and labelled fallbacks, the phone the store PUBLISHED);
- *  - how payment works: cash at handover always; the store's own MMG only while its link passes the same check the
- *    checkout applies (validateMmgPayUrl), so the page never names a way to pay the checkout would not offer;
+ *  - how payment works: cash at handover always; the store's own MMG only while the checkout would offer it (a valid
+ *    MMG number, or a valid pay link while STORE_MMG_PAY_LINK is on), so the page never names a way to pay the
+ *    checkout would not offer;
  *  - the store's own refund rule (its owner's words, vendor/refund-rule.ts), then the statutory-rights sentence.
  * Only what is on file: a fact Swift does not hold is null, and the page says "Ask the store" — never a guess.
  * A store whose supplier block is withheld (not live, not approved) has no seller block.
@@ -34,14 +36,17 @@ export interface StorefrontSeller {
 /** Project the seller block from a compiled public disclosure and the store's own payment and refund facts. */
 export function storefrontSeller(
   disclosure: DisclosureBlock,
-  store: { mmgPayUrl: string | null; refundRule: string | null },
+  store: { mmgPayUrl: string | null; mmgNumber?: string | null; refundRule: string | null },
 ): StorefrontSeller {
   const refundRule = store.refundRule?.trim() || null;
   return {
     legalName: disclosure.legalName?.value ?? null,
     address: disclosure.address?.value ?? null,
     phone: disclosure.contact?.value ?? null,
-    payment: { cash: true, storeMmg: safeMmgPayUrl(store.mmgPayUrl) !== null },
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] "Pay the store directly in MMG" is said only while the
+    // checkout would offer it: the store has a valid MMG number (or, only while STORE_MMG_PAY_LINK is
+    // on, a valid pay link). The number itself is never on the storefront.
+    payment: { cash: true, storeMmg: safeMmgNumber(store.mmgNumber) !== null || offeredStoreMmgPayUrl(store.mmgPayUrl) !== null },
     refundRule,
     statutoryRights: STATUTORY_RIGHTS_SENTENCE,
   };
@@ -59,7 +64,7 @@ export async function publicStorefrontSeller(
   if (!block) return null;
   const store = await db.vendor.findFirst({
     where: { id: vendorId, ...vendorTenantForCaller() },
-    select: { mmgPayUrl: true, refundRule: true },
+    select: { mmgPayUrl: true, mmgNumber: true, refundRule: true },
   });
   return store ? storefrontSeller(block, store) : null;
 }

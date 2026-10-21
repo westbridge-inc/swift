@@ -22,6 +22,10 @@ export interface TenantStore {
    *  plugins/prisma.ts: the tenant a BATCH transaction is bound to. (An
    *  interactive transaction's tenant is keyed by its own id there.) */
   batchTenant?: string;
+  /** [item 20 · owner wall] The person this request acts for, bound beside
+   *  its tenant (`app.current_user`) when OWNER_RLS_BIND=1. Set by
+   *  authentication only (enterOwner); never by system work. */
+  userId?: string | null;
 }
 
 export type TenantMode = 'request' | 'system' | 'unbound';
@@ -70,6 +74,20 @@ export function enterTenant(tenantId: string | null): void {
   const store = tenantContext.getStore();
   if (store) store.tenantId = tenantId;
   else tenantContext.enterWith({ tenantId, mode: 'request' });
+}
+
+/** [item 20] Bind the current request to the person it acts for (after
+ *  authentication, beside enterTenant). Only a request store carries one. */
+export function enterOwner(userId: string | null): void {
+  const store = tenantContext.getStore();
+  if (store) store.userId = userId;
+}
+
+/** [item 20] The person the current request acts for, or null (system work,
+ *  pre-auth, a job: the owner wall shows such a flow no owner-walled row). */
+export function getOwnerUserId(): string | null {
+  const store = tenantContext.getStore();
+  return store && store.mode !== 'system' ? store.userId ?? null : null;
 }
 
 /** Run a function with tenant scoping explicitly OFF (cross-tenant admin/system

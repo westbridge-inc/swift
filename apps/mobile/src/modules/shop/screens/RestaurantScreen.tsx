@@ -18,6 +18,7 @@ import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
+import { STORE_PICKS_TITLE } from '../../../lib/storePick';
 import {
   AddMorph,
   CartBar,
@@ -26,6 +27,7 @@ import {
   CircleChip,
   ErrorState,
   FoodCard,
+  Header,
   HeartBadge,
   IconChip,
   LoadingBlock,
@@ -293,7 +295,9 @@ export function RestaurantScreen() {
 
   if (vendor.isLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <LoadingBlock />
       </View>
     );
@@ -301,6 +305,8 @@ export function RestaurantScreen() {
   if (vendor.isError || !v) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => vendor.refetch()} />
       </View>
     );
@@ -667,10 +673,10 @@ export function RestaurantScreen() {
             </>
           ) : (
             <>
-          {/* Recommended rail */}
+          {/* The store's own picks (its isPopular tick), named as such: never "Recommended for you". */}
           {recommended.length > 0 ? (
             <>
-              <SectionHeader title="Recommended for you" style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
+              <SectionHeader title={STORE_PICKS_TITLE} style={{ paddingHorizontal: GUTTER, marginTop: space['3xl'] }} />
               <FlatList
                 horizontal
                 showsHorizontalScrollIndicator={false}

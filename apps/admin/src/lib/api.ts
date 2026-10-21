@@ -727,7 +727,7 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string; certificateYear?: number; registrationKind?: 'BUSINESS_NAME' | 'COMPANY' } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
@@ -843,15 +843,15 @@ export const fetchDiscoveryRequests = (status: string) =>
 
 export const updateDiscoveryCategory = (
   id: string,
-  body: Partial<Pick<DiscoveryCategory, 'name' | 'emoji' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
+  body: Partial<Pick<DiscoveryCategory, 'name' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
 ) => apiFetch(`/api/v1/admin/discovery/categories/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 
-/** Approve a vendor's request as a NEW category. `emoji`, `kind` and `vertical`
- *  are required by the route — kind and vertical against enums, so the page
- *  offers selects and never a text box. */
+/** Approve a vendor's request as a NEW category. `iconKey`, `kind` and `vertical`
+ *  are required by the route, each against a fixed list (the icon from
+ *  CATEGORY_ICON_OPTIONS, never an emoji), so the page offers selects and never a text box. */
 export const approveDiscoveryRequest = (
   id: string,
-  body: { name?: string; emoji: string; kind: string; vertical: string },
+  body: { name?: string; iconKey: string; kind: string; vertical: string },
 ) => apiFetch(`/api/v1/admin/discovery/requests/${id}/approve`, { method: 'POST', body: JSON.stringify(body) });
 
 /** Resolve a request onto an EXISTING category instead of minting a near-duplicate. */

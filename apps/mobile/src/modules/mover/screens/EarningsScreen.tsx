@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
 import React, { useEffect, useRef } from 'react';
-import { AccessibilityInfo, Alert, Animated, ScrollView, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, Alert, Animated, RefreshControl, ScrollView, StyleSheet, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, fontSize, motion, radius, space } from '@swift/ui';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, ErrorState, Header, LinkText, LoadingBlock, PillButton, Screen, StatTile as KitStatTile, T, TonePill } from '../../../kit';
 import { useMoverKind, useMoverStats, useMoverSubscription, useEarningsSummary, useEarnings, useCashSettlements, useConfirmCashSettlement } from '../../../hooks';
 import { money, moneyExact } from '../../../lib/money';
@@ -398,6 +399,8 @@ export function EarningsScreen({ navigation }: any) {
   const { kind } = mover;
   const summaryQ = useEarningsSummary<unknown>(kind);
   const historyQ = useEarnings<unknown>(kind);
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => Promise.all([summaryQ.refetch(), historyQ.refetch()]));
   const stats = useMoverStats(kind);
   const subQ = useMoverSubscription(kind);
   const ledgerQ = useCashSettlements(kind);
@@ -470,7 +473,11 @@ export function EarningsScreen({ navigation }: any) {
         // earned nothing" when the request simply failed.
         <ErrorState message="We couldn't load your earnings. Check your connection and try again." onRetry={() => summaryQ.refetch()} />
       ) : (
-        <ScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
+        >
           <EarningsHero
             total={earningsWindowTotal(summaryQ.data, 'thisWeek', 'week')}
             facts={weekFacts}
@@ -579,7 +586,7 @@ export function EarningsScreen({ navigation }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.surface.sunken, padding: space.md, marginTop: space.lg }}>
             <MaterialCommunityIcons name="calendar-check" size={fontSize.base} color={color.text.secondary} />
             <T variant="caption" weight="semibold" tone="muted" style={{ flex: 1 }}>
-              You keep every cent — Swift only charges the flat weekly fee. No commission, ever.
+              You keep every cent — Swift only charges the flat weekly fee. No commission on orders.
             </T>
           </View>
         </ScrollView>

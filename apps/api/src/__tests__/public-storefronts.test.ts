@@ -5,6 +5,7 @@ import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { publicRoutes } from '../modules/public/public.routes';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Public storefronts: the unauthenticated SEO surface. Only ACTIVE + verified
@@ -12,7 +13,7 @@ import { publicRoutes } from '../modules/public/public.routes';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const marker = `pubsf${nanoid(4).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`;
+const marker = `pubsf${wordFreeTag(8)}`;
 let liveSlug: string;
 let hiddenSlug: string;
 let liveVendorId: string;
@@ -22,7 +23,7 @@ let ownerId: string;
 let userId: string;
 
 async function makeVendor(overrides: Record<string, unknown>) {
-  const suffix = nanoid(6).toLowerCase();
+  const suffix = wordFreeTag(8).toLowerCase();
   const v = await app.prisma.vendor.create({
     data: {
       ownerId,
@@ -57,7 +58,7 @@ beforeAll(async () => {
   // A vendor needs an owner (User + VendorOwner)
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59269${Math.floor(Math.random() * 90000) + 10000}`,
+      phone: testPhone(),
       roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
       firstName: 'Pub', lastName: 'Test', isPhoneVerified: true,
     },

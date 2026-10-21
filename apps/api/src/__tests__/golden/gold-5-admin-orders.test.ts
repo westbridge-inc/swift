@@ -240,6 +240,8 @@ async function allRedisKeys(): Promise<Set<string>> {
 
 beforeAll(async () => {
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', PAY_HOST);
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -547,6 +549,15 @@ describe('GOLD-5 · ADMIN-03 — admin cancel and refund settlement', () => {
     expect((await approvalRow(approvalId)).status).toBe('APPROVED');
     row = await orderRow(o1.orderId);
     expect({ status: row.status, ref: row.refundRef, paid: row.refundPaidAmount }).toEqual({ status: 'CANCELLED', ref: null, paid: null });
+
+    // [U06] While that approved ask stands, nobody can ask again to settle this
+    // order (one ask per act): it is applied, or it expires...
+    const again = await admin({ ...settle(o1.orderId, ref('OTHER'), owed1), token: ops.token });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    expect(again.json().error.details).toEqual({ approvalId, approvalStatus: 'APPROVED', askedByYou: true });
+    // ...24 h later (the clock moved here rather than waited for): the next ask is new.
+    await sys(() => app.prisma.privilegedApproval.update({ where: { id: approvalId }, data: { expiresAt: new Date(Date.now() - 1_000) } }));
   });
 
   it('the exact amount closes the obligation ONCE; a duplicate is refused; one handover cannot settle two orders; the books reconcile', async () => {

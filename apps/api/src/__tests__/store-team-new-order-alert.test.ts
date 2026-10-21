@@ -503,8 +503,9 @@ describe('[#15] every publication to a store room goes through the team gate', (
       visit(ast);
     }
     expect(bypasses).toEqual([]);
-    // 12 + the admin store-refund close (#1607).
-    expect(publishers).toBe(13);
+    // 12 + the admin store-refund close (#1607) + the MMG acceptance expiry (owner 18 Oct: an accepted MMG
+    // order not marked "Paid by MMG" within 30 minutes cancels; the store's room hears it through the gate).
+    expect(publishers).toBe(14);
   });
 });
 

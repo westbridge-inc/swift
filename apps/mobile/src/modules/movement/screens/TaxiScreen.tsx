@@ -473,10 +473,9 @@ function TaxiBooking({ navigation }: any) {
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  // [Owner 16 Oct] Customers take no photos: the ID check is the only door.
   const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
   const needsL2 = door === 'identity';
-  const needsSelfie = door === 'selfie';
   // Joining the queue passes the same account gates as a request (the route
   // and the queue share one authority boundary), so its refusal must show,
   // with the same doors — never a silent tap.
@@ -708,7 +707,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (
@@ -751,14 +750,6 @@ function TaxiBooking({ navigation }: any) {
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
-          {needsSelfie ? (
-            <PillButton
-              label="Add your photo — your driver sees it"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('Selfie')}
-            />
-          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -788,11 +779,13 @@ function TaxiBooking({ navigation }: any) {
             // 5.5A — the flagship fix: real counts, a queue, no apology.
             <Card style={{ marginTop: space.lg }}>
               <T variant="title">
-                {(counts?.online ?? 0) === 0
-                  ? 'No drivers online right now'
-                  : (counts?.busy ?? 0) >= (counts?.online ?? 0)
-                    ? 'All drivers are busy'
-                    : 'No eligible driver available for this request'}
+                {!counts
+                  ? 'No eligible driver available for this request'
+                  : counts.online === 0
+                    ? 'No drivers online right now'
+                    : counts.busy >= counts.online
+                      ? 'All drivers are busy'
+                      : 'No eligible driver available for this request'}
               </T>
               {counts ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
@@ -828,14 +821,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'selfie' ? (
-                <PillButton
-                  label="Add your photo — your driver sees it"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('Selfie')}
-                />
               ) : null}
               {queueDoor === 'identity' ? (
                 <PillButton
@@ -1119,9 +1104,10 @@ function AssignedRideCard({
 
       <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginTop: space.lg, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
         <View style={{ flex: 1 }}>
-          <T variant="micro" tone="faint">Fare · cash</T>
+          <T variant="micro" tone="faint">Fare</T>
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Paid straight to the driver: cash or MMG, no in-app pay link. */}
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-            Pay the driver directly.
+            Pay the driver cash or MMG at drop-off.
           </T>
         </View>
         <Money amount={fare} size="l" />
@@ -1618,7 +1604,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               </T>
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
-                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash to the driver
+                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · pay the driver cash or MMG at drop-off
                 {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
               </T>
             </>

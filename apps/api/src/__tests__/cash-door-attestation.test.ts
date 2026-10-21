@@ -20,6 +20,7 @@ import { doorCashHoldAudience, resolveHeldDoorCash, stageDoorCashHoldPage } from
 import { renderReceiptHtml } from '../modules/order/receipt';
 import { AccountService } from '../modules/user/account.service';
 import { partnerObligations, verdictFor } from '../modules/user/partner-wind-down';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [L02 · row 34] CASH AT THE DOOR IS RECORDED AS THE REAL AMOUNT.
@@ -123,7 +124,9 @@ async function orderAtDoor(riderId: string, customerId: string) {
   expect(await new FloatService(app.prisma).commit(app.prisma, riderId, SUBTOTAL)).toBe(true);
   await app.prisma.orderStatusLog.create({ data: { orderId: order.id, status: 'PICKED_UP', changedBy: riderId, note: 'fixture pickup', createdAt: new Date(Date.now() - 30 * 60_000) } });
   await app.prisma.orderStatusLog.create({ data: { orderId: order.id, status: 'ARRIVED', changedBy: riderId, note: 'fixture arrival', createdAt: new Date(Date.now() - 2 * 60_000) } });
-  return app.prisma.order.update({ where: { id: order.id }, data: { status: 'ARRIVED' } });
+  // [row 264] Walked along declared edges (RIDER_ASSIGNED -> PICKED_UP -> ARRIVED), as production moves it.
+  await walkOrderStatus(app.prisma, order.id, 'ARRIVED');
+  return app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
 }
 
 /** What the rider's screen was shown: the server's own door authority. */
@@ -819,9 +822,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
     const holder = await makeRider();
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
-    } });
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() });
     // The goods and the store's fronted cash have come back. The customer's
     // separate partial cash is still with the rider, held for operations.
     await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
@@ -841,9 +842,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
     const holder = await makeRider();
     const customer = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
-    } });
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() });
     await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
     const obligations = await app.prisma.$transaction((tx) => partnerObligations(tx, customer.user.id));
     expect(verdictFor(obligations).blockers).not.toContain('PARTIAL_CASH_RETURN');
@@ -875,9 +874,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
               // Deterministic interleaving: goods return commits before the
               // active-work read, after any earlier cash census. The cash
               // still belongs to the customer and is still with this rider.
-              await tx.order.update({ where: { id: order.id }, data: {
-                status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
-              } });
+              await walkOrderStatus(tx, order.id, 'RETURNED', { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() });
             }
             return target.count(args);
           };
@@ -899,9 +896,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
     const customer = await makeCustomer();
     const unrelated = await makeCustomer();
     const order = await orderAtDoor(holder.rider.id, customer.user.id);
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(),
-    } });
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', { doorCashReturnAmount: 2000, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date() });
     await app.prisma.rider.update({ where: { id: holder.rider.id }, data: { committedFloat: 0 } });
     const census = (userId: string) => app.prisma.$transaction((tx) => partnerObligations(tx, userId));
     expect(verdictFor(await census(unrelated.user.id)).clear).toBe(true);
@@ -932,9 +927,7 @@ describe('[row 34] cash-return retries and operations scope', () => {
     const resolve = (reason = 'Operations confirmed the cash went back to the customer.') =>
       resolveHeldDoorCash(app.prisma, { orderId: order.id, adminUserId, reason, audit });
     await expect(resolve()).rejects.toMatchObject({ code: 'NO_HELD_CASH' });
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: 2000, doorCashReturnStatus: 'RETURNED', doorCashReturnRecordedAt: new Date(),
-    } });
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', { doorCashReturnAmount: 2000, doorCashReturnStatus: 'RETURNED', doorCashReturnRecordedAt: new Date() });
     await expect(resolve()).rejects.toMatchObject({ code: 'NO_HELD_CASH' });
     await app.prisma.order.update({ where: { id: order.id }, data: { doorCashReturnStatus: 'HELD' } });
     await expect(resolve('   ')).rejects.toMatchObject({ code: 'REASON_REQUIRED' });
@@ -1094,9 +1087,10 @@ describe('[C8 · owner 15 Oct] the rider\'s deletion block for held customer cas
   // The clock counts from when the hold was recorded (doorCashReturnRecordedAt).
   async function heldWith(riderId: string, customerId: string, amount: number, daysAgo: number) {
     const order = await orderAtDoor(riderId, customerId);
-    await app.prisma.order.update({ where: { id: order.id }, data: {
-      status: 'RETURNED', doorCashReturnAmount: amount, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(Date.now() - daysAgo * DAY),
-    } });
+    // Along declared edges only (#1740's transition guard refuses an ARRIVED -> RETURNED jump).
+    await walkOrderStatus(app.prisma, order.id, 'RETURNED', {
+      doorCashReturnAmount: amount, doorCashReturnStatus: 'HELD', doorCashReturnRecordedAt: new Date(Date.now() - daysAgo * DAY),
+    });
     return order;
   }
   const guyanaDate = (at: Date) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Guyana' }).format(at);

@@ -1,4 +1,5 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -13,6 +14,7 @@ import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { z } from 'zod';
+import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
 import { NotificationService } from '../notification/notification.service';
@@ -43,7 +45,7 @@ import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
-  fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
+  alreadyOpenMessage, fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
   type ApprovalSnapshotRow,
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
@@ -76,17 +78,19 @@ import {
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { readFareBreakdown } from '../rides/taxi-waiting';
+import { readAdminItinerary } from '../rides/taxi-stops-read';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
 import { recoveryFor, requeueRefusal } from '../../jobs/recovery-policy';
+import { isOutboxDeadLetterName, listOutboxDeadLetters, OUTBOX_RECOVERY, requeueOutboxDeadLetter } from '../../jobs/outbox-dead-letter';
 import { weeklyFeeAmount, billableWeeklyFee, waivedWeeklyFee } from '../billing/subscription-fee';
 import { openCreditRefunds, openSetAsideIds, PAID_REFUND_BODY, payoutAskStateFor, recordCreditRefundPaid, REFUND_AMOUNT, REFUND_SET_ASIDE_ID, refundReferenceOf, releaseCreditRefund, setAsideCreditRefund } from '../billing/credit-refund';
 import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
-import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
@@ -95,6 +99,7 @@ import { assertAmountAttested, isDuplicateOn, normaliseReference } from '../mone
 import { MMG_SUPPORT_PAGE_DEFAULT, MMG_SUPPORT_PAGE_MAX, MMG_SUPPORT_STATUSES, decodeSupportCursor, mmgCheckoutSupportDetail, searchMmgCheckouts } from '../billing/mmg-checkout-support';
 import { catalogueChecksFor, flaggedItemsInTenant, prohibitedStoreCategory, storeCheckOf, storesHeldInTenant, STORE_WORDS_SELECT, wordsFor } from '../compliance/prohibited-gate';
 import { judgedWordsHash, notAllowedMessage, PROHIBITED_CLASSES, PROHIBITED_CLASS_LABELS, storeWordsHash, type CatalogueCheck } from '../compliance/prohibited-items';
+import { REGISTRATION_KINDS } from '../verification/doc-registry';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -363,6 +368,10 @@ const approveDocSchema = z.object({
   // only as a blind-index identity key — and a police clearance's issue date.
   documentNumber: z.string().trim().min(1).max(40).optional(),
   issuedOn: z.coerce.date().optional(),
+  // [R15] the year printed on a licence or food certificate checked again every January
+  certificateYear: z.coerce.number().int().min(1900).max(9999).optional(),
+  // [R16] a business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation
+  registrationKind: z.enum(REGISTRATION_KINDS).optional(),
   // Insurance 5-point manual check (spec §3.4) — supplied for hire-insurance docs
   insurance: z.object({
     insurerName: z.string().min(1).max(120),
@@ -838,6 +847,13 @@ export async function adminRoutes(app: FastifyInstance) {
         },
       });
     }
+    if (outcome.outcome === 'already-open') {
+      // [U06] A second press, or a second admin, asking for an act that is
+      // already waiting: nothing was written, and the earlier ask is named.
+      adminApprovalCounter.labels('already_open', authority.cls).inc();
+      throw new AppError(409, 'APPROVAL_ALREADY_OPEN', alreadyOpenMessage(outcome.status, outcome.askedByYou),
+        { approvalId: outcome.approvalId, approvalStatus: outcome.status, askedByYou: outcome.askedByYou });
+    }
     if (outcome.outcome === 'refused') {
       adminApprovalCounter.labels(outcome.code, authority.cls).inc();
       throw new ForbiddenError(approvalRefusalMessage(outcome.code));
@@ -994,7 +1010,21 @@ export async function adminRoutes(app: FastifyInstance) {
     changes?: Record<string, unknown>,
     request?: any,
   ) {
-    await app.prisma.auditLog.create({
+    await auditIn(app.prisma, userId, action, entity, entityId, changes, request);
+  }
+
+  /** [S2-29 · KYC-DECISION-ATOMIC] The same row as `audit`, written through the given client — a
+   *  decision's own transaction, so the row commits with its action or not at all. */
+  async function auditIn(
+    db: Pick<Prisma.TransactionClient, 'auditLog'>,
+    userId: string,
+    action: string,
+    entity: string,
+    entityId: string,
+    changes?: Record<string, unknown>,
+    request?: any,
+  ) {
+    await db.auditLog.create({
       data: {
         userId,
         action,
@@ -1189,6 +1219,9 @@ export async function adminRoutes(app: FastifyInstance) {
     city: true,
   } as const;
 
+  /** [item 20] The one system capability that reads another person's saved addresses for an admin. */
+  const ADMIN_USER_ADDRESSES_CAPABILITY = 'admin:user-detail-addresses';
+
   app.get('/users/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
@@ -1199,7 +1232,6 @@ export async function adminRoutes(app: FastifyInstance) {
         rider: { select: ADMIN_USER_MOVER_SELECT },
         driver: { select: ADMIN_USER_MOVER_SELECT },
         vendorOwner: { select: { vendors: { select: ADMIN_USER_VENDOR_SELECT } } },
-        addresses: true,
         // The trust story + the paper trail the operator acts on.
         strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
         orders: {
@@ -1212,10 +1244,22 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!user) throw new NotFoundError('User', id);
 
+    // [item 20 · owner wall] A person's saved addresses are walled to that
+    // person. Support keeps them here (delivery disputes, COORD 18 Oct) through
+    // ONE named system capability, and every such read leaves its own audit
+    // row first: who read whose addresses, and why. No row, no read.
+    const actorUserId = (request.user as { userId?: string } | undefined)?.userId;
+    if (!actorUserId) throw new AppError(401, 'UNAUTHORIZED', 'Sign in again');
+    await app.prisma.sensitiveReadLog.create({ data: {
+      actorUserId, action: 'READ addresses (GET /users/:id)', capability: ADMIN_USER_ADDRESSES_CAPABILITY,
+      subjectId: id, purpose: 'saved addresses on the admin user detail (support: delivery disputes)',
+    } });
+    const addresses = await runAsSystem(ADMIN_USER_ADDRESSES_CAPABILITY, () => app.prisma.address.findMany({ where: { userId: id } }));
+
     // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
-    return { success: true, data: sanitizeUser(user) };
+    return { success: true, data: sanitizeUser({ ...user, addresses }) };
   });
 
   /** GET /users/:id/risk — one deterministic number from existing signals
@@ -2614,8 +2658,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // itemised and read-only (route fare + waiting = total). Any other order
     // gains no key.
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops: each stop in order with its
+    // progress and the arrival's evidence note, and the one the ride is
+    // heading for. Any other order gains no key.
+    const itinerary = order.orderType === 'TAXI' ? await readAdminItinerary(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}), ...(itinerary ?? {}) } };
   });
 
   /**
@@ -4624,6 +4672,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (posterBuffer && !looksLikeImage(posterBuffer)) throw new AppError(400, 'BAD_POSTER', 'Poster must be an image.');
 
     const tenantId = await adsTenant();
+    await scanUpload(fileBuffer, { surface: 'admin', log: request.log });
+    if (posterBuffer) await scanUpload(posterBuffer, { surface: 'admin', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer: fileBuffer, filename: fileName || 'house-ad', mimeType: fileMime, folder: 'ads/house' });
     let posterUrl: string | null = null;
     if (posterBuffer) {
@@ -5644,6 +5694,22 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: row };
   });
 
+  // [Owner legal plan 15 Oct · R12] One weekly-fee receipt as the partner sees
+  // it (billing/fee-receipt.ts), by its number: support reads it out, the
+  // accountant checks it. Read only.
+  app.get('/billing/receipts/:receiptNumber', { preHandler: [adminGuard] }, async (request) => {
+    // Tenant-local like every billing read: only a receipt of this tenant's
+    // own subscriptions; another tenant's number reads as not found.
+    requireDefaultTenantBilling();
+    const tenantId = getTenantId();
+    if (!tenantId) throw new ForbiddenError('Tenant context required');
+    const { receiptNumber } = z.object({ receiptNumber: z.string().regex(/^[A-Z0-9-]{1,64}$/) }).parse(request.params);
+    const { feeReceiptDocument } = await import('../billing/fee-receipt');
+    const doc = await feeReceiptDocument(app.prisma, receiptNumber, { tenantId, subscriptionWhere: subscriptionTenantScope(tenantId) });
+    if (!doc) throw new NotFoundError('Receipt');
+    return { success: true, data: doc };
+  });
+
   /** Daily cash journal CSV [20.4] — the accountant's export. */
   app.get('/billing/cash-journal', { preHandler: [adminGuard] }, async (request, reply) => {
     const q = z.object({
@@ -5983,15 +6049,17 @@ export async function adminRoutes(app: FastifyInstance) {
       required: true,
       ...(body.documentNumber !== undefined ? { documentNumber: body.documentNumber } : {}),
       ...(body.issuedOn !== undefined ? { issuedOn: body.issuedOn } : {}),
+      ...(body.certificateYear !== undefined ? { certificateYear: body.certificateYear } : {}),
+      ...(body.registrationKind !== undefined ? { registrationKind: body.registrationKind } : {}),
+    }, {
+      // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction: the
+      // action row and the canonical admin row. A decision cannot commit without them.
+      within: async (tx, decided) => {
+        await auditIn(tx, request.user.userId, 'APPROVE_VERIFICATION_DOC', 'VerificationDocument', id,
+          { docType: decided.docType, ...(body.insurance ? { insurance: body.insurance } : {}) }, request);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      },
     });
-    await audit(
-      request.user.userId,
-      'APPROVE_VERIFICATION_DOC',
-      'VerificationDocument',
-      id,
-      { docType: doc.docType, ...(body.insurance ? { insurance: body.insurance } : {}) },
-      request,
-    );
 
     return { success: true, data: doc };
   });
@@ -6000,10 +6068,15 @@ export async function adminRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const body = rejectDocSchema.parse(request.body);
 
-    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode);
-    // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
-    const action = doc.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
-    await audit(request.user.userId, action, 'VerificationDocument', id, { docType: doc.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+    const doc = await verification.rejectDocument(id, request.user.userId, body.reason, body.reasonCode, {
+      // [S2-29 · KYC-DECISION-ATOMIC] The trail commits with the decision, in its transaction.
+      within: async (tx, decided) => {
+        // [DOC-1 §24.2] A fraud-class verdict from the first reviewer escalates instead of rejecting — the trail says which happened.
+        const action = decided.status === 'PENDING' ? 'ESCALATE_VERIFICATION_DOC' : 'REJECT_VERIFICATION_DOC';
+        await auditIn(tx, request.user.userId, action, 'VerificationDocument', id, { docType: decided.docType, reason: body.reason, reasonCode: body.reasonCode ?? null }, request);
+        await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+      },
+    });
 
     return { success: true, data: doc };
   });
@@ -6884,7 +6957,8 @@ export async function adminRoutes(app: FastifyInstance) {
   // removed (SWIFT-023) — dropped here; 'search' was missing, so search's failed
   // jobs were invisible in the DLQ — added.
   // [row 266] 'offer' = the offer fast lane (offer timeouts only).
-  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'search'] as const;
+  // [row 331] 'safety' = the safety lane (the SOS backstop + Trip Guardian ticks).
+  const DLQ_NAMES = ['order', 'subscription', 'settlement', 'notification', 'verification', 'dispatch', 'offer', 'safety', 'search'] as const;
 
   /** GET /alerts/health — ack rate + median time-to-ack per alert kind
    *  (alerts spec §A4): how silently-failing pushes get caught before churn.
@@ -6946,6 +7020,9 @@ export async function adminRoutes(app: FastifyInstance) {
         });
       }
     }
+    // [row 267] The durable outboxes' dead letters sit beside the dead jobs:
+    // a command whose retry budget ran out, waiting for an operator.
+    for (const row of await listOutboxDeadLetters(app.prisma)) out.push({ ...row, recovery: OUTBOX_RECOVERY });
     out.sort((a, b) => Number(b['finishedOn'] ?? 0) - Number(a['finishedOn'] ?? 0));
     return { success: true, data: out.slice(0, 200) };
   });
@@ -7054,6 +7131,16 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/dlq/:queue/:id/requeue', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string; acknowledgedReconciled?: string };
+    // [row 267] An outbox dead letter is requeued in the database: the same row,
+    // a fresh retry budget, compare-and-set on the stamp the operator saw.
+    if (isOutboxDeadLetterName(queue)) {
+      const finishedOn = expected.expectedFinishedOn === undefined ? undefined : Number(expected.expectedFinishedOn);
+      if (finishedOn !== undefined && !Number.isSafeInteger(finishedOn)) throw new AppError(400, 'VALIDATION_ERROR', 'expectedFinishedOn must be a timestamp in milliseconds');
+      await auditedDlqAction(request, 'REQUEUE_DLQ_JOB', queue, id, { outbox: queue }, async () => {
+        if (!(await requeueOutboxDeadLetter(app.prisma, queue, id, finishedOn))) throw NO_LONGER_FAILED('it was already requeued or completed');
+      });
+      return { success: true, data: { queue, id, retried: true } };
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     // [A-08] Retry-safety is a property each job class has to EARN. The page
@@ -7087,6 +7174,11 @@ export async function adminRoutes(app: FastifyInstance) {
   app.delete('/dlq/:queue/:id', { preHandler: [platformControlGuard] }, async (request) => {
     const { queue, id } = request.params as { queue: string; id: string };
     const expected = (request.query ?? {}) as { expectedName?: string; expectedFinishedOn?: string };
+    // [row 267] An outbox row is an obligation someone is owed (a dispatch, a
+    // revocation, a safety intake): it is requeued or fixed, never discarded here.
+    if (isOutboxDeadLetterName(queue)) {
+      throw new AppError(409, 'OUTBOX_DEAD_LETTER_NOT_DISCARDABLE', 'An outbox command cannot be discarded from here. Requeue it, or fix what it is waiting on.');
+    }
     const q = dlqQueue(queue);
     const job = await requireDeadLetter(queue, id, { name: expected.expectedName, finishedOn: expected.expectedFinishedOn });
     await auditedDlqAction(
@@ -7131,7 +7223,8 @@ export async function adminRoutes(app: FastifyInstance) {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
       emoji: z.string().min(1).max(8).optional(),
-      iconKey: z.string().max(60).nullable().optional(),
+      // Owner 17 Oct: categories carry one of the app's icons, never emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list').nullable().optional(),
       aliases: z.array(z.string().trim().min(1).max(60)).max(60).optional(),
       sortWeight: z.number().int().min(0).max(10_000).optional(),
       status: z.enum(['ACTIVE', 'HIDDEN']).optional(),
@@ -7182,7 +7275,8 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>('/discovery/requests/:id/approve', { preHandler: [adminGuard] }, async (request) => {
     const body = z.object({
       name: z.string().trim().min(2).max(60).optional(),
-      emoji: z.string().min(1).max(8),
+      // Owner 17 Oct: a new category gets one of the app's icons, never an emoji.
+      iconKey: z.string().refine(isCategoryIconKey, 'Pick an icon from the list'),
       kind: z.enum(['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL']),
       vertical: z.enum(['FOOD', 'GROCERY', 'RETAIL']),
     }).parse(request.body);

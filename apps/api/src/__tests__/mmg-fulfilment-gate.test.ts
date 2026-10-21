@@ -18,6 +18,7 @@ import { OrderService, reconcileMissingEarnings } from '../modules/order/order.s
 import { registerErrorHandler } from '../middleware/error-handler';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
+import { retireLiveOrders, walkOrderStatus } from './helpers/order-status-walk';
 import { newRidePin } from '../modules/rides/ride-pin';
 
 // [W-25] A store's attestation now carries the provider reference from its own
@@ -113,8 +114,8 @@ async function makeMmgOrder(status: OrderStatus, opts: { paymentStatus?: Payment
 }
 
 /** [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
- *  cancel only when it is very late — 30 minutes past its promise. */
-const PAST_PROMISE = () => new Date(Date.now() - 31 * 60_000);
+ *  cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise. */
+const PAST_PROMISE = () => new Date(Date.now() - 61 * 60_000);
 
 function inject(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payload?: unknown, vendor?: string) {
   return app.inject({
@@ -171,13 +172,18 @@ afterAll(async () => {
 });
 
 describe('the gate — no fulfilment while MMG payment is PENDING', () => {
-  it('vendor cannot ACCEPT an unpaid MMG order (409 MMG_PAYMENT_PENDING)', async () => {
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] The store ACCEPTS first — that is what shows the
+  // customer the store's MMG number — and NOTHING after acceptance moves until the store says the money arrived.
+  it('vendor CAN accept an unpaid MMG order, and the very next step (preparing) is refused (409 MMG_PAYMENT_PENDING)', async () => {
     const order = await makeMmgOrder('PENDING', { withRider: false });
     const res = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, vendorOwner.token, {}, vendorId);
-    expect(res.statusCode).toBe(409);
-    expect(res.json().error?.code ?? res.json().code).toBe('MMG_PAYMENT_PENDING');
+    expect(res.statusCode, res.body).toBe(200);
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-    expect(fresh.status).toBe('PENDING');
+    expect([fresh.status, fresh.paymentStatus]).toEqual(['ACCEPTED', 'PENDING']);
+    const prep = await inject('PUT', `/api/v1/vendor/orders/${order.id}/preparing`, vendorOwner.token, {}, vendorId);
+    expect(prep.statusCode).toBe(409);
+    expect(prep.json().error?.code ?? prep.json().code).toBe('MMG_PAYMENT_PENDING');
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
   });
 
   it('the store CAN confirm payment while PENDING, and acceptance then works', async () => {
@@ -192,9 +198,9 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
   });
 
-  it('every canonical fulfilment transition refuses while unpaid', async () => {
+  it('every canonical fulfilment transition AFTER acceptance refuses while unpaid', async () => {
+    // [PAYMENT-SIMPLIFY · Q1] PENDING -> ACCEPTED is the one un-gated step (proved above and below).
     const cases: Array<{ from: OrderStatus; to: OrderStatus }> = [
-      { from: 'PENDING', to: 'ACCEPTED' },
       { from: 'ACCEPTED', to: 'PREPARING' },
       { from: 'PREPARING', to: 'READY_FOR_PICKUP' },
       { from: 'ACCEPTED', to: 'RIDER_ASSIGNED' },
@@ -212,6 +218,13 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
       const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
       expect(fresh.status).toBe(from);
     }
+    // ...and the seam itself lets ONLY acceptance through, and only while no dispute is open.
+    const toAccept = await makeMmgOrder('PENDING');
+    await expect(orders.updateStatus(toAccept.id, 'ACCEPTED', 'test-system')).resolves.toBeTruthy();
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: toAccept.id } })).status).toBe('ACCEPTED');
+    const disputed = await makeMmgOrder('PENDING');
+    await app.prisma.order.update({ where: { id: disputed.id }, data: { mmgClaimMismatchAt: new Date() } });
+    await expect(orders.updateStatus(disputed.id, 'ACCEPTED', 'test-system')).rejects.toMatchObject({ code: 'MMG_CLAIM_MISMATCH' });
   });
 
   it('rider /delivered refuses an unpaid MMG order; after capture it completes and the settlement owes fee + tip', async () => {
@@ -489,15 +502,9 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     // [E02] A PAID MMG order can no longer be written CANCELLED without its
     // refund obligation (the migration's deferred guard), so the paid legs
     // earlier tests left with this rider close as FAILED; the rest as before.
-    const live = { riderId, status: { notIn: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'] as OrderStatus[] } };
-    await app.prisma.order.updateMany({
-      where: { ...live, paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CLAIMED', 'CAPTURED'] } },
-      data: { status: 'FAILED', riderId: null },
-    });
-    await app.prisma.order.updateMany({
-      where: live,
-      data: { status: 'CANCELLED', riderId: null },
-    });
+    // [row 264] Along declared edges: an order in the rider's custody cannot be cancelled, so it ends the way it can.
+    await retireLiveOrders(app.prisma, { riderId, paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CLAIMED', 'CAPTURED'] } }, { riderId: null }, ['FAILED', 'RETURNED', 'DELIVERED', 'COMPLETED']);
+    await retireLiveOrders(app.prisma, { riderId }, { riderId: null });
     const session = await app.prisma.session.findFirst({ where: { userId: rider.userId } });
     await app.prisma.rider.update({
       where: { id: riderId },
@@ -522,7 +529,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 
   it('the persistence seam takes no price at all: a stray fee from any caller never reprices (defense in depth)', async () => {
@@ -536,7 +543,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     expect(Number(fresh.deliveryFee)).toBe(300);
     expect(Number(fresh.totalAmount)).toBe(1500);
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 
   it('a market-fee board grab (no undercut) still assigns a captured MMG order', async () => {
@@ -551,7 +558,7 @@ describe('captured money cannot be repriced [REPORT-005 F-005-01]', () => {
     // PAID MMG, which the database no longer lets anyone write CANCELLED without
     // a refund obligation, so the fixture closes it as FAILED instead.
     await app.prisma.rider.update({ where: { id: riderId }, data: { isAvailable: true, currentOrderId: null } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', riderId: null } });
+    await walkOrderStatus(app.prisma, order.id, 'FAILED', { riderId: null });
   });
 });
 

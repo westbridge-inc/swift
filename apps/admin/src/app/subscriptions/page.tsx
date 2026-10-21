@@ -8,6 +8,7 @@ import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
 import { askReason, reasonTooShort } from '@/lib/ask-reason';
 import { label } from '@/lib/labels';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -22,9 +23,10 @@ function holder(s: any): { name: string; kind: string; href?: string } {
 }
 
 function BillingEvents({ id }: { id: string }) {
-  const { data, isLoading } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['billing-events', id], queryFn: () => fetchBillingEvents(id) });
   const events: any[] = data?.data ?? [];
   if (isLoading) return <p className="text-xs text-[var(--muted)] p-3">Loading billing trail…</p>;
+  if (isError) return <QueryFailed error={error} what="the billing trail" onRetry={() => void refetch()} retrying={isFetching} className="m-3" />;
   if (events.length === 0) return <p className="text-xs text-[var(--muted)] p-3">No billing events.</p>;
   return (
     <div className="p-3 space-y-1.5">
@@ -71,7 +73,7 @@ export default function SubscriptionsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('ALL');
   const [openTrail, setOpenTrail] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['subscriptions', filter],
     queryFn: () => fetchSubscriptions(filter === 'ALL' ? 'limit=50' : `limit=50&status=${filter}`),
   });
@@ -199,6 +201,10 @@ export default function SubscriptionsPage() {
           <tbody>
             {isLoading ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">Loading…</td></tr>
+            ) : isError ? (
+              <tr><td colSpan={5} className="p-4">
+                <QueryFailed error={error} what="the subscriptions" onRetry={() => void refetch()} retrying={isFetching} />
+              </td></tr>
             ) : rows.length === 0 ? (
               <tr><td colSpan={5} className="p-8 text-center text-[var(--muted)]">No subscriptions match.</td></tr>
             ) : (

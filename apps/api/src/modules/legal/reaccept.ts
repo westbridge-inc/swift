@@ -23,6 +23,29 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: who processes your data and where our servers are, how a breach is handled, and that we answer a request within one month.',
     ],
   },
+  {
+    // [Owner rulings: identity checks by a person only, face matching off; customers take no photos (16 Oct)]
+    version: '2026-10-17',
+    summary: [
+      'Identity checks are done by people on Swift’s verification team: no outside identity-verification provider and no automated face-matching receives your documents or selfie.',
+      'Customers never need a photo, taxi rides included — a ride needs only your ID on file — and a mover or business is never shown a photo of a customer.',
+      'Privacy: if a business takes MMG, the MMG payment details it gives Swift are shown to its customer on the order, so the customer pays the business directly.',
+      'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
+    ],
+  },
+];
+
+/**
+ * Versions deliberately classed NOT material: no fresh tick, nobody is asked again. Each says why. Listing a version
+ * here changes nothing at run time (a version absent from MATERIAL_CHANGES already needs no tick); it records the
+ * decision, and `legal-reaccept.test.ts` requires every served LEGAL_VERSION to be classed exactly once.
+ */
+export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string }> = [
+  {
+    // [COORD 18 Oct ruling: non-material; pre-launch] Privacy s.6 states what already happens to a customer's own ID.
+    version: '2026-10-18',
+    why: 'Privacy section 6 now says a customer\u2019s own ID is kept while the account is open and deleted with the account, which is what already happens; it takes nothing from anyone.',
+  },
 ];
 
 /** The newest material version that is already being served, or null. */
@@ -56,7 +79,11 @@ export function acceptanceStatus(user: { tosVersion: string | null; roles: reado
   const material = materialVersion(current);
   const accepted = user.tosVersion;
   const needsAcceptance = accepted === null || (material !== null && accepted < material);
-  const summary = accepted !== null && material !== null ? (MATERIAL_CHANGES.find((c) => c.version === material)?.summary ?? []) : [];
+  // Every material change since the version this person accepted, oldest first — someone who skipped
+  // 2026-10-16 and is asked at 2026-10-17 sees both summaries, never only the newest.
+  const summary = accepted !== null
+    ? MATERIAL_CHANGES.filter((c) => c.version > accepted && c.version <= current).flatMap((c) => c.summary)
+    : [];
   return {
     currentVersion: current,
     acceptedVersion: accepted,

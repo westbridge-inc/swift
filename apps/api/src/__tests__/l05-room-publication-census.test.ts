@@ -30,7 +30,7 @@ function namesSensitiveRoom(arg: ts.Expression, ast: ts.SourceFile): boolean {
 }
 
 describe('sensitive room publication census', () => {
-  it('all 45 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
+  it('all 48 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
     const bypasses: string[] = []; let orderPublishers = 0;
     for (const file of sources(join(__dirname, '..'))) {
       const text = readFileSync(file, 'utf8');
@@ -68,7 +68,10 @@ describe('sensitive room publication census', () => {
     }
     expect(bypasses).toEqual([]);
     // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed)
-    // + the admin store-refund close (#1607).
-    expect(orderPublishers).toBe(45);
+    // + the admin store-refund close (#1607)
+    // + the swap question withdrawn at its deadline on MMG (#1830, through the gate)
+    // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance).
+    // + the taxi stop change (multi-stop part 4: ride:stop_changed, through the gate).
+    expect(orderPublishers).toBe(48);
   });
 });

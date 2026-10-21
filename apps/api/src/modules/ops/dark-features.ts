@@ -32,7 +32,7 @@
  * turns it on, and states what a real person sees while it is off.
  */
 
-export type DarkFeatureImpact = 'growth' | 'product' | 'ops';
+export type DarkFeatureImpact = 'growth' | 'product' | 'ops' | 'safety' | 'money';
 
 export interface DarkFeature {
   key: string;
@@ -60,6 +60,13 @@ export interface DarkFeature {
    * for a flag like LIFECYCLE_V2 where '0' is a real, deliberate OFF.
    */
   enabledWhen?: string;
+  /**
+   * [row 331 · CONFIG-GUARDS] A KILL SWITCH: the capability is on by default and
+   * OFF while the env var equals this exact value (every *_KILL reads '1'). A
+   * rollback switch left on after the incident it was flipped for starts
+   * cleanly and says nothing, so it belongs here like any other silent OFF.
+   */
+  offWhen?: string;
 }
 
 export const DARK_FEATURES: DarkFeature[] = [
@@ -116,6 +123,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'product',
   },
   {
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Deliberately OFF: a store's MMG NUMBER replaced its pay
+    // link. Listed so the switch is never a silent mystery.
+    key: 'store_mmg_pay_link',
+    setting: 'STORE_MMG_PAY_LINK',
+    source: 'env',
+    enabledWhen: '1',
+    title: "The store's MMG pay link (replaced by the store's MMG number)",
+    whileOff:
+      "A customer who chooses MMG pays the store's MMG NUMBER directly, shown on the order once the store accepts; no surface offers or opens a store pay link, a store cannot set a new one, and phones on builds 9-11 (which know only the link) see cash only at checkout. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
+    impact: 'money',
+  },
+  {
     key: 'mover_push_required',
     setting: 'MOVER_PUSH_REQUIRED',
     source: 'env',
@@ -124,6 +143,161 @@ export const DARK_FEATURES: DarkFeature[] = [
     whileOff:
       'A rider or driver whose phone has no push registration (notifications never granted, a new or reinstalled phone, an account ops created) still goes online, and learns of an offer or a cancellation only while the app is open. This is the deliberate launch posture: build 9 cannot ask for notifications or open Settings, so requiring push is an owner decision once a build that can is live in both stores.',
     impact: 'ops',
+  },
+  {
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Deliberately OFF: the owner removed the
+    // driver's in-app MMG pay link. Listed so the switch is never a silent mystery.
+    key: 'driver_mmg_pay_link',
+    setting: 'DRIVER_MMG_PAY_LINK',
+    source: 'env',
+    enabledWhen: '1',
+    title: "The taxi driver's MMG pay link",
+    whileOff:
+      "A passenger pays the driver directly at drop-off, in cash or by MMG, with no in-app pay link: the trip-end screen shows no 'Pay with MMG' button, the driver's Account screen shows no MMG pay link card, and a new link is refused. Stored links stay in the database unused. This is the owner's launch decision (17 Oct 2026), not a fault.",
+    impact: 'money',
+  },
+  {
+    key: 'web_taxi_booking',
+    setting: 'WEB_TAXI_BOOKING',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Taxi booking on the website',
+    whileOff:
+      "The website's Taxi page shows real fare estimates and says 'Book a taxi in the Swift app'; a ride request from a browser session is refused (TAXI_MOBILE_APP_REQUIRED) and the ride page points to the app for the safety PIN and SOS. Phone booking is unchanged. Kept OFF until web booking passes the app's safety bar and a staging run, then the owner decides (16 Oct 2026).",
+    impact: 'safety',
+  },
+  // ── [row 331 · CONFIG-GUARDS] the kill switches. Each is unset (or 0) in
+  // normal running; set to 1 it switches its capability off. The census in
+  // dark-features.test.ts fails on any *_KILL the API reads that is not here.
+  {
+    key: 'sos_escalation_worker',
+    setting: 'SOS_ESCALATION_WORKER_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'SOS escalation retries',
+    whileOff:
+      'A new SOS still texts its emergency contacts and pages ops once, inline, as it is raised. Anything that first try missed (a contact text, the ops page, the war-room emit, the evidence bundle) is never retried or backfilled by the 10-second tick; only the failed-delivery pager and the watchdog keep paging ops about it.',
+    impact: 'safety',
+  },
+  {
+    key: 'ops_alert_escalation',
+    setting: 'OPS_ALERT_ESCALATION_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Ops alert escalation',
+    whileOff:
+      'An ops alert nobody acknowledges by its deadline is not pushed again, the on-call phones are not texted and the platform is not paged. It stays unacknowledged in the alert list until someone happens to open it.',
+    impact: 'safety',
+  },
+  {
+    key: 'guardian_checkin_delivery',
+    setting: 'GUARDIAN_CHECKIN_DELIVERY_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Trip Guardian check-in retries',
+    whileOff:
+      'A Trip Guardian check-in that did not reach the rider on its first, inline try is never retried. Its deadline holds and ops are paged instead, so an unanswered check-in on a lost connection waits for a person.',
+    impact: 'safety',
+  },
+  {
+    key: 'guardian_driver_deescalation',
+    setting: 'GUARDIAN_DRIVER_DEESCALATION_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Driver confirmation of an unanswered hard check-in',
+    whileOff:
+      'When a passenger does not answer a hard check-in, the driver saying all is well no longer stands it down: the automatic SOS goes ahead every time.',
+    impact: 'safety',
+  },
+  {
+    key: 'not_my_driver_authority',
+    setting: 'NOT_MY_DRIVER_AUTHORITY_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Not-my-driver automatic response',
+    whileOff:
+      'A passenger who reports that the car is not their driver gets a case and an ops page, but the ride is not released, the driver is not locked and no other car is sent until a person handles it by hand.',
+    impact: 'safety',
+  },
+  {
+    key: 'trip_share_public_lookup',
+    setting: 'TRIP_SHARE_PUBLIC_LOOKUP_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Shared trip links',
+    whileOff:
+      'Every trip link a rider shares with family or friends opens to nothing, as if it had expired, even while the ride is under way.',
+    impact: 'safety',
+  },
+  {
+    key: 'card_charges',
+    setting: 'CARD_RAIL_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'New card charges',
+    whileOff:
+      'No new card charge is made, so a customer cannot pay by card and pays by MMG or cash; charges the processor already made are still reconciled. This is the launch posture production requires (owner ruling, 13 Oct) until an attorney signs off, so in production it is listed on purpose.',
+    impact: 'money',
+  },
+  {
+    key: 'fx_rate_activation',
+    setting: 'FX_RATE_ACTIVATION_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'New exchange rates',
+    whileOff:
+      'An admin who sets a new exchange rate is refused (503), and the rate already in force keeps pricing every bill however old it gets.',
+    impact: 'money',
+  },
+  {
+    key: 'settlement_publication',
+    setting: 'SETTLEMENT_PUBLISH_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Settlement file publication',
+    whileOff:
+      'An imported settlement file is staged and checked, but none of its rows moves money until the hold is released.',
+    impact: 'money',
+  },
+  {
+    key: 'fare_zone_table',
+    setting: 'FARE_ZONE_TABLE_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'The zone-to-zone fare table',
+    whileOff:
+      'Every taxi quote ignores the zone-to-zone fare table and prices by the country distance formula, so a fixed zone fare an operator set never reaches a rider.',
+    impact: 'money',
+  },
+  {
+    key: 'ad_checkout',
+    setting: 'AD_CHECKOUT_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Ad checkout',
+    whileOff:
+      'An advertiser who tries to pay for a campaign is told checkout is unavailable (503). Ads are off at launch, so this matters once ads are switched on.',
+    impact: 'money',
+  },
+  {
+    key: 'ad_refund_execution',
+    setting: 'AD_REFUND_EXECUTION_KILL',
+    source: 'env',
+    offWhen: '1',
+    title: 'Ad refunds',
+    whileOff:
+      'An advertiser owed a refund gets nothing back: the refund is recorded as owed, but bookings, inventory, the credit balance and the invoice stay as they were until it is released.',
+    impact: 'money',
+  },
+  {
+    key: 'upload_malware_scan',
+    setting: 'MALWARE_SCAN',
+    source: 'env',
+    enabledWhen: 'clamd',
+    title: 'Malware scan of uploaded photos and documents (row 312)',
+    whileOff:
+      'Uploaded photos and documents are stored after the type, size and decode checks only: no virus scanner sees them, and a person notices nothing. Turn on (with CLAMD_HOST, and CLAMD_PORT if not 3310) once the ClamAV scanner runs on this host or the private network.',
+    impact: 'safety',
   },
 ];
 
@@ -142,9 +316,11 @@ export function darkFeatureStatus(
     on: f.defaultedInCode
       ? true
       : f.source === 'env'
-        ? f.enabledWhen !== undefined
-          ? env[f.setting] === f.enabledWhen
-          : Boolean(env[f.setting]?.trim())
+        ? f.offWhen !== undefined
+          ? env[f.setting] !== f.offWhen
+          : f.enabledWhen !== undefined
+            ? env[f.setting] === f.enabledWhen
+            : Boolean(env[f.setting]?.trim())
         : configOn[f.setting] === true,
   }));
 }

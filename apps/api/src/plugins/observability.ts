@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import fp from 'fastify-plugin';
 import client from 'prom-client';
 import * as Sentry from '@sentry/node';
 import { AppError } from '../utils/errors';
@@ -6,7 +7,9 @@ import { runtimeMode } from '../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // Observability — both halves are env-gated and cost nothing when unset:
-//   SENTRY_DSN     → error tracking (5xx + worker failures)
+//   SENTRY_DSN     → error tracking (5xx + worker failures). An HTTP 5xx is
+//                    captured ONCE, by the app's error handler, on the status
+//                    it actually sent (middleware/error-handler.ts) [OBS-1].
 //   METRICS_TOKEN  → GET /metrics (Prometheus) behind a bearer token; without
 //                    the env the endpoint 404s, so the public API never
 //                    exposes internals by default.
@@ -24,9 +27,34 @@ let sentryReady = false;
 // event passes through this scrubber; capture sites additionally pass route
 // TEMPLATES instead of raw URLs.
 const TOKENISH_PARAM = /\b(token|secret|key|authorization|otp|pin|code|sig|signature)=[^&\s]+/gi;
-const TOKENISH_PATH = /\/(track|public\/trip|render)\/[A-Za-z0-9_.-]+/g;
+// [M013] The website's own share link is /trip/<token> (no /public prefix).
+const TOKENISH_PATH = /\/(track|(?:public\/)?trip|render)\/[A-Za-z0-9_.-]+/g;
+// [M013] Fields that ARE credentials, whatever their value looks like: a
+// token, an OTP or PIN, a password, a sign-in link, raw headers or cookies,
+// a provider key. Matched on the key with '-' and '_' removed, any case.
+const CREDENTIAL_KEY = /^(?:.*token.*|.*secret.*|.*password.*|passwordhash|otp|otpcode|pin|ridepin|pickupcode|deliverypin|signinurl|magiclink|authorization|cookies?|setcookie|headers|apikey|mkey|msecret|cardnumber|cvc|cvv|.*privatekey.*|.*signingkey.*|.*kek|pem)$/;
+// [#1795 S4-2] A PEM private-key block quoted in any text (a key-loading error) is withheld whole; a block cut short
+// is withheld to the end of the text.
+const PEM_PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g;
+// [M013] Free text: an error, delivery or log message can quote a bare code
+// with no URL or key around it ("your code is 123456"), which no pattern can
+// find. The error report keeps its type, stack and context, never the text,
+// the same rule the structured logs follow (logger-config err serializer).
+const FREE_TEXT_KEY = /^(?:message|formatted|body|text|html)$/;
+// A `code` field is kept only when it is an error classification
+// (SMS_SEND_FAILED, P2002, FST_ERR_…, ECONNRESET); anything else, such as a
+// six-digit sign-in code, is withheld.
+const CLASSIFICATION_CODE = /^(?:[A-Z][A-Z0-9_]{1,63}|P\d{4})$/;
+const SCRUBBED = '[scrubbed]';
+function scrubbedByKey(key: string, value: unknown): boolean {
+  const k = key.replace(/[-_]/g, '').toLowerCase();
+  if (CREDENTIAL_KEY.test(k)) return true;
+  if (FREE_TEXT_KEY.test(k)) return typeof value === 'string';
+  if (k === 'code') return !(typeof value === 'string' && CLASSIFICATION_CODE.test(value));
+  return false;
+}
 function scrubSentryText(value: string): string {
-  let out = value.replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
+  let out = value.replace(PEM_PRIVATE_KEY, SCRUBBED).replace(TOKENISH_PARAM, '$1=[scrubbed]').replace(TOKENISH_PATH, '/$1/[scrubbed]');
   // [REPORT-016 F-016-02] Any URL's query string can carry arbitrary user
   // input (a raw search term, an address) that the named-param rule above
   // won't catch — and the Sentry SDK's default RequestData integration
@@ -41,7 +69,9 @@ function scrubSentryText(value: string): string {
 // now passes the scrubber.
 function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (typeof node === 'string') return scrubSentryText(node);
-  if (node === null || typeof node !== 'object' || depth <= 0) return node;
+  if (node === null || typeof node !== 'object') return node;
+  // [M013] Past the traversal budget nothing was read, so nothing is sent.
+  if (depth <= 0) return SCRUBBED;
   if (seen.has(node as object)) return node;
   seen.add(node as object);
   if (Array.isArray(node)) {
@@ -49,12 +79,28 @@ function scrubDeep(node: unknown, depth: number, seen: WeakSet<object>): unknown
     return node;
   }
   const rec = node as Record<string, unknown>;
-  for (const key of Object.keys(rec)) rec[key] = scrubDeep(rec[key], depth - 1, seen);
+  for (const key of Object.keys(rec)) {
+    // The SDK's own working state (live scopes and the client) rides on the
+    // event until the envelope is built, which deletes it unsent. Rewriting
+    // it would corrupt the SDK for every later event, so it is left alone.
+    if (key === 'sdkProcessingMetadata') continue;
+    rec[key] = scrubbedByKey(key, rec[key]) ? SCRUBBED : scrubDeep(rec[key], depth - 1, seen);
+  }
   return rec;
 }
 export function scrubSentryEvent<T extends {
   request?: { url?: string; query_string?: unknown; headers?: unknown; cookies?: unknown; data?: unknown };
 }>(event: T): T {
+  // [M013] An exception's text is free text too (a provider error can quote
+  // the SMS it refused); its type, stack and mechanism stay.
+  const exceptions = (event as { exception?: { values?: unknown } }).exception?.values;
+  if (Array.isArray(exceptions)) {
+    for (const exception of exceptions) {
+      if (exception && typeof exception === 'object' && typeof (exception as { value?: unknown }).value === 'string') {
+        (exception as { value: string }).value = SCRUBBED;
+      }
+    }
+  }
   if (event.request) {
     // Structural drops first — these fields are pure identifier surface.
     delete event.request.query_string;
@@ -229,7 +275,8 @@ export const adminAuditSnapshotCounter = new client.Counter({
 
 /** [A-01 / W-01] Browser (cookie-mode) sessions: cookie_issued, cookie_refreshed, cookie_auth, cookie_cleared,
  *  cookie_rejected_header (a cookie without the client header), cookie_rejected_origin (a cookie from an origin
- *  outside the CORS allowlist), body_tokens_refused. */
+ *  outside the CORS allowlist), body_tokens_refused; socket_cookie_auth / socket_cookie_rejected_origin (the
+ *  website's store socket presenting its access cookie, PERF row 8). */
 export const browserSessionCounter = new client.Counter({
   name: 'swift_browser_session_total',
   help: 'Browser cookie-session events (cookie_issued/cookie_refreshed/cookie_auth/cookie_cleared/cookie_rejected_header/cookie_rejected_origin)',
@@ -456,6 +503,31 @@ export const notificationFailuresCounter = new client.Counter({
   name: 'swift_notification_failures_total',
   help: 'Notification deliveries that failed after retries, by channel and stage',
   labelNames: ['channel', 'stage'] as const,
+  registers: [registry],
+});
+
+// [STORE-ALERT 18 Oct 2026] Push that did not reach a phone. Before this a
+// refused Expo ticket (InvalidCredentials, DeviceNotRegistered, ...) or a bad
+// receipt left no trace at all, and a store with no push device looked the
+// same as a store that was rung. Labels are bounded: stage = request (one
+// failed HTTP attempt to Expo) | ticket | receipt; reason = an Expo error class
+// (push-outcome.ts list, else 'other') or timeout | network | http_429 |
+// http_4xx | http_5xx | bad_response. Never a token, a user or a phone.
+export const pushFailuresCounter = new client.Counter({
+  name: 'swift_push_failures_total',
+  help: 'Push messages (or Expo request attempts) that did not reach a phone, by stage and error class',
+  labelNames: ['stage', 'reason'] as const,
+  registers: [registry],
+});
+
+// [STORE-ALERT] An urgent push (alert class ring_order | ring_offer |
+// job_update) for a person with no active push device, or with push turned
+// off: nothing left for any phone. The count says how often an alert depends
+// on the socket and SMS alone.
+export const pushNoDeviceCounter = new client.Counter({
+  name: 'swift_push_no_device_total',
+  help: 'Urgent notifications whose recipient had no active push device (or push off), by alert class',
+  labelNames: ['alert_class'] as const,
   registers: [registry],
 });
 
@@ -1105,7 +1177,7 @@ export const tenantBindCounter = new client.Counter({
   registers: [registry],
 });
 
-export async function observabilityPlugin(app: FastifyInstance) {
+async function observability(app: FastifyInstance) {
   initSentry();
   if (!metricsWired) {
     client.collectDefaultMetrics({ register: registry });
@@ -1173,7 +1245,8 @@ export async function observabilityPlugin(app: FastifyInstance) {
   }
 
   app.addHook('onResponse', (request, reply, done) => {
-    // routeOptions.url keeps cardinality bounded (":id", not real ids).
+    // routeOptions.url keeps cardinality bounded (":id", not real ids); a path
+    // no route matched (the 404 handler) has no template and is ONE series.
     const route = request.routeOptions?.url ?? 'unmatched';
     httpDuration.observe(
       { method: request.method, route, status: String(reply.statusCode) },
@@ -1182,16 +1255,10 @@ export async function observabilityPlugin(app: FastifyInstance) {
     done();
   });
 
-  // 5xx = our fault → Sentry. 4xx is the caller's problem and stays out.
-  app.addHook('onError', (request, _reply, error, done) => {
-    const status = (error as AppError).statusCode ?? 500;
-    if (status >= 500) {
-      // Route TEMPLATE, never the raw URL — /track/:token must not leak its
-      // token into the tracker [REPORT-013 F-013-04].
-      captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
-    }
-    done();
-  });
+  // [OBS-1] No onError hook here: an onError hook sees the THROWN error, not
+  // the status the error handler then sends (a ZodError → 400 or a Prisma
+  // not-found → 404 carry no statusCode and read as 500). The 5xx capture
+  // lives in the error handler, on the status it sent — one site, once.
 
   app.get('/metrics', async (request, reply) => {
     const token = process.env['METRICS_TOKEN'];
@@ -1203,3 +1270,11 @@ export async function observabilityPlugin(app: FastifyInstance) {
     return registry.metrics();
   });
 }
+
+/** [OBS-1] fastify-plugin (skip-override): the onResponse hook above must bind
+ *  to EVERY route of the instance it is registered on. A plain async plugin is
+ *  encapsulated — its hooks reached only the routes it declared itself, so the
+ *  latency/status histogram only ever recorded /metrics. Register it on the
+ *  root, BEFORE the route modules (app.ts does). /metrics is unchanged: same
+ *  path, same METRICS_TOKEN gate. */
+export const observabilityPlugin = fp(observability, { name: 'swift-observability' });

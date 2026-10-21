@@ -1,11 +1,14 @@
+import { accountErasedUnderLock } from '../user/account-closure';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
-import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, registryCode } from './doc-registry';
+import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
+import { guyanaWallClockParts, startOfGuyanaDay } from '../../utils/guyana-day';
 import type { ValidatorContext } from './validators';
 import { plausibleExpiryCeiling, startOfToday } from './validators';
 import { approvedEvidenceFor, recordEvidenceFor, type EvidenceRow } from './evidence';
@@ -13,15 +16,17 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
 import { dueRenewalNotices } from './renewal-schedule';
+import { configuredDays, DAY_MS, DEFAULT_REJECTED_DOCUMENT_DAYS, isPersonalDocType, PARTNER_DOCUMENT_WHERE, REJECTED_DOCUMENT_DAYS_KEY } from './retention-rules';
 import { assertNotRecused } from './recusal';
 import { placeDocLegalHoldIn } from './legal-hold';
 import { DOC_FRAUD_REASON_CODE } from '../integrity/enforcement';
 import { identityAuthority, lockIdentityAuthority, requireIdentityAuthority, IdentityReviewRequiredError } from '../integrity/identity-review';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { isUuid } from '../../utils/uuid';
 import { CountryConfigService, PricingConfigError } from '../country/country-config.service';
 import { log } from '../../utils/logger';
 import { awaitingFirstGoLive, goLiveMissing, NEEDS_PUBLIC_PHONE_KIND } from '../vendor/go-live';
@@ -40,6 +45,7 @@ import { SubscriptionService } from '../subscription/subscription.service';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
@@ -116,6 +122,31 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
+/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+ *  last chose (while they still hold that role), else the Rider-first fallback of legacy
+ *  profiles. The one rule for getMoverVehicleType and getStatus. */
+function moverVehicleFrom(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: { vehicleType: VehicleType } | null,
+  driver: { vehicleType: VehicleType } | null,
+): VehicleType | null {
+  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+}
+
+/** A read started before it is known to be needed: marked handled at once, so a failure while an
+ *  earlier step throws never becomes an unhandled rejection. Awaiting it still throws. */
+function startedEarly<T>(read: Promise<T>): Promise<T> {
+  read.catch(() => undefined);
+  return read;
+}
+
 /** The KYC engines whose identity check compares the document's face with the
  *  selfie (Didit's face-match; ID Analyzer's biometric scan). The on-shore
  *  manual review and the sandbox compare none, and an engine missing here is
@@ -161,6 +192,10 @@ export interface ReviewerTypedInput {
   documentNumber?: string;
   /** A police clearance's issue date. */
   issuedOn?: Date;
+  /** [R15] The year printed on a licence or food certificate that is checked again every January. */
+  certificateYear?: number;
+  /** [R16] A business registration: a yearly business NAME (sole trader, partnership) or a COMPANY's incorporation. */
+  registrationKind?: RegistrationKind;
   /** The reviewer console's contract: the fields this type needs must be typed. */
   required?: boolean;
 }
@@ -187,6 +222,39 @@ export function clearanceRecheckDate(issuedOn: Date | null, now: Date = new Date
   return recheck;
 }
 
+/**
+ * [R15 · owner 15 Oct 2026, research A9/D9] A licence or food certificate renewed by the calendar
+ * year is checked again every January: its approval lapses at the start of 16 January after its
+ * year, Guyana time (the holder has the first fortnight of January to bring the new one). Only the
+ * current year's certificate — or, until 16 January, last year's — can be approved.
+ */
+export function certificateYearRecheck(year: number | null | undefined, now: Date = new Date()): Date {
+  if (typeof year !== 'number' || !Number.isInteger(year)) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_REQUIRED', 'Type the year printed on the certificate before approving it. It is checked again every January.');
+  }
+  if (year > guyanaWallClockParts(now).year) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_IN_FUTURE', 'That year has not started yet. Check the year printed on the certificate.');
+  }
+  const recheck = startOfGuyanaDay(`${year + 1}-01-16`);
+  if (recheck.getTime() <= now.getTime()) {
+    throw new AppError(400, 'CERTIFICATE_YEAR_LAPSED', `This certificate is for ${year}. Ask the person for this year’s certificate.`);
+  }
+  return recheck;
+}
+
+/** [R15] The automatic path's conservative default, never past the January re-check for a certificate-year type. */
+function autoApprovalExpiry(docType: string, days: number, now: Date = new Date()): Date {
+  const byDays = new Date(now.getTime() + days * 86_400_000);
+  if (!CERTIFICATE_YEAR_DOC_TYPES.has(docType)) return byDays;
+  const cap = januaryRecheckCap(now);
+  return byDays.getTime() > cap.getTime() ? cap : byDays;
+}
+
+/** [R15] The latest an approval of a certificate-year document may last: the coming January re-check. */
+export function januaryRecheckCap(now: Date = new Date()): Date {
+  return startOfGuyanaDay(`${guyanaWallClockParts(now).year + 1}-01-16`);
+}
+
 export function resolveApprovalExpiry(
   docType: string,
   supplied: Date | undefined,
@@ -208,6 +276,13 @@ export function resolveApprovalExpiry(
       'EXPIRY_IN_PAST',
       `That expiry date has already passed. An expired ${docType.replace(/_/g, ' ')} cannot be approved.`,
     );
+  }
+  // [R15] A certificate-year document never outlasts the coming January re-check: a date from its
+  // typed year is that re-check already; any other date (an internal caller, an older console, an
+  // expiry assigned at upload) is brought forward to it, never extended.
+  if (CERTIFICATE_YEAR_DOC_TYPES.has(docType)) {
+    const cap = januaryRecheckCap(now);
+    return effective.getTime() > cap.getTime() ? cap : effective;
   }
   // [self-test C · ruling 2026-09-06] The other direction: a date beyond the longest validity
   // this type is issued for is a typo or a forgery (2036 keyed for 2026), not a long licence.
@@ -330,6 +405,25 @@ function hireLicenceName(docType: string): string {
 function hireLicenceUploadWords(missing: readonly string[]): string {
   if (missing.length === HIRE_SPLIT_DOC_TYPES.length) return 'Upload your Hire Car Driver’s Licence and your car’s hire licence (the yearly one shown on the car)';
   return `Upload your ${missing.map(hireLicenceName).join(' and your ')}`;
+}
+
+/**
+ * [S2-29 · KYC-DECISION-ATOMIC] Work the CALLER of a document decision must commit with it — the
+ * admin route's audit rows. Called inside the decision transaction, after the decision and its
+ * projections, with the decided document; a throw rolls the whole decision back.
+ */
+export type DecisionWithin = (tx: Prisma.TransactionClient, decided: VerificationDocument) => Promise<void>;
+
+/** [S2-29] The one command an approval's outbox row carries: the work that must follow the
+ *  reviewer-typed identity capture (which runs on the system login, in its own transaction). */
+export const APPROVAL_TAIL = 'APPROVAL_TAIL';
+
+/** The words of the decision notices — one place, for the in-transaction and the direct sends. */
+export function approvedNotice(docType: string): { title: string; body: string } {
+  return { title: 'Document approved', body: `Your ${docType.replace(/_/g, ' ')} has been approved.` };
+}
+export function rejectedNotice(docType: string, reason?: string): { title: string; body: string } {
+  return { title: 'Document rejected', body: `Your ${docType.replace(/_/g, ' ')} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.` };
 }
 
 function audienceForRole(role: string): 'customer' | 'earner' | 'business' {
@@ -763,7 +857,7 @@ export class VerificationService {
           reviewedAt: new Date(),
           // Auto-approvals lapse on a conservative default so the expiry
           // sweep + 30-day reminders always fire; humans key the real date.
-          ...(autoExpiryDays && { expiresAt: new Date(Date.now() + autoExpiryDays * 24 * 60 * 60 * 1000) }),
+          ...(autoExpiryDays && { expiresAt: autoApprovalExpiry(docType, autoExpiryDays) }),
         }),
         ...(result.status === 'rejected' && { reviewedBy: 'kyc:auto', reviewedAt: new Date(), reviewNote: result.reason }),
     }, { queue: (result as { collided?: boolean }).collided ? 'SECOND_REVIEW' : 'STANDARD', extraction, authority });
@@ -997,7 +1091,7 @@ export class VerificationService {
   // Manual review queue (admin)
   // -------------------------------------------------------------------------
 
-  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}) {
+  async approveDocument(docId: string, adminId: string, expiresAt?: Date, insurance?: InsuranceReview, typed: ReviewerTypedInput = {}, decision: { within?: DecisionWithin } = {}) {
     // [DOC-1 §21.1 · P21] No approvals without the key service (production): fail closed.
     assertKeyServiceForAccess('approval');
     // [A-19] Read the candidate first: the expiry decision needs the document's
@@ -1008,6 +1102,9 @@ export class VerificationService {
       select: { docType: true, expiresAt: true, status: true, userId: true, role: true },
     });
     if (!candidate) throw new NotFoundError('VerificationDocument', docId);
+    // [DOC-1 §8.6 · R16] Recusal before anything the reviewer typed is judged: a recused reviewer is told so, never
+    // asked for a certificate's year or a registration's kind first. (The decision boundary checks it again.)
+    await assertNotRecused(this.prisma, adminId, candidate.userId);
     // [VERIFY-DOCS · owner ruling 6 Oct 2026] What the reviewer must TYPE for
     // this type: the ID/licence number (kept only as a blind-index identity
     // key) or the police clearance's issue date (the re-check falls due a year
@@ -1036,6 +1133,22 @@ export class VerificationService {
         issuedOn = typed.issuedOn ?? null;
         expiresAt = clearanceRecheckDate(issuedOn);
       }
+      // [R15] A licence or food certificate checked every January: the reviewer types its YEAR and the
+      // approval lasts to the January re-check after it — never a keyed or guessed expiry.
+      if (CERTIFICATE_YEAR_DOC_TYPES.has(candidate.docType) && (typed.required || typed.certificateYear !== undefined)) {
+        expiresAt = certificateYearRecheck(typed.certificateYear);
+      }
+      // [R16 · research D7] A business NAME (sole trader, partnership) is registered for a year: recorded by
+      // that year and checked again every January (the store goes offline on 16 January if it is not
+      // renewed). A company's certificate of incorporation never expires: nothing is set for it (the console
+      // keys no date for a business registration).
+      if (REGISTRATION_DOC_TYPES.includes(candidate.docType) && (typed.required || typed.registrationKind !== undefined)) {
+        if (typed.registrationKind === 'BUSINESS_NAME') expiresAt = certificateYearRecheck(typed.certificateYear);
+        else if (typed.registrationKind !== 'COMPANY') {
+          throw new AppError(400, 'REGISTRATION_KIND_REQUIRED',
+            'Say what this certificate is: a business name registration (a sole trader or partnership, renewed every year) or a company’s certificate of incorporation.');
+        }
+      }
     }
     // Never on any later write: the typed number leaves this method only as the blind index.
     delete typed.documentNumber;
@@ -1048,6 +1161,7 @@ export class VerificationService {
         ? resolveApprovalExpiry(candidate.docType, expiresAt, candidate.expiresAt)
         : (expiresAt ?? candidate.expiresAt ?? null);
 
+    let raisedToL2 = false;
     const updated = await this.transitionPendingDocument(docId, 'APPROVED', {
         status: 'APPROVED',
         reviewedBy: adminId,
@@ -1060,11 +1174,31 @@ export class VerificationService {
           hireClassConfirmed: insurance.hireClassConfirmed,
           plateCrossChecked: insurance.plateCrossChecked,
         }),
-    }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } });
+    }, { reviewerId: adminId, approval: { expiresAt, insurance, ...(issuedOn ? { issuedOn } : {}) } }, async (tx, decided) => {
+      // [S2-29 · KYC-DECISION-ATOMIC] Everything the approval owes commits with it, or none of it does:
+      // the L2 promotion, the approval notice (published after commit), the caller's audit rows, and —
+      // for a partner document — the outbox row that owes the trial decision. A throw anywhere here
+      // leaves the document PENDING, so the reviewer's retry decides it, once.
+      if (decided.docType === IDENTITY_DOC_TYPE) {
+        raisedToL2 = await this.promoteToL2Within(tx, decided.userId);
+      } else {
+        await tx.verificationDecisionOutbox.create({ data: {
+          tenantId: (await tx.user.findUniqueOrThrow({ where: { id: decided.userId }, select: { tenantId: true } })).tenantId,
+          documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
+        } });
+      }
+      const notice = await tx.notification.create({ data: {
+        userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
+        data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
+      } });
+      this.projectionNotices.get(tx)?.push(notice.id);
+      if (decision.within) await decision.within(tx, decided);
+    });
 
-    // [VERIFY-DOCS] The typed number becomes a HARD identity key BEFORE the
-    // trial decision below (afterApproval) — the same order as an extracted
-    // number. The service hashes it (HMAC blind index) and never throws.
+    // After commit. [VERIFY-DOCS] The typed number becomes a HARD identity key BEFORE the trial
+    // decision (the outbox drain below) — the same order as an extracted number. The service hashes
+    // it (HMAC blind index) and never throws. It runs on the system login in its own transaction,
+    // which is why the trial decision is an outbox command and not part of the decision transaction.
     if (identitySignal) {
       const { IdentityService } = await import('../integrity/identity.service');
       await new IdentityService(this.prisma).capture({
@@ -1074,24 +1208,21 @@ export class VerificationService {
     }
 
     if (updated.docType === IDENTITY_DOC_TYPE) {
-      await this.promoteToL2(updated.userId);
+      // The promotion committed with the decision; only its notice is left, and a failed notice
+      // never turns a committed, audited decision into an error.
+      await this.promoteToL2(updated.userId, 'PERSON', raisedToL2).catch((err) => {
+        log().error({ err, docId }, '[S2-29] L2 notice after a committed approval failed');
+      });
     } else {
-      await this.afterApproval(updated.userId);
+      // The trial decision, drained now; a failure stays on the row (retried by the sweep, then a
+      // paged dead letter) and never fails the committed decision.
+      await this.processDecisionOutbox({ documentId: docId });
     }
-
-    await this.notifications.send({
-      userId: updated.userId,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Document approved',
-      body: `Your ${updated.docType.replace(/_/g, ' ')} has been approved.`,
-      audience: audienceForRole(updated.role),
-      data: { kind: 'verification_approved', docId },
-    });
 
     return updated;
   }
 
-  async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode) {
+  async rejectDocument(docId: string, adminId: string, reason: string, reasonCode?: RejectionReasonCode, decision: { within?: DecisionWithin } = {}) {
     // Templated reason codes (onboarding spec §9.3): the code drives a clear,
     // consistent opening line; the reviewer's free text adds the specifics.
     const template = reasonCode ? REJECTION_TEMPLATES[reasonCode] : null;
@@ -1109,7 +1240,7 @@ export class VerificationService {
         include: { decisions: { where: { outcome: 'ESCALATE' }, orderBy: { decidedAt: 'desc' }, take: 1 } },
       });
       if (!open || open.queue !== 'SECOND_REVIEW') {
-        return this.escalateToSecondReview(docId, adminId, reasonCode, reason);
+        return this.escalateToSecondReview(docId, adminId, reasonCode, reason, decision.within);
       }
       if (open.decisions[0]?.reviewerId === adminId) {
         throw new AppError(403, 'SECOND_REVIEWER_REQUIRED', 'You raised this suspicion — a different reviewer must confirm it (DOC-1 §24.2)');
@@ -1122,10 +1253,16 @@ export class VerificationService {
         reviewedBy: adminId,
         reviewedAt: new Date(),
         reviewNote: reasonCode ? `[${reasonCode}] ${fullReason}` : fullReason,
-    }, { reviewerId: adminId, reasonCode, note: fullReason, fraud });
-
-    // The actor hears the category's text only; for the fraud class that is the generic message.
-    await this.notifyRejection(updated.userId, updated.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason);
+    }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
+      // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
+      // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
+      const notice = await tx.notification.create({ data: {
+        userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
+        data: { kind: 'verification_rejected' },
+      } });
+      this.projectionNotices.get(tx)?.push(notice.id);
+      if (decision.within) await decision.within(tx, decided);
+    });
     return updated;
   }
 
@@ -1135,6 +1272,8 @@ export class VerificationService {
    * is refused. A case another reviewer holds is not taken over (compare-and-set).
    */
   async claimReviewCase(caseId: string, reviewerId: string) {
+    // An id that is not a UUID names no case (review_cases.id is a uuid column): 404, not a failed query.
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     const kase = await this.prisma.reviewCase.findUnique({ where: { id: caseId }, select: { id: true, submissionId: true, closedAt: true } });
     if (!kase) throw new NotFoundError('ReviewCase', caseId);
     if (kase.closedAt) throw new AppError(409, 'CASE_CLOSED', 'This case is already decided');
@@ -1156,12 +1295,17 @@ export class VerificationService {
 
   /** Only the reviewer holding a case may hand it back to the queue. */
   async releaseReviewCase(caseId: string, reviewerId: string) {
+    if (!isUuid(caseId)) throw new NotFoundError('ReviewCase', caseId);
     return this.projectionTransaction(async (tx) => {
       const won = await tx.reviewCase.updateMany({
         where: { id: caseId, closedAt: null, assignedTo: reviewerId },
         data: { assignedTo: null, assignedAt: null },
       });
-      if (won.count !== 1) throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      if (won.count !== 1) {
+        // A case that does not exist is not a case someone else holds.
+        if (!(await tx.reviewCase.findUnique({ where: { id: caseId }, select: { id: true } }))) throw new NotFoundError('ReviewCase', caseId);
+        throw new AppError(409, 'NOT_CASE_HOLDER', 'Only the reviewer holding this case can release it');
+      }
       // [DOC-1 P5-1] X-RELEASE: handing the case back is IN_REVIEW → REVIEW_QUEUED.
       const kase = await tx.reviewCase.findUniqueOrThrow({ where: { id: caseId } });
       await hopDocState(tx, { id: kase.submissionId }, 'IN_REVIEW', 'REVIEW_QUEUED');
@@ -1174,7 +1318,7 @@ export class VerificationService {
    * the case is re-queued at raised priority and unassigned, the reviewer's
    * verdict is recorded as an ESCALATE decision, and the document stays PENDING.
    */
-  private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string): Promise<VerificationDocument> {
+  private async escalateToSecondReview(docId: string, adminId: string, reasonCode: RejectionReasonCode, note?: string, within?: DecisionWithin): Promise<VerificationDocument> {
     return this.projectionTransaction(async (tx) => {
       // [DS1054 S3 · DS1064 S3] Lock the paper's open case, then the paper itself, BEFORE reading either: the
       // locks a vehicle edit takes, in the same order, before it decides what to withdraw (vehicle-retirement.ts,
@@ -1202,6 +1346,8 @@ export class VerificationService {
       await tx.reviewCase.update({ where: { id: open.id }, data: { queue: 'SECOND_REVIEW', priority: Math.min(open.priority, FRAUD_HOLD_PRIORITY), assignedTo: null, assignedAt: null } });
       // [DOC-1 P5-1] T15 decide(ESCALATE): back to the queue (a claimed document leaves IN_REVIEW).
       await hopDocState(tx, { id: docId }, 'IN_REVIEW', 'REVIEW_QUEUED');
+      // [S2-29] The caller's audit row (the escalation) commits with it.
+      if (within) await within(tx, doc);
       return doc;
     });
   }
@@ -1318,6 +1464,9 @@ export class VerificationService {
     requestedStatus: 'APPROVED' | 'REJECTED',
     data: Prisma.VerificationDocumentUpdateManyMutationInput,
     review: { reviewerId: string; reasonCode?: RejectionReasonCode; note?: string; fraud?: { reasonCode: RejectionReasonCode }; approval?: { expiresAt?: Date; insurance?: InsuranceReview; issuedOn?: Date } },
+    // [S2-29 · KYC-DECISION-ATOMIC] What must commit with the decision: the decision's own effects
+    // (L2, the outbox row, the notice) and the caller's audit rows. Runs last, inside the transaction.
+    within?: DecisionWithin,
   ): Promise<VerificationDocument> {
     const candidate = await this.prisma.verificationDocument.findUnique({
       where: { id: docId },
@@ -1331,12 +1480,17 @@ export class VerificationService {
 
     const outcome = await this.projectionTransaction(async (tx) => {
       await assertNotRecused(tx, review.reviewerId, candidate.userId);
-      const users = await tx.$queryRaw<Array<{ id: string }>>`
-        SELECT "id" FROM "users"
+      const users = await tx.$queryRaw<Array<{ id: string; phone: string }>>`
+        SELECT "id", "phone" FROM "users"
         WHERE "id" = ${candidate.userId}
         FOR UPDATE /* verification-document-decision-authority */
       `;
       if (!users[0]) throw new NotFoundError('User', candidate.userId);
+      // [#1879 · REVIEW-F S3-2] An erased account (its erasure marker commits under this same lock) is decided
+      // nothing: a document a legal hold kept would otherwise re-create the outbox row, the notice and a trial.
+      if (users[0].phone === `deleted:${candidate.userId}`) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Its documents cannot be decided.');
+      }
 
       if (requestedStatus === 'APPROVED') {
         const pending = await this.lockApprovalSubject(tx, docId);
@@ -1457,6 +1611,7 @@ export class VerificationService {
       if (approve) await this.assertActivationPriceable(candidate.userId, tx);
       await projectProviderVerificationLocked(tx, updated.userId);
       await this.projectVendorActivation(tx, updated.userId);
+      if (within) await within(tx, updated);
       return { kind: 'UPDATED' as const, document: updated };
     });
     if (outcome.kind === 'REPLACED') {
@@ -1541,7 +1696,10 @@ export class VerificationService {
     });
     if (!doc || doc.state !== 'COMMITTED' || doc.legalHoldId || doc.imagePurgedAt || !doc.fileUrl) return 'NOT_PURGED';
     const storage = getStorageProvider();
-    const evidence = await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
+    // [Row 243] The image is destroyed only under the person's lock and only while still unheld.
+    const evidence = await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
+      { state: 'COMMITTED', imagePurgedAt: null, fileUrl: doc.fileUrl });
+    if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
     if (evidence.probe === 'FAILED') {
       await writeDeletionReceipt(this.prisma, receipt);
@@ -1648,14 +1806,7 @@ export class VerificationService {
       db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
-    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-    }
-    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-    return rider?.vehicleType ?? driver?.vehicleType ?? null;
+    return moverVehicleFrom(user, rider, driver);
   }
 
   /**
@@ -1704,8 +1855,14 @@ export class VerificationService {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId)) ?? 'MOTORCYCLE';
       return this.countryConfig.getMoverOptionalDocuments(countryCode, vehicleType);
     }
-    // A service category that is not open has no checklist at all — and nothing to add either.
-    if (roleKey === 'SERVICE_PROVIDER' && required.length === 0) return [];
+    if (roleKey === 'SERVICE_PROVIDER') {
+      // A service category that is not open has no checklist at all — and nothing to add either.
+      if (required.length === 0) return [];
+      // [TRADES] The provider's base and trade `_OPTIONAL` lists
+      // — the same projection as the checklist.
+      const { providerOptionalDocuments } = await import('../services/services.service');
+      return providerOptionalDocuments(this.prisma, userId, required);
+    }
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
@@ -1716,16 +1873,57 @@ export class VerificationService {
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
+    // [PERF C2] A mover's app shows a spinner until this answers (MoverRoot gates Home on it), so
+    // the reads that do not depend on each other run together: the account first (an unknown
+    // account is refused before anything else is read), then the mover's rows once (vehicle and
+    // trial role), then both lists beside the trial preview, then the documents. A mover's police
+    // clearance starts beside the mover's rows. About ten round trips in a row became four.
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { countryCode: true, trustLevel: true },
+      select: { countryCode: true, trustLevel: true, activeRole: true, lastMoverRole: true, roles: true },
     });
     if (!user) throw new NotFoundError('User', userId);
 
+    const { previewTrial } = await import('../integrity/enforcement');
+    // The mover's saved vehicle (null until they provision one) — lets the
+    // onboarding screen initialise its selector and know whether to re-prompt.
+    let vehicleType: VehicleType | null = null;
+    // Trial-integrity Part 4: told BEFORE they commit — what activation will
+    // do for this human (copy #2/#3). Read-only preview: no side effects; the
+    // apps render `trial.message` verbatim when present. Vendor checklists are
+    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
+    let trialRole = 'VENDOR';
+    // [VERIFY-DOCS] Police clearance is on every mover's optional list; it is used below only
+    // when this person's lists name it, exactly as before.
+    let policeClearedEarly: Promise<boolean> | undefined;
+    if (roleKey === 'MOVER') {
+      policeClearedEarly = startedEarly(isPoliceCleared(this.prisma, userId));
+      const [rider, driver] = await Promise.all([
+        this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+        this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      ]);
+      vehicleType = moverVehicleFrom(user, rider, driver);
+      trialRole = driver ? 'DRIVER' : 'RIDER';
+    }
+    const trialRead = previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+
     // `gate`: what this role must hold to go live — roleVerified reads it alone.
-    const gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
-    // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
-    let optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    // [VERIFY-DOCS] `optional`: what the person MAY add. Older apps read only `checklist` and ignore it.
+    // A mover's two lists use the same vehicle rule as the gates (the preview's hint, else the saved
+    // vehicle, else a motorcycle), and a mover's optional list does not read `gate`, so the two are
+    // read together. Every other role's optional list is cut from its checklist, so it waits for it.
+    let gate: string[];
+    let optional: string[];
+    if (roleKey === 'MOVER') {
+      const listVehicle = vehicleHint ?? vehicleType ?? 'MOTORCYCLE';
+      [gate, optional] = await Promise.all([
+        this.checklistFor(userId, user.countryCode, roleKey, listVehicle),
+        this.optionalFor(userId, user.countryCode, roleKey, [], listVehicle),
+      ]);
+    } else {
+      gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+      optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    }
     // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
     // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
     // store's gate is unchanged: only its home-visit bookings wait for the clearance.
@@ -1733,7 +1931,8 @@ export class VerificationService {
     let homeVisits: { offered: boolean; cleared: boolean } | undefined;
     if (roleKey === 'SERVICE') {
       const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
-      homeVisits = { offered: await ownerOffersHomeVisits(this.prisma, userId), cleared: await homeVisitsCleared(this.prisma, userId) };
+      const [offered, cleared] = await Promise.all([ownerOffersHomeVisits(this.prisma, userId), homeVisitsCleared(this.prisma, userId)]);
+      homeVisits = { offered, cleared };
       if (homeVisits.offered && !checklist.includes(POLICE_CLEARANCE_DOC_TYPE)) {
         checklist = [...checklist, POLICE_CLEARANCE_DOC_TYPE];
         optional = optional.filter((docType) => docType !== POLICE_CLEARANCE_DOC_TYPE);
@@ -1743,10 +1942,17 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const rows = await this.prisma.verificationDocument.findMany({
-      where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
-      orderBy: { createdAt: 'desc' },
-    });
+    // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
+    // the one evidence rule, so the flag survives the image being deleted after review.
+    // Only asked where this person's lists name the document at all. Read beside the documents.
+    const namesPoliceClearance = [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE);
+    const [rows, policeCleared] = await Promise.all([
+      this.prisma.verificationDocument.findMany({
+        where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      namesPoliceClearance ? (policeClearedEarly ?? isPoliceCleared(this.prisma, userId)) : false,
+    ]);
     // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
     // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
@@ -1770,21 +1976,7 @@ export class VerificationService {
     // done: a driver without them sees each one still to upload (`missing`).
     const missing = checklist.filter((docType) => !approved.has(docType));
     const gateMissing = gate.filter((docType) => !approved.has(docType));
-
-    // The mover's saved vehicle (null until they provision one) — lets the
-    // onboarding screen initialise its selector and know whether to re-prompt.
-    const vehicleType = roleKey === 'MOVER' ? await this.getMoverVehicleType(userId) : null;
-
-    // Trial-integrity Part 4: told BEFORE they commit — what activation will
-    // do for this human (copy #2/#3). Read-only preview: no side effects; the
-    // apps render `trial.message` verbatim when present. Vendor checklists are
-    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
-    const { previewTrial } = await import('../integrity/enforcement');
-    const trialRole =
-      roleKey === 'MOVER'
-        ? (await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } })) ? 'DRIVER' : 'RIDER'
-        : 'VENDOR';
-    const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+    const trial = await trialRead;
 
     // [Owner, 1 Oct · truth] The checklist documents this server compares with
     // the profile selfie right now: the submit path's face-match leg, run by an
@@ -1808,10 +2000,8 @@ export class VerificationService {
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && gate.length === 0,
       trial,
       faceMatchDocTypes,
-      // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
-      // the one evidence rule, so the flag survives the image being deleted after review.
-      // Only asked where this person's lists name the document at all.
-      policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      // [VERIFY-DOCS · rulings 1–2] Police-cleared (read beside the documents, above).
+      policeCleared,
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
@@ -2066,6 +2256,10 @@ export class VerificationService {
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
+      // [#1879 S3-3 · REVIEW-G R1] An erased account's stores are projected nothing (no flags, no promotion, no
+      // trial): the person's row is locked after the identity lock (the activation order), so an erasure either
+      // commits first and is seen here, or waits and winds down what this wrote.
+      if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
     const owner = await db.vendorOwner.findUnique({
@@ -2241,13 +2435,27 @@ export class VerificationService {
   // Expiry automation (daily job)
   // -------------------------------------------------------------------------
 
-  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend. */
+  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend.
+   *  [Expiry isolation] One document never stops the sweep. A lapsed row in a state the document machine does
+   *  not let expire is HELD as it is, for a person (no gate accepts an expired record, so it grants
+   *  nothing); a row whose expiry fails stays lapsed and is retried on the next run; a failed heal or
+   *  follow-up is reported. The admins are told once per run, and the reminders, retention reaper and
+   *  licence sweep after this in the daily job always run. */
   async expireLapsedDocuments(): Promise<number> {
+    const report = new ExpirySweepReport();
     // Reconcile first so a prior process failure after marking EXPIRED cannot
     // remain invisible forever merely because the next query skips terminal rows.
-    await reconcileProviderVerifications(this.prisma);
+    try {
+      await reconcileProviderVerifications(this.prisma);
+    } catch (err) {
+      report.add('provider_reconcile', null, err);
+    }
     // [STRAND-2 belt] Vendor projections ride the same daily heal.
-    await this.reconcileVendorActivations();
+    try {
+      await this.reconcileVendorActivations();
+    } catch (err) {
+      report.add('vendor_reconcile', null, err);
+    }
     const now = new Date();
     const lapsed = await this.prisma.verificationDocument.findMany({
       where: { status: { in: ['APPROVED', 'PENDING'] }, expiresAt: { lt: now } },
@@ -2255,65 +2463,80 @@ export class VerificationService {
 
     let expired = 0;
     for (const doc of lapsed) {
-      const transitioned = await this.projectionTransaction(async (tx) => {
-        const users = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "users"
-          WHERE "id" = ${doc.userId}
-          FOR UPDATE /* verification-document-expiry-authority */
-        `;
-        if (!users[0]) return false;
-        const won = await tx.verificationDocument.updateMany({
-          where: {
-            id: doc.id,
-            userId: doc.userId,
-            status: { in: ['APPROVED', 'PENDING'] },
-            expiresAt: { lt: now },
-          },
-          data: { status: 'EXPIRED' },
+      if (doc.state && !EXPIRABLE_DOC_STATES.has(doc.state)) {
+        report.add('not_expirable', doc.id);
+        continue;
+      }
+      let transitioned: boolean;
+      try {
+        transitioned = await this.projectionTransaction(async (tx) => {
+          const users = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id" FROM "users"
+            WHERE "id" = ${doc.userId}
+            FOR UPDATE /* verification-document-expiry-authority */
+          `;
+          if (!users[0]) return false;
+          const won = await tx.verificationDocument.updateMany({
+            where: {
+              id: doc.id,
+              userId: doc.userId,
+              status: { in: ['APPROVED', 'PENDING'] },
+              expiresAt: { lt: now },
+            },
+            data: { status: 'EXPIRED' },
+          });
+          // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
+          if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
+          if (won.count !== 1) return false;
+          await projectProviderVerificationLocked(tx, doc.userId);
+          // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
+          // transaction — document truth and the derived vendor flags are one
+          // generation, not "EXPIRED now, store closes at some later sweep".
+          await this.projectVendorActivation(tx, doc.userId);
+          return true;
         });
-        // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
-        if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
-        if (won.count !== 1) return false;
-        await projectProviderVerificationLocked(tx, doc.userId);
-        // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
-        // transaction — document truth and the derived vendor flags are one
-        // generation, not "EXPIRED now, store closes at some later sweep".
-        await this.projectVendorActivation(tx, doc.userId);
-        return true;
-      });
+      } catch (err) {
+        report.add('expiry_failed', doc.id, err);
+        continue;
+      }
       if (!transitioned) continue;
       expired += 1;
 
-      // L2 is permanent once earned — an expired ID does not demote the user
-      if (doc.docType === IDENTITY_DOC_TYPE) continue;
+      try {
+        // L2 is permanent once earned — an expired ID does not demote the user
+        if (doc.docType === IDENTITY_DOC_TYPE) continue;
 
-      // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
-      // and a mover whose live-operation status broke is pulled offline now —
-      // not "after they next toggle" (an uninsured taxi must stop getting jobs).
-      if (doc.role === 'MOVER') {
-        await this.forceMoverOfflineIfNotLive(doc.userId);
-      } else {
-        await this.suspendListingsIfUnverified(doc.userId);
+        // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
+        // and a mover whose live-operation status broke is pulled offline now —
+        // not "after they next toggle" (an uninsured taxi must stop getting jobs).
+        if (doc.role === 'MOVER') {
+          await this.forceMoverOfflineIfNotLive(doc.userId);
+        } else {
+          await this.suspendListingsIfUnverified(doc.userId);
+        }
+        // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
+        await this.propagateVehicleLapse(doc, 'expired');
+        // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+        // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
+        const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
+        await this.notifications.send({
+          userId: doc.userId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Document expired',
+          body: optional
+            ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+            : doc.docType === HIRE_PERMIT_DOC_TYPE
+              ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
+              : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+          audience: audienceForRole(doc.role),
+          data: { kind: 'verification_expired', docId: doc.id },
+        });
+      } catch (err) {
+        report.add('effects_failed', doc.id, err);
       }
-      // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
-      await this.propagateVehicleLapse(doc, 'expired');
-      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
-      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
-      const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
-      await this.notifications.send({
-        userId: doc.userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Document expired',
-        body: optional
-          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
-          : doc.docType === HIRE_PERMIT_DOC_TYPE
-            ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
-            : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
-        audience: audienceForRole(doc.role),
-        data: { kind: 'verification_expired', docId: doc.id },
-      });
     }
 
+    await report.report(this.prisma, this.notifications, expired);
     return expired;
   }
 
@@ -2479,11 +2702,10 @@ export class VerificationService {
     result: T,
   ): Promise<T & { collided?: boolean }> {
     const mine = await resolveVerificationObject(this.prisma, { fileKey, userId });
-    const other = await this.prisma.encryptedObject.findFirst({
-      where: { sha256: mine.sha256, createdBy: { not: userId } },
-      select: { createdBy: true },
-    });
-    if (!other) return result;
+    // [Row 331 (c)] The other holder is a LIVE account: an erased one is never linked again.
+    const [otherId] = await liveDuplicateHolders(this.prisma, mine.sha256, userId);
+    if (!otherId) return result;
+    const other = { createdBy: otherId };
     const { IdentityService } = await import('../integrity/identity.service');
     const identity = new IdentityService(this.prisma);
     const otherRole = (await this.prisma.user.findUnique({ where: { id: other.createdBy }, select: { activeRole: true } }))?.activeRole ?? 'CUSTOMER';
@@ -2495,13 +2717,54 @@ export class VerificationService {
     return { ...flagged, status: 'pending_manual', reason: 'Duplicate of a document already on another account — second review required' };
   }
 
+  /**
+   * [R24 · research C4] A partner's REJECTED document is not needed once the decision stands:
+   * a PERSONAL one is deleted the configured number of days after the rejection (30 unless the
+   * lawyer's number is set); a vehicle or business one after its registry window (90 days).
+   * This only sets the retention clock — never later than one it already has, never for an AML
+   * record (its own law keeps it), never under a legal hold — and the reaper below deletes it
+   * when the clock falls due. A revoked approval is not a rejection (its record is evidence
+   * history), and a customer's own ID follows the customer-ID rule, not this one (an individual
+   * service provider's documents, stored with role CUSTOMER, are partner documents: PARTNER_DOCUMENT_WHERE).
+   * Continues the VERIFY-DOCS PR-V2 work (fix/verify-docs-retention).
+   */
+  async scheduleRejectedDocumentRetention(batch = 500): Promise<number> {
+    const personalDays = await configuredDays(this.prisma, REJECTED_DOCUMENT_DAYS_KEY, DEFAULT_REJECTED_DOCUMENT_DAYS);
+    const rejected = await this.prisma.verificationDocument.findMany({
+      where: {
+        OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+        AND: [PARTNER_DOCUMENT_WHERE], reviewedAt: { not: null }, purgedAt: null, legalHoldId: null,
+      },
+      select: { id: true, docType: true, role: true, reviewedAt: true, retentionExpiresAt: true, user: { select: { countryCode: true } } },
+      orderBy: { reviewedAt: 'asc' }, take: batch,
+    });
+    let scheduled = 0;
+    for (const doc of rejected) {
+      const config = await this.countryConfig.getByCode(doc.user.countryCode);
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: doc.user.countryCode, docType: doc.docType, role: doc.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      const days = isPersonalDocType(doc.docType) ? personalDays : ruling.days;
+      const due = new Date(doc.reviewedAt!.getTime() + days * DAY_MS);
+      if (doc.retentionExpiresAt && doc.retentionExpiresAt.getTime() <= due.getTime()) continue;
+      const set = await this.prisma.verificationDocument.updateMany({
+        where: {
+          id: doc.id, purgedAt: null, legalHoldId: null, OR: [{ state: 'REJECTED' }, { state: null, status: 'REJECTED' }],
+          AND: [{ OR: [{ retentionExpiresAt: null }, { retentionExpiresAt: { gt: due } }] }],
+        },
+        data: { retentionExpiresAt: due },
+      });
+      scheduled += set.count;
+    }
+    return scheduled;
+  }
+
   /** Purge documents whose retention window elapsed: delete the stored object,
    *  clear the fileKey, and leave an auditable purgedAt marker. Daily job. */
   async purgeExpiredDocuments(): Promise<number> {
     const now = new Date();
-    // [DOC-1 §9.4 · DOC-INV-14] Exclude legal holds here and recheck at the
-    // final DB transition. Irreversible storage actions still precede that
-    // final check; the committed purge/legal-hold fence is separate work.
+    // [DOC-1 §9.4 · DOC-INV-14 · Row 243] Exclude legal holds here; purgeDocumentNow
+    // destroys the bytes only under the person's lock while still unheld
+    // (shredUnlessHeld), and rechecks at the final DB transition.
     const due = await this.prisma.verificationDocument.findMany({
       where: { retentionExpiresAt: { lt: now }, purgedAt: null, legalHoldId: null },
       select: { id: true, userId: true, fileUrl: true, docType: true, user: { select: { tenantId: true } } },
@@ -2544,7 +2807,12 @@ export class VerificationService {
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
-    const evidence = doc.fileUrl ? await shredAndProbe(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id }) : NOTHING_STORED;
+    // [Row 243] The bytes are destroyed only under the person's lock and only while still unheld.
+    const evidence = doc.fileUrl
+      ? await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
+        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) })
+      : NOTHING_STORED;
+    if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
     if (evidence.probe === 'FAILED') {
       await writeDeletionReceipt(this.prisma, receipt);
@@ -2607,30 +2875,90 @@ export class VerificationService {
   /** L1 → L2. `basis` keeps the notice truthful (owner ruling 8 Oct 2026, customer-id.ts): an ID
    *  that is only ON FILE is never called verified; only a person's approval is. An account
    *  already above L1 (an earned L3) is never lowered by a second approval. */
-  private async promoteToL2(userId: string, basis: 'ON_FILE' | 'PERSON' = 'PERSON') {
-    // Under the same user lock revoke and purge take, and only while a committed customer ID still
-    // stands: a withdrawal or an erasure that landed after the document committed is never undone.
-    const promoted = await this.projectionTransaction(async (tx) => {
-      await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* customer-id-promotion-authority */`;
-      const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
-      if (standing === 0) return false;
-      const raised = await tx.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
-      // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
-      // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
-      await new FloatService(tx).recomputeForUser(userId);
-      return raised.count === 1;
-    });
+  private async promoteToL2(userId: string, basis: 'ON_FILE' | 'PERSON' = 'PERSON', raisedInDecision?: boolean) {
+    // [S2-29] A reviewer's approval raises the account inside its own decision transaction and
+    // passes the result here for the notice; the automatic on-file path raises it now.
+    const promoted = raisedInDecision ?? await this.projectionTransaction((tx) => this.promoteToL2Within(tx, userId));
     if (!promoted) return;
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(basis === 'ON_FILE'
-        // Truthful: the ID unlocks bigger orders; a taxi ride also needs the profile photo (SELFIE_REQUIRED).
-        ? { title: 'Your ID is on file', body: 'Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }
-        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders are unlocked now. Taxi rides also need your profile photo, so your driver knows who to pick up.' }),
+        // Truthful: the ID unlocks bigger orders and taxi rides. [Owner ruling 16 Oct] A customer never
+        // needs a photo — a ride needs only the ID on file (rides.service assertL2).
+        ? { title: 'Your ID is on file', body: 'Bigger orders and taxi rides are unlocked now.' }
+        : { title: 'Identity verified', body: 'A person on our team checked your ID. Bigger orders and taxi rides are unlocked now.' }),
       audience: 'customer',
       data: { kind: 'verification_l2' },
     });
+  }
+
+  /** Under the same user lock revoke and purge take, and only while a committed customer ID still
+   *  stands: a withdrawal or an erasure that landed after the document committed is never undone. */
+  private async promoteToL2Within(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
+    await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* customer-id-promotion-authority */`;
+    const standing = await tx.verificationDocument.count({ where: { userId, docType: IDENTITY_DOC_TYPE, state: 'COMMITTED' } });
+    if (standing === 0) return false;
+    const raised = await tx.user.updateMany({ where: { id: userId, trustLevel: 'L1' }, data: { trustLevel: 'L2' } });
+    // D.3 — a higher trust level means a higher float limit (no-op for non-riders; an ID that is
+    // only on file never lifts a rider's float — FloatService.recomputeForUser / floatTrustLevel).
+    await new FloatService(tx).recomputeForUser(userId);
+    return raised.count === 1;
+  }
+
+  /**
+   * [S2-29 · KYC-DECISION-ATOMIC] Drain the work committed approvals still owe — the trial
+   * decision and the rest of `afterApproval`, which is idempotent (an existing subscription is
+   * returned, never a second one). Claimed with a lease like every outbox; a failure is recorded
+   * on the row and retried with backoff until its budget is spent, then it is a dead letter
+   * (paged and listed on the admin Background jobs page). An approval that no longer stands —
+   * withdrawn, purged — owes nothing: the row closes without starting a trial.
+   */
+  async processDecisionOutbox(opts: { documentId?: string; limit?: number; now?: Date } = {}): Promise<{ processed: number; failed: number }> {
+    const now = opts.now ?? new Date();
+    const rows = await this.prisma.verificationDecisionOutbox.findMany({
+      where: {
+        processedAt: null, deadLetteredAt: null, availableAt: { lte: now },
+        attempts: { lt: this.prisma.verificationDecisionOutbox.fields.maxAttempts },
+        ...(opts.documentId ? { documentId: opts.documentId } : {}),
+      },
+      orderBy: { createdAt: 'asc' },
+      take: opts.limit ?? 200,
+    });
+    let processed = 0; let failed = 0;
+    for (const row of rows) {
+      const claimed = await this.prisma.verificationDecisionOutbox.updateMany({
+        where: { id: row.id, processedAt: null, OR: [{ claimedAt: null }, { claimedAt: { lt: new Date(now.getTime() - 60_000) } }] },
+        data: { claimedAt: now, attempts: { increment: 1 } },
+      });
+      if (claimed.count !== 1) continue;
+      try {
+        if (row.command !== APPROVAL_TAIL) throw new Error(`unknown verification decision command ${row.command}`);
+        const standing = await this.prisma.verificationDocument.findUnique({ where: { id: row.documentId }, select: { state: true } });
+        // [#1879] afterApproval honours the deletion write barrier: an account erased (or being erased) since
+        // the claim gets nothing, and the row closes as owed to no one.
+        const ran = standing?.state === 'COMMITTED' ? await this.afterApproval(row.userId) : false;
+        // updateMany: an account erasure deletes the person's rows (account.service), so a row this drain
+        // claimed may be gone by now; there is then nothing left to close.
+        await this.prisma.verificationDecisionOutbox.updateMany({
+          where: { id: row.id },
+          data: { processedAt: new Date(), claimedAt: null, lastError: ran ? null : standing?.state === 'COMMITTED' ? 'account closed' : 'approval no longer stands' },
+        });
+        processed += 1;
+      } catch (err) {
+        log().error({ err, documentId: row.documentId, attempts: row.attempts + 1 }, '[S2-29] approval tail failed; retried by the sweep');
+        await this.prisma.verificationDecisionOutbox.updateMany({
+          where: { id: row.id },
+          data: {
+            claimedAt: null,
+            lastError: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
+            availableAt: new Date(now.getTime() + Math.min(60 * 60_000, 30_000 * 2 ** Math.min(row.attempts, 7))),
+          },
+        });
+        failed += 1;
+      }
+    }
+    return { processed, failed };
   }
 
   /**
@@ -2641,7 +2969,31 @@ export class VerificationService {
    * subscription. Vendors additionally get their display flag, and a store
    * suspended by a lapsed document re-opens when verification is restored.
    */
-  private async afterApproval(userId: string) {
+  /**
+   * [GUARDRAILS §2 · #1879] The deletion write barrier for work owed after an approval: the account erasure's
+   * own commit (status DEACTIVATED, or the deleted:<id> marker). Read
+   * under the person's row lock (FOR SHARE): an erasure holding FOR UPDATE commits first, so an account
+   * erased or being erased is seen closed here. The erasure deletes the outbox rows in that same transaction.
+   * Not covered: an erasure that begins after this read and commits while the tail runs (the tail's writes are
+   * their own transactions; holding this lock across them would deadlock with their own person locks).
+   */
+  private async openForOwedWork(userId: string): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const rows = await tx.$queryRaw<Array<{ status: string; phone: string }>>`
+        SELECT "status"::text AS "status", "phone" FROM "users" WHERE "id" = ${userId}
+        FOR SHARE /* approval-tail-deletion-barrier */
+      `;
+      const person = rows[0];
+      // [REVIEW-F S2-2] Only an erasure closes it: SUSPENDED and BANNED are reversible, and a reinstated
+      // person is still owed the trial. DEACTIVATED is the erasure's status commit; the marker is its tombstone.
+      return Boolean(person) && person!.phone !== `deleted:${userId}` && person!.status !== 'DEACTIVATED';
+    });
+  }
+
+  /** Returns false (and writes nothing) when the deletion write barrier closes the account. */
+  private async afterApproval(userId: string): Promise<boolean> {
+    if (!await this.openForOwedWork(userId)) return false;
     // [STRAND-1] One projection owns vendor activation truth (flags + the
     // PENDING_APPROVAL→ACTIVE promotion). Manual review already ran it inside
     // the decision transaction; the auto-approval path reaches it here. It is
@@ -2683,7 +3035,7 @@ export class VerificationService {
       if (driver && !(await this.subscriptions.isFiction({ driverId: driver.id }))) await this.subscriptions.startTrialForDriver(driver.id);
       if (rider && !(await this.subscriptions.isFiction({ riderId: rider.id }))) await this.subscriptions.startTrialForRider(rider.id);
     }
-
+    return true;
   }
 
   /**
@@ -2800,8 +3152,7 @@ export class VerificationService {
     await this.notifications.send({
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Document rejected',
-      body: `Your ${docType.replace(/_/g, ' ')} was rejected${reason ? `: ${reason}` : ''}. Please fix it and resubmit.`,
+      ...rejectedNotice(docType, reason),
       data: { kind: 'verification_rejected' },
     });
   }

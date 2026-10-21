@@ -465,7 +465,7 @@ export function HomeScreen() {
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
               <Pressable
-                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}
+                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' }, { pop: true })}
                 accessibilityRole="button"
                 accessibilityLabel="Profile"
               >
@@ -654,7 +654,7 @@ export function HomeScreen() {
         <CategoryRail
           data={discovery.data}
           loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
 

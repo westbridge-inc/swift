@@ -1,4 +1,11 @@
+import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
+import { eraseUserDevices } from '../../lib/owner-rls';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
+import { exportPersonalData } from './data-export';
+import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
@@ -8,10 +15,12 @@ import {
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
-import { shredAndProbe, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
+import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -30,9 +39,7 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
-/** The subject of a closure request confirmed in the app. Support completes
- *  only these: a typed-in ticket is not a confirmed request. */
-export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 /** The server-written record that a closure request was confirmed in the app
  *  (behind the deletion step-up). Anyone can type the subject into a support
  *  ticket; only the confirmed request writes this record, so support completes
@@ -55,64 +62,10 @@ export async function closesByRequest(
 export class AccountService {
   constructor(private app: Pick<FastifyInstance, 'prisma' | 'io' | 'log'>) {}
 
-  /** DPA right of access + portability: a copy of the person's own data. */
+  /** DPA right of access + portability: a copy of the person's own data.
+   *  [Row 331 (b)] Every category of the export register, paged, never cut silently (data-export.ts). */
   async exportData(userId: string) {
-    const prisma = this.app.prisma;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        id: true,
-        phone: true,
-        email: true,
-        firstName: true,
-        lastName: true,
-        roles: true,
-        activeRole: true,
-        lastMoverRole: true,
-        countryCode: true,
-        trustLevel: true,
-        isPhoneVerified: true,
-        createdAt: true,
-        lastActiveAt: true,
-      },
-    });
-    if (!user) throw new AppError(404, 'NOT_FOUND', 'Account not found');
-
-    const [addresses, orders, ratingsGiven, serviceJobs] = await Promise.all([
-      prisma.address.findMany({
-        where: { userId },
-        select: { label: true, addressLine1: true, addressLine2: true, city: true, latitude: true, longitude: true, createdAt: true },
-      }),
-      prisma.order.findMany({
-        where: { customerId: userId },
-        select: { orderNumber: true, orderType: true, status: true, totalAmount: true, createdAt: true, deliveredAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.rating.findMany({
-        where: { raterId: userId },
-        select: { score: true, comment: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-      prisma.serviceJob.findMany({
-        where: { customerId: userId },
-        select: { status: true, scheduledFor: true, quoteAmount: true, createdAt: true },
-        orderBy: { createdAt: 'desc' },
-        take: 1000,
-      }),
-    ]);
-
-    return {
-      exportedAt: new Date().toISOString(),
-      notice:
-        'This is the personal data Swift holds about your account. Money amounts are in your local minor unit. Verification document contents are never exported — they are encrypted and access-logged.',
-      account: user,
-      addresses,
-      orders,
-      ratingsGiven,
-      serviceJobs,
-    };
+    return exportPersonalData(this.app.prisma, userId);
   }
 
   private async closureTicket(tx: Prisma.TransactionClient, userId: string) {
@@ -120,7 +73,7 @@ export class AccountService {
     const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
-        message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
+        message: ACCOUNT_CLOSURE_MESSAGE,
       } });
     // Same transaction as the request: the confirmation and its ticket commit
     // together. One record per ticket; a repeated request reuses it.
@@ -189,7 +142,16 @@ export class AccountService {
       };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
-        await tx.deviceToken.deleteMany({ where: { userId } });
+        // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
+        await eraseUserDevices(tx, userId);
+        // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
+        // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
+        // verification.service openForOwedWork), and the row's userId never
+        // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
+        await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
+        // [COORD 18 Oct 23:28Z · REVIEW-F #1879 §4] Notices, staged money-setting commands, finished mover
+        // revocations, unheld safety check-in deliveries, renewal reminders and staff permissions (erasure-coverage.ts).
+        await eraseOwedRowsInTransaction(tx, userId);
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
@@ -274,7 +236,8 @@ export class AccountService {
       await tx.serviceProvider.updateMany({ where: { userId }, data: { isVerified: false } });
       // Marked wound down with the cutoff, so no billing repair or fee payment
       // can reopen a closed account's store (it reopens billing holds only).
-      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN' } });
+      await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
+      await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
@@ -307,6 +270,10 @@ export class AccountService {
     if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
       this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
     }
+
+    // [COORD 19 Oct 03:46Z] Every saved card leaves service (REVOKED, unsent charges closed; the row is PT-1
+    // frozen) and card sessions that moved no money go; payment evidence stays (settlement history, §6).
+    await retireCardsAndSessions(prisma, userId);
 
     const memberships = await prisma.advertiserMember.findMany({
       where: { userId },
@@ -371,7 +338,11 @@ export class AccountService {
       // due pointer; it cannot prevent the other personal-data cleanup.
       let evidence;
       try {
-        evidence = doc.fileUrl ? await shredAndProbe(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }) : NOTHING_STORED;
+        // [Row 243] Destroyed only under the person's lock while still unheld. A hold that landed
+        // since the census keeps the document; the tombstone retry then defers it as held.
+        const fenced = doc.fileUrl ? await shredUnlessHeld(prisma, storage, { fileKey: doc.fileUrl, userId, documentId: doc.id }, { purgedAt: null }) : NOTHING_STORED;
+        if (!fenced) { pendingDocuments += 1; continue; }
+        evidence = fenced;
       } catch (error) {
         if (!(error instanceof AppError) || error.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw error;
         // Refusal is an unresolved obligation, never proof of destruction.
@@ -386,17 +357,40 @@ export class AccountService {
         pendingDocuments += 1;
         continue;
       }
-      await prisma.$transaction(async (tx) => {
-        await tx.verificationDocument.update({ where: { id: doc.id }, data: { purgedAt: new Date(), fileUrl: '' } });
+      const closed = await prisma.$transaction(async (tx) => {
+        // [Row 243] The close re-checks the hold under the person's row lock (placeDocLegalHoldIn takes the same lock
+        // first). A hold that landed since the census keeps the record and its extracted values: that includes a
+        // document whose image R24 already purged (fileUrl ''), which never enters the fence above. A document a
+        // concurrent purge already closed is not closed (or receipted) twice.
+        await bindTenantTransaction(tx);
+        const person = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "users" WHERE "id" = ${userId} FOR UPDATE /* verification-document-purge-authority */
+        `;
+        if (person.length !== 1) return false;
+        const close = await tx.verificationDocument.updateMany({
+          where: { id: doc.id, userId, purgedAt: null, legalHoldId: null }, data: { purgedAt: new Date(), fileUrl: '' },
+        });
+        if (close.count !== 1) return false;
         // [DOC-1 Part XXV] Erasure takes the extracted VALUES with the image: shred the run DEKs (rows stay as the custody record).
         await tx.extractionRun.updateMany({ where: { submissionId: doc.id }, data: { wrappedDek: null } });
         await tx.extractedField.updateMany({ where: { submissionId: doc.id }, data: { valueCt: null } });
         await writeDeletionReceipt(tx, { submissionId: doc.id, subjectId: userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy: userId, evidence });
+        return true;
       });
+      // Held (or already closed) since the census: the tombstone retry defers or skips it.
+      if (!closed) pendingDocuments += 1;
     }
 
     const moverObjects = await eraseMoverObjects(prisma, storage, userId, this.app.log);
     pendingDocuments += moverObjects.pending;
+
+    // [Row 331 · DSAR-ERASURE (a)] Uploads no document or mover pointer claims (the optional L2
+    // ID selfie, an abandoned onboarding file) go too, with a receipt; a hold keeps them.
+    const uploads = await eraseUnclaimedUploads(prisma, storage, userId, this.app.log);
+    // [Row 331 (c)] Everything shredded above stops carrying its content hash, so the same
+    // document uploaded later cannot find this account again (held objects keep theirs until purged).
+    const fingerprints = await forgetErasedFingerprints(prisma, userId, this.app.log);
+    let pendingUploads = uploads.pending + fingerprints.pending;
 
     // 1a. [F-024-08] The mandatory signup selfie lives in the avatar object,
     //     which is PUBLIC for the local provider. Nulling the column (step 4)
@@ -480,8 +474,10 @@ export class AccountService {
 
     // Sessions and push tokens were revoked atomically with authority cutoff.
 
-    // 3. Drop precise saved locations (home/work) outright.
-    await prisma.address.deleteMany({ where: { userId } });
+    // 3. Drop precise saved locations (home/work) outright. [item 20] Through
+    //    a named system capability: an admin's closure or the erasure retry job
+    //    acts for someone else, and the owner wall would let it delete nothing.
+    await runAsSystem('account:erasure-addresses', () => prisma.address.deleteMany({ where: { userId } }));
 
     // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
     //     recovery ID/selfie pointers, biometric liveness rows, public trip
@@ -490,13 +486,23 @@ export class AccountService {
     //     leaves; case-bound safety evidence lives elsewhere under its own
     //     hold rules.
     await prisma.accountRecovery.deleteMany({ where: { userId } });
-    await prisma.livenessCheck.deleteMany({ where: { userId } });
+    // [Row 331 (a)] The shift selfie photos first: each row goes once its photo is confirmed gone
+    // (a legal hold on the person keeps both, reported as held).
+    const liveness = await eraseLivenessSelfies(prisma, storage, userId, this.app.log);
+    pendingUploads += liveness.pending;
     await prisma.tripShareToken.deleteMany({ where: { createdByUserId: userId } });
     await prisma.emergencyContact.deleteMany({ where: { userId } });
     await prisma.rideQueueEntry.deleteMany({ where: { customerId: userId } });
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
     await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+
+    // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
+    //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
+    //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
+    await deidentifyProfiles(prisma, userId);
+    await deidentifyCaseRecords(prisma, userId);
+    await deidentifySafetyRecords(prisma, userId);
 
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The
@@ -520,18 +526,20 @@ export class AccountService {
       },
     });
 
-    if (deferred.count > 0 || moverObjects.held > 0) {
+    // Everything a hold keeps is reported as kept (heldUploads = unclaimed uploads + liveness photos).
+    const heldUploads = uploads.held + liveness.held;
+    if (deferred.count > 0 || moverObjects.held > 0 || heldUploads > 0 || fingerprints.held > 0) {
       return {
-        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held,
-        pendingDocuments, pendingAvatarObjects,
+        deleted: false, status: 'PENDING_LEGAL_HOLD' as const, heldDocuments: deferred.count, heldMoverObjects: moverObjects.held, heldUploads,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Documents required by a legal hold remain protected until the hold is released; other pending erasure will be retried automatically.',
       };
     }
 
-    if (pendingDocuments > 0 || pendingAvatarObjects > 0) {
+    if (pendingDocuments > 0 || pendingAvatarObjects > 0 || pendingUploads > 0) {
       return {
         deleted: false, status: 'PENDING_DOCUMENT_ERASURE' as const,
-        pendingDocuments, pendingAvatarObjects,
+        pendingDocuments, pendingAvatarObjects, pendingUploads,
         message: 'Your account is closed. Some personal-data erasure is pending; no further sign-in is needed.',
         ...(preflight.hold && { holdId: preflight.hold.holdId, holdReasons: preflight.hold.reasons }),
       };

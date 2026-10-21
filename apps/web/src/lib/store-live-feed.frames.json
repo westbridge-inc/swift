@@ -1,0 +1,13 @@
+{
+  "about": "Text frames the API's store socket sends a browser at /api/v1/socket.io/ (engine.io v4 / socket.io v5), recorded by apps/api/src/__tests__/socket-browser-cookie.test.ts, which fails if the server's frames ever differ from these. Connection ids and times are placeholders.",
+  "frames": {
+    "open": "0{\"sid\":\"<sid>\",\"upgrades\":[],\"pingInterval\":25000,\"pingTimeout\":20000,\"maxPayload\":65536}",
+    "connected": "40{\"sid\":\"<sid>\"}",
+    "authReady": "42[\"auth:ready\",{\"expiresAt\":\"<iso>\"}]",
+    "orderNew": "42[\"order:new\",{\"orderId\":\"ord-fixture\",\"vendorId\":\"store-fixture\",\"orderNumber\":\"SW-FIXTURE\"}]",
+    "statusChanged": "42[\"order:status_changed\",{\"orderId\":\"ord-fixture\",\"status\":\"ACCEPTED\",\"timestamp\":\"2026-10-19T05:00:00.000Z\"}]",
+    "ping": "2",
+    "connectError": "44{\"message\":\"Authentication required\"}",
+    "serverDisconnect": "41"
+  }
+}

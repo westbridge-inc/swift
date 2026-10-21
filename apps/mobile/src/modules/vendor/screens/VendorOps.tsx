@@ -18,6 +18,7 @@ import {
   TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
 import {
@@ -37,6 +38,7 @@ import {
   type VendorOrderActionKind,
 } from '../shared';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 import { useVerificationStatus } from '../../../hooks/verification';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import {
@@ -241,8 +243,19 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 placeholder="From MMG’s payment message"
                 style={{ marginTop: space.sm }}
               />
+              {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] One plainly worded button: tap it when the
+                  money is in the store's own MMG account. Swift never checks the money itself. */}
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Tap when {money(order.totalAmount ?? order.total)} is in your MMG account.
+              </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {typeof order.mmgPayByLine === 'string' && order.mmgPayByLine.trim() ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {order.mmgPayByLine}
+                </T>
+              ) : null}
               <PillButton
-                label={`${money(order.totalAmount ?? order.total)} received in my MMG`}
+                label="Paid by MMG"
                 size="md"
                 icon="check"
                 style={{ marginTop: space.sm }}
@@ -346,14 +359,14 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
           index={1}
           label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
           detail={menuQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage && items.length === 0 ? (
         <BoardFirstRunRow
           index={1}
           label="Add your first item"
           detail={`Your ${catalogueMeta(store.vendorType).label.toLowerCase()} is empty — nothing to order yet`}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage ? (
         <BoardFirstRunRow
@@ -366,7 +379,7 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
               ? `All ${items.length} items have a photo`
               : `Photos missing on ${missingPhotos} of ${items.length} items`
           }
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : null}
       <BoardFirstRunRow
@@ -725,7 +738,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           detail={menuDetail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
         <ManageTile
           icon="chart-bar"
@@ -818,7 +831,7 @@ function VendorStaffAvailability({ navigation }: any) {
           detail={detail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       </View>
     </View>
@@ -938,6 +951,8 @@ export function VendorOps({ store, navigation }: any) {
           />
         }
       >
+        {/* [STORE-ALERT] Says so when this phone cannot ring for new orders. */}
+        {!inPreview ? <PushOffStrip audience="store" style={{ marginBottom: space.lg }} /> : null}
         {/* Multi-store switcher — only when the owner has more than one store. */}
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>

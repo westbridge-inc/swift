@@ -1,4 +1,5 @@
 import { Prisma, type MoverRole, type OrderStatus, type UserRole, type UserStatus } from '@prisma/client';
+import { revokeUserDevices } from '../lib/owner-rls';
 import { freshRidePinReset } from './rides/ride-pin';
 import type { FastifyInstance } from 'fastify';
 import { AppError, ConflictError, ForbiddenError, NotFoundError } from '../utils/errors';
@@ -755,10 +756,8 @@ export async function transitionUserStatusAuthority(
       // A ban is a global security revocation, not merely an API-session
       // deletion. Silence every registered device in the same commit so an
       // already-issued push token cannot keep receiving account/order data.
-      await tx.deviceToken.updateMany({
-        where: { userId, isActive: true },
-        data: { isActive: false },
-      });
+      // [item 20] An admin's ban acts for someone else: the narrow action, never a write the owner wall would empty.
+      await revokeUserDevices(tx, userId);
     }
 
     if (auditEvidence) {

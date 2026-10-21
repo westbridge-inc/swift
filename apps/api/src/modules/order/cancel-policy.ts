@@ -31,10 +31,30 @@ import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-genera
  *  order's window lasts at least as long as its hold. */
 export const FREE_CANCEL_WINDOW_MIN = 5;
 
-/** [owner #52 · #50] How long past its promised moment an order (or the mover
- *  or provider serving it) must be before the customer may cancel it free for
- *  lateness. One number for every kind. */
+/** [owner #52 · #50] How long past its promised moment a RIDE, a PARCEL or a
+ *  BOOKING (or the driver, rider or provider serving it) must be before the
+ *  customer may cancel it free for lateness. A store order has its own number
+ *  (`STORE_VERY_LATE_AFTER_MIN`); read it through `veryLateAfterMin`. */
 export const VERY_LATE_AFTER_MIN = 30;
+
+/** [owner 17 Oct 2026] A STORE order (`isStoreOrder`: food or a shop,
+ *  delivered or collected) is very late an HOUR past its promised moment, not
+ *  thirty minutes. Rides, parcels and bookings keep `VERY_LATE_AFTER_MIN`. */
+export const STORE_VERY_LATE_AFTER_MIN = 60;
+
+/** [owner 17 Oct 2026] An accepted store order that was promised nothing — no
+ *  checkout promise, no prep minutes (a store may declare 0) and no slot — is
+ *  taken as promised this long after the store accepted it (or the store's own
+ *  prep minutes, when longer). Without it such an order could never be very
+ *  late: the customer would wait on the store forever with no way out. */
+export const STORE_FALLBACK_PROMISE_MIN = 45;
+
+/** [owner 17 Oct 2026] How long past its promised moment THIS order must be to
+ *  count as very late: a store order `STORE_VERY_LATE_AFTER_MIN`, every other
+ *  kind `VERY_LATE_AFTER_MIN`. The one place the number is chosen. */
+export function veryLateAfterMin(order: Pick<CancellationSnapshot, 'orderType' | 'fulfillment'>): number {
+  return isStoreOrder(order) ? STORE_VERY_LATE_AFTER_MIN : VERY_LATE_AFTER_MIN;
+}
 
 /** The fields the cancellation decision reads. Structural on purpose: the
  *  cancel path (order.service, and the courier route through the canonical
@@ -87,6 +107,9 @@ export type CancellationSnapshot = {
    *  store outside Swift, so its words never promise "free". Optional: a
    *  caller without it reads as not-MMG. */
   paymentMethod?: string | null;
+  /** [PAYMENT-SIMPLIFY · COORD Q2] Whether the store has confirmed an MMG payment ('PENDING' = not yet).
+   *  Optional: a caller without it reads as "confirmed or not MMG" (the stricter answer). */
+  paymentStatus?: string | null;
 };
 
 /** [Item 64] What the preview tells the customer when no mover was found. */
@@ -99,6 +122,8 @@ export const STORE_ACCEPTED_CANCEL_MESSAGE = 'The store has accepted your order,
 export const CANCEL_WINDOW_CLOSED_CODE = 'CANCEL_WINDOW_CLOSED';
 /** [owner #46] Why a store order is free right now, in plain words. */
 export const AWAITING_STORE_FREE_CANCEL_MESSAGE = 'You can cancel for free until the store accepts your order.';
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] An accepted MMG order the store has not marked "Paid by MMG". */
+export const MMG_UNCONFIRMED_CANCEL_MESSAGE = 'You can cancel until the store confirms your MMG payment.';
 export const TOO_LATE_FREE_CANCEL_MESSAGE = 'Your order is running very late. You can cancel it for free.';
 /** [Opus S3-2 · REPORT-008 F-01] An MMG order may already be paid to the store outside Swift: no cancel surface
  *  promises "free" for it, and the customer is told where any money comes back from. */
@@ -114,7 +139,8 @@ export type FreeCancelReason =
   | 'AWAITING_STORE' // [owner #46] a store order nobody has accepted yet
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
   | 'IN_WINDOW' // [owner #50] inside the five-minute window (or the hold)
-  | 'TOO_LATE'; // [owner #46/#50/#52] very late
+  | 'TOO_LATE' // [owner #46/#50/#52] very late
+  | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
 
 /** What a customer cancel may do right now: free, or refused. Never a fee. */
 export type CancellationVerdict =
@@ -258,10 +284,13 @@ function freeWindowEnd(order: CancellationSnapshot): Date | null {
 /**
  * [owner #52 · #50] The moment this order was promised for, while it can
  * still be late — or null when nothing was promised or lateness no longer
- * applies at this stage. Very late = `VERY_LATE_AFTER_MIN` past it.
+ * applies at this stage. Very late = `veryLateAfterMin` past it.
  *  - store order: the checkout delivery promise (ALG-12); for a pickup with no
  *    promise, placing + the store's prep minutes (the "ready in about" the
  *    order screen shows). A scheduled order is never "late" before its slot.
+ *    [owner 17 Oct] Promised nothing at all (and no slot): the store's
+ *    acceptance (or placing) + `STORE_FALLBACK_PROMISE_MIN`, or + its prep
+ *    minutes when longer — never "no promise, so never late".
  *    A pickup the store has already marked READY is waiting for the CUSTOMER,
  *    so it is never late on the store's side;
  *  - booking: the slot, while the provider has accepted but not completed it;
@@ -279,7 +308,10 @@ function promisedMoment(order: CancellationSnapshot): Date | null {
     if (order.fulfillment === 'PICKUP' && order.status === 'READY_FOR_PICKUP') return null;
     const prep = order.estimatedPrepTime != null && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : null;
     const promise = order.promisedAt
-      ?? (order.fulfillment === 'PICKUP' && prep != null ? plusMinutes(order.placedAt, prep) : null);
+      ?? (order.fulfillment === 'PICKUP' && prep != null ? plusMinutes(order.placedAt, prep) : null)
+      ?? (order.scheduledFor == null
+        ? plusMinutes(order.acceptedAt ?? order.placedAt, Math.max(STORE_FALLBACK_PROMISE_MIN, prep ?? 0))
+        : null);
     return latest([promise, order.scheduledFor]);
   }
   if (order.orderType === 'TAXI') {
@@ -294,11 +326,12 @@ function promisedMoment(order: CancellationSnapshot): Date | null {
   return null;
 }
 
-/** [owner #52 · #50] Is the order very late — `VERY_LATE_AFTER_MIN` past its
- *  promised moment (`promisedMoment`)? */
+/** [owner #52 · #50 · 17 Oct] Is the order very late — `veryLateAfterMin`
+ *  (a store order an hour, every other kind thirty minutes) past its promised
+ *  moment (`promisedMoment`)? */
 export function isVeryLate(order: CancellationSnapshot, now: Date = new Date()): boolean {
   const promised = promisedMoment(order);
-  return promised != null && now.getTime() >= plusMinutes(promised, VERY_LATE_AFTER_MIN).getTime();
+  return promised != null && now.getTime() >= plusMinutes(promised, veryLateAfterMin(order)).getTime();
 }
 
 /** [owner #46/#50/#52] Whose lateness frees the cancel, in the customer's words. */
@@ -328,8 +361,8 @@ function windowClosedMessage(order: CancellationSnapshot): string {
  *
  * [owner #46] A STORE order (`isStoreOrder`) once the store has accepted it:
  *  - free when it is very late — past the food-age cutoff with nobody to
- *    carry it (`tooLateToDeliver`), or [owner #52] thirty minutes past its
- *    promised time;
+ *    carry it (`tooLateToDeliver`), or [owner #52 · 17 Oct] an hour
+ *    (`STORE_VERY_LATE_AFTER_MIN`) past its promised time;
  *  - otherwise REFUSED: the customer contacts the store.
  *
  * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
@@ -345,6 +378,14 @@ export function cancellationVerdict(order: CancellationSnapshot, now: Date = new
   if (freeBecauseNoMoverFound(order)) return { allowed: true, free: true, reason: 'NO_MOVER' };
   if (isStoreOrder(order)) {
     if (notAcceptedYet(order)) return { allowed: true, free: true, reason: 'AWAITING_STORE' };
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD Q2] With MMG to the store's number the store
+    // ACCEPTS before the customer pays, and nothing is prepared or dispatched until the store taps
+    // "Paid by MMG". Until then the customer may still cancel in the app — what the published
+    // Refunds page promises ("not confirmed yet: you can cancel in the app"); the store gets the
+    // unattested-MMG cancel notice and refunds directly if money did arrive.
+    if (order.paymentMethod === 'MOBILE_MONEY' && order.paymentStatus === 'PENDING') {
+      return { allowed: true, free: true, reason: 'MMG_UNCONFIRMED' };
+    }
     if ((unassigned(order) && order.tooLateToDeliver === true) || isVeryLate(order, now)) {
       return { allowed: true, free: true, reason: 'TOO_LATE' };
     }
@@ -436,7 +477,9 @@ export function customerCancelView(order: CancellationSnapshot, now: Date = new 
     ? NO_MOVER_FREE_CANCEL_MESSAGE
     : verdict.reason === 'AWAITING_STORE'
       ? AWAITING_STORE_FREE_CANCEL_MESSAGE
-      : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
+      : verdict.reason === 'MMG_UNCONFIRMED'
+        ? MMG_UNCONFIRMED_CANCEL_MESSAGE
+        : verdict.reason === 'TOO_LATE' ? tooLateMessage(order) : null;
   return {
     canCancel: true,
     freeCancellationExpiresAt: freeCancellationExpiresAt(order, now)?.toISOString() ?? null,
