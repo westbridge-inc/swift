@@ -13,7 +13,7 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
-import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
+import { getMmgProvider, mmgDisabled, mmgPushFollowUpOn, mmgPushRailOn } from '../../providers/mmg/mmg-provider';
 import { noLivePayPath } from './fee-pause';
 import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReactivationPeriodEnd } from './mmg-pause';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
@@ -349,6 +349,9 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   if (error instanceof AppError && error.code === 'FEE_PAUSED') return FEE_PAUSED_ROW;
   throw error;
 }
+
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -1915,6 +1918,14 @@ export class BillingService {
       return { ok: false, reason: 'MMG payments are switched off right now' };
     }
 
+    // [S1 · SWITCHES 21 Oct, Option A] The push rail is its own switch (mmg-provider mmgPushRailOn),
+    // off in production: no charge request goes to the partner's phone. The week has no automatic
+    // rail, like a cash subscription, and fails; the fee notice tells the partner to pay on the MMG
+    // checkout page (feePayLine) while it is live. Never a push "because MMG is live".
+    if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn && !mmgPushRailOn()) {
+      return { ok: false, reason: MMG_PUSH_OFF_REASON };
+    }
+
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
       const mmg = getMmgProvider();
       // SWIFT-004 — MMG double-charge guard. The poller's synthetic 24h expiry
@@ -3326,12 +3337,14 @@ export class BillingService {
     // [PROD-PATH] MMG fully off: no row is stamped, looked up, expired or
     // dunned. Only MMG's own answer may resolve a request it once accepted
     // [LAW M-5], so every row waits, untouched, until MMG is switched on.
-    if (mmgDisabled()) {
+    // [S1 · Option A] A request already sent is followed up only where OUR reference's round trip is
+    // proved (mmgPushFollowUpOn); otherwise it waits untouched, exactly as above. Never a new push.
+    if (mmgDisabled() || !mmgPushFollowUpOn()) {
       out.stillPending = pending.length;
       return out;
     }
 
-    const mmg = getMmgProvider();
+    const mmg = getMmgProvider({ followUp: true });
     // [REVIEW-M #1832 S3-1] Up to 200 network-bound items: each is looked up, expired and settled at
     // the time it is really processed, never at the run's start instant (a chosen `at` stays exact).
     const clock = batchClock(at);
@@ -3475,6 +3488,15 @@ export class BillingService {
     }
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
+    }
+    // [S1 · SWITCHES 21 Oct, Option A] While the push rail is off, automatic MMG charges are never
+    // offered: a switch TO it is refused. A plan already on it may resume (the in-app resume keeps
+    // its method), and is never pushed: the billing run tells it to pay on the checkout page.
+    if (method === 'MOBILE_MONEY' && !mmgPushRailOn()) {
+      const current = await this.prisma.subscription.findUnique({ where: { id: subscriptionId }, select: { billingMethod: true } });
+      if (current?.billingMethod !== 'MOBILE_MONEY') {
+        throw new AppError(409, 'MMG_AUTO_CHARGE_OFF', 'Automatic MMG charges are not available. Pay your weekly fee with MMG on the checkout page in the app.');
+      }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose (before any write).
     if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();
