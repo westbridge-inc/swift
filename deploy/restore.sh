@@ -471,7 +471,7 @@ compare_with_source() {
   local live_snapshot scratch_snapshot
   live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
   scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  printf '%s\n' "$live_snapshot" | grep -q '^rows|' || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  grep -q '^rows|' <<<"$live_snapshot" || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
@@ -511,15 +511,18 @@ SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
 # [#1984 COORD ruling 14:11Z] The replay covers documents, keys, receipts, tombstones, the closure's
 # rows and rating text; it does not yet re-run the app's own erasure passes, so the de-identifications
 # #1905 and #1945 add (updates, not deletes) are not replayed. Every restore says so until it does.
-echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used" | tee /dev/stderr
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used"
+echo "NOT erasure-complete for #1905/#1945 de-identifications: re-apply them to this copy (the app's erasure passes, for every closed account) before anything from it is used" >&2
 if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
   if [ -n "$LEDGER_FROM" ]; then
-    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)" | tee /dev/stderr
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)"
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)" >&2
     echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
   else
-    echo "NOT erasure-complete: replay the off-site ledger before use" | tee /dev/stderr
+    echo "NOT erasure-complete: replay the off-site ledger before use"
+    echo "NOT erasure-complete: replay the off-site ledger before use" >&2
     echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
   fi
   echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"

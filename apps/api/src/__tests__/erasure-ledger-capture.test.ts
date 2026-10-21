@@ -8,10 +8,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { AccountService } from '../modules/user/account.service';
 
-const prisma = new PrismaClient();
+const prisma = testPrismaClient();
 const ID = randomBytes(4).toString('hex');
 const PHONE = `+1555${String(Date.now()).slice(-7)}`;
 const digest = (v: string) => createHash('sha256').update(v).digest('hex');

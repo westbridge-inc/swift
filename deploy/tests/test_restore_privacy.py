@@ -330,5 +330,15 @@ class TheDeidentificationGap(unittest.TestCase):
         self.assertIn(self.LINE, (DEPLOY / 'PILOT-RUNBOOK.md').read_text())
 
 
+class RunsUnderAnyStderr(unittest.TestCase):
+    """[#1977 CI] A CI runner's stderr can be a socket: `tee /dev/stderr` fails there ("No such device or
+    address"). And `printf ... | grep -q` under pipefail can fail on a large snapshot (SIGPIPE when grep
+    stops reading early). Neither may appear in restore.sh."""
+    def test_no_dev_stderr_and_no_early_closing_pipe(self):
+        src = (DEPLOY / 'restore.sh').read_text()
+        self.assertNotIn('/dev/stderr', src)
+        self.assertEqual([l for l in src.splitlines() if '| grep -q' in l], [])
+
+
 if __name__ == '__main__':
     unittest.main()

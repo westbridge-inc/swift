@@ -4,7 +4,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { AccountService } from '../modules/user/account.service';
 
 // ---------------------------------------------------------------------------
@@ -90,7 +91,7 @@ beforeAll(async () => {
   const reference = join(tmp, 'reference.dump');
   execFileSync('pg_dump', ['-Fc', '--data-only', '-t', 'doc_state_transition', '-d', TEST_DB, '-f', reference], { env: pgEnv() });
   execFileSync('pg_restore', ['--exit-on-error', '--no-owner', '--disable-triggers', '-d', LIVE, reference], { env: pgEnv(), stdio: ['ignore', 'ignore', 'pipe'] });
-  live = new PrismaClient({ datasources: { db: { url: urlFor(LIVE) } } });
+  live = testPrismaClient(urlFor(LIVE));
   await live.tenant.create({ data: { id: 'swift-default', name: 'Swift', slug: 'swift' } });
   await live.$executeRawUnsafe(`INSERT INTO country_configs (id, code, name, "currencyCode", "usdExchangeRate", "subscriptionTiers", "documentChecklists", "updatedAt") VALUES ('cc-${ID}', 'GY', 'Guyana', 'GYD', 209, '[]', '{}', now())`);
   const mk = (phone: string, firstName: string) => live.user.create({ data: { phone, firstName, lastName: 'Fixture', activeRole: 'CUSTOMER', roles: ['CUSTOMER'], email: `${firstName.toLowerCase()}.${ID}@example.invalid`, passwordHash: 'synthetic-hash' } });
