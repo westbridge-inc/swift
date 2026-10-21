@@ -4,7 +4,8 @@
  * stays because it is owed, open, held or payment evidence. One case per table (red on the erasure before this
  * PR), plus the activation write barrier (REVIEW-G's R1 probe and its store variants).
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
+import { wordFreeTag } from './helpers/fixture-ids';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -15,7 +16,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AccountService } from '../modules/user/account.service';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from '../modules/user/account-closure';
-import { ERASED_TEXT } from '../modules/user/erasure-coverage';
+import { ERASED_TEXT, TICKET_TEXT_REMOVED } from '../modules/user/erasure-coverage';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { APPROVAL_TAIL, VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
@@ -74,7 +75,7 @@ async function order(customerId: string) {
 async function store(ownerUserId: string) {
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUserId } });
   return app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `Cover ${nanoid(6)}`, slug: `cover-${nanoid(10).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `Cover ${wordFreeTag(6)}`, slug: `cover-${nanoid(10).toLowerCase().replace(/[^a-z0-9]/g, 'x')}`, vendorType: 'RESTAURANT',
     phone: '+5920000000', addressLine1: 'Street', city: 'Georgetown', region: 'Demerara', latitude: 6.8, longitude: -58.15, cuisineTypes: [], tags: [],
   } });
 }
@@ -102,6 +103,7 @@ afterAll(async () => {
   // every later suite on the same database. Bundles first, then the cases (released first, in case one cannot go).
   const caseIds = (await app.prisma.incidentCase.findMany({ where: { caseNumber: { startsWith: CASE_PREFIX } }, select: { id: true } })).map((c) => c.id);
   await quiet(app.prisma.evidenceBundle.deleteMany({ where: { caseId: { in: caseIds }, sealedAt: null } }));
+  await quiet(app.prisma.docLegalHold.deleteMany({ where: { incidentCaseId: { in: caseIds } } }));
   await quiet(app.prisma.incidentCase.updateMany({ where: { id: { in: caseIds } }, data: { legalHold: false } }));
   await quiet(app.prisma.incidentCase.deleteMany({ where: { id: { in: caseIds } } }));
   for (const step of [
@@ -147,6 +149,33 @@ describe('[COORD 23:28Z] owed rows go with the account (in the erasure transacti
       app.prisma.renewalSchedule.count({ where: { subjectId: u } }),
       app.prisma.admin.count({ where: { userId: u } }),
     ])).toEqual([0, 0, 0, 0]);
+  });
+
+  it('[REVIEW-G S4-1] money-surface commands: the person\'s own driver surface goes; a command they staged on a live store stays in its chain, de-identified, and no generation is reused', async () => {
+    const owner = await person();
+    const member = await person();
+    const shop = await store(owner);
+    const own = await app.prisma.driver.create({ data: { userId: member, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: `PR${nanoid(5)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    const cmd = (userId: string, entityId: string, actor: 'VENDOR' | 'DRIVER', generation: number) => app.prisma.moneySurfaceCommand.create({ data: {
+      actor, entityId, userId, kind: 'MMG_LINK_STAGE', state: 'DECIDED', generation, oldDigest: `o${generation}`, newDigest: `n${generation}`,
+      noticeKind: 'MMG_LINK_STAGED', noticePayload: { title: 'Staged', body: 'Your link changes soon' }, applyAt: soon() } });
+    // The rows carry an unsent notice: whatever this test leaves would be swept by a later suite's notice sweep.
+    onTestFinished(async () => { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: { in: [shop.id, own.id] } } }); });
+    await cmd(owner, shop.id, 'VENDOR', 1);
+    const staged = await cmd(member, shop.id, 'VENDOR', 2);
+    await cmd(member, own.id, 'DRIVER', 1);
+    await erase(member);
+    // The store's chain is whole: both generations, the member's row kept with the erased marker and its notice to them withdrawn.
+    const chain = await app.prisma.moneySurfaceCommand.findMany({ where: { entityId: shop.id }, orderBy: { generation: 'asc' }, select: { generation: true, userId: true, state: true, newDigest: true, noticeKind: true, noticePayload: true } });
+    expect(chain.map((c) => [c.generation, c.state, c.newDigest])).toEqual([[1, 'DECIDED', 'n1'], [2, 'DECIDED', 'n2']]);
+    expect(chain[1]).toMatchObject({ userId: `deleted:${member}`, noticeKind: null, noticePayload: null });
+    expect(chain[0]!.userId).toBe(owner);
+    // The next generation the store's writer computes (max + 1) is unchanged: 3, never a reused 2.
+    expect((await app.prisma.moneySurfaceCommand.findFirst({ where: { entityId: shop.id }, orderBy: { generation: 'desc' }, select: { generation: true } }))?.generation).toBe(2);
+    expect(await app.prisma.moneySurfaceCommand.count({ where: { id: staged.id } })).toBe(1);
+    // The person's own surface (their driver profile, closed with them) goes.
+    expect(await app.prisma.moneySurfaceCommand.count({ where: { entityId: own.id } })).toBe(0);
+    expect(await app.prisma.moneySurfaceCommand.count({ where: { userId: member } })).toBe(0);
   });
 
   it('a processed mover revocation goes at once; one still owed to other people stays until done, then the re-sweep deletes it', async () => {
@@ -265,7 +294,8 @@ describe('[owner 19 Oct G1 + G2] fraud marks and case rows stay without their id
     const rating = await app.prisma.ratingReport.create({ data: { tenantId: T, ratingId: `rt-${nanoid(8)}`, reporterId: u, reason: 'ABUSIVE', note: 'Free text', status: 'DISMISSED' } });
     await erase(u);
     const t = await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
-    expect([t.category, t.subject, t.message, t.adminNote]).toEqual(['ORDER_ISSUE', ERASED_TEXT, ERASED_TEXT, null]);
+    // [REVIEW-G S4-2] Support sees why the text is gone.
+    expect([t.category, t.subject, t.message, t.adminNote]).toEqual(['ORDER_ISSUE', TICKET_TEXT_REMOVED, TICKET_TEXT_REMOVED, null]);
     const c = await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: closure.id } });
     expect([c.subject, c.message]).toEqual([ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_CLOSURE_MESSAGE]);
     expect((await app.prisma.complianceViolation.findUniqueOrThrow({ where: { id: violation.id } })).evidence).toEqual({});
@@ -329,6 +359,28 @@ describe('[owner 19 Oct G3] safety records: whole while open or held, otherwise 
     expect((await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: held.id } })).summary).toBe('Held summary');
     expect((await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: sos.id } })).triggerNote).toBe('Covered');
     expect((await app.prisma.tripSafetySession.findUniqueOrThrow({ where: { id: trip.id } })).riskFactors).toEqual({ night: true });
+  });
+
+  it('[REVIEW-M S3-1] a closed case under a document legal hold keeps its SOS (location, notes, re-triggers), the trip session escalated into it and the SOS bundle\'s items whole', async () => {
+    const u = await person();
+    const other = await person();
+    const sos = await app.prisma.sosAlert.create({ data: { tenantId: T, actorUserId: u, actorRole: 'CUSTOMER', status: 'RESOLVED', resolvedAt: new Date(), triggerLat: 6.8, triggerNote: 'Doc-held' } });
+    await app.prisma.sosRetrigger.create({ data: { tenantId: T, sosAlertId: sos.id, seq: 1, at: new Date(), source: 'BUTTON', actorRole: 'CUSTOMER', lat: 6.8, lng: -58.1, note: 'Again' } });
+    const kase = await app.prisma.incidentCase.create({ data: { tenantId: T, caseNumber: `${CASE_PREFIX}${nanoid(8)}`, status: 'CLOSED', closedAt: new Date(), severity: 'S2', category: 'other', intake: 'SOS_RESOLUTION',
+      subjectUserId: other, sosAlertId: sos.id, summary: 'About the SOS', slaAckBy: new Date(), slaDecideBy: new Date(), interimAction: 'NONE' } });
+    // The hold is on the case (raised from it), about the other person: nothing person-level covers u.
+    await app.prisma.docLegalHold.create({ data: { tenantId: T, subjectUserId: other, incidentCaseId: kase.id, reason: 'court order', ownerId: 'admin-x', placedBy: 'admin-x', reviewBy: soon() } });
+    const trip = await app.prisma.tripSafetySession.create({ data: { tenantId: T, orderId: `ord-${nanoid(8)}`, orderType: 'TAXI', passengerUserId: u, driverUserId: other, status: 'CLOSED', closedAt: new Date(),
+      escalatedToSosId: sos.id, riskFactors: { night: true } } });
+    const bundle = await app.prisma.evidenceBundle.create({ data: { tenantId: T, bundleNumber: `EB-${nanoid(8)}`, sosAlertId: sos.id, subjectUserId: u } });
+    await app.prisma.evidenceItem.create({ data: { bundleId: bundle.id, kind: 'LOCATION_FIX', label: 'fix', content: { lat: 6.8 }, contentHash: 'h'.repeat(64) } });
+    await erase(u);
+    const a = await app.prisma.sosAlert.findUniqueOrThrow({ where: { id: sos.id } });
+    expect([a.triggerLat, a.triggerNote]).toEqual([6.8, 'Doc-held']);
+    expect(await app.prisma.sosRetrigger.count({ where: { sosAlertId: sos.id } })).toBe(1);
+    expect((await app.prisma.tripSafetySession.findUniqueOrThrow({ where: { id: trip.id } })).riskFactors).toEqual({ night: true });
+    expect(await app.prisma.evidenceItem.count({ where: { bundleId: bundle.id } })).toBe(1);
+    expect((await app.prisma.incidentCase.findUniqueOrThrow({ where: { id: kase.id } })).summary).toBe('About the SOS');
   });
 
   it('an open case: the erasure opens a safety deletion hold, so every safety record stays whole', async () => {
