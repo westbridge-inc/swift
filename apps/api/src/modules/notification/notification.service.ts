@@ -1,4 +1,5 @@
 import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { sendPushAfterResponse } from '../../lib/push-after-response';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
@@ -26,8 +27,9 @@ const DEFAULT_PREFS: NotificationPrefs = { push: true, sms: true, email: false }
  *  sends stop paying for ghosts. Best-effort by design. */
 async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
   if (!invalidTokens?.length) return;
-  await prisma.deviceToken
-    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } })
+  // [item 20] Dead tokens are anyone's: the named capability under the owner wall.
+  await ownerWallSystem('push:dead-token-cleanup', () => prisma.deviceToken
+    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } }))
     .catch((err) => {
       // [STORE-ALERT] Best-effort, never silent: the count only, never a token.
       log().warn({ err, count: invalidTokens.length }, 'dead push token cleanup failed');
@@ -164,10 +166,11 @@ export async function escalateVendorAlert(
       });
       // [RINGER] Each device is told what its app can ring with: the job
       // ring for a build that has it, today's push for builds 9-11.
-      const devices = await prisma.deviceToken.findMany({
+      // [item 20] The store team's devices, read for a job: the named capability under the owner wall.
+      const devices = await ownerWallSystem('push:vendor-re-alert-devices', () => prisma.deviceToken.findMany({
         where: { userId: alert.userId, isActive: true },
         select: PUSH_DEVICE_SELECT,
-      });
+      }));
       if (devices.length > 0) {
         await pushToDevices(channels.push, devices, 'Order still waiting!', alert.body, payload)
           .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
@@ -606,10 +609,11 @@ export class NotificationService {
 
       if (!prefs.push) recordNoPushDevice(data);
       if (prefs.push) {
-        const devices = await this.prisma.deviceToken.findMany({
+        // [item 20] The recipient's devices, read from whoever's request sends it: the named capability under the owner wall.
+        const devices = await ownerWallSystem('push:recipient-devices', () => this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
           select: PUSH_DEVICE_SELECT, orderBy: { token: 'asc' },
-        });
+        }));
         if (devices.length === 0) recordNoPushDevice(data);
         if (devices.length > 0) {
           // Channel failures must never break the request path — but after the
