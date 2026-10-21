@@ -1,4 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
+import { runAsSystem } from '../plugins/tenant-context';
+import { normalizePolicyExpression, TENANT_POLICY_CONTRACT } from './rls-attestation';
 import {
   isOwnedAvatarKey,
   resolveUnreferencedAvatarObject,
@@ -58,21 +60,24 @@ export function isAvatarErasureObligation(
 }
 
 /** Global completion census. The request-scoped StorageOrphan delegate would
- * hide a mismatched historical tenant row, so completion uses raw SQL while
- * the current privileged application credential can genuinely see all rows.
- * Once the app moves to the NOBYPASSRLS credential, this no-migration bridge
- * refuses to certify completion until structural object lineage/system-DB
- * transaction support replaces it. */
+ * hide a mismatched historical tenant row, so completion uses raw SQL on a
+ * connection that genuinely sees every tenant's rows, proven on that
+ * connection (storageOrphanCensusSeesEveryRow), never inferred from config.
+ *
+ * [Phase C] On the walled credentials (TENANT_RLS_BIND=1, least-privilege
+ * request login) the request's connection is tenant-filtered, so the census
+ * is system work: runAsSystem makes its transaction BEGIN on the system login,
+ * whose swift_bypass_rls membership the tenant policy admits. It is never
+ * called inside a caller's transaction (it takes the client and opens its
+ * own), where a system query would be refused rather than moved. With the
+ * wall off it runs on the one connection, as before. Without a system login
+ * the census still refuses, and the account answer stays pending. */
 export async function openAvatarErasureObligationIds(
   db: PrismaClient,
   userId: string,
 ): Promise<string[]> {
-  return db.$transaction(async (tx) => {
-    const visibility = await tx.$queryRaw<Array<{ active: boolean }>>`
-      SELECT row_security_active('storage_orphans'::regclass) AS "active"
-      /* avatar-obligation-global-census-visibility */
-    `;
-    if (visibility.length !== 1 || visibility[0]?.active !== false) {
+  return runAsSystem('account:erasure-avatar-census', () => db.$transaction(async (tx) => {
+    if (!(await storageOrphanCensusSeesEveryRow(tx))) {
       throw new Error('Global avatar erasure census is filtered by row-level security');
     }
     const rows = await tx.$queryRaw<Array<{ id: string; key: string; reason: string; userId: string | null }>>`
@@ -83,7 +88,40 @@ export async function openAvatarErasureObligationIds(
       /* avatar-obligation-global-census */
     `;
     return rows.filter((row) => isAvatarErasureObligation(row, userId)).map((row) => row.id);
-  });
+  }));
+}
+
+type RawTx = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
+type CensusPolicy = { permissive: boolean; cmd: string; applies: boolean; qual: string | null };
+
+/** Does THIS connection see every row of storage_orphans? Either row security
+ * is not applied to it at all (a superuser, a BYPASSRLS login, the owner of an
+ * unforced table: the wall-off posture), or it is a swift_bypass_rls member
+ * (the system login) and every policy that filters its reads is the tenant
+ * contract itself, whose escape admits that membership, with no restrictive
+ * policy to narrow it. Postgres reports row security ACTIVE for the system
+ * login (the escape is a policy term, not a role attribute), so the bare
+ * row_security_active check would refuse it for ever. */
+export async function storageOrphanCensusSeesEveryRow(tx: RawTx): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ active: boolean; bypass?: boolean; policies?: CensusPolicy[] }>>`
+    SELECT row_security_active('storage_orphans'::regclass) AS "active",
+           COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+           COALESCE((SELECT json_agg(json_build_object(
+                       'permissive', p.polpermissive,
+                       'cmd', p.polcmd::text,
+                       'applies', p.polroles = '{0}'::oid[]
+                                  OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                       'qual', pg_get_expr(p.polqual, p.polrelid)))
+                       FROM pg_policy p WHERE p.polrelid = 'storage_orphans'::regclass), '[]'::json) AS "policies"
+    /* avatar-obligation-global-census-visibility */
+  `;
+  if (rows.length !== 1) return false;
+  const [row] = rows;
+  if (row?.active === false) return true;
+  if (row?.bypass !== true || !Array.isArray(row.policies)) return false;
+  const reads = row.policies.filter((p) => p.applies && (p.cmd === '*' || p.cmd === 'r'));
+  return !reads.some((p) => !p.permissive)
+    && reads.some((p) => p.permissive && normalizePolicyExpression(p.qual) === TENANT_POLICY_CONTRACT);
 }
 
 /** The strict writer is used when an object pointer is about to disappear.
