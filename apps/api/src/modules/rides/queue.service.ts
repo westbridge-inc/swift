@@ -225,8 +225,9 @@ export async function scanRideQueue(
           passengerCount: e.passengerCount,
           rideClass: e.rideClass as RideClass,
           // [PRICE-LOCK · row 448] Booked only at the fare the passenger was shown
-          // when they joined; a fare that moved since is refused (FARE_CHANGED)
-          // and handled below. A join from an app before the lock has none.
+          // when they joined (or, from an app before the lock, the fare at the
+          // join); a fare that moved since is refused (FARE_CHANGED) and handled
+          // below. Entries from before this migration have none.
           ...(e.quotedFare != null ? { expectedFare: Number(e.quotedFare) } : {}),
         },
         false, // the scan just read supply — no availability pre-check race
@@ -274,7 +275,7 @@ export async function scanRideQueue(
               type: 'ORDER_UPDATE',
               title: `The fare to ${e.dropoffAddress} changed`,
               body: typeof fareNow === 'number'
-                ? `A driver freed up, but the fare is now ${shown(fareNow)}, not the ${shown(Number(e.quotedFare))} you were shown. Nothing was booked. Tap to see it and request again.`
+                ? `A driver freed up, but the fare is now ${shown(fareNow)}, not the ${shown(Number(e.quotedFare))} you joined at. Nothing was booked. Tap to see it and request again.`
                 : 'A driver freed up, but the fare changed since you joined. Nothing was booked. Tap to see the new fare and request again.',
               audience: 'customer',
               data: {

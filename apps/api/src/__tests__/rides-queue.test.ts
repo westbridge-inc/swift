@@ -616,7 +616,7 @@ describe('[PRICE-LOCK] a queued ride is booked only at the fare the passenger wa
       });
       expect(note.title).toBe('The fare to Camp Street changed');
       const gyd = (n: number) => formatMoney(n, 'GYD', { code: true, whole: true });
-      expect(note.body).toContain(`the fare is now ${gyd(fareNow)}, not the ${gyd(fare)} you were shown`);
+      expect(note.body).toContain(`the fare is now ${gyd(fareNow)}, not the ${gyd(fare)} you joined at`);
       expect(note.body).toContain('Nothing was booked');
       // The next scan leaves it alone: one question, never a second.
       await runScan();
@@ -626,12 +626,51 @@ describe('[PRICE-LOCK] a queued ride is booked only at the fare the passenger wa
     }
   });
 
-  it('an app from before the lock sends no fare: queued with none, and booked at the scan-time fare as before', async () => {
+  // Every store build today joins without the fare: the entry keeps the fare of
+  // the join (the one their screen was quoted), so the wait never moves it.
+  it('an app from before the lock sends no fare: the entry keeps the fare at the join, and the scan books at exactly that fare', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const fare = await shownFare(c.token);
     expect((await join(c.token)).statusCode).toBe(201);
     const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId, status: 'WAITING' } });
-    expect(entry.quotedFare).toBeNull();
+    expect(Number(entry.quotedFare)).toBe(fare);
+    await aloneInLine(c.userId);
+    await makeDriver(GT);
+    expect((await runScan()).matched).toBe(1);
+    const order = await app.prisma.order.findFirstOrThrow({ where: { customerId: c.userId } });
+    expect(Number(order.taxiFareTotal)).toBe(fare);
+    await app.prisma.order.update({ where: { id: order.id }, data: { status: 'CANCELLED' } });
+  });
+
+  it('an app from before the lock: a fare that moves while they wait is never charged either', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fare = await shownFare(c.token);
+    expect((await join(c.token)).statusCode).toBe(201);
+    const restore = await pinLegacyGuyanaTaxiCard(app.prisma);
+    try {
+      const fareNow = await shownFare(c.token);
+      expect(fareNow).not.toBe(fare);
+      await aloneInLine(c.userId);
+      await makeDriver(GT);
+      expect((await runScan()).matched).toBe(0);
+      expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
+      const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId } });
+      expect([entry.status, entry.matchedOrderId]).toEqual(['EXPIRED', null]);
+      const note = await app.prisma.notification.findFirstOrThrow({
+        where: { userId: c.userId, data: { path: ['kind'], equals: 'ride_queue_expired' } },
+      });
+      const gyd = (n: number) => formatMoney(n, 'GYD', { code: true, whole: true });
+      expect(note.body).toContain(`the fare is now ${gyd(fareNow)}, not the ${gyd(fare)} you joined at`);
+    } finally {
+      await restore();
+    }
+  });
+
+  it('an entry from before the migration has no fare: booked at the scan-time fare as before', async () => {
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const fare = await shownFare(c.token);
+    expect((await join(c.token)).statusCode).toBe(201);
+    await app.prisma.rideQueueEntry.updateMany({ where: { customerId: c.userId, status: 'WAITING' }, data: { quotedFare: null } });
     await aloneInLine(c.userId);
     await makeDriver(GT);
     expect((await runScan()).matched).toBe(1);
