@@ -42,11 +42,41 @@ describe('batchClock', () => {
     expect(clock().getTime()).toBe(AT.getTime());
   });
 
-  it('moves with the real (monotonic) clock by default', async () => {
+  it('moves with the real clock by default', async () => {
     const clock = batchClock(AT);
     const first = clock().getTime();
     await sleep(STEP);
     expect(clock().getTime() - first).toBeGreaterThanOrEqual(STEP - 5);
+  });
+
+  it('a test that freezes the clock (fake Date) freezes the batch clock with it, to the millisecond', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(AT);
+      const clock = batchClock(new Date());
+      await sleep(STEP); // real time passes; the frozen clock does not
+      expect(clock().getTime()).toBe(AT.getTime());
+      vi.setSystemTime(AT.getTime() + 1_000); // the test moves its clock: the batch moves with it
+      expect(clock().getTime()).toBe(AT.getTime() + 1_000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a wall-clock step back never dates a later item before an earlier one', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(AT);
+      const clock = batchClock(new Date());
+      vi.setSystemTime(AT.getTime() + 5_000);
+      expect(clock().getTime()).toBe(AT.getTime() + 5_000);
+      vi.setSystemTime(AT.getTime() + 2_000); // the wall clock is stepped back 3 s
+      expect(clock().getTime()).toBe(AT.getTime() + 5_000);
+      vi.setSystemTime(AT.getTime() + 7_000);
+      expect(clock().getTime()).toBe(AT.getTime() + 7_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
