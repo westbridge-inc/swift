@@ -734,6 +734,41 @@ describe('[UI-SWEEP U01] a parcel is booked once', () => {
     expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null).toBeNull();
     expect(navigation.replace).not.toHaveBeenCalled();
   });
+
+  // [REVIEW-F #1900 S4-1] The retire set, pinned on both sides: every refusal the
+  // server checks before writing retires the key (the next send is a new
+  // parcel), and any other 4xx keeps it (it might hide a parcel already made).
+  it.each([
+    [400, 'VALIDATION_ERROR'], [413, 'PARCEL_TOO_BIG'], [403, 'ACCOUNT_RESTRICTED'], [422, 'PROHIBITED_PARCEL'],
+    [409, 'PRICE_CHANGED'], [422, 'IDEMPOTENCY_MISMATCH'], [400, 'INVALID_IDEMPOTENCY_KEY'],
+  ] as const)('a %s %s refusal retires the key: the next send is a new intent', async (status, code) => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1
+      ? refuse(status, code, code === 'PRICE_CHANGED' ? { expectedFee: 1160, fee: 1160, currencyCode: 'GYD' } : undefined)
+      : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null, 'the refused intent left no key behind').toBeNull();
+    await click(sendButton() ?? null);
+    const keys = keysSent();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toMatch(/^parcel_/);
+    expect(keys[1], 'a fresh key, never the refused one').not.toBe(keys[0]);
+  });
+
+  it.each([
+    [429, 'RATE_LIMITED'], [409, 'COURIER_BUSY'], [404, 'NOT_FOUND'], [400, 'BAD_REQUEST'],
+  ] as const)('a %s %s refusal (not on the list) KEEPS the key for the retry', async (status, code) => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? refuse(status, code) : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    const [first] = keysSent();
+    expect(fx.storage.get('swift.courier.requestAttempt.v1'), 'the key outlives the refusal').toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
+  });
 });
 
 describe('a road-routing outage is explained on single-stop quote screens', () => {
