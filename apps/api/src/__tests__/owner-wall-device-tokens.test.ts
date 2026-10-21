@@ -26,6 +26,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { delegateEscapes } from './helpers/delegate-escapes';
 import { testPhone } from './helpers/fixture-ids';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_NOTICE_ACTIONS } from '../lib/owner-wall-notices';
@@ -229,6 +230,7 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
     walk(root);
     const calls: Record<string, number> = {};
     const txWrites: string[] = [];
+    const escapes: string[] = [];
     for (const path of files) {
       const rel = relative(root, path);
       const text = readFileSync(path, 'utf8');
@@ -236,6 +238,7 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
       if (n > 0) calls[rel] = n;
       if (rel !== 'lib/owner-rls.ts' && /swift_owner_wall_(revoke|erase)/.test(text)) txWrites.push(`${rel}: calls a device action by name`);
       for (const m of text.matchAll(/\btx\s*\.\s*deviceToken\s*\.\s*(update|updateMany|delete|deleteMany|create|createMany|upsert)\b/g)) txWrites.push(`${rel}: tx.deviceToken.${m[1]}`);
+      for (const form of delegateEscapes(text, 'deviceToken')) escapes.push(`${rel} ${form}`);
     }
     expect(calls).toEqual({
       'modules/auth/auth.service.ts': 3,
@@ -243,6 +246,9 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
       'modules/user/account.service.ts': 1,
     });
     expect(txWrites).toEqual([]);
+    // [REVIEW-M S4-3] ...and none reaches the device delegate any way the regex above cannot see (as a value, by a quoted
+    // name, destructured).
+    expect(escapes).toEqual([]);
   });
 });
 

@@ -30,6 +30,7 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { computedClientAccess, delegateEscapes } from './helpers/delegate-escapes';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { withAdminReason } from './helpers/admin-reason';
 import { readOwnerWallFacts } from '../lib/owner-rls';
@@ -246,6 +247,37 @@ describe('[item 20] support tickets for someone else', () => {
   });
 });
 
+describe('[item 20 · REVIEW-G N6] an account closure request, completed by the admin with the wall ON', () => {
+  it('its own tenant\'s: 200, the account closed and de-identified, the request resolved; another tenant\'s: 404 naming the ticket only, nothing touched', async () => {
+    const { AccountService } = await import('../modules/user/account.service');
+    const closer = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    const own = await asPerson(closer, () => new AccountService(app).requestClosure(closer));
+    const elsewhereCloser = await mkUser(['CUSTOMER'], 'CUSTOMER', { tenantId: OTHER_TENANT });
+    const elsewhere = await tenant.tenantContext.run({ tenantId: OTHER_TENANT, mode: 'request', userId: elsewhereCloser },
+      async () => await new AccountService(app).requestClosure(elsewhereCloser));
+    const complete = (ticketId: string) => {
+      const url = `/api/v1/admin/support/${ticketId}/complete-account-closure`;
+      return call('POST', url, tokens.admin, withAdminReason('POST', url, {}) as Record<string, unknown>);
+    };
+    // Another tenant's confirmed request is not found from here: the ticket, never the person behind it.
+    const refused = await complete(elsewhere.ticketId);
+    expect(refused.statusCode, refused.body).toBe(404);
+    expect(refused.json().error.message).toBe(`SupportTicket with id ${elsewhere.ticketId} not found`);
+    expect(refused.body).not.toContain(elsewhereCloser);
+    expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: elsewhere.ticketId } })).toMatchObject({ status: 'OPEN', resolvedAt: null });
+    expect(await owner.user.findUniqueOrThrow({ where: { id: elsewhereCloser } })).toMatchObject({ status: 'ACTIVE', firstName: 'Ticket' });
+    // Its own tenant's: read and closed through the named capability, the erasure run end to end.
+    const done = await complete(own.ticketId);
+    expect(done.statusCode, done.body).toBe(200);
+    // (The erasure's own report is not this test's subject: on this suite's tenant-walled request login its global avatar
+    // census refuses a row-security-filtered view and reports the erasure pending, which the retry job, as system, finishes.)
+    expect(done.json().data, done.body).toMatchObject({ ticketId: own.ticketId, outcome: expect.objectContaining({ deleted: expect.any(Boolean) }) });
+    expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: own.ticketId } }))
+      .toMatchObject({ status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: ids.admin });
+    expect(await owner.user.findUniqueOrThrow({ where: { id: closer } })).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${closer}` });
+  });
+});
+
 describe('[item 20] GOLDEN: with the wall ON the ticket helper and actions match the calls they replaced', () => {
   it('opening a case for someone: the same row both ways, an id of the same cuid shape', async () => {
     const make = (userId: string) => ({ userId, orderId: ids.goldOrder, category: 'PAYMENT' as const, subject: `Gold ${RUN}`, message: 'gold case' });
@@ -299,6 +331,8 @@ describe('[item 20] support tickets: the census', () => {
     const actionCalls: Record<string, number> = {};
     const named: string[] = [];
     const relations: Record<string, number> = {};
+    const escapes: Record<string, number> = {};
+    const computed: Record<string, number> = {};
     const bump = (map: Record<string, number>, key: string) => { map[key] = (map[key] ?? 0) + 1; };
     for (const path of files) {
       const rel = relative(root, path);
@@ -308,6 +342,8 @@ describe('[item 20] support tickets: the census', () => {
       for (const m of text.matchAll(/\b(orderCaseExists|closeOrderCase)\s*\(/g)) if (!/function\s+$/.test(text.slice(0, m.index))) bump(actionCalls, `${rel} ${m[1]}`);
       if (rel !== HELPER && /swift_owner_wall_(order_case_exists|close_order_case)/.test(text)) named.push(rel);
       for (let n = (text.match(/\bsupportTickets\s*:/g) ?? []).length; n > 0; n -= 1) bump(relations, rel);
+      for (const form of delegateEscapes(text, 'supportTicket')) bump(escapes, `${rel} ${form}`);
+      for (const form of computedClientAccess(text)) bump(computed, `${rel} ${form}`);
     }
     expect(sites).toEqual({
       // The person's own: filing, listing, the closure request (in its own transaction).
@@ -334,6 +370,18 @@ describe('[item 20] support tickets: the census', () => {
     // The sweep's order filter (a system job) and closeStoreSilentMmgCase's type.
     // (and the inactive-account sweep's user filter, a system job).
     expect(relations).toEqual({ 'modules/order/mmg-accept-expiry.ts': 1, 'modules/user/inactivity.ts': 1 });
+    // [REVIEW-M S4-3] The sites above are `.supportTicket.<op>(` calls. A ticket delegate taken as a value, by a quoted
+    // name or destructured — or any client indexed by a computed name — would escape them. Pinned, none a delegate: the
+    // helper's writer type, closeStoreSilentMmgCase's transaction type, tenantPrisma's child scope for the model, and
+    // the admin authority's entity name.
+    expect(escapes).toEqual({
+      [`${HELPER} { supportTicket } key or destructuring`]: 1,
+      [`${HELPER} ['supportTicket']`]: 1,
+      'modules/order/mmg-accept-expiry.ts { supportTicket } key or destructuring': 1,
+      'modules/admin/admin.routes.ts { supportTicket } key or destructuring': 1,
+      'modules/admin/admin-authority.ts .supportTicket without a call': 1,
+    });
+    expect(computed).toEqual({});
     // The admin queue's service is given the capability.
     expect(readFileSync(join(root, 'modules/admin/admin.routes.ts'), 'utf8')).toMatch(/new SupportService\(tenantPrisma, notifications, \{ capability: 'admin:support-queue', client: app\.prisma \}\)/);
   });
