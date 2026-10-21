@@ -66,6 +66,8 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await system(async () => {
+    await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: ids } } }).catch(() => undefined);
+    await app.prisma.complianceReviewCase.deleteMany({ where: { userId: { in: ids } } }).catch(() => undefined);
     await app.prisma.verificationDocument.updateMany({ where: { userId: { in: ids } }, data: { legalHoldId: null } });
     await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: ids } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
@@ -301,6 +303,40 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect(outcome).toBe('NOT_PURGED');
     expect((await docOf(d.id)).purgedAt).toBeNull();
     expect(await stored(d.fileUrl)).toBe(true);
+  });
+});
+
+describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance or dispute case keeps the documents, like a hold', () => {
+  const incident = (userId: string) => system(() => app.prisma.incidentCase.create({ data: {
+    caseNumber: `INC-${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`, severity: 'S3', category: 'dispute', intake: 'OPS_CREATED',
+    subjectUserId: userId, summary: 'synthetic open case', slaAckBy: later(1), slaDecideBy: later(10),
+  } }));
+
+  it('an open safety case: no notice, nothing deleted; once it is closed (no hold) the 76/90-day clock runs and the documents go', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const c = await incident(u);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    await system(() => app.prisma.incidentCase.update({ where: { id: c.id }, data: { status: 'CLOSED', closedAt: new Date() } }));
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    // [REVIEW-M S4-1] the record says which inbox row the notice is, and whether a push reached a phone
+    const audit = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: u, action: ABANDON_NOTICE_ACTION } }));
+    expect(audit.changes).toMatchObject({ pushed: false });
+    expect(typeof (audit.changes as { notificationId?: unknown }).notificationId).toBe('string');
+    expect(await sweep(later(14.01), u)).toMatchObject({ purged: 1 });
+    expect((await docOf(d.id)).purgedAt).not.toBeNull();
+  });
+
+  it('an open compliance review keeps them too', async () => {
+    const u = await person('DRIVER');
+    const d = await doc(u, 'DRIVER', 'REJECTED', 100);
+    await system(() => app.prisma.complianceReviewCase.create({ data: { userId: u, dueAt: later(5) } }));
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect((await docOf(d.id)).purgedAt).toBeNull();
   });
 });
 

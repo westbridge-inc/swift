@@ -16,7 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -2880,6 +2880,9 @@ export class VerificationService {
     for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);
     const lastActivityAt = new Date(last);
     if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
+    // [REVIEW-M S4-3 · COORD] An open fraud, safety, compliance or dispute case keeps the documents, like a hold:
+    // no notice (it would not be true), nothing deleted, until it closes.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     // The application's documents: partner documents of a role never verified, not held, not an AML record.
     const verified = await everVerifiedRoles(this.prisma, userId, (roleKey) => this.everCompletedChecklist(userId, roleKey));
     const config = await this.countryConfig.getByCode(user.countryCode);
@@ -2901,7 +2904,9 @@ export class VerificationService {
       orderBy: { createdAt: 'asc' }, select: { createdAt: true },
     });
     if (!notice) {
-      await this.notifications.send({
+      // [REVIEW-M S4-1] The in-app notice is the inbox row (written or the call throws, and then no record either);
+      // whether a push also reached a phone is recorded with it, never assumed.
+      const reach = await this.notifications.sendReach({
         userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
         // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
         ...(candidates.some((d) => d.role === 'VENDOR_OWNER') ? { audience: 'business' as const }
@@ -2911,7 +2916,7 @@ export class VerificationService {
       });
       await this.prisma.auditLog.create({ data: {
         userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
-        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length },
+        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length, notificationId: reach.id, pushed: reach.pushed },
       } });
       return { noticed: 1, purged: 0 };
     }

@@ -62,6 +62,52 @@ export function abandonPurgeDueAt(lastActivityAt: Date, noticeAt: Date): Date {
 
 type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvider' | 'subscription' | 'moverFeeAuthority'>;
 
+type CaseDb = Pick<PrismaClient, 'verificationDocument' | 'rider' | 'driver' | 'fraudCase' | 'incidentCase' | 'complianceReviewCase' | 'reviewCase'
+  | 'identityClusterMember' | 'identityReviewCase' | 'custodyRecoveryCase' | 'contentReport' | 'ratingReport' | 'reimbursementClaim'>;
+
+/**
+ * [Row 249 · REVIEW-M S4-3 · COORD ruling 18:4xZ] An OPEN fraud, safety, compliance or dispute case on the person or on
+ * one of their documents keeps their documents, like a hold: no notice, nothing deleted, until it closes (then the
+ * 76/90-day clock applies as usual). Fails toward keeping: any error reads as an open case.
+ *  - fraud: any confirmed FraudCase on the person or a document (it has no closed state: the founder decides), an OPEN
+ *    identity review of the person's identity cluster;
+ *  - safety: an IncidentCase the person is subject or reporter of that is not CLOSED, or is under a legal hold;
+ *  - compliance: an OPEN ComplianceReviewCase; a document ReviewCase not closed;
+ *  - disputes: an unresolved custody recovery the person owns, a content report by or about them still PENDING or
+ *    REVIEWING, a rating report of theirs still PENDING, a reimbursement claim on them not yet decided or paid.
+ */
+export async function openCaseKeeps(db: CaseDb, userId: string): Promise<boolean> {
+  try {
+    const [docs, rider, driver, member] = await Promise.all([
+      db.verificationDocument.findMany({ where: { userId }, select: { id: true } }),
+      db.rider.findUnique({ where: { userId }, select: { id: true } }),
+      db.driver.findUnique({ where: { userId }, select: { id: true } }),
+      db.identityClusterMember.findUnique({ where: { accountId: userId }, select: { clusterId: true } }),
+    ]);
+    const docIds = docs.map((d) => d.id);
+    const counts = await Promise.all([
+      db.fraudCase.count({ where: { OR: [{ subjectUserId: userId }, { submissionId: { in: docIds } }] } }),
+      member ? db.identityReviewCase.count({ where: { clusterId: member.clusterId, status: 'OPEN' } }) : 0,
+      db.incidentCase.count({ where: {
+        OR: [{ subjectUserId: userId }, { reporterUserId: userId }],
+        AND: [{ OR: [{ status: { not: 'CLOSED' } }, { legalHold: true }, { legalHoldRecord: { isNot: null } }] }],
+      } }),
+      db.complianceReviewCase.count({ where: { userId, status: 'OPEN' } }),
+      docIds.length ? db.reviewCase.count({ where: { submissionId: { in: docIds }, closedAt: null } }) : 0,
+      db.custodyRecoveryCase.count({ where: { ownerUserId: userId, resolvedAt: null } }),
+      db.contentReport.count({ where: { OR: [{ targetId: userId }, { reporterId: userId }], status: { in: ['PENDING', 'REVIEWING'] } } }),
+      db.ratingReport.count({ where: { reporterId: userId, status: 'PENDING' } }),
+      db.reimbursementClaim.count({ where: {
+        OR: [{ customerId: userId }, ...(rider ? [{ riderId: rider.id }] : []), ...(driver ? [{ driverId: driver.id }] : [])],
+        status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] },
+      } }),
+    ]);
+    return counts.some((n) => n > 0);
+  } catch {
+    return true;
+  }
+}
+
 /** A document Swift approved at some point (it may since have lapsed, or its image gone). */
 export const EVER_APPROVED_WHERE: Prisma.VerificationDocumentWhereInput = {
   OR: [{ state: { in: ['AUTO_APPROVED', 'APPROVED', 'COMMITTED', 'EXPIRED'] } }, { status: { in: ['APPROVED', 'EXPIRED'] } }, { imagePurgedAt: { not: null } }],
