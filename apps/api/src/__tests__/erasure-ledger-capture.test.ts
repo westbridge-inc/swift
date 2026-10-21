@@ -101,6 +101,18 @@ describe('every erasure writes its off-site ledger entry, in its own transaction
     expect(rights[0]).toEqual({ sel: true, ins: false, upd: false, del: false });
   });
 
+  it('[#1984 REVIEW-M S4-3] the trigger waits for exactly the tombstone AccountService writes (a changed literal is red here)', () => {
+    const service = readFileSync(join(__dirname, '../modules/user/account.service.ts'), 'utf8');
+    const migration = readFileSync(join(__dirname, '../../prisma/migrations/20261021140000_offsite_erasure_ledger/migration.sql'), 'utf8');
+    const tombstone = service.slice(service.indexOf("firstName: 'Deleted'") - 200, service.indexOf("firstName: 'Deleted'") + 400);
+    for (const literal of ["firstName: 'Deleted'", "lastName: 'User'", 'email: null', 'passwordHash: null', 'avatar: null', 'lastKnownLat: null', 'lastKnownLng: null', 'phone: `deleted:${userId}`']) {
+      expect(tombstone, literal).toContain(literal);
+    }
+    expect(migration).toContain(`AND NEW."firstName" = 'Deleted' AND NEW."lastName" = 'User' AND NEW.email IS NULL AND NEW."passwordHash" IS NULL`);
+    expect(migration).toContain(`AND NEW.avatar IS NULL AND NEW."lastKnownLat" IS NULL AND NEW."lastKnownLng" IS NULL`);
+    expect(migration).toContain(`NEW.phone = 'deleted:' || NEW.id`);
+  });
+
   it('every table the restore replay deletes from has its capture trigger (a new one is red here)', async () => {
     const replay = readFileSync(join(__dirname, '../../../../deploy/restore-replay-erasures.sql'), 'utf8');
     const tables = [...replay.matchAll(/DELETE FROM ("?[A-Za-z_]+"?) t USING restore_closed_ids/g)].map((m) => m[1]!.replace(/"/g, ''));

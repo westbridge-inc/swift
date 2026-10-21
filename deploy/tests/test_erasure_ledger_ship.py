@@ -157,6 +157,14 @@ class ErasureLedgerShip(unittest.TestCase):
         self.assertEqual(self.objects(), [])
         self.assertFalse(self.ships.exists())
 
+    def test_outside_production_without_the_owner_key_nothing_leaves_in_clear(self):
+        # [#1984 REVIEW-F S4-1] staging serves real people until the cutover: no batch ever leaves unencrypted.
+        r = self.run_ship("--project", "swift", PILOT_ENV="staging", BACKUP_GPG_FINGERPRINT=None, BACKUP_GPG_RECIPIENT_FILE=None)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("owner's backup key", r.stderr)
+        self.assertEqual(self.objects(), [])
+        self.assertFalse(self.ships.exists())
+
     def test_without_an_offsite_bucket_nothing_is_recorded(self):
         r = self.run_ship("--project", "swift", BACKUP_BUCKET=None)
         self.assertNotEqual(r.returncode, 0)
@@ -177,6 +185,14 @@ class ShipperUnits(unittest.TestCase):
         unit = (DEPLOY / "swift-erasure-ledger.service").read_text()
         self.assertIn("ExecStart=/opt/swift/deploy/erasure-ledger-ship.sh --project swift", unit)
         self.assertIn("UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE", unit)
+
+    def test_production_pilot_up_needs_the_ledger_timer_before_the_api_starts(self):
+        # [#1984 REVIEW-G S3-1] the watch pages production; the shipper must exist before the API does.
+        pilot = (DEPLOY / "pilot-up.sh").read_text()
+        block = pilot[pilot.index('if [ "$PILOT_ENV" = production ]; then\n  env -u BACKUP_GPG_RECIPIENT_FILE'):]
+        block = block[:block.index("\nfi\n")]
+        self.assertIn('if [ "$DATA_ONLY" -eq 0 ]; then', block)
+        self.assertIn("systemctl is-enabled --quiet swift-erasure-ledger.timer && systemctl is-active --quiet swift-erasure-ledger.timer ||", block)
 
     def test_the_doctor_fails_on_an_unshipped_entry_and_a_missing_production_timer(self):
         doctor = (DEPLOY / "doctor.sh").read_text()

@@ -43,6 +43,16 @@ afterAll(async () => {
 });
 
 describe('an erasure that never reaches the off-site ledger is an incident', () => {
+  it('[#1984 REVIEW-G S3-1] outside production (no shipper is required there) a stale ledger is reported, never paged', async () => {
+    const deps = { prisma: app.prisma, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) };
+    const old = await entryAged(20);
+    const quiet = await sys(() => pageErasureLedgerShipping(deps, { PILOT_ENV: 'staging' }));
+    expect(quiet.result.stale).toBe(true);
+    expect(quiet.page).toBeNull();
+    expect(await sys(() => app.prisma.opsAlert.count({ where: { title: ERASURE_LEDGER_PAGE_TITLE, closedAt: null } }))).toBe(0);
+    await ship(old);
+  });
+
   it('the window is 10 minutes', () => { expect(ERASURE_LEDGER_MAX_UNSHIPPED_MINUTES).toBe(10); });
 
   it('everything shipped: calm', async () => {
@@ -66,13 +76,13 @@ describe('an erasure that never reaches the off-site ledger is an incident', () 
   it('a stale ledger pages the platform responders; a shipped one closes the page', async () => {
     const deps = { prisma: app.prisma, redis: app.redis, notifications: new NotificationService(app.prisma, app.io) };
     const old = await entryAged(15);
-    const stale = await sys(() => pageErasureLedgerShipping(deps));
+    const stale = await sys(() => pageErasureLedgerShipping(deps, { PILOT_ENV: 'production' }));
     expect(stale.result.stale).toBe(true);
     expect(stale.page).not.toBeNull();
     const open = await sys(() => app.prisma.opsAlert.findMany({ where: { title: ERASURE_LEDGER_PAGE_TITLE } }));
     expect(open.length).toBeGreaterThan(0);
     await ship(old);
-    const calm = await sys(() => pageErasureLedgerShipping(deps));
+    const calm = await sys(() => pageErasureLedgerShipping(deps, { PILOT_ENV: 'production' }));
     expect(calm.result.stale).toBe(false);
     expect(calm.page).toBeNull();
   });
