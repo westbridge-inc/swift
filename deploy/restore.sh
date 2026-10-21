@@ -406,7 +406,7 @@ compare_with_source() {
   local live_snapshot scratch_snapshot
   live_snapshot="$(db_psql "$LIVE_DB" -q -tA -c "$POSTURE_SQL")" || die "could not read the source database $LIVE_DB; scratch database retained"
   scratch_snapshot="$(db_psql "$SCRATCH" -q -tA -c "$POSTURE_SQL")" || die "could not read the scratch database; scratch database retained"
-  printf '%s\n' "$live_snapshot" | grep -q '^rows|' || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
+  grep -q '^rows|' <<<"$live_snapshot" || die "the source database $LIVE_DB has no tables to compare; scratch database retained"
   summarize() {
     printf '%s\n' "$1" | awk -F'|' -v who="$2" '
       $1 == "rows" { tables++; rows += $3 }
@@ -446,7 +446,8 @@ SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
 if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
-  echo "NOT erasure-complete: replay the off-site ledger before use" | tee /dev/stderr
+  echo "NOT erasure-complete: replay the off-site ledger before use"
+  echo "NOT erasure-complete: replay the off-site ledger before use" >&2
   echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
   echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"
   exit 3
