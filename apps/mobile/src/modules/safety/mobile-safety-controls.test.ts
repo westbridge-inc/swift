@@ -8,6 +8,7 @@ const host = vi.hoisted(() => ({
   status: 'ACTIVE', tasks: [] as Promise<unknown>[],
   getSos: vi.fn(), flagged: null as string | null, monitoringValue: false,
   sos: vi.fn(), monitoringRead: vi.fn(), monitoringWrite: vi.fn(), markSafe: vi.fn(),
+  ownedRows: [] as Array<Record<string, unknown>>,
 }));
 vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
@@ -21,6 +22,7 @@ vi.mock('react', async (original) => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
+  useInfiniteQuery: () => ({ data: { pages: [{ rows: host.ownedRows, nextCursor: null }] }, isPending: false, isError: false, isFetching: false, hasNextPage: false, refetch: vi.fn() }),
   useQuery: (options: { queryKey: string[] }) => ({ data: options.queryKey.includes('owned-alert') ? { id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: host.status, userSafeFlaggedAt: host.flagged } : options.queryKey.includes('monitoring') ? host.monitoringValue : undefined, isLoading: false, refetch: async () => ({ data: false }) }),
   useMutation: (options: { mutationFn: (arg: unknown) => Promise<unknown>; onSuccess?: () => void; onSettled?: () => void }) => ({
     isPending: false, isError: false,
@@ -72,6 +74,7 @@ import { MonitoringControl } from './MonitoringControl';
 import { OwnedSosActions } from './OwnedSosActions';
 import { SosCeremony } from './SosCeremony';
 import { ProfileScreen } from '../profile/screens/ProfileScreen';
+import { OwnedSafetyPanel } from './OwnedSafetyPanel';
 
 function elements(node: unknown): ReactElement<Record<string, unknown>>[] {
   if (Array.isArray(node)) return node.flatMap(elements);
@@ -87,7 +90,7 @@ function renderSos() {
 }
 beforeEach(() => {
   vi.clearAllMocks(); host.index = 0; host.slots = []; host.tasks = []; host.flagged = null; host.monitoringValue = false;
-  host.status = 'ACTIVE';
+  host.status = 'ACTIVE'; host.ownedRows = [];
   host.getSos.mockImplementation(async () => ({ data: { data: { id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: host.status, userSafeFlaggedAt: host.flagged } } }));
   host.monitoringWrite.mockResolvedValue({ data: { data: {} } });
   host.markSafe.mockResolvedValue({ data: { data: {} } });
@@ -110,6 +113,17 @@ describe('reachable safety controls on real mobile components', () => {
     const active = renderSos();
     expect(active.some((el) => el.type === 'PopupTitle'), 'server-raised alert rendered').toBe(true);
     expect(active.some((el) => el.type === 'PillButton' && /safe now/i.test(String(el.props['label']))), 'live owned alert has mark-safe control').toBe(true);
+  });
+});
+
+describe('[73] the signed-in safety control floats only over a live alert', () => {
+  it('a calm account sees nothing over the app; a live alert gets one control', () => {
+    host.index = 0;
+    expect(elements(OwnedSafetyPanel())).toEqual([]);
+    host.ownedRows = [{ id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: 'ACTIVE', userSafeFlaggedAt: null }];
+    host.index = 0;
+    const labels = elements(OwnedSafetyPanel()).filter((el) => el.type === 'PillButton').map((el) => el.props['label']);
+    expect(labels).toContain('My safety alert');
   });
 });
 

@@ -76,6 +76,12 @@ describe('current principal safety hook boundaries', () => {
     expect(await host.mutations[0]!['mutationFn']('synthetic-alert')).toEqual(flagged);
     expect(host.get).toHaveBeenCalledTimes(2); expect(host.mark).toHaveBeenCalledOnce();
   });
+  it('a write the server did not record is never reported as a saved safe flag', async () => {
+    useMarkSafeSos();
+    host.get.mockResolvedValueOnce(envelope(alert())).mockResolvedValueOnce(envelope(alert()));
+    await expect(host.mutations[0]!['mutationFn']('synthetic-alert')).rejects.toThrow('Could not verify your safe flag.');
+    expect(host.mark).toHaveBeenCalledOnce();
+  });
   it.each(['TRIGGER_PENDING', 'RESOLVED', 'CANCELLED'])('%s cannot acquire a first safe flag', async (status) => {
     useMarkSafeSos(); host.get.mockResolvedValue(envelope(alert({ status })));
     expect((await host.mutations[0]!['mutationFn']('synthetic-alert')).status).toBe(status);
