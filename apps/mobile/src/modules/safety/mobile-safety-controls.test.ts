@@ -153,12 +153,13 @@ describe('real safety control result presentation', () => {
     const first = renderControl(MonitoringControl);
     expect(first.some((el) => el.type === 'PillButton' && /save/i.test(String(el.props['label'])))).toBe(false);
     flip(first, true);
-    expect(host.monitoringWrite).toHaveBeenCalledOnce();
-    expect(host.monitoringWrite.mock.calls[0]![0]).toBe(true);
+    expect(host.tasks, 'the flip itself starts the save').toHaveLength(1);
     const saving = renderControl(MonitoringControl);
     expect(toggleOf(saving).props['value']).toBe(true);
     expect(toggleOf(saving).props['disabled'], 'no second flip while the write and its read-back run').toBe(true);
     await Promise.all(host.tasks);
+    expect(host.monitoringWrite).toHaveBeenCalledOnce();
+    expect(host.monitoringWrite.mock.calls[0]![0]).toBe(true);
     const saved = renderControl(MonitoringControl);
     expect(toggleOf(saved).props['value']).toBe(true);
     expect(toggleOf(saved).props['disabled']).toBe(false);

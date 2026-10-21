@@ -49,12 +49,12 @@ describe('every rendered state is the server’s', () => {
     expect(page).toContain('const status = serverStatus(data);');
     expect(page).toContain("recordSosTransition('ACTIVE', 'UNKNOWN')");
     expect(page).toContain("setOutcome('confirm-unknown')");
-    expect(page).not.toMatch(/setAlert\(\{ \.\.\.alert, status: 'ACTIVE' \}\)/);
+    expect(page).not.toMatch(/(set|change)Alert\(\{ \.\.\.alert, status: 'ACTIVE' \}\)/);
     // the error path is UNKNOWN or OFFLINE, never a paged state
     const onError = page.slice(page.indexOf('onError:'));
     expect(onError).toContain("isOffline(err) ? 'offline' : 'confirm-unknown'");
     expect(onError).not.toContain("status: 'ACTIVE'");
-    expect(onError).not.toContain('setAlert(');
+    expect(onError).not.toMatch(/(set|change)Alert\(/);
   });
   it('cancel treats ONLY a 409 SOS_NOT_CANCELLABLE as too-late; anything else is unknown or offline', () => {
     const cancel = between('const cancelAlert = () => {', 'const live = alert');
@@ -64,12 +64,12 @@ describe('every rendered state is the server’s', () => {
     expect(helper).toContain("=== 'SOS_NOT_CANCELLABLE'");
     // the ACTIVE inference exists only inside the 409 branch
     const branch = cancel.slice(cancel.indexOf('if (isSosNotCancellable(err)) {'), cancel.indexOf('return;', cancel.indexOf('if (isSosNotCancellable(err)) {')));
-    expect(branch).toContain("setAlert({ ...alert, status: 'ACTIVE' })");
+    expect(branch).toContain("changeAlert({ ...alert, status: 'ACTIVE' })");
     const after = cancel.slice(cancel.indexOf('return;', cancel.indexOf('if (isSosNotCancellable(err)) {')));
     expect(after).not.toContain("status: 'ACTIVE'");
     expect(after).toContain("setOutcome(isOffline(err) ? 'offline' : 'cancel-unknown')");
     // a successful cancel is CANCELLED only when the server says so
-    expect(cancel).toContain("if (status === 'CANCELLED') { setAlert({ ...alert, status: 'CANCELLED' }); return; }");
+    expect(cancel).toContain("if (status === 'CANCELLED') { changeAlert({ ...alert, status: 'CANCELLED' }); return; }");
   });
   it('serverStatus admits only the five real statuses; isOffline is "no response at all"', () => {
     const status = between('function serverStatus(data: unknown)', 'function isOffline(err: unknown): boolean {');
