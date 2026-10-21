@@ -113,13 +113,13 @@ describe('[UI-SWEEP U32] the item page never strands the customer', () => {
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 
-  it('an item the store took off: Back, and "Back to the store" instead of a Try again that cannot help', () => {
+  it('an item the store took off: Back, and a neutral "Go back" instead of a Try again that cannot help', () => {
     mocks.vendor = { isLoading: false, isError: false, refetch: vi.fn(), data: STORE };
     const tree = render();
     expect(ofType(tree, 'Header')).toHaveLength(1);
     expect(ofType(tree, 'ErrorState')).toEqual([]);
     const [gone] = ofType(tree, 'EmptyState');
-    expect(gone?.props).toMatchObject({ title: 'This item is no longer on the menu.', actionLabel: 'Back to the store' });
+    expect(gone?.props).toMatchObject({ title: 'This item is no longer on the menu.', actionLabel: 'Go back' });
     gone.props.onAction();
     expect(mocks.goBack).toHaveBeenCalledTimes(1);
   });
