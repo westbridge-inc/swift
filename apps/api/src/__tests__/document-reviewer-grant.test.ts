@@ -40,7 +40,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import * as authority from '../modules/admin/admin-authority';
-import { uniquePng } from './helpers/real-image';
+import { REAL_PNG, uniquePng } from './helpers/real-image';
 
 const GRANT = 'documents.review';
 const REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
@@ -225,7 +225,7 @@ describe('[V3] opening a document', () => {
     expect(new URL(path, 'http://x').searchParams.get('reviewer')).toBe(r.id);
     const first = await render(path);
     expect(first.statusCode).toBe(200);
-    expect(Buffer.from(first.rawPayload).equals(PNG)).toBe(true);
+    expect(Buffer.from(first.rawPayload).equals(REAL_PNG)).toBe(true); // [Row 238] the photo, its metadata note removed
     await system(() => app.prisma.admin.update({ where: { userId: r.id }, data: { permissions: ['*'] } }));
     const after = await render(path);
     expect(after.statusCode).toBe(403);

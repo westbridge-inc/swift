@@ -217,7 +217,9 @@ export function CourierScreen({ navigation }: any) {
       },
       {
         onSuccess: (res: any) => {
-          if (res?.orderId) navigation?.navigate?.('Delivery', { orderId: res.orderId });
+          // [UI-SWEEP U01] The sent parcel's tracking REPLACES the form: Back
+          // never returns to a filled, still-armed "Send parcel" button.
+          if (res?.orderId) navigation?.replace?.('Delivery', { orderId: res.orderId });
         },
         onError: (error: any) => {
           // The fee moved since the quote: fetch the new one to show (the
