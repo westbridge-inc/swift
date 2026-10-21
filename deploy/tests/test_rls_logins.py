@@ -18,7 +18,7 @@ def catalogue():
         'qrSchemaPresent': True, 'qrUnsafeGrants': 0, 'obsoleteExecutable': 0,
         'parentUpdateMissing': 0, 'appendOnlyUnsafeGrants': 0,
         'defaultGrantCount': 0, 'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0,
-        'groupOwnedObjects': 0,
+        'groupOwnedObjects': 0, 'ownerWallMembers': 0,
         'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64,
         'roles': {},
     }
@@ -115,6 +115,28 @@ class LoginPlanTests(unittest.TestCase):
                 cat['roles']['swift_app_login'][key] = value
                 with self.assertRaises(wall.Refusal):
                     wall.plan(cat, approved())
+
+    def test_phase_c_grants_no_owner_wall_membership(self):
+        """[item 20] The owner wall is a separate, later switch: any member of
+        swift_owner_wall, or a runtime login that reaches it, refuses by name."""
+        for members in (1, 2):
+            cat = catalogue()
+            cat['ownerWallMembers'] = members
+            with self.subTest(members=members), self.assertRaises(wall.Refusal) as refused:
+                wall.plan(cat, approved())
+            self.assertEqual(str(refused.exception), 'OWNER_WALL_MEMBER_PRESENT')
+        for name in ('swift_app_login', 'swift_system_login'):
+            cat = catalogue()
+            cat['roles'][name] = role(name)
+            cat['roles'][name]['reachable'] = cat['roles'][name]['reachable'] + ['swift_owner_wall']
+            with self.subTest(login=name), self.assertRaises(wall.Refusal) as refused:
+                wall.plan(cat, approved())
+            self.assertEqual(str(refused.exception), 'OWNER_WALL_MEMBER_PRESENT')
+        for value in (-1, True, '0', None):
+            cat = catalogue()
+            cat['ownerWallMembers'] = value
+            with self.subTest(value=value), self.assertRaises(wall.Refusal):
+                wall.plan(cat, approved())
 
     def test_every_target_and_acl_invariant_is_required(self):
         invalid = {'cluster': 'other', 'database': 'other', 'migration': 'other',
