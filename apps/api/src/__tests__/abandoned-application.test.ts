@@ -255,6 +255,18 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect(await notices(z)).toHaveLength(1);
   });
 
+  it('[REVIEW-G S3-1] a checklist that cannot be read counts as complete: the documents are kept', async () => {
+    const u = await person('RIDER');
+    await riderOf(u, 'MOTORCYCLE');
+    const id = await doc(u, 'RIDER', 'COMMITTED', 100, 'national_id'); // otherwise swept (the case above)
+    const svc = service([u]);
+    (svc as unknown as { checklistFor: () => Promise<string[]> }).checklistFor = async () => { throw new Error('synthetic checklist read failure'); };
+    expect(await system(() => svc.sweepAbandonedApplications(new Date()))).toMatchObject({ noticed: 0, purged: 0, failed: 0 });
+    expect(await system(() => svc.sweepAbandonedApplications(later(30)))).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(id.id)).purgedAt).toBeNull();
+  });
+
   it('[COORD security review (2)] more than a page of excluded people still lets the person behind them be swept', async () => {
     const tag = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
     const excluded: string[] = [];
