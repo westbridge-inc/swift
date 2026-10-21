@@ -65,7 +65,8 @@ describe('[ROLE-DOCS] the lists and the registry no longer ask for the removed d
     // a selfie is named by no list at all
     for (const [key, list] of Object.entries(DEFAULT_DOCUMENT_CHECKLISTS)) expect(list, key).not.toContain('selfie');
     // the change carries its own config version (production picks it up with the next owner-signed seed)
-    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-21.1');
+    // (2026-10-21.2 adds the own-name store lists on top: own-name-declaration.test.ts)
+    expect(PLATFORM_CONFIG_VERSION).toBe('2026-10-21.2');
   });
 
   it('no liquor licence, pharmacy authorisation or NIS registration is seeded, gated, disclosed or given an expiry', () => {
