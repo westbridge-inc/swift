@@ -8,9 +8,10 @@
  *   (modules/dispatch/dispatch.service.ts, modules/dispatch/rescue.ts).
  *
  * Text a person typed (a store's reject reason, a sender's or an admin's note)
- * and the server's own sentences are kept as written. A code this map does not
- * know never shows: the caller gets a neutral sentence or nothing.
- * Web and phone both import this module from `@swift/types`.
+ * and the server's own sentences are kept as written. A code-shaped reason
+ * (capitals, digits, underscores) never shows: a known code reads as words, an
+ * unknown one as a neutral sentence.
+ * Web, admin and phone all import this module from `@swift/types`.
  */
 import type { OrderStatus } from './order';
 
@@ -79,18 +80,25 @@ export const SYSTEM_CANCELLATION_WORDS: Readonly<Record<string, Readonly<Record<
   },
 };
 
-/** A system code: capitals, digits and underscores only ("NO_DRIVERS_AVAILABLE"). */
-const SYSTEM_CODE = /^[A-Z][A-Z0-9_]*$/;
+/** Neutral words for a code-shaped reason this build does not know (never the code). */
+export const UNKNOWN_CANCELLATION_WORDS: Readonly<Record<CancellationReader, string>> = {
+  customer: ORDER_CANCELLED_WORDS,
+  store: 'No further details are available.',
+};
+
+/** Code-shaped: capitals, digits and underscores only ("NO_DRIVERS_AVAILABLE"). Never shown to a person. */
+const SYSTEM_CODE = /^[A-Z0-9_]+$/;
 
 /**
- * The cancellation reason in words for this reader, or null when there is
- * nothing to say (no reason, or a code this build does not know: the caller
- * shows its neutral line, e.g. ORDER_CANCELLED_WORDS). Typed text is kept.
+ * The cancellation reason in words for this reader. A known system code reads
+ * as words, an unknown code-shaped reason as UNKNOWN_CANCELLATION_WORDS, and
+ * any other text (typed by a store, a sender or an admin, or one of the
+ * server's own sentences) is kept as written. Null only when there is no reason.
  */
 export function cancellationReasonWords(reason: unknown, reader: CancellationReader): string | null {
   if (typeof reason !== 'string') return null;
   const text = reason.trim();
   if (!text) return null;
   if (own(SYSTEM_CANCELLATION_WORDS, text)) return SYSTEM_CANCELLATION_WORDS[text]![reader];
-  return SYSTEM_CODE.test(text) ? null : text;
+  return SYSTEM_CODE.test(text) ? UNKNOWN_CANCELLATION_WORDS[reader] : text;
 }

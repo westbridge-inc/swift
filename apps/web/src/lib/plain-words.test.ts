@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { OrderStatus, cancellationReasonWords, storeOrderStatusWords, STORE_ORDER_STATUS_WORDS, UNKNOWN_STATUS_WORDS } from '@swift/types';
+import { OrderStatus, cancellationReasonWords, storeOrderStatusWords, ORDER_CANCELLED_WORDS, STORE_ORDER_STATUS_WORDS, UNKNOWN_CANCELLATION_WORDS, UNKNOWN_STATUS_WORDS } from '@swift/types';
 
 // [UI-SWEEP U14 · COORD rulings 21 Oct] ONE plain-words map (@swift/types order-words):
 // web and phone never show a raw status or cancellation code.
@@ -47,11 +47,13 @@ describe('cancellation reasons read as words, never as codes', () => {
     expect(cancellationReasonWords('NO_DRIVERS_AVAILABLE', 'store')).toBe('No driver was found in time.');
   });
 
-  it('a code this build does not know says nothing, so the page shows its neutral line', () => {
-    for (const code of ['SOME_NEW_CODE', 'X', 'MMG_NOT_PAID_IN_TIME']) {
-      expect(cancellationReasonWords(code, 'customer'), code).toBeNull();
-      expect(cancellationReasonWords(code, 'store'), code).toBeNull();
+  it('a code this build does not know reads as a neutral sentence, never the code', () => {
+    for (const code of ['SOME_NEW_CODE', 'X', 'EXPIRED', 'MMG_NOT_PAID_IN_TIME', 'CODE_2', 'CONSTRUCTOR']) {
+      expect(cancellationReasonWords(code, 'customer'), code).toBe('This order was cancelled.');
+      expect(cancellationReasonWords(code, 'store'), code).toBe('No further details are available.');
+      expect(cancellationReasonWords(`  ${code} `, 'store'), code).toBe('No further details are available.');
     }
+    expect(UNKNOWN_CANCELLATION_WORDS.customer).toBe(ORDER_CANCELLED_WORDS);
   });
 
   it('text a person typed, and the server\'s own sentences, are kept as written', () => {

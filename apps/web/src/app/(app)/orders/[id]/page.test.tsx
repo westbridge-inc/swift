@@ -390,7 +390,13 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
     vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'SOME_NEW_CODE', cancellationNotice: null } as never);
     render(<OrderDetailPage />);
     expect(await screen.findByText('This order was cancelled.')).toBeTruthy();
-    expect(document.body.textContent).not.toContain('SOME_NEW_CODE');
+    expect(document.body.textContent).not.toMatch(/SOME_NEW_CODE|some new code/i);
+  });
+
+  it('a reason the store typed is kept as written', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'Out of stock', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Out of stock')).toBeTruthy();
   });
 });
 
