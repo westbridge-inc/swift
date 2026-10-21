@@ -187,6 +187,12 @@ body {
    so the marker .swift-order-row carries no size of its own [WEB-REDESIGN].
    The store page's placeholder is drawn with the page's own classes [W6]. */
 .swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
+
+/* [WEB-LAUNCH-CHECK F2] On the soft-pink panel the plain grey is 4.32:1 (AA
+   needs 4.5:1). Every such panel turns its grey text one step darker, so the
+   legal footers, the /contact cards and the partner notes all pass and a new
+   panel cannot forget. Hover-only tints (hover:bg-...) are a different class. */
+.bg-\[var\(--swift-subtle\)\] { --swift-muted: var(--swift-muted-on-subtle); }
 @keyframes swift-bone { to { opacity: 0.5; } }
 
 @layer base {

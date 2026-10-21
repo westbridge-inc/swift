@@ -28,11 +28,14 @@ export function OrderingContextBar({ inline = false, deliverTo, addressHref, nea
   // Inline (Home's top row, which on a phone also holds the menu and the
   // profile or Sign in) the phone pill shows the address itself, like the
   // phone app's location pill, or just "Delivery" before there is one;
-  // "Delivery", "address at checkout" and "ASAP" stay in its spoken name and
-  // show on wider screens.
+  // "Delivery", "address at checkout" and "ASAP" show on wider screens.
+  // [WEB-LAUNCH-CHECK F4] The pill is named by its own words (no aria-label):
+  // words a phone hides are visually hidden, not removed, so they stay in the
+  // name, and what a voice-control user sees is what they can say.
+  const phoneHides = (hide: boolean | undefined) => (hide ? ' sr-only wide:not-sr-only' : '');
   const trigger = (
-    <button type="button" onClick={() => setOpen(true)} className={`flex min-h-11 max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-sm${inline ? ' min-w-0' : ''}`} aria-label={`${pickup ? 'Pickup from the store' : deliverTo ? `Delivery to ${deliverTo}` : 'Delivery, address at checkout'}, as soon as possible. Change delivery or pickup`}>
-      <MapPin size={18} aria-hidden className="flex-none text-[var(--swift-red)]" /><span className={`font-semibold${inline && !pickup && deliverTo ? ' hidden wide:inline' : ''}`}>{pickup ? 'Pickup' : 'Delivery'}</span><span className={`truncate${inline && !pickup && !deliverTo ? ' hidden wide:inline' : ''}`}>{where}</span><span className={`flex-none text-[var(--swift-muted)]${inline ? ' hidden wide:inline' : ''}`}>· ASAP</span><ChevronDown size={16} aria-hidden className="flex-none" />
+    <button type="button" onClick={() => setOpen(true)} className={`flex min-h-11 max-w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-sm${inline ? ' min-w-0' : ''}`}>
+      <MapPin size={18} aria-hidden className="flex-none text-[var(--swift-red)]" /><span className={`font-semibold${phoneHides(inline && !pickup && !!deliverTo)}`}>{pickup ? 'Pickup' : 'Delivery'}</span>{' '}<span className={`truncate${phoneHides(inline && !pickup && !deliverTo)}`}>{where}</span>{' '}<span className={`flex-none text-[var(--swift-muted)]${phoneHides(inline)}`}><span aria-hidden>· </span>ASAP</span><span className="sr-only">. Change delivery or pickup</span><ChevronDown size={16} aria-hidden className="flex-none" />
     </button>
   );
   return <>
