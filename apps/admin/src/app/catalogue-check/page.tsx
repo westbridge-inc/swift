@@ -16,6 +16,7 @@ import { JUDGED_FIELD_WORDS as FIELD_WORDS, PROHIBITED_CLASS_LABELS as CLASS_LAB
 import { ActionResult } from '@/components/mc/ActionResult';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { label } from '@/lib/labels';
 
 // ---------------------------------------------------------------------------
 // [GUARDRAILS §8] THE CATALOGUE CHECK (owner, 13 Oct 2026).
@@ -94,7 +95,7 @@ function StoreRow({ store, onDone }: { store: WaitingStore; onDone: (_outcome: O
 
   return (
     <li className="mc-card" aria-label={store.name}>
-      <p className="mc-label">Store · {store.status}</p>
+      <p className="mc-label">Store · {label('VendorStatus', store.status)}</p>
       <h2 className="text-base font-semibold">{store.name}</h2>
       <p className="text-sm">
         Held as <strong>{CLASS_LABELS[store.prohibitedClass] ?? store.prohibitedClass}</strong>: the word &ldquo;{store.term}&rdquo; in the{' '}
