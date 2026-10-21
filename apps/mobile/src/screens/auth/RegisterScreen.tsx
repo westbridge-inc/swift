@@ -8,7 +8,7 @@ import { authApi, API_URL } from '../../services/api';
 import { openPayLink } from '../../lib/payLink';
 import { useAuthStore } from '../../stores/authStore';
 import { SwiftMark } from '../../components/SwiftLogo';
-import { BrandCheckbox, LabeledInput, PillButton, Screen, T } from '../../kit';
+import { BrandCheckbox, Header, LabeledInput, PillButton, Screen, T } from '../../kit';
 import { AGE_TICK_LABEL } from '../../lib/ageTickCopy';
 
 // Kit "Register" (frame 7) on the real signup contract: the phone arrived
@@ -63,6 +63,9 @@ export function RegisterScreen() {
 
   return (
     <Screen style={{ backgroundColor: color.surface.base }}>
+      {/* [BUG-GUARDS C4] A way out of sign-up (a wrong number, a change of mind). The phone proof is
+          one-use, so Back starts a fresh sign-in, the same door as "Verify phone again". */}
+      <Header onBack={() => navigation.reset({ index: 0, routes: [{ name: 'PhoneEntry' }] })} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
         <ScrollView
           contentContainerStyle={{ flexGrow: 1, paddingHorizontal: space['2xl'], paddingTop: space['2xl'] }}

@@ -22,17 +22,35 @@ function statusTone(s: string): 'success' | 'brand' | 'neutral' {
   return s === 'RESOLVED' ? 'success' : s === 'IN_PROGRESS' ? 'brand' : 'neutral';
 }
 
+type GetHelpPreset = {
+  presetOrderId?: string;
+  presetCategory?: SupportCategory;
+  presetSubject?: string;
+  presetMessage?: string;
+};
+
 export function GetHelpScreen() {
   const route = useRoute<any>();
-  const presetOrderId: string | undefined = route.params?.orderId;
-  const presetCategory: SupportCategory | undefined = route.params?.category;
   // [E11] Callers with a CONTEXT (a rejected document's appeal door) arrive
   // with the ticket half-written — the document named, the reviewer's words
   // quoted — so the person adds their side instead of reconstructing ours.
   // Plain initial values: everything stays editable.
-  const presetSubject: string | undefined = route.params?.subject;
-  const presetMessage: string | undefined = route.params?.message;
+  const preset: GetHelpPreset = {
+    presetOrderId: route.params?.orderId,
+    presetCategory: route.params?.category,
+    presetSubject: route.params?.subject,
+    presetMessage: route.params?.message,
+  };
+  // [UI-SWEEP U10 S3-1] A tap to a screen already in the stack goes back to
+  // it (navigate + pop) and hands the SAME mounted screen the new params. The
+  // form is seeded once, so a new door is a new form: keyed on what seeds it,
+  // order A's typing can never be filed against order B. The same door handed
+  // again keeps what was typed.
+  const formKey = JSON.stringify([preset.presetOrderId, preset.presetCategory, preset.presetSubject, preset.presetMessage]);
+  return <GetHelpForm key={formKey} {...preset} />;
+}
 
+function GetHelpForm({ presetOrderId, presetCategory, presetSubject, presetMessage }: GetHelpPreset) {
   const [category, setCategory] = useState<SupportCategory>(presetCategory ?? (presetOrderId ? 'ORDER_ISSUE' : 'OTHER'));
   const [subject, setSubject] = useState(presetSubject ?? '');
   const [message, setMessage] = useState(presetMessage ?? '');

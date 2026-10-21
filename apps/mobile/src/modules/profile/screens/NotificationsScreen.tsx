@@ -1,9 +1,10 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList, RefreshControl, View } from 'react-native';
 import { useNavigation, type NavigationProp, type ParamListBase } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useNotifications } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PressableScale, Screen, T } from '../../../kit';
 import { destinationFor, HOME_SCREEN } from '../../../services/notification-router';
 import { safeNavigate } from '../../../navigation/navigationRef';
@@ -55,6 +56,8 @@ function opensThisInbox(dest: { screen: string; params?: Record<string, unknown>
 export function NotificationsScreen() {
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const notifications = useNotifications<any>();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => notifications.refetch());
   const all: any[] = Array.isArray(notifications.data)
     ? notifications.data
     : (notifications.data?.notifications ?? []);
@@ -80,6 +83,7 @@ export function NotificationsScreen() {
         <FlatList
           data={rows}
           keyExtractor={(n, i) => n.id ?? String(i)}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
           renderItem={({ item: n }) => {
             const card = (

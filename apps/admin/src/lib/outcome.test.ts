@@ -268,3 +268,46 @@ describe('[MC-PR2] the activation refusals (admin.routes.ts PUT /vendors/:id/app
     expect(outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'STORE_CLOSED' })).title).toBe('This store is closed');
   });
 });
+
+// ---------------------------------------------------------------------------
+// [U06] One ask per act: the server refuses a second ask while the first still
+// stands (409 APPROVAL_ALREADY_OPEN). Nothing new was asked, so it is the
+// queued answer, never a failure; and only the admin who asked can apply (or
+// withdraw) an ask, so another admin is told whose it is.
+// ---------------------------------------------------------------------------
+describe('[U06] 409 APPROVAL_ALREADY_OPEN — the earlier ask still stands', () => {
+  const standing = (approvalStatus: 'PENDING' | 'APPROVED', askedByYou: boolean) => replyWith(409, {
+    success: false,
+    error: { code: 'APPROVAL_ALREADY_OPEN', message: 'Nothing new was asked.', details: { approvalId: 'apr_9', approvalStatus, askedByYou } },
+  });
+
+  it('your own waiting ask: queued, names Approvals, keeps the id', async () => {
+    standing('PENDING', true);
+    const o = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(o.tone).toBe('queued');
+    expect(o.title).toBe("Already waiting for a second admin's approval");
+    expect(o.next).toMatch(/Nothing new was asked/);
+    expect(o.link).toEqual({ label: 'Open Approvals', href: APPROVALS_HREF });
+    expect(o.approvalId).toBe('apr_9');
+  });
+
+  it('your own approved ask: apply it, do not ask again', async () => {
+    standing('APPROVED', true);
+    const o = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(o.tone).toBe('queued');
+    expect(o.title).toBe('Already approved and waiting for you to apply it');
+  });
+
+  it('another admin\'s ask: says whose it is, never tells you to apply or cancel it', async () => {
+    standing('PENDING', false);
+    const pending = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(pending.tone).toBe('queued');
+    expect(pending.title).toBe('Another admin already asked for this');
+    expect(pending.next).not.toMatch(/cancel|apply it/i);
+
+    standing('APPROVED', false);
+    const approved = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(approved.title).toBe('Another admin already asked for this');
+    expect(approved.next).toMatch(/the admin who asked/);
+  });
+});

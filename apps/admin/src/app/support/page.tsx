@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { maskedPhone } from '@/lib/review-center';
+import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
 
@@ -59,6 +61,16 @@ export default function SupportPage() {
     },
   });
 
+  // [U57] "Take it" is its own act with its own answer, shown next to ITS
+  // ticket's button. It used to share the close mutation, whose error renders
+  // only inside an open close panel (possibly another ticket's), so a failed
+  // take showed nothing.
+  const take = useMutation({
+    mutationFn: ({ id, expectedStatus }: { id: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
+      resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
+  });
+
   /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
   const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
   const closeAccount = useMutation({
@@ -82,7 +94,9 @@ export default function SupportPage() {
           {FILTERS.map((f) => (
             <button
               key={f}
+              type="button"
               onClick={() => setFilter(f)}
+              aria-pressed={filter === f}
               className={`px-2.5 py-1 rounded-lg text-xs ${
                 filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
               }`}
@@ -138,7 +152,7 @@ export default function SupportPage() {
                 <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
                   {t.user ? (
                     <Link href={`/users/${t.user.id}`} className="hover:text-[var(--accent)] transition-colors">
-                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {t.user.phone} →
+                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {maskedPhone(t.user.phone)} →
                     </Link>
                   ) : null}
                   {t.orderId ? (
@@ -178,15 +192,20 @@ export default function SupportPage() {
                           value={completion.reason}
                           onChange={(e) => setCompleting({ id: t.id, reason: e.target.value })}
                           rows={2}
+                          aria-describedby={`closure-reason-help-${t.id}`}
                           className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
                         />
-                        {closeAccount.isError ? (
+                        {/* [U56] The server needs at least REASON_MIN characters; say so before sending. */}
+                        <p id={`closure-reason-help-${t.id}`} className="mt-1 text-xs text-[var(--muted)]">
+                          At least {REASON_MIN} characters ({completion.reason.trim().length} so far).
+                        </p>
+                        {closeAccount.isError && closeAccount.variables?.id === t.id ? (
                           <p className="mt-2 text-sm text-red-400">{(closeAccount.error as Error).message}</p>
                         ) : null}
                         <div className="mt-3 flex gap-2">
                           <button
                             onClick={() => closeAccount.mutate({ id: t.id, reason: completion.reason.trim() })}
-                            disabled={closeAccount.isPending || completion.reason.trim().length === 0}
+                            disabled={closeAccount.isPending || reasonTooShort(completion.reason)}
                             className="px-4 py-2 rounded-lg text-sm bg-red-600 hover:bg-red-600/80 disabled:opacity-50"
                           >
                             {closeAccount.isPending ? 'Closing…' : 'Close the account'}
@@ -210,11 +229,12 @@ export default function SupportPage() {
                       <div className="flex gap-2">
                         {t.status === 'OPEN' && (
                           <button
-                            onClick={() => resolve.mutate({ id: t.id, status: 'IN_PROGRESS', expectedStatus: t.status })}
-                            disabled={resolve.isPending}
+                            type="button"
+                            onClick={() => take.mutate({ id: t.id, expectedStatus: t.status })}
+                            disabled={take.isPending}
                             className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Take it
+                            {take.isPending && take.variables?.id === t.id ? 'Taking…' : 'Take it'}
                           </button>
                         )}
                         <button
@@ -223,6 +243,9 @@ export default function SupportPage() {
                         >
                           Close this ticket
                         </button>
+                        {take.isError && take.variables?.id === t.id ? (
+                          <p role="alert" className="self-center text-sm text-red-400">{(take.error as Error).message}</p>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="rounded-lg border border-[var(--border)] p-4">
@@ -256,8 +279,8 @@ export default function SupportPage() {
                           rows={3}
                           className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
                         />
-                        {resolve.isError ? (
-                          <p className="mt-2 text-sm text-red-400">{(resolve.error as Error).message}</p>
+                        {resolve.isError && resolve.variables?.id === t.id ? (
+                          <p role="alert" className="mt-2 text-sm text-red-400">{(resolve.error as Error).message}</p>
                         ) : null}
                         <div className="mt-3 flex gap-2">
                           <button

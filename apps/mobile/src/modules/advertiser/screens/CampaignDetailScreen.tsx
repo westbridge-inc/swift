@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { color, radius, space } from '@swift/ui';
-import { ErrorState, Card, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { ErrorState, Card, Header, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
 import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertiserActions } from '../../../hooks/advertiser';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { adsApi } from '../../../services/api';
@@ -123,12 +123,14 @@ export function CampaignDetailScreen() {
     const loadedButMissing = campaigns.isSuccess && !campaigns.isFetching;
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [BUG-GUARDS C4] Loading and a failed read keep a way back, not only "no longer available". */}
+        <Header />
         {failed ? (
-          <ErrorState style={{ paddingTop: 120 }} onRetry={() => { me.refetch(); campaigns.refetch(); }} />
+          <ErrorState style={{ paddingTop: 64 }} onRetry={() => { me.refetch(); campaigns.refetch(); }} />
         ) : loadedButMissing ? (
-          <ErrorState style={{ paddingTop: 120 }} message="This campaign is no longer available." onRetry={() => navigation.goBack()} />
+          <ErrorState style={{ paddingTop: 64 }} message="This campaign is no longer available." onRetry={() => navigation.goBack()} />
         ) : (
-          <LoadingBlock style={{ paddingTop: 120 }} />
+          <LoadingBlock style={{ paddingTop: 64 }} />
         )}
       </View>
     );

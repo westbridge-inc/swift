@@ -396,12 +396,12 @@ class BackupEncryption(unittest.TestCase):
         r = self.restore("-", "swift_restore_y", stdin=b"")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn(b"nothing arrived on stdin", r.stderr)
-        r = self.restore("-", "swift_restore_y", stdin=self.fixture.read_bytes())
+        r = self.restore("--project", "swift", "-", "swift_restore_y", stdin=self.fixture.read_bytes())
         self.assertNotIn(b"pg_restore cannot read this archive", r.stderr)
         self.assertIn("CREATE DATABASE", self.log.read_text())
 
     # ── the drill, on the owner's computer ─────────────────────────────────
-    def drill(self, key_text: str, passphrase: str, obj: str, scratch="swift_drill_t"):
+    def drill(self, key_text: str, passphrase: str, obj: str, scratch="swift_drill_t", project="swift"):
         received = self.tmp / "received.dump"
         ssh_log = self.tmp / "ssh.log"
         # The host: a fetch streams the object from the fake bucket; the restore
@@ -416,8 +416,15 @@ esac
 ''')
         r = subprocess.run(["bash", str(DEPLOY / "backup-drill.sh"), "swift-deploy@prod.example.invalid", str(self.private), obj, scratch],
                            input=key_text + passphrase + "\n", text=True, capture_output=True, timeout=120,
-                           env={**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}"})
+                           env={**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", **({"SWIFT_RESTORE_PROJECT": project} if project else {})})
         return r, received, ssh_log
+
+    def test_the_drill_names_the_compose_project_or_refuses_before_reaching_the_host(self):
+        # [#1977 · copy run #5c] restore.sh never guesses the stack; neither does the drill.
+        r, _, ssh_log = self.drill("", PASSPHRASE, "s3://swift-backups/db/swift-20261013T010000Z.dump.gpg", project="")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("SWIFT_RESTORE_PROJECT", r.stderr)
+        self.assertFalse(ssh_log.exists() and ssh_log.read_text())
 
     def test_the_drill_decrypts_on_the_owner_side_and_the_host_receives_the_plain_dump(self):
         ok = self.backup()
@@ -432,7 +439,7 @@ esac
         self.assertEqual(received.read_bytes(), self.fixture.read_bytes())
         host_saw = ssh_log.read_text()
         self.assertIn("restore.sh --fetch-encrypted", host_saw)
-        self.assertIn("restore.sh --compare-source - 'swift_drill_t'", host_saw)
+        self.assertIn("restore.sh --project 'swift' --compare-source - 'swift_drill_t'", host_saw)
         # Neither the key nor the passphrase ever reaches the host or a log.
         for secret in (PASSPHRASE, key_text.splitlines()[3]):
             self.assertNotIn(secret, host_saw)

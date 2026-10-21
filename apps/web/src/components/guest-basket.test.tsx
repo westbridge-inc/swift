@@ -68,6 +68,19 @@ it('keeps an unknown changed price as an unknown figure and prevents accepting i
   expect(readGuestBasket().lines[0]?.unitPrice).toBe(800);
 });
 
+// [BUG-GUARDS C5] Each line's check reads as words, never the server's code.
+it('names each refused line in words, never its code', async () => {
+  addGuestLine({ vendorId: 'fixture-vendor', storeSlug: 'fixture-menu', vendorName: 'Fixture Menu', itemId: 'fixture-item', name: 'Soup', quantity: 1, unitPrice: 800, selectedOptions: {} });
+  addGuestLine({ vendorId: 'fixture-vendor', storeSlug: 'fixture-menu', vendorName: 'Fixture Menu', itemId: 'fixture-item-2', name: 'Bake', quantity: 1, unitPrice: 300, selectedOptions: {} });
+  const [soup, bake] = readGuestBasket().lines;
+  vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: { applied: false, verdicts: [{ clientLineId: soup!.clientLineId, status: 'INSUFFICIENT_STOCK' }, { clientLineId: bake!.clientLineId, status: 'SOMETHING_NEW' }], cart: { items: [] } } } as never);
+  render(<QueryClientProvider client={new QueryClient()}><CustomerSessionProvider value={{ status: 'signed-in', scope: 'account-a', epoch: 0, ensureSignedIn: async () => true, nearPoint: null, setNearPoint: () => undefined }}><GuestBasketSync /></CustomerSessionProvider></QueryClientProvider>);
+  await screen.findByText('Your basket needs a check');
+  expect(screen.getByText('Soup: not enough left in stock')).toBeTruthy();
+  expect(screen.getByText('Bake: needs a check')).toBeTruthy();
+  expect(document.body.textContent).not.toMatch(/insufficient|something new|_/i);
+});
+
 // [#1594 review S3] A basket frozen mid-upload must never lock a person out of
 // /cart and /checkout. Discarding the browser copy is safe: the server's
 // upload receipt is the record, and a committed upload is already in that
