@@ -192,6 +192,34 @@ describe('EvidenceItem: a sealed item may be deleted only when its bundle is abo
     await system(() => app.prisma.docLegalHold.create({ data: { tenantId: 'swift-default', subjectUserId: byDocHold.userId, reason: 'trigger test', ownerId: 'admin-x', placedBy: 'admin-x', reviewBy: new Date(Date.now() + 86_400_000) } }));
     await expect(del(await sealedItem(byDocHold.userId))).rejects.toThrow(/sealed/);
   });
+
+  // [REVIEW-M S3-1 parity] The database keeps a sealed item exactly where the app keeps the case whole
+  // (erasure-coverage CASE_KEPT_WHOLE). One bundle per SOS, so the bundle's own legal hold is already checked.
+  it('[REVIEW-M S3-1 parity] a document legal hold raised from its closed case keeps the item (the hold is about someone else)', async () => {
+    const gone = await payer(true);
+    const other = await payer(false);
+    const docHeldCase = await kase(gone.userId, 'CLOSED');
+    await system(() => app.prisma.docLegalHold.create({ data: { tenantId: 'swift-default', subjectUserId: other.userId, incidentCaseId: docHeldCase, reason: 'trigger test', ownerId: 'admin-x', placedBy: 'admin-x', reviewBy: new Date(Date.now() + 86_400_000) } }));
+    await expect(del(await sealedItem(gone.userId, { caseId: docHeldCase }))).rejects.toThrow(/sealed/);
+  });
+
+  it('[REVIEW-M S3-1 parity] the SOS is over but a case on it is kept whole (open, or closed under its flag, a legal_holds row or a document hold): the item stays; closed and unheld: it may go', async () => {
+    const gone = await payer(true);
+    const other = await payer(false);
+    const onSos = async (status: 'OPEN' | 'CLOSED', hold?: 'flag' | 'row' | 'doc') => {
+      const sosAlertId = await sos(gone.userId, 'RESOLVED');
+      const caseId = await kase(other.userId, status, hold === 'flag');
+      await system(() => app.prisma.incidentCase.update({ where: { id: caseId }, data: { sosAlertId } }));
+      if (hold === 'row') await system(() => app.prisma.legalHold.create({ data: { tenantId: 'swift-default', caseId, placedBy: 'ops-x', reason: 'trigger test' } }));
+      if (hold === 'doc') await system(() => app.prisma.docLegalHold.create({ data: { tenantId: 'swift-default', subjectUserId: other.userId, incidentCaseId: caseId, reason: 'trigger test', ownerId: 'admin-x', placedBy: 'admin-x', reviewBy: new Date(Date.now() + 86_400_000) } }));
+      return sealedItem(gone.userId, { sosAlertId });
+    };
+    await expect(del(await onSos('OPEN'))).rejects.toThrow(/sealed/);
+    await expect(del(await onSos('CLOSED', 'flag'))).rejects.toThrow(/sealed/);
+    await expect(del(await onSos('CLOSED', 'row'))).rejects.toThrow(/sealed/);
+    await expect(del(await onSos('CLOSED', 'doc'))).rejects.toThrow(/sealed/);
+    await del(await onSos('CLOSED'));
+  });
 });
 
 describe('[COORD] a forged marker opens nothing: the database gate is the erasure\'s whole cut-off, not the phone', () => {

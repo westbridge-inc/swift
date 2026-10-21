@@ -8,9 +8,11 @@
 --      once. A card erased that way that no payment, card session, observation or replacement names may be deleted.
 --   2. mmg_payer_evidence: an erased person's payer hash and digest may be replaced by fixed erased values;
 --      nothing else changes, and DELETE stays refused.
---   3. EvidenceItem: a SEALED item may be deleted when its bundle is about an erased person and is not under a
---      legal hold. The app deletes only the items of a closed case or SOS, under the person's and the bundle's
---      locks. The bundle row, its seal hash and its dates stay as proof the evidence existed.
+--   3. EvidenceItem: a SEALED item may be deleted when its bundle is about an erased person, no hold covers the
+--      bundle or the person, and its case and SOS are no longer kept whole by the app's own test (CASE_KEPT_WHOLE:
+--      closed, no legal-hold flag, no legal_holds row, no unreleased document hold raised from the case; an SOS that
+--      is over with no such case on it). The app deletes these items under the person's and the bundle's locks.
+--      The bundle row, its seal hash and its dates stay as proof the evidence existed.
 
 SET lock_timeout = '10s';
 
@@ -120,9 +122,16 @@ BEGIN
     IF TG_OP = 'DELETE' AND EXISTS (
       SELECT 1 FROM "EvidenceBundle" b
       WHERE b."id" = OLD."bundleId" AND NOT b."legalHold" AND b."subjectUserId" IS NOT NULL AND swift_erased_person(b."subjectUserId")
-        -- Its case (if any) is CLOSED and under no hold; its SOS (if any) is over; no hold covers the bundle or the person.
-        AND (b."caseId" IS NULL OR EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."id" = b."caseId" AND c."status"::text = 'CLOSED' AND NOT c."legalHold"))
-        AND (b."sosAlertId" IS NULL OR EXISTS (SELECT 1 FROM "SosAlert" a WHERE a."id" = b."sosAlertId" AND a."status"::text IN ('RESOLVED', 'CANCELLED')))
+        -- Its case (if any) is not kept whole; its SOS (if any) is over and no case on it is kept whole; no hold covers
+        -- the bundle or the person. "Kept whole" is the app's CASE_KEPT_WHOLE (erasure-coverage.ts), never weaker:
+        -- open, the case legal-hold flag, a legal_holds row on the case, or an unreleased document hold raised from it.
+        AND (b."caseId" IS NULL OR EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."id" = b."caseId"
+          AND c."status"::text = 'CLOSED' AND NOT c."legalHold" -- (a legal_holds row on it: the bundle line below)
+          AND NOT EXISTS (SELECT 1 FROM doc_legal_hold d2 WHERE d2."incidentCaseId" = c."id" AND d2."releasedAt" IS NULL)))
+        AND (b."sosAlertId" IS NULL OR EXISTS (SELECT 1 FROM "SosAlert" a WHERE a."id" = b."sosAlertId" AND a."status"::text IN ('RESOLVED', 'CANCELLED')
+          AND NOT EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND (c."status"::text <> 'CLOSED' OR c."legalHold"
+            OR EXISTS (SELECT 1 FROM legal_holds l3 WHERE l3."caseId" = c."id")
+            OR EXISTS (SELECT 1 FROM doc_legal_hold d3 WHERE d3."incidentCaseId" = c."id" AND d3."releasedAt" IS NULL)))))
         AND NOT EXISTS (SELECT 1 FROM legal_holds l WHERE l."bundleId" = b."id" OR l."caseId" = b."caseId")
         AND NOT EXISTS (SELECT 1 FROM safety_deletion_holds h WHERE h."userId" = b."subjectUserId" AND h."status"::text = 'PENDING')
         AND NOT EXISTS (SELECT 1 FROM doc_legal_hold d WHERE d."subjectUserId" = b."subjectUserId" AND d."releasedAt" IS NULL)
