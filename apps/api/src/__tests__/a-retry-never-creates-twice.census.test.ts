@@ -25,9 +25,12 @@ import { ADMIN_ROUTE_AUTHORITY, ADMIN_ACTION_CLASSES, type AdminRouteKey } from 
 // Every guard is PINNED: the census reads the handler or the named function
 // and requires the exact code that does the guarding, so removing it fails.
 // New routes cannot slip past: every POST/PUT/PATCH route whose last path
-// segment is a create/money verb must be classified here (in SCOPE, or in OUT
-// with the reason it creates none of those); an admin route of class C4/C5 is
-// covered by the approval gate automatically.
+// segment is a create/money verb, or a money-bearing state transition
+// (delivered / complete / handover / collect / cancel / quote / accept), must
+// be classified here (in SCOPE, or in OUT with the reason it creates none of
+// those); an admin route of class C4/C5 is covered by the approval gate
+// automatically. Every registration must sit in a *.routes.ts file with a
+// literal path, or the census could not read it.
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
@@ -38,20 +41,30 @@ type Guard = 'key' | 'unique' | 'state' | 'approval' | 'refused';
 type Pin = [string, string, string];
 interface Entry { kind: Kind; guard: Guard; pins: Pin[] }
 interface Route { file: string; method: string; path: string; handler: string }
+/** [#1964 review F2 S4-2] A registration the census cannot read: outside *.routes.ts, or a non-literal path. */
+const REGISTER = /^(post|put|patch)$/;
 
-const VERB = /^(checkout|order|orders|request|payment-claim|refund[a-z-]*|topup|payout|paid|settle|confirm-payment|confirm-deposit|adjust[a-z-]*|reverse|card-sessions|mmg-checkout|reserve|campaigns|agent-payments|attach|tip|return|process|mark-paid|set-aside|release|settlement-import|backfill|notify|resolve|confirm|refund-settled|close-store-refund|jobs)$/;
+/** Create/money verbs, plus [#1964 review F2 S3-1 / G S4-1] the transitions that mint money rows inside a
+ *  state change (earnings + cash settlement on delivered/complete, cash CAPTURED at handover/collect, a refund
+ *  obligation on cancel) and the noun creators the review named (accept, house, fx-rates). */
+const VERB = /^(checkout|order|orders|request|payment-claim|refund[a-z-]*|topup|payout|paid|settle|confirm-payment|confirm-deposit|adjust[a-z-]*|reverse|card-sessions|mmg-checkout|reserve|campaigns|agent-payments|attach|tip|return|process|mark-paid|set-aside|release|settlement-import|backfill|notify|resolve|confirm|refund-settled|close-store-refund|jobs|delivered|complete|handover|collect|cancel|quote|accept|house|fx-rates)$/;
 
 /** Every route registration in a *.routes.ts file: app.post('/path', …, handler). */
-function routesOf(files: Record<string, string>): Route[] {
+function routesOf(files: Record<string, string>, unreadable: string[] = []): Route[] {
   const out: Route[] = [];
   for (const [file, text] of Object.entries(files)) {
-    if (!/\.routes\.ts$/.test(file)) continue;
+    const routesFile = /\.routes\.ts$/.test(file);
+    if (!routesFile && !/\.(post|put|patch)(<[^>]*>)?\(\s*['"`/]/.test(text)) continue;
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
     const visit = (n: ts.Node) => {
       if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression) && /^(post|put|patch|delete)$/.test(n.expression.name.text)) {
         const a0 = n.arguments[0];
-        if (a0 && (ts.isStringLiteral(a0) || ts.isNoSubstitutionTemplateLiteral(a0)) && a0.text.startsWith('/')) {
-          out.push({ file, method: n.expression.name.text.toUpperCase(), path: a0.text, handler: n.arguments[n.arguments.length - 1]!.getText() });
+        const literal = !!a0 && (ts.isStringLiteral(a0) || ts.isNoSubstitutionTemplateLiteral(a0)) && a0.text.startsWith('/');
+        const method = n.expression.name.text;
+        if (routesFile && literal) {
+          out.push({ file, method: method.toUpperCase(), path: (a0 as ts.StringLiteral).text, handler: n.arguments[n.arguments.length - 1]!.getText() });
+        } else if (REGISTER.test(method) && n.arguments.length >= 2 && a0 && (literal || routesFile)) {
+          unreadable.push(`${file}|${method.toUpperCase()}|${a0.getText()}`);
         }
       }
       ts.forEachChild(n, visit);
@@ -85,12 +98,13 @@ const approvalClass = (r: Route) => {
   return a && ADMIN_ACTION_CLASSES[a.cls].requiresApproval ? a.cls : null;
 };
 
-interface Census { routes: number; inScope: string[]; byApproval: string[]; unclassified: string[]; missingRoutes: string[]; brokenPins: string[] }
+interface Census { routes: number; inScope: string[]; byApproval: string[]; unclassified: string[]; missingRoutes: string[]; brokenPins: string[]; unreadable: string[] }
 
 function census(files: Record<string, string>, scope: Record<string, Entry>, out: Record<string, string>, pendingFix: Record<string, string>, gatePins: Pin[]): Census {
-  const routes = routesOf(files);
+  const unreadable: string[] = [];
+  const routes = routesOf(files, unreadable);
   const ids = new Set(routes.map(idOf));
-  const result: Census = { routes: routes.length, inScope: [], byApproval: [], unclassified: [], missingRoutes: [], brokenPins: [] };
+  const result: Census = { routes: routes.length, inScope: [], byApproval: [], unclassified: [], missingRoutes: [], brokenPins: [], unreadable };
   const pinHolds = ([file, fn, code]: Pin, handler?: string): boolean => {
     const text = fn === '' ? handler : functionText(files, file, fn);
     return text != null && text.includes(code);
@@ -120,7 +134,21 @@ function census(files: Record<string, string>, scope: Record<string, Entry>, out
 const H = '';
 const CUSTOMER = 'modules/user/customer.routes.ts';
 const ADMIN = 'modules/admin/admin.routes.ts';
+const VENDOR = 'modules/vendor/vendor.routes.ts';
+const ORDER_SVC = 'modules/order/order.service.ts';
 const approval = (kind: Kind): Entry => ({ kind, guard: 'approval', pins: [] });
+const MMG_REPLY_CAS: Pin[] = [['modules/billing/mmg-checkout.service.ts', 'observeReply', 'where: { id: current.id, status: current.status },'], ['modules/billing/mmg-checkout.service.ts', 'observeReply', 'if (moved.count !== 1)']];
+/** Every order transition runs here: the order row locked FOR UPDATE, then the source status checked
+ *  against the caller's allowedFrom, so a replay finds the order already moved and changes nothing. */
+const ORDER_CAS: Pin[] = [[ORDER_SVC, 'stageCanonicalOrderTransition', 'FOR UPDATE'], [ORDER_SVC, 'stageCanonicalOrderTransition', 'if (!input.allowedFrom.includes(source.status))']];
+/** A money-bearing order transition: its own allowedFrom in the handler, and the shared compare-and-set. */
+const transition = (kind: Kind, file: string, allowedFrom: string, more: Pin[] = []): Entry => ({ kind, guard: 'state', pins: [[file, H, allowedFrom], ...ORDER_CAS, ...more] });
+/** Earnings + the cash-settlement ledger are written once, inside the DELIVERED transition (orderId is unique). */
+const EARNINGS: Pin = [ORDER_SVC, 'createEarnings', 'await db.deliveryCashSettlement.upsert({'];
+/** Cash CAPTURED at the door: the locked row's handover version changes with the capture, so a replay is stale. */
+const HANDOVER: Pin = ['modules/cash/cash-rules.service.ts', 'handover', 'if (!handoverVersionMatches(lockedSource, input.handoverVersion))'];
+/** A cancel: the order lock and the CANCELLED edge decide it (refund obligations ride the same commit). */
+const CANCEL: Pin[] = [[ORDER_SVC, 'cancelOrder', 'if (!ORDER_TRANSITIONS.CANCELLED.includes(order.status))'], [ORDER_SVC, 'cancelOrder', 'lockTaxiOrderForCustodyDecision(tx, orderId)']];
 
 /** The routes that create one of the eight things, and what makes each replay a no-op. */
 const SCOPE: Record<string, Entry> = {
@@ -128,10 +156,11 @@ const SCOPE: Record<string, Entry> = {
   [`${CUSTOMER}|POST|/checkout`]: { kind: 'order', guard: 'key', pins: [[CUSTOMER, H, 'newCheckoutClaim(']] },
   'modules/courier/courier.routes.ts|POST|/order': { kind: 'parcel', guard: 'key', pins: [['modules/courier/courier.routes.ts', H, 'courierReceiptKey(']] },
   'modules/rides/rides.routes.ts|POST|/request': { kind: 'ride', guard: 'key', pins: [['modules/rides/rides.routes.ts', H, 'rideRequestReceiptKey(']] },
-  [`${CUSTOMER}|POST|/orders/:id/convert-to-pickup`]: { kind: 'order', guard: 'state', pins: [[CUSTOMER, H, 'updateMany(']] },
+  // [#1964 review F2 S4-1 / G S4-2] State pins name the compare-and-set's where clause, not a bare updateMany(.
+  [`${CUSTOMER}|POST|/orders/:id/convert-to-pickup`]: { kind: 'order', guard: 'state', pins: [[CUSTOMER, H, "fulfillment: 'DELIVERY',"], [CUSTOMER, H, 'if (converted.count === 0)']] },
   // Payment claims.
   [`${CUSTOMER}|POST|/orders/:id/payment-claim`]: { kind: 'payment-claim', guard: 'state', pins: [[CUSTOMER, H, 'outcome.replayed'], ['modules/order/mmg-claim.service.ts', 'recordCustomerMmgClaim', 'replayed']] },
-  'modules/vendor/vendor.routes.ts|POST|/orders/:id/confirm-payment': { kind: 'payment-claim', guard: 'state', pins: [['modules/vendor/vendor.routes.ts', H, 'updateMany(']] },
+  'modules/vendor/vendor.routes.ts|POST|/orders/:id/confirm-payment': { kind: 'payment-claim', guard: 'state', pins: [[VENDOR, H, "paymentStatus: { notIn: ['CAPTURED', 'CLAIMED'] },"], [VENDOR, H, 'mmgClaimRevision: locked.mmgClaimRevision,']] },
   // C3 (no second admin): the claim revision is compare-and-set under the order lock; a replay answers REPLAY.
   [`${ADMIN}|POST|/orders/:id/payment-claim/resolve`]: { kind: 'payment-claim', guard: 'state', pins: [['modules/order/mmg-claim.service.ts', 'resolveMmgClaimDisagreement', 'mmgClaimRevision: input.expectedClaimRevision'], ['modules/order/mmg-claim.service.ts', 'resolveMmgClaimDisagreement', "decision.kind === 'REPLAY'"]] },
   // Refunds.
@@ -159,8 +188,8 @@ const SCOPE: Record<string, Entry> = {
   [`${ADMIN}|POST|/billing/settlement-batches/:id/adjust-deposit`]: approval('payout'),
   // Weekly-fee checkouts and fee money.
   'modules/billing/mmg-checkout.routes.ts|POST|/subscription/mmg-checkout': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/mmg-checkout.service.ts', 'createCheckout', 'const replay = await this.answerForKey(who, now);']] },
-  'modules/billing/mmg-checkout.routes.ts|POST|/notify': { kind: 'fee-checkout', guard: 'state', pins: [['modules/billing/mmg-checkout.service.ts', 'observeReply', 'updateMany(']] },
-  'modules/billing/mmg-checkout.routes.ts|POST|/return': { kind: 'fee-checkout', guard: 'state', pins: [['modules/billing/mmg-checkout.service.ts', 'observeReply', 'updateMany(']] },
+  'modules/billing/mmg-checkout.routes.ts|POST|/notify': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
+  'modules/billing/mmg-checkout.routes.ts|POST|/return': { kind: 'fee-checkout', guard: 'state', pins: MMG_REPLY_CAS },
   'modules/billing/card-rail.routes.ts|POST|/subscription/card-sessions': { kind: 'fee-checkout', guard: 'key', pins: [['modules/billing/card-rail.routes.ts', H, 'subscriptionId_purpose_idempotencyKey: { subscriptionId: sub.id, purpose, idempotencyKey: key }']] },
   [`${ADMIN}|POST|/subscriptions/:id/topup`]: approval('fee-checkout'),
   [`${ADMIN}|PUT|/subscriptions/:id/waive-fee`]: approval('fee-checkout'),
@@ -172,6 +201,18 @@ const SCOPE: Record<string, Entry> = {
   // Ad spend (ads are OFF at launch; the routes still guard).
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/reserve': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/booking.service.ts', 'reserveAndHold', 'FOR UPDATE']] },
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/checkout': { kind: 'ad-spend', guard: 'state', pins: [['modules/ads/checkout.service.ts', 'checkout', 'if (open) { invoice = open; return; }']] },
+  // [#1964 review F2 S3-1] Money-bearing state transitions.
+  'modules/rider/rider.routes.ts|PUT|/orders/:id/delivered': transition('payout', 'modules/rider/rider.routes.ts', "allowedFrom: ['ARRIVED', 'EN_ROUTE_DELIVERY']", [['modules/rider/rider.routes.ts', H, "withIdempotency(app, request, 'delivered', id"], EARNINGS]),
+  [`${VENDOR}|PUT|/orders/:id/delivered`]: transition('payout', VENDOR, "allowedFrom: ['READY_FOR_PICKUP'],", [EARNINGS]),
+  'modules/driver/driver.routes.ts|PUT|/rides/:id/complete': { kind: 'payout', guard: 'state', pins: [['modules/driver/driver.routes.ts', H, "allowedFrom: ['RIDE_IN_PROGRESS'],"], [ORDER_SVC, 'transitionOrderAtomically', 'this.stageCanonicalOrderTransition(tx, input)'], ...ORDER_CAS, EARNINGS] },
+  'modules/rider/rider.routes.ts|POST|/orders/:id/handover': { kind: 'payment-claim', guard: 'state', pins: [['modules/rider/rider.routes.ts', H, "withIdempotency(app, request, 'handover', id"], HANDOVER] },
+  'modules/driver/driver.routes.ts|POST|/rides/:id/handover': { kind: 'payment-claim', guard: 'state', pins: [['modules/driver/driver.routes.ts', H, "withIdempotency(app, request, 'handover', id"], HANDOVER] },
+  'modules/courier/courier.routes.ts|POST|/order/:id/collect': { kind: 'payment-claim', guard: 'state', pins: [['modules/cash/cash-rules.service.ts', 'collectFromSender', "if (claimed.count !== 1) throw new AppError(409, 'ALREADY_COLLECTED'"]] },
+  [`${CUSTOMER}|POST|/orders/:id/cancel`]: { kind: 'refund', guard: 'state', pins: [[CUSTOMER, H, 'orderService.cancelOrder('], ...CANCEL] },
+  'modules/rides/rides.routes.ts|POST|/:id/cancel': { kind: 'refund', guard: 'state', pins: [['modules/rides/rides.routes.ts', H, 'orderService.cancelOrder('], ...CANCEL] },
+  'modules/courier/courier.routes.ts|POST|/order/:id/cancel': transition('refund', 'modules/courier/courier.routes.ts', 'allowedFrom: COURIER_CANCELLABLE_STATUSES,'),
+  [`${ADMIN}|PUT|/orders/:id/cancel`]: transition('refund', ADMIN, '.filter((status) => !(TERMINAL_ORDER_STATUSES as string[]).includes(status))'),
+  'modules/ads/ads.routes.ts|POST|/campaigns/:id/cancel': { kind: 'refund', guard: 'state', pins: [['modules/ads/ads.routes.ts', H, "lifecycle.transition(request.params.id, 'cancel'"], ['modules/ads/lifecycle.service.ts', 'transition', 'where: { id: campaignId, status: before.status },'], ['modules/ads/refund.service.ts', 'stage', 'if (existing) return { intentId: existing.id, staged: false']] },
   // A tip after delivery is refused until a collection path exists.
   [`${CUSTOMER}|POST|/orders/:id/tip`]: { kind: 'payout', guard: 'refused', pins: [['modules/order/order.service.ts', 'addPostDeliveryTip', 'TIP_COLLECTION_UNAVAILABLE']] },
 };
@@ -196,11 +237,30 @@ const OUT: Record<string, string> = {
   [`${ADMIN}|POST|/compliance/violations/:id/resolve`]: 'Resolves a compliance violation record; no order or money.',
   [`${ADMIN}|POST|/discovery/backfill`]: 'Rebuilds discovery/search projections; no order or money.',
   [`${ADMIN}|POST|/rating-reports/:id/resolve`]: 'Decides a reported rating; no order or money.',
+  // [#1964 review F2 S3-1 / G S4-1] Transitions and nouns now read, that create none of the eight.
+  'modules/rider/rider.routes.ts|POST|/orders/:id/accept': 'A rider takes an existing order (assignment under the order lock); no new order and no money row — earnings come at delivered.',
+  'modules/rider/rider.routes.ts|POST|/offers/accept': 'A rider takes an offered order (the offer is claimed once); assignment only, no money row.',
+  'modules/driver/driver.routes.ts|POST|/rides/:id/accept': 'A driver takes an existing ride request (assignment); the fare is earned at complete, not here.',
+  'modules/driver/driver.routes.ts|POST|/offers/accept': 'A driver takes an offered ride (the offer is claimed once); assignment only, no money row.',
+  'modules/driver/driver.routes.ts|POST|/rides/:id/cancel': 'The driver gives the ride back (PENDING, driver cleared) under the taxi custody lock; the customer is not refunded or charged here.',
+  [`${VENDOR}|PUT|/orders/:id/accept`]: 'The store accepts an order (PENDING -> ACCEPTED through the order compare-and-set); no money row.',
+  'modules/services/services.routes.ts|POST|/jobs/:id/quote': 'The provider names a price (bound to expectedUpdatedAt); service money is paid to the provider directly, Swift records no money row.',
+  'modules/services/services.routes.ts|POST|/jobs/:id/complete': 'Marks a service job done (bound to expectedUpdatedAt); no money row on Swift.',
+  'modules/services/services.routes.ts|POST|/jobs/:id/cancel': 'Cancels a service request (bound to expectedUpdatedAt); nothing was charged, so nothing is refunded.',
+  'modules/safety/safety.routes.ts|POST|/sos/:id/cancel': 'Safety: cancels an existing SOS; it creates no order or money.',
+  [`${CUSTOMER}|POST|/team-invites/:id/accept`]: 'Joins an advertiser/store team; no order or money.',
+  [`${ADMIN}|POST|/ads/house`]: 'Uploads a house (Swift\'s own) ad creative; no advertiser, invoice or spend.',
+  [`${ADMIN}|POST|/approvals/:id/cancel`]: 'An admin withdraws their own pending approval request; nothing is executed.',
 };
 
 /** Real gaps, each with its own server-fix PR to come (tolerated while listed). */
 const PENDING_FIX: Record<string, string> = {
   'modules/services/services.routes.ts|POST|/jobs': 'A retried service request creates a SECOND REQUESTED job and chat room (no money: the quote comes later). Fix PR (RISKY G+M): optional Idempotency-Key + a server-side key from the request so a keyless retry is one job.',
+};
+
+/** Registrations the census cannot read (reviewed): not a creator of the eight. */
+const UNREADABLE: Record<string, string> = {
+  'modules/rider/rider.routes.ts|PUT|`/orders/:id/${slug}`': "The rider's in-transit steps from STATUS_TRANSITIONS (en-route-pickup, arrived-pickup, picked-up, en-route-delivery, arrived): each moves the status through the order compare-and-set; no money row (earnings at delivered, cash at handover).",
 };
 
 function sources(dir: string): string[] {
@@ -228,6 +288,11 @@ describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () =
     for (const [id, reason] of [...Object.entries(OUT), ...Object.entries(PENDING_FIX)]) expect(reason.trim().length, id).toBeGreaterThanOrEqual(20);
   });
 
+  it('every route registration is one the census can read (a *.routes.ts file, a literal path)', () => {
+    expect(RESULT.unreadable, 'move it into a *.routes.ts file with a literal path, or list it here with its reason').toEqual(Object.keys(UNREADABLE));
+    for (const [id, reason] of Object.entries(UNREADABLE)) expect(reason.trim().length, id).toBeGreaterThanOrEqual(20);
+  });
+
   it("every listed route still exists, and every guard is still in the code (the pins)", () => {
     expect(RESULT.missingRoutes, 'a listed route is gone or moved: update its entry').toEqual([]);
     expect(RESULT.brokenPins).toEqual([]);
@@ -246,6 +311,19 @@ describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () =
     const pinned: Record<string, Entry> = { 'modules/x/x.routes.ts|POST|/order': { kind: 'payout', guard: 'state', pins: [['modules/x/x.service.ts', 'confirm', "status: 'OWED'"]] } };
     expect(census({ ...route('return confirm(req.id);'), ...svc }, pinned, {}, {}, []).brokenPins).toEqual([]);
     expect(census({ ...route('return confirm(req.id);'), 'modules/x/x.service.ts': svc['modules/x/x.service.ts'].replace("status: 'OWED'", '') }, pinned, {}, {}, []).brokenPins).toHaveLength(1);
+    // [#1964 review F2 S3-1] A money transition is read too: an unguarded settlement on delivered is unclassified (M-F2-62/63).
+    const at = (method: string, path: string, handler = 'return settle(req.id);') => ({ 'modules/x/x.routes.ts': `export function r(app) { app.${method}('${path}', async (req) => { ${handler} }); }` });
+    expect(census(at('put', '/orders/:id/delivered'), {}, {}, {}, []).unclassified).toEqual(['modules/x/x.routes.ts|PUT|/orders/:id/delivered']);
+    expect(census(at('put', '/orders/:id/cancel'), {}, {}, {}, []).unclassified).toEqual(['modules/x/x.routes.ts|PUT|/orders/:id/cancel']);
+    for (const seg of ['complete', 'handover', 'collect', 'quote', 'accept']) expect(census(at('post', `/orders/:id/${seg}`), {}, {}, {}, []).unclassified, seg).toHaveLength(1);
+    // [#1964 review F2 S4-2] A registration outside *.routes.ts, or with a computed path, is reported (M-F2-64).
+    expect(census({ 'modules/x/x.plugin.ts': `export function r(app) { app.post('/orders/:id/payout', async () => ({})); }` }, {}, {}, {}, []).unreadable).toEqual(["modules/x/x.plugin.ts|POST|'/orders/:id/payout'"]);
+    expect(census({ 'modules/x/x.routes.ts': 'export function r(app) { app.post(PATH, async () => ({})); }' }, {}, {}, {}, []).unreadable).toEqual(['modules/x/x.routes.ts|POST|PATH']);
+    expect(census({ 'modules/x/x.service.ts': `export async function f(http) { return http.get('/v1/rate'); }` }, {}, {}, {}, []).unreadable).toEqual([]);
+    // [#1964 review F2 S4-1] A state pin names the where clause: another updateMany left in the handler does not keep it green.
+    const cas: Record<string, Entry> = { 'modules/x/x.routes.ts|PUT|/orders/:id/delivered': { kind: 'payout', guard: 'state', pins: [['modules/x/x.routes.ts', '', "status: 'READY'"]] } };
+    expect(census(at('put', '/orders/:id/delivered', "await db.o.updateMany({ where: { id, status: 'READY' } }); await db.log.updateMany({});"), cas, {}, {}, []).brokenPins).toEqual([]);
+    expect(census(at('put', '/orders/:id/delivered', 'await db.o.updateMany({ where: { id } }); await db.log.updateMany({});'), cas, {}, {}, []).brokenPins).toHaveLength(1);
     // Admin: a C4 route is approval-gated; a non-money admin route still needs a classification.
     const admin = (method: string, path: string) => ({ [ADMIN]: `export function a(app) { app.${method}('${path}', async () => {}); }` });
     expect(census(admin('post', '/cash-rules/rlp/reserve/adjust'), {}, {}, {}, []).byApproval).toEqual([`${ADMIN}|POST|/cash-rules/rlp/reserve/adjust`]);
