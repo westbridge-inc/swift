@@ -24,6 +24,9 @@ export function bookingProblem(error: unknown): BookingProblem {
   switch (code) {
     case 'FARE_CHANGED':
       return { kind: 'fare-changed', message: 'The fare changed since you looked. Check the new fare, then request again.', keepKey: false };
+    case 'WAITING_TERMS_CHANGED':
+      // Priced again like a changed fare: the new quote carries the new terms.
+      return { kind: 'fare-changed', message: 'The waiting charge changed since you looked. Check the new terms, then request again.', keepKey: false };
     case 'ID_VERIFICATION_REQUIRED':
       return { kind: 'id-needed', message: 'Your first ride needs your ID on file. Add your ID in the Swift app (Account), then book here.', keepKey: false };
     case 'RIDE_IN_PROGRESS':
