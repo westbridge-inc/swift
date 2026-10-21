@@ -42,6 +42,7 @@ describe('the page', () => {
     expect(String(url)).toMatch(/\/api\/v1\/safety\/public\/checkin$/);
     expect(JSON.parse(String((init as RequestInit).body))).toEqual({ ref: REF, secret: SECRET, response: 'OK' });
     expect((init as RequestInit).credentials).toBeUndefined(); // no session rides along
+    expect(window.location.hash).toBe(''); // the secret left the address bar once read
   });
 
   it('I need help: Swift is alerted and the police line is the next step', async () => {

@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
+import { rateLimitOptions } from '../utils/rate-limit-options';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import type { UserRole } from '@prisma/client';
@@ -110,6 +112,8 @@ beforeAll(async () => {
   await app.register(redisPlugin);
   await app.register(authPlugin);
   await app.register(socketPlugin);
+  // The server's own limiter, as app.ts registers it: the answer link must survive it.
+  await app.register(rateLimit, rateLimitOptions({ verify: (token) => app.jwt.verify(token), max: 200 }));
   await app.register(safetyRoutes, { prefix: '/api/v1/safety' });
   await app.ready();
 });
@@ -298,5 +302,47 @@ describe('[WEB-TAXI] the answer link refuses everything else alike', () => {
     expect(idle.statusCode).toBe(404);
     expect(idle.json()).toEqual(unknown.json());
     expect(await app.prisma.sosAlert.count({ where: { clientIdempotencyKey: `guardian-help:${sessionId}` } })).toBe(0);
+  });
+});
+
+// [REVIEW-F S3-1 · F-027-17] No rate limit stands between a person and HELP.
+// Guyana's carriers put many riders behind one address (CGNAT): a valid
+// answer from a busy address must land, every time.
+describe('[WEB-TAXI] the answer link is never throttled for a valid answer', () => {
+  const SHARED_IP = '10.99.0.1';
+  const fromShared = (body: Record<string, unknown>) => app.inject({ method: 'POST', url: '/api/v1/safety/public/checkin', payload: body, remoteAddress: SHARED_IP });
+
+  it('25 riders behind one address say "I need help" within a minute: every one lands and raises its SOS', async () => {
+    await app.redis.del(`guardian-link-miss:${SHARED_IP}`);
+    const t0 = Date.now() - 1_800_000;
+    const asks: Array<{ ref: string; secret: string; sessionId: string }> = [];
+    for (let i = 0; i < 25; i += 1) {
+      const { passenger, sessionId, l2At } = await anomalousRide(t0);
+      await healthy().sweep(new Date(l2At));
+      asks.push({ ...linkOf((await textsTo(passenger.userId)).at(-1)!.body)!, sessionId });
+    }
+    for (const ask of asks) {
+      const res = await fromShared({ ref: ask.ref, secret: ask.secret, response: 'NEED_HELP' });
+      expect(res.statusCode, res.body).toBe(200);
+    }
+    for (const ask of asks) {
+      expect(await app.prisma.sosAlert.count({ where: { clientIdempotencyKey: `guardian-help:${ask.sessionId}` } })).toBe(1);
+    }
+  }, 120_000);
+
+  it('only misses are counted: past the miss limit an address gets 429 for misses, and a valid answer from it still lands', async () => {
+    await app.redis.del(`guardian-link-miss:${SHARED_IP}`);
+    const t0 = Date.now() - 1_800_000;
+    const { passenger, ride, l2At } = await anomalousRide(t0);
+    await healthy().sweep(new Date(l2At));
+    const link = linkOf((await textsTo(passenger.userId))[0]!.body)!;
+    const codes: number[] = [];
+    for (let i = 0; i < 52; i += 1) codes.push((await fromShared({ ref: link.ref, secret: nanoid(22), response: 'OK' })).statusCode);
+    expect(codes.slice(0, 50).every((c) => c === 404)).toBe(true);
+    expect(codes.slice(50)).toEqual([429, 429]);
+    const ok = await fromShared({ ...link, response: 'OK' });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect((await session(ride.id)).status).toBe('MONITORING');
+    await app.redis.del(`guardian-link-miss:${SHARED_IP}`);
   });
 });
