@@ -1,12 +1,12 @@
 {
   "targetKb": 120,
   "firstLoadJsKb": {
-    "/(app)/page": 158,
-    "/(app)/store/[slug]/page": 168,
-    "/(app)/market/page": 154,
-    "/(app)/order/browse/page": 154,
-    "/(app)/cart/page": 158,
-    "/(app)/checkout/page": 158,
+    "/(app)/page": 156,
+    "/(app)/store/[slug]/page": 166,
+    "/(app)/market/page": 153,
+    "/(app)/order/browse/page": 150,
+    "/(app)/cart/page": 157,
+    "/(app)/checkout/page": 157,
     "/login/page": 117,
     "/signup/page": 123
   }
