@@ -35,6 +35,7 @@ import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_R
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -587,9 +588,12 @@ export function ActiveJobScreen({ navigation }: any) {
     }
   };
 
+  // [UI-SWEEP U04] The trip-complete popup closes in its own tick; Back waits
+  // for the modal's teardown (#910's law, kit/after-dismiss). Closing and going
+  // back in one tick can leave an invisible window over Home eating every tap.
   const closeRating = () => {
     setRatePopup(null);
-    navigation?.goBack?.();
+    afterDismiss(() => navigation?.goBack?.());
   };
 
   // The one big action at the bottom (reference "Arrived" button).
