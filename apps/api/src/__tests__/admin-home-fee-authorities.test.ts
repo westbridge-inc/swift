@@ -239,7 +239,9 @@ describe('the admin home (platformStats)', () => {
 
   it('counts what the biller would: allowed subscriptions only, movers by their decided fee type', async () => {
     const ids = Object.values(fixtures);
-    const stats = await runWithTenant(TENANT, () => platformStats(app.prisma, { tenantId: TENANT, today: new Date(), subscriptionScope: { id: { in: ids } } }));
+    // The route's own tenant scope (admin.routes subscriptionTenantScope), narrowed to this file's fixtures. The expected
+    // set below is read WITHOUT the tenant scope, so a scope that dropped any fixture would fail this test too.
+    const stats = await runWithTenant(TENANT, () => platformStats(app.prisma, { tenantId: TENANT, today: new Date(), subscriptionScope: { ...scope(TENANT), id: { in: ids } } }));
     const expected: Array<{ id: string; type: string }> = [];
     const active = await sys(() => app.prisma.subscription.findMany({ where: { id: { in: ids }, status: 'ACTIVE' }, select: { id: true, type: true } }));
     for (const sub of active) {
