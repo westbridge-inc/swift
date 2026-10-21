@@ -39,7 +39,9 @@ beforeAll(async () => {
   users.push(mover.id, customer.id); customerId = customer.id;
   token = app.jwt.sign({ userId: mover.id, role: 'MOVER', jti: nanoid(8) });
   await app.prisma.session.create({ data: { userId: mover.id, token, refreshToken: nanoid(48), deviceId: 'board-privacy', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000) } });
-  driverId = (await app.prisma.driver.create({ data: { userId: mover.id, vehicleMake: 'Fixture', vehicleModel: 'Car', vehicleYear: 2020, vehicleColor: 'Grey', licensePlate: nanoid(10), driverLicenseUrl: 'https://example.invalid/document', vehicleInsuranceUrl: 'https://example.invalid/document', isOnline: true, isAvailable: true, locationSessionId: nanoid(), currentLat: at.lat, currentLng: at.lng } })).id;
+  driverId = (await app.prisma.driver.create({ data: { userId: mover.id, vehicleMake: 'Fixture', vehicleModel: 'Car', vehicleYear: 2020, vehicleColor: 'Grey', licensePlate: nanoid(10), driverLicenseUrl: 'https://example.invalid/document', vehicleInsuranceUrl: 'https://example.invalid/document', isOnline: true, isAvailable: true, locationSessionId: nanoid(), currentLat: at.lat, currentLng: at.lng,
+    // [TAXI multi-stop 4/8] An app that declared it runs stops: the taxi below has one.
+    taxiStopsCapable: true } })).id;
   riderId = (await app.prisma.rider.create({ data: { userId: mover.id, riderType: 'COURIER', vehicleType: 'MOTORCYCLE', isOnline: true, isAvailable: true, locationSessionId: nanoid(), currentLat: at.lat, currentLng: at.lng } })).id;
 });
 

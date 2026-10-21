@@ -114,7 +114,9 @@ export default function InventoryPage() {
     ...instantSwitch<{ id: string; isAvailable: boolean }, CatalogItem[]>(
       queryClient, storeKey(storeId, 'items', 'all'),
       (rows, v, undo) => rows.map((row) => (row.id === v.id ? { ...row, isAvailable: undo ? !v.isAvailable : v.isAvailable } : row)),
-      refresh,
+      // [#1936 S4-1] Only the last answer re-reads: a re-read while another item's change is
+      // still on its way would show that item's old value for a moment. (This one still counts.)
+      () => (queryClient.isMutating({ mutationKey: availKey }) > 1 ? undefined : refresh()),
     ),
   });
   const availPending = new Set(useMutationState({

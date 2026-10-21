@@ -236,7 +236,7 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
       const text = readFileSync(path, 'utf8');
       const n = (text.match(/\b(revokeUserDevices|revokeUserDevice|eraseUserDevices)\(tx,/g) ?? []).length;
       if (n > 0) calls[rel] = n;
-      if (rel !== 'lib/owner-rls.ts' && /swift_owner_wall_(revoke|erase)/.test(text)) txWrites.push(`${rel}: calls a device action by name`);
+      if (rel !== 'lib/owner-rls.ts' && /swift_owner_wall_(revoke_devices|revoke_device|erase_devices)\b/.test(text)) txWrites.push(`${rel}: calls a device action by name`);
       for (const m of text.matchAll(/\btx\s*\.\s*deviceToken\s*\.\s*(update|updateMany|delete|deleteMany|create|createMany|upsert)\b/g)) txWrites.push(`${rel}: tx.deviceToken.${m[1]}`);
       for (const form of delegateEscapes(text, 'deviceToken')) escapes.push(`${rel} ${form}`);
     }

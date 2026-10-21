@@ -1,7 +1,12 @@
 """[TA-S0-003 · C1] Filter `pg_dumpall --roles-only --no-role-passwords` to the
 named group roles, for the rehearsal copy (deploy/wall/rehearsal.sh).
 
-    pg_dumpall --roles-only --no-role-passwords | python3 -I rehearsal-roles.py swift_app swift_bypass_rls ...
+    pg_dumpall --roles-only --no-role-passwords | python3 -I rehearsal-roles.py swift_app swift_bypass_rls ... [--optional NAME ...]
+
+A group named after --optional is kept the same way when the dump has it and
+is not required when it does not (swift_owner_wall exists only once the owner
+wall's migrations ran: its policies name it, so a copy without it would error
+on every owner-walled table).
 
 Kept: CREATE ROLE / ALTER ROLE for a named group, and GRANT lines where both
 the granted role and the member are named groups. Dropped: every other role
@@ -13,11 +18,17 @@ import re
 import sys
 
 
-def main(groups):
-    if not groups:
+def main(argv):
+    required, optional, target = [], [], None
+    for arg in argv:
+        if arg == '--optional':
+            target = optional
+            continue
+        (required if target is None else target).append(arg)
+    if not required or ('--optional' in argv and not optional):
         print('ROLE_FILTER_NEEDS_GROUPS', file=sys.stderr)
         return 1
-    allowed = set(groups)
+    allowed = set(required) | set(optional)
     kept, created = [], set()
     for raw in sys.stdin:
         line = raw.rstrip('\n')
@@ -41,7 +52,7 @@ def main(groups):
             continue
         print('ROLE_DUMP_UNEXPECTED_LINE', file=sys.stderr)
         return 1
-    if created != allowed:
+    if not set(required) <= created:
         print('ROLE_DUMP_MISSING_GROUP', file=sys.stderr)
         return 1
     print('\n'.join(kept))

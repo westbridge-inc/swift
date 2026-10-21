@@ -50,7 +50,9 @@ vi.mock('@react-navigation/native', () => ({
     getParent: () => ({ getState: () => ({ routeNames: mocks.rootRouteNames }), getParent: () => undefined }),
   }),
 }));
-vi.mock('react-native', () => ({ FlatList: 'FlatList', View: 'View' }));
+vi.mock('react-native', () => ({ FlatList: 'FlatList', View: 'View', RefreshControl: 'RefreshControl' }));
+// [UI-SWEEP U33] The inbox's pull to refresh (the hook is proven in hooks/usePullToRefresh tests).
+vi.mock('../../../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false, onRefresh: async () => {} }) }));
 // [Row 55] The invite card has its own suite (TeamInviteCards.test.ts).
 vi.mock('../components/TeamInviteCards', () => ({ TeamInviteCards: 'TeamInviteCards' }));
 vi.mock('@swift/ui', () => ({ color: { brand: {} }, space: {} }));
