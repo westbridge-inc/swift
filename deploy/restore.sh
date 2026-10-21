@@ -37,16 +37,36 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+die() { echo "FATAL: $*" >&2; exit 1; }
 COMPARE_SOURCE=0
 FETCH_ENCRYPTED=0
-if [ "${1:-}" = "--compare-source" ]; then COMPARE_SOURCE=1; shift
-elif [ "${1:-}" = "--fetch-encrypted" ]; then FETCH_ENCRYPTED=1; shift; fi
+# [#1977] Disaster recovery: with the live database gone there is no live ledger. Both flags or nothing.
+NO_LIVE_LEDGER=0
+LIVE_IS_GONE=0
+# [#1977] A failed replay drops the copy (it holds people the live database erased) unless kept.
+KEEP_FAILED=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --compare-source) COMPARE_SOURCE=1 ;;
+    --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
+    --no-live-ledger) NO_LIVE_LEDGER=1 ;;
+    --i-know-live-is-gone) LIVE_IS_GONE=1 ;;
+    --keep-failed) KEEP_FAILED=1 ;;
+    --*) die "unknown option $1" ;;
+    *) break ;;
+  esac
+  shift
+done
+if [ "$NO_LIVE_LEDGER" = 1 ] || [ "$LIVE_IS_GONE" = 1 ]; then
+  [ "$NO_LIVE_LEDGER" = 1 ] && [ "$LIVE_IS_GONE" = 1 ] ||
+    die "the disaster-recovery restore needs BOTH --no-live-ledger and --i-know-live-is-gone: without the live database there is no erasure ledger, and the copy will not be erasure-complete"
+  [ "$COMPARE_SOURCE" = 0 ] && [ "$FETCH_ENCRYPTED" = 0 ] ||
+    die "--no-live-ledger --i-know-live-is-gone restores without a live database: it cannot be combined with --compare-source or --fetch-encrypted"
+fi
 SOURCE="${1:-}"
 SCRATCH="${2:-swift_restore_$(date -u +%Y%m%d%H%M%S)}"
 COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml")
 TMP_DIR=""
-
-die() { echo "FATAL: $*" >&2; exit 1; }
 env_value() {
   [ -f "$HERE/.env" ] || return 0
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
@@ -91,6 +111,33 @@ db_psql() {
     'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
     sh "$database" "$@"
 }
+# [#1977 · REVIEW-G S4-1] Every read of the LIVE database's ledger runs read-only: this path never writes live.
+db_psql_ro() {
+  local database="$1"; shift
+  "${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; export PGOPTIONS="-c default_transaction_read_only=on"; db="$1"; shift; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$db" -v ON_ERROR_STOP=1 "$@"' \
+    sh "$database" "$@"
+}
+# [#1977 · REVIEW-F S4-1] Once rows are in the copy, a failure DROPS it: a copy the replay did not
+# finish still holds people the live database has erased. --keep-failed keeps it, quarantined.
+ROWS_IN=0
+die_copy() {
+  [ "$ROWS_IN" = 1 ] || die "$*; scratch database retained (quarantined, empty), not restored"
+  if [ "$KEEP_FAILED" = 1 ]; then
+    die "$*; scratch database $SCRATCH retained (quarantined) because --keep-failed was given. It may hold people the live database erased: drop it as soon as you are done"
+  fi
+  if db_psql postgres -q -c "DROP DATABASE \"$SCRATCH\" WITH (FORCE);"; then
+    die "$*; the scratch database (quarantined until now) was dropped: it held people the live database has erased. Fix and rerun, or pass --keep-failed to inspect it"
+  fi
+  die "$*; DROPPING the scratch database $SCRATCH FAILED: drop it by hand now, it holds people the live database has erased"
+}
+# [#1977 · REVIEW-F S4-2] Which deployment a database belongs to (environment/deploymentId), or none/none.
+deployment_identity_of() {
+  local fn="$2" has
+  has="$("$fn" "$1" -tAc "SELECT to_regclass('public.deployment_identity') IS NOT NULL;" | tr -d '[:space:]')" || return 1
+  if [ "$has" != t ]; then echo "none/none"; return 0; fi
+  "$fn" "$1" -tAc "SELECT coalesce(max(environment), 'none') || '/' || coalesce(max(\"deploymentId\"), 'none') FROM deployment_identity;" | tr -d '[:space:]'
+}
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
 private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
@@ -117,11 +164,18 @@ SQL
 LEDGER_SQL="$HERE/restore-erasure-ledger.sql"
 REPLAY_SQL="$HERE/restore-replay-erasures.sql"
 replay_erasure_ledger() {
-  local has names=() selects=() name="" line i script summary
+  local has names=() selects=() name="" line i script summary live_id copy_id
   [ -f "$LEDGER_SQL" ] && [ -f "$REPLAY_SQL" ] ||
-    die "the erasure ledger files are missing next to restore.sh; scratch database retained (quarantined), not restored"
-  has="$(db_psql "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
-    die "could not read the erasure ledger of $LIVE_DB; scratch database retained (quarantined), not restored"
+    die_copy "the erasure ledger files are missing next to restore.sh; not restored"
+  live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
+  copy_id="$(deployment_identity_of "$SCRATCH" db_psql)" || die_copy "could not read the deployment identity of the restored copy; not restored"
+  echo "live database identity : $live_id"
+  echo "restored copy identity : $copy_id"
+  if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
+    die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
+  fi
+  has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
+    die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
   if [ "$has" != t ]; then
     echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
     return 0
@@ -130,7 +184,7 @@ replay_erasure_ledger() {
     if [[ "$line" =~ ^--\ ledger:\ ([a-z_]+)$ ]]; then name="${BASH_REMATCH[1]}"; continue; fi
     if [ -n "$name" ] && [[ "$line" == SELECT\ * ]]; then names+=("$name"); selects+=("$line"); name=""; fi
   done < "$LEDGER_SQL"
-  [ "${#names[@]}" -gt 0 ] || die "the erasure ledger file names no entries; scratch database retained (quarantined), not restored"
+  [ "${#names[@]}" -gt 0 ] || die_copy "the erasure ledger file names no entries; not restored"
   private_tmp
   script="$TMP_DIR/erasure-replay.sql"
   # The live rows travel through this run's private directory only (ids,
@@ -142,17 +196,17 @@ replay_erasure_ledger() {
       done
       for i in "${!names[@]}"; do
         echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
-        db_psql "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+        db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
         printf '%s\n' '\.'
       done
       cat "$REPLAY_SQL"
       echo 'COMMIT;'
-    } > "$script" ) || die "could not read the erasure ledger of $LIVE_DB; scratch database retained (quarantined), not restored"
+    } > "$script" ) || die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
   summary="$(db_psql "$SCRATCH" -q -tA < "$script")" ||
-    die "the erasure ledger replay failed; scratch database retained (quarantined), not restored"
+    die_copy "the erasure ledger replay failed; not restored"
   rm -f -- "$script"
   printf '%s\n' "$summary" | grep -E '^erasure ledger replayed: ' ||
-    die "the erasure ledger replay reported nothing; scratch database retained (quarantined), not restored"
+    die_copy "the erasure ledger replay reported nothing; not restored"
 }
 
 [ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
@@ -232,11 +286,16 @@ db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\";"
 quarantine_scratch || die "the scratch database could not be quarantined; it was created empty and is retained"
 
 STARTED="$(date +%s)"
+ROWS_IN=1
 "${COMPOSE[@]}" exec -T postgres sh -c \
   'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
-  sh "$SCRATCH" < "$DUMP"
-quarantine_scratch || die "the restored scratch database could not be kept quarantined; scratch database retained"
-replay_erasure_ledger
+  sh "$SCRATCH" < "$DUMP" || die_copy "pg_restore failed; not restored"
+quarantine_scratch || die_copy "the restored scratch database could not be kept quarantined"
+if [ "$NO_LIVE_LEDGER" = 1 ]; then
+  echo "DISASTER-RECOVERY MODE: no live erasure ledger was replayed (--no-live-ledger --i-know-live-is-gone)"
+else
+  replay_erasure_ledger
+fi
 
 FAILED=0
 check() {
@@ -371,6 +430,14 @@ else
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
+if [ "$NO_LIVE_LEDGER" = 1 ]; then
+  # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
+  echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
+  echo "NOT erasure-complete: replay the off-site ledger before use" | tee /dev/stderr
+  echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
+  echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"
+  exit 3
+fi
 echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
 echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection"
 # A failed rehearsal heartbeat cannot turn a verified scratch restore into a
@@ -383,6 +450,6 @@ INSERT INTO platform_config (id, key, value, "updatedAt")
 VALUES (md5(random()::text || clock_timestamp()::text), 'last_restore_rehearsal_seconds', to_jsonb($SECONDS_TAKEN), now())
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
-echo "Inspect the scratch DB before dropping it with psql inside the Postgres container."
+echo "The quarantine covers the logins that exist now: re-run the quarantine before use (a login created later is not covered), and drop the copy after use (psql inside the Postgres container)."
 echo "Document objects and MASTER_KEK require separate recovery proof."
 echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."

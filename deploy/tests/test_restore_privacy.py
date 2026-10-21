@@ -185,7 +185,7 @@ class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
     """[#1977 COORD ruling, REVIEW-F S3-1] With the live database gone there is no live ledger. A loud
     DR mode restores the copy and keeps it quarantined, but never calls it restored."""
     run_restore = RestoreQuarantineAndReplay.run_restore
-    first = RestoreQuarantineAndReplay.first
+    first = staticmethod(RestoreQuarantineAndReplay.first)
 
     def test_the_dr_mode_needs_both_flags_and_refuses_before_anything(self):
         for args in (('--no-live-ledger',), ('--i-know-live-is-gone',), ('--no-live-ledger', '--i-know-live-is-gone', '--compare-source')):
