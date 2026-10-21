@@ -25,6 +25,8 @@ import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { openAvatarErasureObligationIds, storageOrphanCensusSeesEveryRow } from '../lib/storage-orphans';
+import { storageProviderKind } from '../providers/storage/storage-key';
+import { resolveUnreferencedAvatarObject } from '../modules/verification/object-authority';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles (and, rolled back, one probe role and policy).
 grantSuiteCapability('ddl');
@@ -43,7 +45,7 @@ let app: FastifyInstance;
 let tenant: TenantModule;
 let prismaModule: typeof import('../plugins/prisma');
 
-const ids = { admin: '', selfServe: '', closed: '', pending: '', orphan: '' };
+const ids = { admin: '', selfServe: '', closed: '', pending: '', orphan: '', withAvatar: '', withCase: '', kase: '' };
 const users: string[] = [];
 
 const mkUser = async (roles: string[], activeRole: string, extra: Record<string, unknown> = {}) => {
@@ -68,6 +70,20 @@ beforeAll(async () => {
   await owner.tenant.create({ data: { id: OTHER_TENANT, name: `Census ${RUN}`, slug: OTHER_TENANT } });
   ids.orphan = (await owner.storageOrphan.create({ data: {
     tenantId: OTHER_TENANT, key: `avatars/${ids.pending}/census${RUN}.jpg`, reason: 'SELFIE_AUTHORITY_UNPROVEN', userId: ids.pending,
+  } })).id;
+
+  // [copy run #5a] People with a signup avatar (the server-issued key shape, so the exact-row retry may delete it):
+  // their erasure queues the avatar obligation under the user lock and closes that exact row before answering.
+  // One of them is also inside an open incident case, so their answer is the safety-hold receipt.
+  ids.withAvatar = await mkUser(['CUSTOMER'], 'CUSTOMER');
+  ids.withCase = await mkUser(['CUSTOMER'], 'CUSTOMER');
+  for (const id of [ids.withAvatar, ids.withCase]) {
+    const relative = `avatars/${id}/${`av${RUN}`.padEnd(16, 'x').slice(0, 16)}.jpg`;
+    await owner.user.update({ where: { id }, data: { avatar: storageProviderKind() === 'local' ? `/uploads/${relative}` : relative } });
+  }
+  ids.kase = (await owner.incidentCase.create({ data: {
+    caseNumber: `INC-${RUN.toUpperCase()}`, status: 'OPEN', severity: 'S1', category: 'SAFETY_ASSAULT', intake: 'OPS_CREATED',
+    subjectUserId: ids.withCase, summary: 'census wall test', slaAckBy: new Date(), slaDecideBy: new Date(), tenantId: PRODUCTION,
   } })).id;
 
   process.env['DATABASE_URL'] = logins.requestUrl;
@@ -97,6 +113,8 @@ afterAll(async () => {
     }
     if (users.length) {
       await owner.storageOrphan.deleteMany({ where: { userId: { in: users } } });
+      await owner.safetyDeletionHold.deleteMany({ where: { userId: { in: users } } });
+      await owner.incidentCase.deleteMany({ where: { id: ids.kase } }).catch(() => undefined);
       await owner.notification.deleteMany({ where: { userId: { in: users } } });
       await owner.session.deleteMany({ where: { userId: { in: users } } });
       await purgeFixtureAuditTrail(owner, users, 'erasure-avatar-census-wall');
@@ -129,6 +147,24 @@ describe('[Phase C] the erasure answer under the tenant wall', () => {
   it('an avatar obligation still open in another tenant: still pending, from an admin\'s request', async () => {
     expect(await erase(ids.admin, ids.pending)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE', pendingAvatarObjects: 1 });
     expect(await owner.storageOrphan.findUniqueOrThrow({ where: { id: ids.orphan } })).toMatchObject({ purgedAt: null });
+  });
+});
+
+describe('[Phase C · copy run #5a] the exact avatar obligation closes before the answer, under the wall', () => {
+  it('a person with a signup avatar is told the erasure is complete (P1), and the obligation row is closed', async () => {
+    expect(await erase(ids.withAvatar, ids.withAvatar, true)).toEqual({ deleted: true });
+    expect(await owner.user.findUniqueOrThrow({ where: { id: ids.withAvatar } })).toMatchObject({ status: 'DEACTIVATED', avatar: null });
+    const rows = await owner.storageOrphan.findMany({ where: { userId: ids.withAvatar } });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ reason: 'ACCOUNT_DELETION_DELETE_PENDING' });
+    expect(rows[0]!.purgedAt).not.toBeNull();
+  });
+
+  it('inside an open incident case: the safety-hold receipt, deleted:true (P2), never a pending answer', async () => {
+    const answer = await erase(ids.admin, ids.withCase);
+    expect(answer).toMatchObject({ deleted: true, status: 'PENDING_SAFETY_HOLD', holdReasons: ['OPEN_INCIDENT'] });
+    expect(answer).not.toHaveProperty('pendingAvatarObjects');
+    expect((await owner.storageOrphan.findFirstOrThrow({ where: { userId: ids.withCase } })).purgedAt).not.toBeNull();
   });
 });
 
@@ -166,5 +202,30 @@ describe('[Phase C] the census runs on the system login and proves it sees every
     expect(seen).toEqual({ superuser: true, system: true, request: false, 'system, narrowed': false, 'system, no escape': false });
     expect(await owner.$queryRaw`SELECT 1 FROM pg_policy WHERE polname = ${`census_probe_${RUN}`}`).toEqual([]);
     expect(await asPerson(ids.admin, () => openAvatarErasureObligationIds(app.prisma, ids.pending))).toEqual([ids.orphan]); // the escape is back
+  });
+
+  it('the exact retry\'s users census: the system login proves it, the request login and a narrowed system login do not (rolled back)', async () => {
+    const systemRole = decodeURIComponent(new URL(logins!.systemUrl).username);
+    const requestRole = decodeURIComponent(new URL(logins!.requestUrl).username);
+    // An unreferenced key of the server-issued shape: authority is proven only when the census sees every users row.
+    const relative = `avatars/${ids.pending}/${`un${RUN}`.padEnd(16, 'y').slice(0, 16)}.jpg`;
+    const ref = { fileKey: storageProviderKind() === 'local' ? `/uploads/${relative}` : relative, userId: ids.pending };
+    const seen: Record<string, boolean> = {};
+    const ROLLBACK = new Error('rolled back on purpose');
+    await expect(owner.$transaction(async (tx) => {
+      const as = async (role: string) => {
+        await tx.$executeRawUnsafe(`SET LOCAL ROLE ${role}`);
+        const proven = await resolveUnreferencedAvatarObject(tx, ref).then(() => true, () => false);
+        await tx.$executeRawUnsafe('RESET ROLE');
+        return proven;
+      };
+      seen['system'] = await as(systemRole);
+      seen['request'] = await as(requestRole);
+      await tx.$executeRawUnsafe(`CREATE POLICY users_census_probe_${RUN} ON users AS RESTRICTIVE FOR SELECT USING ("tenantId" = current_setting('app.current_tenant', true))`);
+      seen['system, narrowed'] = await as(systemRole);
+      throw ROLLBACK;
+    }, { timeout: 30_000 })).rejects.toBe(ROLLBACK);
+    expect(seen).toEqual({ system: true, request: false, 'system, narrowed': false });
+    expect(await owner.$queryRaw`SELECT 1 FROM pg_policy WHERE polname = ${`users_census_probe_${RUN}`}`).toEqual([]);
   });
 });

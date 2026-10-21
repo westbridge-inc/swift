@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { runAsSystem } from '../plugins/tenant-context';
-import { normalizePolicyExpression, TENANT_POLICY_CONTRACT } from './rls-attestation';
+import { censusSeesEveryRow, type CensusVisibilityRow } from './census-visibility';
 import {
   isOwnedAvatarKey,
   resolveUnreferencedAvatarObject,
@@ -92,7 +92,6 @@ export async function openAvatarErasureObligationIds(
 }
 
 type RawTx = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
-type CensusPolicy = { permissive: boolean; cmd: string; applies: boolean; qual: string | null };
 
 /** Does THIS connection see every row of storage_orphans? Either row security
  * is not applied to it at all (a superuser, a BYPASSRLS login, the owner of an
@@ -103,7 +102,7 @@ type CensusPolicy = { permissive: boolean; cmd: string; applies: boolean; qual: 
  * login (the escape is a policy term, not a role attribute), so the bare
  * row_security_active check would refuse it for ever. */
 export async function storageOrphanCensusSeesEveryRow(tx: RawTx): Promise<boolean> {
-  const rows = await tx.$queryRaw<Array<{ active: boolean; bypass?: boolean; policies?: CensusPolicy[] }>>`
+  const rows = await tx.$queryRaw<CensusVisibilityRow[]>`
     SELECT row_security_active('storage_orphans'::regclass) AS "active",
            COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
            COALESCE((SELECT json_agg(json_build_object(
@@ -115,13 +114,7 @@ export async function storageOrphanCensusSeesEveryRow(tx: RawTx): Promise<boolea
                        FROM pg_policy p WHERE p.polrelid = 'storage_orphans'::regclass), '[]'::json) AS "policies"
     /* avatar-obligation-global-census-visibility */
   `;
-  if (rows.length !== 1) return false;
-  const [row] = rows;
-  if (row?.active === false) return true;
-  if (row?.bypass !== true || !Array.isArray(row.policies)) return false;
-  const reads = row.policies.filter((p) => p.applies && (p.cmd === '*' || p.cmd === 'r'));
-  return !reads.some((p) => !p.permissive)
-    && reads.some((p) => p.permissive && normalizePolicyExpression(p.qual) === TENANT_POLICY_CONTRACT);
+  return censusSeesEveryRow(rows);
 }
 
 /** The strict writer is used when an object pointer is about to disappear.
@@ -184,7 +177,15 @@ export async function deleteStorageObjectAndConfirmAbsent(storage: StorageLike, 
 /** Retry one exact row under locks. User-before-orphan is the fixed lock order
  * for avatars, shared with the selfie/account writers. The row is re-read after
  * both locks and closed with a compare-and-set so a stale page cannot retire a
- * newly reopened obligation. */
+ * newly reopened obligation.
+ *
+ * [Phase C · copy run #5a] The retry is system work: its whole transaction
+ * (both locks, the global "no one else points at it" census, the close)
+ * BEGINs on the system login, so the census proves visibility on the very
+ * connection that holds the locks. On the request's tenant-filtered
+ * connection that census refused, so a walled erasure answered "pending"
+ * until the background sweep came by. It always opens its own transaction
+ * (it takes the client); with the wall off it runs on the one connection. */
 export async function retryStorageOrphan(
   db: PrismaClient,
   storage: StorageLike,
@@ -192,7 +193,7 @@ export async function retryStorageOrphan(
   orphanId: string,
 ): Promise<boolean> {
   try {
-    return await db.$transaction(async (tx) => {
+    return await runAsSystem('storage:orphan-exact-retry', () => db.$transaction(async (tx) => {
       const seed = await tx.storageOrphan.findUnique({ where: { id: orphanId } });
       if (!seed || seed.purgedAt) return false;
 
@@ -245,7 +246,7 @@ export async function retryStorageOrphan(
         data: { purgedAt: new Date() },
       });
       return closed.count === 1;
-    }, { timeout: 15_000 });
+    }, { timeout: 15_000 }));
   } catch (err) {
     log.error({ err, orphanId }, '[F-026-02] storage-orphan retry failed — stays open');
     return false;
