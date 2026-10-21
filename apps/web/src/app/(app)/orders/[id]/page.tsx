@@ -18,14 +18,20 @@ import {
   Star,
   Truck,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { money } from '@/lib/customer';
-import { activeRide, getRide } from '@/lib/customer-rides';
+import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
+import { validPoint } from '@/lib/live-tracking';
+import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
 import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
+
+// [Row 117] A taxi ride's code, driver position and SOS — only while the server
+// says web booking is on; its code (and the map's) loads only for such a ride.
+const TaxiTripSafety = lazy(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
 
 const POLL_INTERVAL_MS = 8_000;
 
@@ -82,6 +88,8 @@ type OrderDetail = {
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   estimatedPrepTime?: number | null;
+  /** [Row 117] The ride's own code and the driver's last position (GET /rides/:id, /rides/active). */
+  taxiSafety?: TaxiSafetyFacts | null;
   rider?: {
     firstName?: string;
     lastName?: string;
@@ -244,6 +252,19 @@ function verifiedMmgAction(order: OrderDetail): NonNullable<OrderDetail['payment
 export default function OrderDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [order, setOrder] = useState<OrderDetail | null>(null);
+  // [Row 117] Whether the server offers web taxi booking (and so the trip's
+  // safety tools here); anything but a yes keeps the page pointing to the app.
+  const [webTaxi, setWebTaxi] = useState(false);
+  const orderIsTaxi = order?.orderType === 'TAXI';
+  useEffect(() => {
+    setWebTaxi(false);
+    if (!orderIsTaxi) return;
+    let live = true;
+    rideCapabilities()
+      .then((capabilities) => { if (live) setWebTaxi(capabilities?.webBooking === true); })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, [id, orderIsTaxi]);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -276,6 +297,12 @@ export default function OrderDetailPage() {
         const active = activeResult.status === 'fulfilled' ? activeResult.value : null;
         const activeDriver = active?.id === id ? active.driver : null;
         const driver = ride?.driver ?? activeDriver;
+        nextOrder.taxiSafety = {
+          ridePin: typeof ride?.ridePin === 'string' && ride.ridePin ? ride.ridePin : null,
+          ridePinVerified: ride?.ridePinVerified === true,
+          driverAt: validPoint(activeDriver?.currentLat, activeDriver?.currentLng),
+          driverName: typeof driver?.user?.firstName === 'string' ? driver.user.firstName : null,
+        };
         if (driver) {
           // Customer order detail omits taxi drivers; normalize the dedicated
           // ride contract into the existing counterparty shape used below.
@@ -518,7 +545,11 @@ export default function OrderDetailPage() {
         </span>
       </section>
 
-      {isTaxi ? (
+      {isTaxi && webTaxi ? (
+        <Suspense fallback={null}>
+          <TaxiTripSafety rideId={id} status={order.status} facts={order.taxiSafety ?? null} />
+        </Suspense>
+      ) : isTaxi ? (
         <section className={styles.moneyNotice} aria-labelledby="taxi-app-title">
           <h2 id="taxi-app-title" className={styles.cardTitle}>Open the Swift app for your safety PIN and SOS</h2>
           <p>You cannot start or manage ride safety on the web. Use the app for trip sharing and driver checks too.</p>
