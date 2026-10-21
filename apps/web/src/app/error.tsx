@@ -1,11 +1,22 @@
 'use client';
 
 import { RefreshCcw } from 'lucide-react';
+import { useChunkRecovery } from '@/lib/chunk-retry';
 
 /** Route-segment error boundary — without this file a thrown render/data error
  *  surfaces as Next's unstyled crash screen. Recovery first: `reset()` re-renders
- *  the segment, so a transient API blip doesn't strand the visitor. */
-export default function RouteError({ reset }: { error: Error & { digest?: string }; reset: () => void }) {
+ *  the segment, so a transient API blip doesn't strand the visitor.
+ *  [PERF #7] A page whose code failed to arrive reloads once by itself, and
+ *  "Try again" reloads it (lib/chunk-retry). */
+export default function RouteError({ error, reset }: { error: Error & { digest?: string }; reset: () => void }) {
+  const { reloading, retry } = useChunkRecovery(error, reset);
+  if (reloading) {
+    return (
+      <main id="main" tabIndex={-1} aria-busy="true" className="flex min-h-[70vh] items-center justify-center px-6 text-center">
+        <p className="text-sm text-[var(--swift-muted)]">Loading the page again…</p>
+      </main>
+    );
+  }
   return (
     <main id="main" tabIndex={-1} className="flex min-h-[70vh] flex-col items-center justify-center px-6 text-center">
       <p className="font-display text-[56px] font-bold leading-none text-[var(--swift-red)]">Oops</p>
@@ -14,7 +25,7 @@ export default function RouteError({ reset }: { error: Error & { digest?: string
         It&apos;s not you — a hiccup on our side. Trying again usually fixes it.
       </p>
       <button
-        onClick={reset}
+        onClick={retry}
         className="mt-6 inline-flex items-center gap-2 sw-btn sw-btn-md"
       >
         <RefreshCcw className="h-4 w-4" aria-hidden />
