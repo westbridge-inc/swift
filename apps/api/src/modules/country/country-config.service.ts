@@ -376,12 +376,14 @@ export class CountryConfigService {
  */
 export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
 
-/** The mover lists: the stored ones, with the code's OPTIONAL lists under them (a key added in code, such as
- *  MOVER_TAXI_EXTRA_OPTIONAL, exists without a re-seed; an edited stored list still wins; the REQUIRED lists stay the
- *  stored ones, exactly as before), minus the retired keys. */
+/** The mover lists: the code's lists UNDER the stored (signed) ones, minus the retired keys. FAIL CLOSED (security
+ *  review, COORD 21 Oct): a key the stored row lacks — a profile added in code, or a row seeded before the key existed —
+ *  takes the code's list, never "no documents". A key the stored row HAS wins, an explicit [] included: that is a signed
+ *  decision (the MOVER base itself is [] by the owner's rulings of 6 Oct). Production's 2026-10-14.5 row holds every
+ *  profile key a vehicle asks for today (MOVER_NO_LICENCE, MOVER_MOTOR, MOVER_TAXI_EXTRA, MOVER_COMMERCIAL); from the
+ *  code it gains only MOVER_TAXI_EXTRA_OPTIONAL. */
 export function moverListsFrom(stored: unknown): Record<string, string[]> {
-  const codeOptional = Object.fromEntries(Object.entries(DEFAULT_DOCUMENT_CHECKLISTS).filter(([key]) => key.endsWith(OPTIONAL_LIST_SUFFIX)));
-  const lists: Record<string, string[]> = { ...codeOptional, ...((stored ?? {}) as Record<string, string[]>) };
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
   for (const key of RETIRED_LIST_KEYS) delete lists[key];
   return lists;
 }
