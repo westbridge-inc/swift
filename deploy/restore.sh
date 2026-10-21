@@ -45,8 +45,12 @@ NO_LIVE_LEDGER=0
 LIVE_IS_GONE=0
 # [#1977] A failed replay drops the copy (it holds people the live database erased) unless kept.
 KEEP_FAILED=0
+# [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
+# base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
+PROJECT=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
     --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
     --no-live-ledger) NO_LIVE_LEDGER=1 ;;
@@ -278,12 +282,21 @@ fi
 [ -f "$DUMP" ] || die "dump file does not exist"
 pg_restore --list "$DUMP" >/dev/null 2>&1 || die "pg_restore cannot read this archive"
 
+[ -n "$PROJECT" ] ||
+  die "name the Compose project that holds the target Postgres: --project <name> (live is 'swift', a rehearsal copy e.g. 'swift-rehearsal'); restore.sh never guesses"
+[[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "--project must be a Compose project name (lowercase letters, digits, - and _)"
+COMPOSE+=(-p "$PROJECT")
+echo "compose project : $PROJECT (its postgres service)"
 echo "archive : $(basename "$DUMP")"
 echo "scratch : $SCRATCH"
 EXISTS="$(db_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$SCRATCH';")"
 [ -z "$EXISTS" ] || die "scratch database already exists; choose a new name"
-db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\";"
+# [#1977 · copy run #5c gap (a)] Closed from birth: created refusing every connection, then closed
+# to PUBLIC and to each login, and only then opened, for the restore.
+db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS false;"
 quarantine_scratch || die "the scratch database could not be quarantined; it was created empty and is retained"
+db_psql postgres -q -c "ALTER DATABASE \"$SCRATCH\" WITH ALLOW_CONNECTIONS true;" ||
+  die "the quarantined scratch database could not be opened for the restore; it was created empty and is retained"
 
 STARTED="$(date +%s)"
 ROWS_IN=1
