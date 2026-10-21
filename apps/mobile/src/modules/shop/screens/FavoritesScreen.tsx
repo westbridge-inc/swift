@@ -62,7 +62,7 @@ export function FavoritesScreen() {
               ratingBucket={v.ratingBucket}
               topRated={v.topRated}
               favorite
-              onToggleFavorite={() => toggleFav.mutate({ vendorId: v.id, isFavorite: true })}
+              onToggleFavorite={() => !toggleFav.isPending && toggleFav.mutate({ vendorId: v.id, isFavorite: true })}
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
             />
           )}

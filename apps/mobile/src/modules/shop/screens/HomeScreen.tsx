@@ -373,6 +373,8 @@ export function HomeScreen() {
       promptLogin();
       return;
     }
+    // [BUG-GUARDS C2] A double tap on the heart sent two add/remove requests.
+    if (toggleFav.isPending) return;
     toggleFav.mutate({ vendorId, isFavorite });
   };
 

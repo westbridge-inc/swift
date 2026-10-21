@@ -263,6 +263,8 @@ export function FeedbackScreen() {
                         <Pressable
                           key={v}
                           onPress={() => {
+                            // [BUG-GUARDS C2] One verdict at a time: two in flight could land in either order.
+                            if (itemFeedback.isPending) return;
                             // [WR-026] Optimistic color, but roll it back if
                             // the upsert fails — a stuck thumb claims saved
                             // feedback that never landed.

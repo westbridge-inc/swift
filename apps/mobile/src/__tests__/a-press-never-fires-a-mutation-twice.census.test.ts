@@ -25,12 +25,13 @@ import ts from 'typescript';
 //    / short-circuits on it (`if (x.isPending) return`, `!x.isPending &&
 //    x.mutate()`, a ref lock `if (inFlight.current) return`).
 // A button inside Alert.alert(…) is the system dialog (it closes on the
-// first tap) and an effect is not a press; both are left out.
+// first tap), so it is left out; an effect or a callback with no `on…` prop
+// behind it is not a press and is not judged.
 // A new hit fails the suite; fix it, or list it below with the reason.
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
-const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending)$/;
+const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending)$/;
 const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]/;
 const MAX_HOPS = 4;
 
@@ -58,6 +59,17 @@ function mutationHooks(sfs: ts.SourceFile[]): Set<string> {
     if (!ts.isBlock(fn.body)) return ts.isCallExpression(fn.body) && calleeName(fn.body) ? [calleeName(fn.body)!] : [];
     return fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression && ts.isCallExpression(st.expression) && calleeName(st.expression) ? [calleeName(st.expression)!] : []));
   };
+  /** A wrapper that hands back its own `{ …m, mutate, mutateAsync, isPending }` (the cart and checkout hooks). */
+  const wraps = (fn: Fn): boolean => {
+    if (!fn.body) return false;
+    const outs = ts.isBlock(fn.body) ? fn.body.statements.flatMap((st) => (ts.isReturnStatement(st) && st.expression ? [st.expression] : [])) : [fn.body];
+    return outs.some((e) => {
+      let x: ts.Expression = e;
+      while (ts.isParenthesizedExpression(x) || ts.isAsExpression(x)) x = x.expression;
+      return ts.isObjectLiteralExpression(x) && x.properties.some((pr) => pr.name !== undefined && /^(mutate|mutateAsync)$/.test(pr.name.getText()));
+    });
+  };
+  for (const [name, fn] of bodies) if (wraps(fn)) hooks.add(name);
   for (let changed = true; changed;) {
     changed = false;
     for (const [name, fn] of bodies) if (!hooks.has(name) && returned(fn).some((r) => hooks.has(r))) { hooks.add(name); changed = true; }
@@ -96,10 +108,13 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
   visit(sf);
   if (!handles.size && !callNames.size) return;
 
-  /** A busy flag counts only when something sets it to true (`setBusy(true)`). */
+  /** A busy flag counts only when something sets it to a truthy value (`setBusy(true)`, `setPicking(kind)`). */
   const setTrue = new Set<string>();
+  const FALSY = new Set([ts.SyntaxKind.FalseKeyword, ts.SyntaxKind.NullKeyword]);
   const findSetters = (n: ts.Node) => {
-    if (ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.arguments[0]?.kind === ts.SyntaxKind.TrueKeyword) setTrue.add(n.expression.text);
+    const arg = ts.isCallExpression(n) && ts.isIdentifier(n.expression) ? n.arguments[0] : undefined;
+    if (arg && !FALSY.has(arg.kind) && !(ts.isIdentifier(arg) && arg.text === 'undefined') && !(ts.isNumericLiteral(arg) && arg.text === '0')
+      && !(ts.isStringLiteral(arg) && arg.text === '') && !ts.isArrowFunction(arg) && !ts.isFunctionExpression(arg)) setTrue.add((n as ts.CallExpression).expression.getText());
     ts.forEachChild(n, findSetters);
   };
   findSetters(sf);
@@ -174,7 +189,6 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
     }
     return false;
   };
-  const insideEffect = (fn: Fn): boolean => ts.isCallExpression(fn.parent) && /^(useEffect|useLayoutEffect|useFocusEffect)$/.test(fn.parent.expression.getText());
   const pressAttr = (n: ts.Node): ts.JsxAttribute | null => {
     const p = n.parent;
     if (p && ts.isJsxExpression(p) && p.parent && ts.isJsxAttribute(p.parent) && /^on[A-Z]/.test(p.parent.name.getText())) return p.parent;
@@ -194,7 +208,6 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
     if (!fn || seen.has(fn)) return;
     seen.add(fn);
     if (guardedWithin(node, fn)) return;
-    if (insideEffect(fn)) return; // not a press
     const attr = pressAttr(fn);
     if (attr) {
       out.pressed++;
@@ -215,7 +228,7 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
       if (direct) {
         out.pressed++;
         if (!elementGuarded(direct)) out.hits.push({ file, line: at(node), text: `${label} <- <${direct.parent.parent.tagName.getText()} ${direct.name.getText()}>` });
-      } else if (!ts.isShorthandPropertyAssignment(ref.parent) || !insideAlert(ref)) {
+      } else {
         follow(ref, label, hops + 1, seen);
       }
     }
@@ -259,14 +272,16 @@ const keyOf = (h: Hit) => `${h.file} | ${h.text}`;
 const PENDING_ELSEWHERE: Record<string, string> = {};
 
 /** Reviewed: a second fire is harmless or impossible. Every entry must still match a real hit. */
-const KNOWN: Record<string, string> = {};
+const KNOWN: Record<string, string> = {
+  'modules/cart/screens/CartScreen.tsx | setTip.mutate <- <Pressable onPress>': 'Choosing Pickup sets the tip to 0 (a value, not a toggle): a second identical request leaves the same state, and checkout submits zero itself.',
+};
 
 const RESULT = census(Object.fromEntries(sources(SRC).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));
 
 describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
   it('finds the mutations and the presses behind them (the census is not vacuous)', () => {
-    expect(RESULT.calls).toBeGreaterThanOrEqual(80);
-    expect(RESULT.pressed).toBeGreaterThanOrEqual(60);
+    expect(RESULT.calls).toBeGreaterThanOrEqual(100);
+    expect(RESULT.pressed).toBeGreaterThanOrEqual(55);
   });
 
   it('every press that fires a mutation is held while it runs (or is listed with its reason)', () => {
@@ -284,13 +299,15 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
   });
 
   it('bites: the shapes that fired twice are refused, the held ones pass', () => {
-    const hook = { 'hooks.ts': `export function useSave() { return useMutation({ mutationFn: save }); }\nexport const useSaveAgain = () => useSave();` };
+    const hook = { 'hooks.ts': `export function useSave() { return useMutation({ mutationFn: save }); }\nexport const useSaveAgain = () => useSave();\nfunction useWrapped(fn) { const m = useMutation({ mutationFn: fn }); const mutate = (p) => m.mutate(p); return { ...m, mutate }; }\nexport function useAddToCart() { return useWrapped(add); }` };
     const verdict = (src: string) => census({ ...hook, 'x.tsx': src }).hits.map((h) => h.text);
     // The favourite heart: an inline handler, nothing holds it.
     expect(verdict(`function P(){ const fav = useSave(); return <Heart onPress={() => fav.mutate({ id: 1 })} />; }`)).toEqual(['fav.mutate <- <Heart onPress>']);
     // A named handler (and a hook that returns another hook), followed to its press.
     expect(verdict(`function P(){ const s = useSaveAgain(); const submit = () => { s.mutate(); }; return <PillButton label="Save" onPress={submit} />; }`)).toEqual(['s.mutate <- <PillButton onPress>']);
     expect(verdict(`function P(){ const s = useSave(); const submit = useCallback(() => s.mutateAsync(), [s]); return <Row onPress={() => submit()} />; }`)).toEqual(['s.mutateAsync <- <Row onPress>']);
+    // A wrapper hook that hands back its own mutate (the cart hooks) is a mutation too.
+    expect(verdict(`function P(){ const add = useAddToCart(); return <Plus onPress={() => add.mutate({ id: 1 })} />; }`)).toEqual(['add.mutate <- <Plus onPress>']);
     // A destructured mutate, and a disabled prop that does not name the request.
     expect(verdict(`function P({ valid }){ const { mutate: send } = useSave(); return <B disabled={!valid} onPress={() => send()} />; }`)).toEqual(['send() <- <B onPress>']);
     // Held: the element names the pending state (directly, destructured, via a local, a busy flag set true).
@@ -302,10 +319,14 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     expect(verdict(`function P(){ const s = useSave(); return <B onPress={() => !s.isPending && s.mutate()} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); const go = () => { if (s.isPending) return; s.mutate(); }; return <B onPress={go} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); const lock = useRef(false); const go = () => { if (lock.current) return; lock.current = true; s.mutate(); }; return <B onPress={go} />; }`)).toEqual([]);
+    // A custom component's own pending prop, and a busy flag set to a non-boolean value, hold it too.
+    expect(verdict(`function P(){ const s = useSave(); return <Tools onStatement={() => s.mutate()} statementLoading={s.isPending} />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const s = useSave(); const [picking, setPicking] = useState(null); const pick = async (k) => { setPicking(k); await s.mutateAsync(k); setPicking(null); }; return <Row busy={picking === 'id'} onPress={() => pick('id')} />; }`)).toEqual([]);
     // A useState flag nobody sets to true is not a guard.
-    expect(verdict(`function P(){ const s = useSave(); const [busy] = useState(false); return <B disabled={busy} onPress={() => s.mutate()} />; }`)).toEqual(['s.mutate <- <B onPress>']);
+    expect(verdict(`function P(){ const s = useSave(); const [busy, setBusy] = useState(false); const done = () => setBusy(false); return <B disabled={busy} onPress={() => s.mutate(undefined, { onSettled: done })} />; }`)).toEqual(['s.mutate <- <B onPress>']);
     // Not a press: the system dialog's button, an effect.
     expect(verdict(`function P(){ const s = useSave(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: () => s.mutate() }])} />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const s = useSave(); const cancel = () => s.mutate(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: cancel }])} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); useEffect(() => { s.mutate(); }, []); return null; }`)).toEqual([]);
   });
 });

@@ -876,7 +876,7 @@ export function CartScreen() {
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}
                         <Pressable
-                          onPress={() => removeItem.mutate(it.id)}
+                          onPress={() => !removeItem.isPending && removeItem.mutate(it.id)}
                           hitSlop={14}
                           accessibilityRole="button"
                           accessibilityLabel={`Remove ${it.name}`}
@@ -918,6 +918,8 @@ export function CartScreen() {
                     label={t === 0 ? 'No tip' : money(t)}
                     selected={(selectedTip ?? Number(c.tipAmount)) === t}
                     onPress={() => {
+                      // [BUG-GUARDS C2] One tip at a time: two in flight could land in either order.
+                      if (setTip.isPending) return;
                       setSelectedTip(t);
                       setTip.mutate(t);
                     }}
@@ -1138,6 +1140,7 @@ export function CartScreen() {
             label="Clear cart"
             size="md"
             onPress={() => {
+              if (clearCart.isPending) return; // [BUG-GUARDS C2] one clear per tap
               clearCart.mutate();
               setMenuOpen(false);
             }}

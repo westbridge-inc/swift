@@ -57,7 +57,7 @@ export function RecommendedScreen() {
               meta={v.etaMin ? `${v.etaMin} min` : undefined}
               favorite={v.isFavorite}
               onToggleFavorite={() =>
-                isAuthenticated ? toggleFav.mutate({ vendorId: v.id, isFavorite: !!v.isFavorite }) : promptLogin()
+                isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId: v.id, isFavorite: !!v.isFavorite }) : promptLogin()
               }
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
             />
