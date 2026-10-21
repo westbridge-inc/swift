@@ -23,6 +23,7 @@ const fx = vi.hoisted(() => ({
   openExternal: vi.fn(async () => true),
   stopAction: { mutate: vi.fn(), isPending: false },
   driverAct: { mutate: vi.fn(), isPending: false, isError: false },
+  rate: { mutate: vi.fn(), isPending: false },
   navigate: vi.fn(),
 }));
 
@@ -85,7 +86,7 @@ vi.mock('../../../hooks', () => ({
   useActiveJobs: () => ({ legs: fx.job ? [fx.job] : [], run: null }),
   useDriverAction: () => fx.driverAct,
   useRiderAction: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
-  useRateCustomer: () => ({ mutate: vi.fn(), isPending: false }),
+  useRateCustomer: () => fx.rate,
   useCourierProof: () => ({ mutate: vi.fn(), isPending: false }),
   useCourierCollect: () => ({ mutate: vi.fn(), isPending: false }),
   useCourierPickupProof: () => ({ mutate: vi.fn(), isPending: false }),
@@ -345,5 +346,52 @@ describe('the live wait on the driver’s trip (Rev 2 §8.3)', () => {
   it('nothing without the server’s waiting object', async () => {
     await render(riderRideWithoutStops({ customer: { firstName: 'Asha' } }));
     expect(byTestId('driver-waiting')).toBeNull();
+  });
+});
+
+describe('[UI-SWEEP U04] the trip-complete popup closes before the screen goes back', () => {
+  // #910's law: a modal that closes in the same tick a navigation starts can
+  // leave its invisible window over the next screen, eating every tap. The
+  // frames are held by hand so "same tick" vs "after the teardown" is exact.
+  const frames: Array<() => void> = [];
+  const g = globalThis as { requestAnimationFrame?: unknown; cancelAnimationFrame?: unknown };
+  const real = { raf: g.requestAnimationFrame, caf: g.cancelAnimationFrame };
+  beforeEach(() => {
+    frames.length = 0;
+    g.requestAnimationFrame = (fn: () => void) => { frames.push(fn); return frames.length; };
+    g.cancelAnimationFrame = () => undefined;
+  });
+  afterEach(() => { g.requestAnimationFrame = real.raf; g.cancelAnimationFrame = real.caf; });
+  async function runFrames() {
+    for (let i = 0; i < 2; i++) {
+      const due = frames.splice(0);
+      await act(async () => { due.forEach((go) => go()); });
+    }
+  }
+  async function finishTrip() {
+    fx.driverAct.mutate.mockImplementationOnce((_input: unknown, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH' }));
+    await click(buttonNamed('Fare collected — complete trip'));
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain('Trip complete');
+  }
+
+  it('Skip: the popup is gone in its own tick; Back comes only after the teardown frames', async () => {
+    await finishTrip();
+    await click(buttonNamed('Skip'));
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    await runFrames();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('Rate passenger: the rating is sent, the popup closes, and Back still waits for the teardown', async () => {
+    fx.rate.mutate.mockImplementationOnce((_input: unknown, opts?: { onSettled?: () => void }) => opts?.onSettled?.());
+    await finishTrip();
+    await click(buttonNamed('Rate passenger'));
+    expect(fx.rate.mutate).toHaveBeenCalledWith({ id: 'cm-ride-3', score: 5 }, expect.anything());
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(navigation.goBack).not.toHaveBeenCalled();
+    await runFrames();
+    expect(navigation.goBack).toHaveBeenCalledTimes(1);
   });
 });

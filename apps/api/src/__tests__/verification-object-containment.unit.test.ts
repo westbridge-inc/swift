@@ -169,7 +169,7 @@ function harness() {
       }),
     },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
-    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
+    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })), findMany: vi.fn(async () => []) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },

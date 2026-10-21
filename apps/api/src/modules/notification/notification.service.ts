@@ -1,6 +1,7 @@
 import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
 import { ownerWallSystem } from '../../lib/owner-rls';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
+import { sendPushAfterResponse } from '../../lib/push-after-response';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
@@ -626,7 +627,7 @@ export class NotificationService {
           const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
           const effect = () => pushToDevices(this.channels.push, devices, notification!.title, notification!.body, data,
             this.channels.push.supportsHandoff && handoff ? { handoff } : {});
-          await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
+          const send = () => (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
             .then(async (r) => {
               if (r && r.sent > 0) pushSubmitted = true;
               await deactivateDeadTokens(this.prisma, r?.invalidTokens);
@@ -638,6 +639,11 @@ export class NotificationService {
               );
               notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
             });
+          // [PERF item 3] A partner's tap (lib/push-after-response) answers without waiting
+          // for the provider: same send, same retries, same failure log and counter. A send
+          // that must know it reached a phone (requirePush) and a fee demand (its handoff
+          // ledger) still wait, everywhere.
+          if (feeDemandId || options.requirePush || !sendPushAfterResponse(send)) await send();
         }
       }
     } catch (err) {

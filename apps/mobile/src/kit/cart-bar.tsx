@@ -72,6 +72,8 @@ export function useCartBarClearance({ vendorId }: { vendorId?: string } = {}): n
  */
 export function CartBar({ vendorId }: { vendorId?: string } = {}) {
   const navigation = useNavigation<any>();
+  // [UI-SWEEP U09] The cart door goes BACK to the stack's own Tabs ({ pop: true }); a
+  // plain navigate pushed a second copy of the whole tab bar from every store screen.
   const insets = useSafeAreaInsets();
   const data = useBarCart();
 
@@ -82,7 +84,7 @@ export function CartBar({ vendorId }: { vendorId?: string } = {}) {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`View cart, ${count} item${count === 1 ? '' : 's'}`}
-      onPress={() => navigation.navigate('Tabs', { screen: 'Cart' })}
+      onPress={() => navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true })}
     >
       {({ pressed }) => (
         <View
