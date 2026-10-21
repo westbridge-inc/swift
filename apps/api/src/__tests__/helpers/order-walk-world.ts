@@ -396,7 +396,9 @@ async function ageRows(w: WalkWorld, ms: number): Promise<void> {
         await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
         // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
         await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
-      });
+        // Prisma's 5 s interactive default is a client setting, not a product
+        // limit: on a loaded shared database one aging statement can exceed it.
+      }, { maxWait: 10_000, timeout: 60_000 });
       return;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

@@ -249,6 +249,51 @@ describe('[OF-01 · REVIEW-G S3-1/S3-2] the grace never hangs on a notice, and m
     expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
   }, 300_000);
 
+  it('a blind or failing inbox read (the owner wall) never counts as "not told": one notice, and the grace still ends it', async () => {
+    // What a sweep sees if its inbox read returns nothing or is refused: the
+    // notification reads are blinded; every other read and write is real.
+    const blind = (mode: 'empty' | 'throw') => new Proxy(w.app.prisma, {
+      get(target, prop) {
+        if (prop === 'notification') {
+          return new Proxy(target.notification, {
+            get(n, np) {
+              if (np === 'findUnique' || np === 'findFirst') {
+                return async () => { if (mode === 'throw') throw new Error('permission denied for table notifications'); return null; };
+              }
+              const v = Reflect.get(n, np);
+              return typeof v === 'function' ? v.bind(n) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as typeof w.app.prisma;
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token);
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    const notifications = new NotificationService(w.app.prisma, w.app.io);
+    const empty = { prisma: blind('empty'), redis: w.app.redis, io: w.app.io, notifications };
+    const failing = { prisma: blind('throw'), redis: w.app.redis, io: w.app.io, notifications };
+    await ageWorld(w, (prep + 46) * MIN);
+    await sweepFoodAge(empty);
+    await ageWorld(w, 5 * MIN);
+    await sweepFoodAge(empty); // reads "nothing held": the re-send collapses into the one notice
+    await ageWorld(w, 5 * MIN);
+    await sweepFoodAge(failing); // the read is refused: nothing is sent, nothing is decided
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    await ageWorld(w, (RIDERLESS_GRACE_MIN - 10) * MIN + 1_000);
+    await sweepFoodAge(failing);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
+  }, 300_000);
+
   it('a paid MMG order is never told it can cancel for free: past the cutoff it is held for a person, not cancelled', async () => {
     const cast = await castWalk(w, 1);
     await offline(cast);

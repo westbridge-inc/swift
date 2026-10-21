@@ -874,10 +874,20 @@ export const RIDERLESS_TOLD_OUTCOME = 'RIDERLESS_CUTOFF_TOLD';
  *  delivered notice collapses into it). */
 async function sendRiderlessCutoffNotice(deps: RescueDeps, order: RetireableOrder, basis: WaitBasis): Promise<void> {
   const dedupeKey = riderlessCutoffNoticeKey(order.id);
-  const held = await deps.prisma.notification.findUnique({
-    where: { userId_dedupeKey: { userId: order.customerId, dedupeKey } },
-    select: { id: true },
-  });
+  // [#1890 owner wall · COORD 13:56Z] A system read of someone's inbox names its
+  // capability. Nothing is DECIDED on this read (the grace runs from the
+  // decision row): an empty read only re-sends a notice whose key collapses it
+  // into the one already held, and a failed read sends nothing this tick.
+  let held: { id: string } | null;
+  try {
+    held = await runAsSystem('rescue-riderless-notice-held', () => deps.prisma.notification.findUnique({
+      where: { userId_dedupeKey: { userId: order.customerId, dedupeKey } },
+      select: { id: true },
+    }));
+  } catch (err) {
+    log().warn({ err, orderId: order.id }, 'rescue: could not read whether the cutoff notice is held; not re-sending this tick');
+    return;
+  }
   if (held) return;
   const money = order.paymentMethod === 'CASH' ? ' You won’t pay anything.' : order.paymentMethod === 'MOBILE_MONEY' ? '' : ' Nothing is charged for it.';
   await deps.notifications.send({
