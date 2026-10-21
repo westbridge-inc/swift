@@ -36,11 +36,14 @@ import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { inventorySummary } from '../../../lib/vendorInventory';
 import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
+
+/** [IMAGES-E2E PR4 · REVIEW-F S4-2 on #1965] A photo address saved before photos were uploaded: named for what it is. */
+export const OUTSIDE_PHOTO_NOTE = "Its old photo link isn't shown to customers. Upload the photo again.";
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import { catalogueMeta, safeVendorRole, numericFact } from '../shared';
 import { catalogueCheckLine } from '../../../lib/catalogueCheck';
 
-function MenuItemRow({
+export function MenuItemRow({
   item,
   navigation,
   categories,
@@ -137,7 +140,7 @@ function MenuItemRow({
           </View>
           {photoNotShown ? (
             <T variant="caption" weight="semibold" style={{ marginTop: space.xs, color: color.warning }}>
-              Customers don't see this photo. Upload it again.
+              {OUTSIDE_PHOTO_NOTE}
             </T>
           ) : null}
           {/* [GUARDRAILS §8] Why customers cannot see this item: Swift does not allow it, or is checking it. */}
@@ -334,7 +337,7 @@ function LowStockCard({ categories, navigation, catOptions }: { categories: any[
 
 /** Category heading with manager controls; staff receive the same factual heading
  *  without authoring affordances. */
-function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
+export function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const updateCategory = useUpdateCategory();
   const deleteCategory = useDeleteCategory();
@@ -342,12 +345,17 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
   const [name, setName] = useState<string>(cat.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const itemCount = (cat.items ?? []).length;
-  // [IMAGES-E2E PR4] The section's own photo (Home shows it on the section's tile).
+  // [IMAGES-E2E PR4] The section's own photo (Home can show it on a tile for the section's name).
   const [photoOpen, setPhotoOpen] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
+  // [REVIEW-F S4-5 on #1965] Removing asks first, like every other photo removal.
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const uploadPhoto = useUploadCategoryPhoto();
   const removePhoto = useRemoveCategoryPhoto();
   const sectionPhoto = isKeptPhoto(cat.imageUrl) ? storePhotoUrl(cat.imageUrl, 160) : null;
+  // [REVIEW-F S4-4 on #1965] An outside address is named here too, as on items.
+  const sectionPhotoNotShown = !!cat.imageUrl && !sectionPhoto;
+  const closePhoto = () => { setPhotoOpen(false); setConfirmRemove(false); };
   const photoBusy = uploadPhoto.isPending || removePhoto.isPending;
   const serverWords = (e: unknown, fallback: string) =>
     (e as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message ?? fallback;
@@ -365,7 +373,7 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
     uploadPhoto.mutate(
       { id: cat.id, file: { uri: a.uri, name: a.fileName ?? 'section.jpg', type: a.mimeType ?? 'image/jpeg' } },
       {
-        onSuccess: () => setPhotoOpen(false),
+        onSuccess: closePhoto,
         onError: (e: unknown) => setPhotoError(serverWords(e, "That photo didn't upload. Check your connection and try again.")),
       },
     );
@@ -405,7 +413,7 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
       {sectionPhoto || canEdit ? (
         <Pressable
           disabled={readOnly || !canEdit}
-          onPress={() => { setPhotoError(null); setPhotoOpen(true); }}
+          onPress={() => { setPhotoError(null); setConfirmRemove(false); setPhotoOpen(true); }}
           accessibilityRole={canEdit ? 'button' : 'image'}
           accessibilityLabel={canEdit ? `Photo for ${cat.name}` : `${cat.name} photo`}
           accessibilityState={{ disabled: readOnly || !canEdit }}
@@ -416,7 +424,7 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
             {sectionPhoto ? (
               <Image source={{ uri: sectionPhoto }} style={{ width: '100%', height: '100%' }} contentFit="cover" />
             ) : (
-              <Feather name="camera" size={16} color={color.text.muted} />
+              <Feather name={sectionPhotoNotShown ? 'alert-circle' : 'camera'} size={16} color={sectionPhotoNotShown ? color.warning : color.text.muted} />
             )}
           </View>
         </Pressable>
@@ -458,36 +466,60 @@ function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean }) {
         </>
       ) : null}
 
-      <PopupCard visible={canEdit && photoOpen} onClose={() => setPhotoOpen(false)}>
+      <PopupCard visible={canEdit && photoOpen} onClose={closePhoto}>
         <PopupTitle variant="title" center>Photo for “{cat.name}”</PopupTitle>
-        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Customers see it on Home with the section's name. Location and camera details are removed.
-        </T>
-        {photoError ? <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>{photoError}</T> : null}
-        <PillButton
-          label={sectionPhoto ? 'Choose a new photo' : 'Choose a photo'}
-          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-          loading={uploadPhoto.isPending}
-          disabled={photoBusy}
-          onPress={() => { void pickSectionPhoto(); }}
-        />
-        {cat.imageUrl ? (
-          <PillButton
-            label="Remove photo"
-            variant="soft"
-            style={{ alignSelf: 'stretch', marginTop: space.md }}
-            loading={removePhoto.isPending}
-            disabled={photoBusy}
-            onPress={() => {
-              if (readOnly || !canEdit) return;
-              removePhoto.mutate(cat.id, {
-                onSuccess: () => setPhotoOpen(false),
-                onError: (e: unknown) => setPhotoError(serverWords(e, "That photo couldn't be removed. Try again.")),
-              });
-            }}
-          />
-        ) : null}
-        <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setPhotoOpen(false)} />
+        {confirmRemove ? (
+          <>
+            <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+              {sectionPhotoNotShown
+                ? 'Remove this photo link? It is taken off this section.'
+                : 'Remove this photo? It is deleted from Swift and customers stop seeing it.'}
+            </T>
+            {photoError ? <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>{photoError}</T> : null}
+            <PillButton
+              label="Remove photo"
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              loading={removePhoto.isPending}
+              disabled={photoBusy}
+              onPress={() => {
+                if (readOnly || !canEdit) return;
+                removePhoto.mutate(cat.id, {
+                  onSuccess: closePhoto,
+                  onError: (e: unknown) => setPhotoError(serverWords(e, "That photo couldn't be removed. Try again.")),
+                });
+              }}
+            />
+            <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirmRemove(false)} />
+          </>
+        ) : (
+          <>
+            {/* [REVIEW-F S3-1 on #1965] Promise nothing Home may not do: Home shows one tile per section name, and none while the discovery rail is live. */}
+            <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+              This photo can show on Home as the picture for “{cat.name}”. Location and camera details are removed.
+            </T>
+            {sectionPhotoNotShown ? (
+              <T variant="caption" weight="semibold" center style={{ marginTop: space.sm, color: color.warning }}>{OUTSIDE_PHOTO_NOTE}</T>
+            ) : null}
+            {photoError ? <T variant="caption" tone="error" center style={{ marginTop: space.sm }}>{photoError}</T> : null}
+            <PillButton
+              label={sectionPhoto ? 'Choose a new photo' : 'Choose a photo'}
+              style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+              loading={uploadPhoto.isPending}
+              disabled={photoBusy}
+              onPress={() => { void pickSectionPhoto(); }}
+            />
+            {cat.imageUrl ? (
+              <PillButton
+                label="Remove photo"
+                variant="soft"
+                style={{ alignSelf: 'stretch', marginTop: space.md }}
+                disabled={photoBusy}
+                onPress={() => { setPhotoError(null); setConfirmRemove(true); }}
+              />
+            ) : null}
+            <PillButton label="Cancel" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={closePhoto} />
+          </>
+        )}
       </PopupCard>
 
       <PopupCard visible={canEdit && confirmDelete} onClose={() => setConfirmDelete(false)}>

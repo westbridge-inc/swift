@@ -55,7 +55,7 @@ describe('bulk import names the rows waiting for a quick check', () => {
     const { user, container } = renderWithQuery(<ImportPage />);
     await user.upload(container.querySelector('input[type="file"]') as HTMLInputElement, new File(['x'], 'menu.csv', { type: 'text/csv' }));
     await user.click(await screen.findByRole('button', { name: 'Import 3 items' }));
-    expect(await screen.findByText('1 imported without a photo. Photos are uploaded, never imported: add them on each item.')).toBeTruthy();
+    expect(await screen.findByText('1 row was imported without a photo. Photos are uploaded, never imported: add them on each item.')).toBeTruthy();
     expect(screen.getByText(`Row 3: ${note}`)).toBeTruthy();
   });
 
