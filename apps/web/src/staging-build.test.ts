@@ -166,7 +166,7 @@ describe('[Size budget] the customer app\u2019s shared code is one chunk', () =>
   });
 
   it('customer pages only, the app\u2019s own JavaScript (and its icons), shared by at least 12 pages, one chunk', async () => {
-    const group = (await run(false)).customerAppShared as Group;
+    const group = (await run(false))['customerAppShared'] as Group;
     expect(group).toMatchObject({ name: 'customer-app-shared', minChunks: 12, minSize: 0 });
     expect(group.chunks({ name: 'app/(app)/checkout/page' })).toBe(true);
     expect(group.chunks({ name: 'app/(app)/layout' })).toBe(true);
