@@ -470,3 +470,56 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
 });
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U14 / U15 / U16] The status pill and the timeline printed codes in
+// lower case ("rider en route pickup"); the phone speaks by the order's own
+// vertical. At 360 px the no-wrap pill squeezed the title until it overlapped.
+// And there was no way to report a problem with the order (the help form
+// already takes ?orderId=).
+// ---------------------------------------------------------------------------
+describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a support door', () => {
+  const live = {
+    ...ORDER, status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', paymentAction: null,
+    timeline: [
+      { status: 'PENDING', timestamp: '2026-10-19T14:00:00.000Z', note: null },
+      { status: 'ACCEPTED', timestamp: '2026-10-19T14:02:00.000Z', note: null },
+      { status: 'RIDER_EN_ROUTE_PICKUP', timestamp: '2026-10-19T14:10:00.000Z', note: null },
+    ],
+  };
+
+  it('the pill and the timeline say the phone\'s words, never a code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const timeline = (await screen.findByRole('heading', { name: 'Order timeline' })).closest('section')!;
+    expect(timeline.textContent).toContain('Order accepted');
+    expect(timeline.textContent).toContain('Rider on the way to the store');
+    expect(screen.getAllByText('Rider on the way to the store').length).toBeGreaterThan(1);
+    expect(document.body.textContent?.toLowerCase()).not.toMatch(/rider en route pickup|rider_en_route/);
+  });
+
+  it('a parcel uses the parcel\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...live, orderType: 'COURIER', timeline: [] } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Rider on the way to collect')).toBeTruthy();
+  });
+
+  it('offers "Report a problem" tied to this order', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const link = await screen.findByRole('link', { name: 'Report a problem' });
+    expect(link.getAttribute('href')).toBe('/account/help?orderId=order-1');
+  });
+
+  it('the header wraps the pill under the copy on a narrow screen instead of squeezing the title', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    const rule = (name: string) => css.match(new RegExp(`\\n\\.${name}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    expect(rule('hero')).toMatch(/flex-wrap:\s*wrap;/);
+    expect(rule('heroCopy')).toMatch(/overflow-wrap:\s*anywhere;/);
+    expect(rule('heroCopy')).toMatch(/flex:\s*1 1 200px;/);
+    expect(rule('statusPill')).not.toMatch(/white-space:\s*nowrap|text-transform:\s*capitalize/);
+    expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
+  });
+});

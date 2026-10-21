@@ -70,6 +70,11 @@ COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
 # [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
 COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
+# [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its
+# reorder notice (src/lib/order-words.ts imports them by path). Both are pure:
+# orderStatus.ts imports only types from @swift/types, reorderNotice.ts nothing.
+COPY apps/mobile/src/lib/orderStatus.ts apps/mobile/src/lib/orderStatus.ts
+COPY apps/mobile/src/lib/reorderNotice.ts apps/mobile/src/lib/reorderNotice.ts
 # [W6] The store page judges an item's choices with the API's own validator
 # (src/lib/menu-options.ts imports it by path, never a second copy). It is a
 # pure module with no imports of its own, so exactly this file.
