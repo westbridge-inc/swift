@@ -779,11 +779,13 @@ function TaxiBooking({ navigation }: any) {
             // 5.5A — the flagship fix: real counts, a queue, no apology.
             <Card style={{ marginTop: space.lg }}>
               <T variant="title">
-                {(counts?.online ?? 0) === 0
-                  ? 'No drivers online right now'
-                  : (counts?.busy ?? 0) >= (counts?.online ?? 0)
-                    ? 'All drivers are busy'
-                    : 'No eligible driver available for this request'}
+                {!counts
+                  ? 'No eligible driver available for this request'
+                  : counts.online === 0
+                    ? 'No drivers online right now'
+                    : counts.busy >= counts.online
+                      ? 'All drivers are busy'
+                      : 'No eligible driver available for this request'}
               </T>
               {counts ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>

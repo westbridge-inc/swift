@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import { nanoid } from 'nanoid';
 import { TripShareService, tripShareDigest } from '../modules/safety/trip-share.service';
 import type { NotificationChannels } from '../../src/providers/notifications/channels';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // Trip Share (safety spec §6). The laws under test: the token is unguessable
 // and grants ONLY the narrow public payload (no addresses, no phones, no ids,
@@ -164,13 +165,13 @@ describe('§6 lifecycle — revoke, trip-end grace, indistinguishable null', () 
 
     // Alive during the trip; dead once the trip ended past the grace window.
     expect(await svc.publicView(shareB.token)).toBeTruthy();
-    await prisma.order.update({ where: { id: b.order.id }, data: { status: 'COMPLETED', deliveredAt: new Date(Date.now() - 61 * 60_000) } });
+    await walkOrderStatus(prisma, b.order.id, 'COMPLETED', { deliveredAt: new Date(Date.now() - 61 * 60_000) });
     expect(await svc.publicView(shareB.token)).toBeNull();
 
     // Inside the grace it still shows (ended, no live fix).
     const c = await mkTrip();
     const shareC = await svc.mint(c.customer.id, c.order.id);
-    await prisma.order.update({ where: { id: c.order.id }, data: { status: 'COMPLETED', deliveredAt: new Date(Date.now() - 10 * 60_000) } });
+    await walkOrderStatus(prisma, c.order.id, 'COMPLETED', { deliveredAt: new Date(Date.now() - 10 * 60_000) });
     const ended = (await svc.publicView(shareC.token))!;
     expect(ended.ended).toBe(true);
     expect(ended.location).toBeNull(); // no live fix after the trip

@@ -46,8 +46,29 @@ async function activeRide(passenger: Session): Promise<any> {
   return (await GET('/rides/active', passenger.token)).json?.data ?? null;
 }
 
-/** A fresh L2 passenger for a case that strikes the account (no-show / refusal). */
+/** [VERIFY-DOCS V3 · owner 6 Oct] Approving a document needs the explicit
+ *  documents.review grant (never implied by SUPER_ADMIN or `*`). A target whose
+ *  runner admin lacks it cannot approve a fresh identity: that is the target's
+ *  configuration, so the journey SKIPS with the reason instead of failing on it.
+ *  (Copy run #2: TAXI-04 403 DOCUMENT_REVIEWER_REQUIRED; staging's admins hold
+ *  no grant.) Null when the grant is held. */
+async function reviewerGrantGap(ctx: Ctx): Promise<string | null> {
+  const r = await GET('/admin/staff/document-reviewers', ctx.admin.token);
+  if (!r.ok) return `the runner admin cannot read the document-reviewer list (${brief(r)}), so the grant cannot be confirmed`;
+  const me = (r.json?.data ?? []).find((s: any) => s.you === true);
+  return me?.documentReviewer === true ? null
+    : 'the runner admin does not hold the documents.review grant (owner rule 6 Oct: an explicit grant, never implied), so no fresh identity can be approved on this target; a super-admin grants it under Review Center > Document reviewers';
+}
+
+/** A fresh L2 passenger for a case that strikes the account (no-show / refusal).
+ *  Null when none can be made; when the target cannot approve an identity at
+ *  all, the whole journey is skipped with that reason (not failed). */
 async function freshL2(rec: Recorder, ctx: Ctx, slot: string): Promise<Session | null> {
+  const gap = await reviewerGrantGap(ctx);
+  if (gap) {
+    rec.skipAll(`a fresh L2 passenger needs an identity approval: ${gap}`);
+    return null;
+  }
   const acct = await registerFresh(ctx, slot);
   if (!acct) return null;
   await upload('/auth/selfie', acct.session.token, { name: 's.png', type: 'image/png', bytes: uniquePng(slot) });
@@ -252,6 +273,7 @@ export const TAXI_04: Journey<Ctx> = {
   cases: 'paid/no-show outcome; missing-GPS denial; admin claim settlement',
   async run(rec, ctx) {
     const passenger = await freshL2(rec, ctx, 'taxi04-noshow');
+    if (!passenger && rec.wholeSkip) return;
     rec.require('a fresh L2 passenger (a no-show strikes the account)', !!passenger, '');
     const ride = await requestRide(rec, ctx, passenger!, 'ride');
     rec.require('a ride', !!ride, '');

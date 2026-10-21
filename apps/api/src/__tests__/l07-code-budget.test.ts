@@ -181,13 +181,16 @@ describe('handover attempt budget is one locked order decision', () => {
         expect(row.paymentStatus).toBe('CAPTURED');
       }
     });
-    it(`${door} cannot complete after a cancellation wins the order lock`, async () => {
+    it(`${door} cannot complete after a cancellation (at the door: a failed handover) wins the order lock`, async () => {
       const f = await fixture(door);
-      const held = await holdOrder(f.order.id, (tx) => tx.order.update({ where: { id: f.order.id }, data: { status: 'CANCELLED' } }));
+      // [row 264] At the door the order is in the rider's custody and the database refuses
+      // ARRIVED -> CANCELLED, so there the competing terminal is the failed handover.
+      const ending = door === 'pickup' ? 'CANCELLED' : 'FAILED';
+      const held = await holdOrder(f.order.id, (tx) => tx.order.update({ where: { id: f.order.id }, data: { status: ending } }));
       const response = f.request('135790');
       try { await waitForOrderWaiters(1); } finally { held.release(); await held.transaction; }
       expect((await response).status).toBe(409);
-      expect((await app.prisma.order.findUniqueOrThrow({ where: { id: f.order.id } })).status).toBe('CANCELLED');
+      expect((await app.prisma.order.findUniqueOrThrow({ where: { id: f.order.id } })).status).toBe(ending);
       expect(await app.prisma.earning.count({ where: { orderId: f.order.id } })).toBe(0);
       expect(await app.prisma.orderOutbox.count({ where: { orderId: f.order.id } })).toBe(0);
     });

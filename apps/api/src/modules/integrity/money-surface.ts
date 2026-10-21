@@ -571,6 +571,21 @@ export async function applyDueMmgLinkChanges(deps: MoneySurfaceDeps, now = new D
 }
 
 /** Read-only: the authority inventory the rollout census reads — open commands and live destinations. */
+/** [#1848 follow-up · REVIEW-M S4] When an account closes, its payee details are cleared (VENDOR_MMG_DESTINATION_CLEARED);
+ *  a link or number change staged before that would stay DECIDED forever — the executor never applies it once the
+ *  field is gone — and keep counting as an open stage. It closes with the account, in the same commit. */
+export async function closeOpenMmgStagesFor(
+  tx: { moneySurfaceCommand: { updateMany(args: Prisma.MoneySurfaceCommandUpdateManyArgs): Promise<{ count: number }> } },
+  entityIds: readonly string[],
+): Promise<number> {
+  if (entityIds.length === 0) return 0;
+  const { count } = await tx.moneySurfaceCommand.updateMany({
+    where: { entityId: { in: [...entityIds] }, kind: { in: [FIELDS.LINK.stage, FIELDS.NUMBER.stage] }, state: 'DECIDED' },
+    data: { state: 'SUPERSEDED' },
+  });
+  return count;
+}
+
 export async function moneySurfaceInventory(prisma: PrismaClient): Promise<{ openStages: number; unsentNotices: number; appliedWithoutDecision: number }> {
   const [openStages, unsentNotices, appliedWithoutDecision] = await Promise.all([
     prisma.moneySurfaceCommand.count({ where: { kind: { in: ['MMG_LINK_STAGE', 'MMG_NUMBER_STAGE'] }, state: 'DECIDED' } }),

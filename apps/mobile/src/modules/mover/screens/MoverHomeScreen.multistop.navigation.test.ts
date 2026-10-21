@@ -13,7 +13,7 @@ import { BOARD_STOPS } from '../../../lib/taxiContract.fixtures';
 // order; a ride without them is exactly today's card.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any }));
+const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any, active: null as any, boardArgs: [] as unknown[], pins: [] as string[] }));
 // [RINGER] The ring itself (audio, vibration, AppState) is unit-tested in
 // hooks/useJobRing + services/jobRinger; here, only WHEN the card asks for it.
 const ring = vi.hoisted(() => ({ useJobRing: vi.fn() }));
@@ -33,7 +33,7 @@ vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ t
 vi.mock('../../../components/PushOffStrip', () => ({ PushOffStrip: () => null }));
 vi.mock('react-native-maps', async () => {
   const R = await import('react');
-  return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: () => null, PROVIDER_DEFAULT: 'default' };
+  return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: (p: any) => { fx.pins.push(String(p.title ?? '')); return null; }, PROVIDER_DEFAULT: 'default' };
 });
 vi.mock('@gorhom/bottom-sheet', async () => {
   const R = await import('react');
@@ -60,9 +60,9 @@ vi.mock('../../../hooks', () => {
     useEarningsToday: () => ({ data: { total: 0 } }),
     useDailyEarnings: () => ({ data: [] }),
     useDemand: () => ({ data: {} }),
-    useAvailableJobs: () => ({ data: fx.jobs }),
+    useAvailableJobs: (...args: unknown[]) => { fx.boardArgs = args; return { data: fx.jobs }; },
     useDispatchOffers: () => ({ offer: fx.offer, queuedBehind: 0, dismiss: vi.fn() }),
-    useActiveJob: () => ({ data: null }),
+    useActiveJob: () => ({ data: fx.active }),
     useActiveJobs: () => ({ legs: [], run: null }),
     useGoOnline: mutation, useGoOffline: mutation, useAcceptJob: mutation, useAcceptOffer: mutation, useDeclineOffer: mutation, useSelectMoverKind: mutation,
     useVerificationStatus: () => ({ data: null }),
@@ -103,6 +103,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   fx.jobs = [];
   fx.offer = null;
+  fx.active = null;
+  fx.boardArgs = [];
+  fx.pins = [];
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => {
@@ -204,3 +207,27 @@ describe('[RINGER] the offer rings until it is answered', () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// [PERF partner #4] A taxi driver carries one ride at a time, so during a ride
+// the job board rests: Home tells the board hook the driver is on a ride (it
+// stops polling) and the board's last pins leave the map.
+// ---------------------------------------------------------------------------
+describe('[PERF partner #4] a taxi driver\'s board rests during a ride', () => {
+  const pinJob = { id: 'pin-1', pickupLat: 6.81, pickupLng: -58.16, vendor: { name: 'Board Pin' }, pickupAddress: 'Bourda Market', dropoffAddress: 'Kitty', fareTotal: 1800, paymentMethod: 'CASH' };
+
+  it('on a ride: the board hook hears it, and no board pin is drawn', async () => {
+    fx.jobs = [pinJob];
+    fx.active = { id: 'ride-1', status: 'ARRIVED', dropoffAddress: 'Kitty', fareTotal: 1800 };
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.boardArgs[2]).toBe(true);
+    expect(fx.pins).not.toContain('Board Pin');
+  });
+
+  it('between rides: the board polls and its pins are drawn', async () => {
+    fx.jobs = [pinJob];
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.boardArgs[2]).toBe(false);
+    expect(fx.pins).toContain('Board Pin');
+  });
+});

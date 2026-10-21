@@ -64,7 +64,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await prisma.settlement.deleteMany({ where: { vendorId: { in: vendorIds } } });
-  await prisma.orderStatusLog.deleteMany({ where: { orderId: { in: orderIds } } });
+  // [row 264] The status-log rows leave with their orders (the foreign-key cascade).
   await prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await prisma.promoCode.deleteMany({ where: { id: { in: promoIds } } });
   await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });

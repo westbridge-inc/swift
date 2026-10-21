@@ -1,4 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { eraseUserDevices } from '../../lib/owner-rls';
+import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
 import { exportPersonalData } from './data-export';
 import { eraseLivenessSelfies, eraseUnclaimedUploads, forgetErasedFingerprints } from './upload-erasure';
@@ -16,6 +18,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { disconnectUserSockets } from '../../utils/socket-revocation';
 import { enumerateSafetyHolds, openSafetyDeletionHold } from '../safety/deletion-hold';
@@ -139,7 +142,8 @@ export class AccountService {
       };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
-        await tx.deviceToken.deleteMany({ where: { userId } });
+        // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
+        await eraseUserDevices(tx, userId);
         // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
         // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
         // verification.service openForOwedWork), and the row's userId never
@@ -230,6 +234,7 @@ export class AccountService {
       // Marked wound down with the cutoff, so no billing repair or fee payment
       // can reopen a closed account's store (it reopens billing holds only).
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
+      await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
@@ -462,8 +467,10 @@ export class AccountService {
 
     // Sessions and push tokens were revoked atomically with authority cutoff.
 
-    // 3. Drop precise saved locations (home/work) outright.
-    await prisma.address.deleteMany({ where: { userId } });
+    // 3. Drop precise saved locations (home/work) outright. [item 20] Through
+    //    a named system capability: an admin's closure or the erasure retry job
+    //    acts for someone else, and the owner wall would let it delete nothing.
+    await runAsSystem('account:erasure-addresses', () => prisma.address.deleteMany({ where: { userId } }));
 
     // 3b. [NR-3 census gap 6] Ephemeral high-risk rows go WITH the account —
     //     recovery ID/selfie pointers, biometric liveness rows, public trip
