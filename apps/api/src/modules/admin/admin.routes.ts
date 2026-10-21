@@ -78,6 +78,7 @@ import {
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { readFareBreakdown } from '../rides/taxi-waiting';
+import { readAdminItinerary } from '../rides/taxi-stops-read';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -2650,8 +2651,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // itemised and read-only (route fare + waiting = total). Any other order
     // gains no key.
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops: each stop in order with its
+    // progress and the arrival's evidence note, and the one the ride is
+    // heading for. Any other order gains no key.
+    const itinerary = order.orderType === 'TAXI' ? await readAdminItinerary(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}), ...(itinerary ?? {}) } };
   });
 
   /**
