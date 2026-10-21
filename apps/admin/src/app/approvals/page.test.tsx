@@ -168,6 +168,9 @@ describe('[OWNER #13] solo approval on your own request', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel this request' }));
     const panel = await screen.findByRole('dialog');
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    // [REVIEW-F2 S4-2] never [Cancel] next to [Cancel the request]: the dismiss names what is kept
+    expect(within(panel).queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(within(panel).getByRole('button', { name: 'Keep the request' })).toBeTruthy();
     await user.click(within(panel).getByRole('button', { name: 'Cancel the request' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/approvals/ap-solo/cancel`);

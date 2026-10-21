@@ -42,7 +42,7 @@ describe('[U59] the live order feed says which state it is in', () => {
     feed(() => ({ body: { success: true, data: [{ id: 'o1', orderNumber: 'SW-1001', status: 'EN_ROUTE_DELIVERY', totalAmount: 2500 }] } }));
     renderWithQuery(<LiveOrderFeed />);
     expect(await screen.findByText('#SW-1001')).toBeTruthy();
-    expect(screen.getByText('en route delivery')).toBeTruthy();
+    expect(screen.getByText('On the way to the customer')).toBeTruthy();
     expect(screen.queryByText('EN_ROUTE_DELIVERY')).toBeNull();
   });
 });

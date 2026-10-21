@@ -60,6 +60,9 @@ export interface ActionDialogRequest<T = unknown> {
   body?: ReactNode;
   /** The button that does it: "Approve store". */
   confirmLabel: string;
+  /** The button that closes it without acting ("Cancel" by default). A dialog whose act IS a
+   *  cancellation names what is kept instead ("Keep the order"), never [Cancel] next to [Cancel order]. */
+  dismissLabel?: string;
   /** Ask for a reason (the default) with optional wording; `false` makes this a plain in-page confirmation. */
   reason?: false | { label?: string; hint?: string };
   fields?: ReasonField[];
@@ -312,7 +315,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
 
         <div className="mc-dialog-actions">
           <button type="button" className="mc-btn" onClick={cancel} disabled={busy}>
-            {refusal ? 'Close' : 'Cancel'}
+            {refusal ? 'Close' : (request.dismissLabel ?? 'Cancel')}
           </button>
           <button type="submit" className="mc-btn mc-btn-primary" disabled={busy}>
             {busy ? 'Sending…' : request.confirmLabel}

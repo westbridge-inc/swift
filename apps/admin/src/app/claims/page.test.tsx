@@ -231,6 +231,29 @@ describe('claim payout mutation', () => {
 });
 
 describe('[DOC-1 §31.4] the reserve line and the evidence bundle', () => {
+  it.each([
+    ['-4500', -4500],
+    ['4500', 4500],
+  ])('[REVIEW-F2 S3-2] a reserve entry typed as %s reaches the server as %d (a minus corrects downwards)', async (typed, sent) => {
+    const fetchMock = mockApi(claimsHandler((request) => {
+      if (request.method === 'POST' && request.url.pathname === '/api/v1/admin/cash-rules/rlp/reserve/adjust') {
+        return { body: { success: true, data: { id: 'e2' } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    }));
+    const { user } = renderWithQuery(<ClaimsPage />);
+    await user.click(await screen.findByRole('button', { name: 'Adjust reserve' }));
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByLabelText(/Adjust the reserve by/), typed);
+    await user.type(within(panel).getByLabelText(/Note recorded with the entry/), 'Statement correction');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Reserve matches the bank statement');
+    await user.click(within(panel).getByRole('button', { name: 'Record entry' }));
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toBe(`${API_ORIGIN}/api/v1/admin/cash-rules/rlp/reserve/adjust`);
+    expect(JSON.parse(String(init?.body))).toEqual({ countryCode: 'GY', amount: sent, note: 'Statement correction' });
+  });
+
   it('shows the reserve balance, its floor and the below-floor warning; a claim renders its bundle with the missing item named', async () => {
     const withBundle = {
       ...targetClaim,

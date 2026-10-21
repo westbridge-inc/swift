@@ -301,6 +301,7 @@ function SoloPanel({ row, onChanged }: { row: ApprovalRow; onChanged: () => void
     title: 'Cancel this request?',
     body: <p>{describeAction(row.action)} will not happen. To do it later, ask again and a second admin decides again.</p>,
     confirmLabel: 'Cancel the request',
+    dismissLabel: 'Keep the request',
     reason: false,
     submit: () => cancelApproval(row.id),
     success: () => 'Request cancelled. Nothing happened.',

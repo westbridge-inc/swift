@@ -267,11 +267,11 @@ export default function SubscriptionsPage() {
                               ],
                               submit: ({ reason, values }) => topup.mutateAsync({ id: s.id, amount: Number(values['amount']), reference: String(values['reference']), reason }),
                               success: () => `Payment recorded for ${h.name}.`,
-                            }).then(lockIfQueued(`${s.id}:topup`))}
-                            disabled={topup.isPending || queuedAsks[`${s.id}:topup`] === true}
+                            }).then(lockIfQueued(`${s.id}:fee-payment`))}
+                            disabled={topup.isPending || queuedAsks[`${s.id}:fee-payment`] === true}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            {queuedAsks[`${s.id}:topup`] ? 'Payment waiting for approval' : 'Record fee payment'}
+                            {queuedAsks[`${s.id}:fee-payment`] ? 'Payment waiting for approval' : 'Record fee payment'}
                           </button>}
                           {Number(s.refundSetAside ?? 0) > 0 ? (
                             <>

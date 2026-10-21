@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { fetchRecentOrders } from '@/lib/api';
+import { label } from '@/lib/labels';
 import { DataUnavailable } from './DataUnavailable';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -17,9 +18,6 @@ const STATUS_COLORS: Record<string, string> = {
   COMPLETED: 'bg-green-500',
   CANCELLED: 'bg-gray-500',
 };
-
-/** A status as words ("EN_ROUTE_DELIVERY" -> "en route delivery"), never a raw enum. */
-const statusWords = (status: unknown) => String(status ?? '').replaceAll('_', ' ').toLowerCase();
 
 export function LiveOrderFeed() {
   const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery({
@@ -55,7 +53,7 @@ export function LiveOrderFeed() {
             <Link key={order.id} href={`/orders/${order.id}`} className="flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors">
               <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[order.status] || 'bg-gray-500'}`} />
               <span className="text-sm font-mono">#{order.orderNumber}</span>
-              <span className="text-xs text-[var(--muted)]">{statusWords(order.status)}</span>
+              <span className="text-xs text-[var(--muted)]">{label('OrderStatus', order.status)}</span>
               <span className="text-xs text-[var(--muted)] ml-auto">
                 ${Number(order.totalAmount).toLocaleString()}
               </span>

@@ -75,7 +75,7 @@ describe('order cancel and refund mutations', () => {
 
     let panel = await openPanel(user, 'Cancel order');
     expect(within(panel).getByRole('heading').textContent).toBe('Cancel order ORDER-TEST-1?');
-    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(panel).getByRole('button', { name: 'Keep the order' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     panel = await openPanel(user, 'Cancel order');
@@ -106,7 +106,7 @@ describe('order cancel and refund mutations', () => {
     let panel = await openPanel(user, 'Record refund owed');
     expect(within(panel).getByRole('heading').textContent).toBe('Cancel ORDER-TEST-1 and record that Test Store owes the customer a refund?');
     expect(panel.textContent).toContain('This does not mark anything refunded.');
-    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(panel).getByRole('button', { name: 'Keep the order' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     panel = await openPanel(user, 'Record refund owed');
@@ -148,7 +148,7 @@ describe('order cancel and refund mutations', () => {
 
       expect((await within(panel).findByRole('alert')).textContent).toContain('Cannot cancel an order with status COMPLETED');
       expect(screen.getByRole('heading', { name: '#ORDER-TEST-1' })).toBeTruthy();
-      expect(screen.getByText('pending')).toBeTruthy();
+      expect(screen.getByText('Waiting to be accepted')).toBeTruthy();
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
       expect(requestsByMethod(fetchMock, 'GET')).toHaveLength(1);
     },
@@ -199,7 +199,7 @@ describe('order cancel and refund mutations', () => {
     expect(screen.queryByRole('button', { name: 'Record refund owed' })).toBeNull();
     const panel = await openPanel(user, 'Cancel order');
     expect(panel.textContent).toContain('MMG payment stays between customer and store. If paid, it is refunded by Test Store; Swift cannot refund it.');
-    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(panel).getByRole('button', { name: 'Keep the order' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
 });

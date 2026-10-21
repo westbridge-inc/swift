@@ -36,7 +36,10 @@ const code = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace
 
 /** A browser dialog or the removed prompt helper, called from console code. */
 export function browserPrompts(source: string): string[] {
-  return [...code(source).matchAll(/\b(window\.(prompt|confirm|alert)|askReason)\s*\(/g)].map((m) => m[1]!);
+  // [REVIEW-F2 S4-3] a bare confirm(…) / prompt(…) / alert(…) is the same browser
+  // dialog as window.confirm(…); a member call (actions.confirm) or a longer name
+  // (onConfirm, confirmLabel) is not.
+  return [...code(source).matchAll(/(\b(?:window|globalThis|self)\.(?:prompt|confirm|alert)|(?<![\w.$])(?<!function\s+)(?:prompt|confirm|alert)|\baskReason)\s*\(/g)].map((m) => m[1]!);
 }
 
 describe('[ADM-006] the reason floor', () => {
@@ -66,6 +69,10 @@ describe('[UI-FIX-ADMIN] no console page asks through a browser prompt', () => {
     expect(browserPrompts(`const id = window.prompt('Rider id:')?.trim();`)).toEqual(['window.prompt']);
     expect(browserPrompts(`if (!window.confirm('Sure?')) return;`)).toEqual(['window.confirm']);
     expect(browserPrompts(`window.alert('Nothing was changed.');`)).toEqual(['window.alert']);
+    expect(browserPrompts(`if (!confirm('Sure?')) return;`)).toEqual(['confirm']);
+    expect(browserPrompts(`const id = prompt('Rider id:');`)).toEqual(['prompt']);
+    expect(browserPrompts(`globalThis.alert('x');`)).toEqual(['globalThis.alert']);
+    expect(browserPrompts(`onConfirm(x); actions.confirm(x); const c = { confirmLabel: 'Go' }; promptText(x);`)).toEqual([]);
     expect(browserPrompts(`// it used to call window.prompt('x') here\nconst reason = await ask(p);`)).toEqual([]);
     expect(browserPrompts(`/** askReason(p) became ask(p) */ const reason = await ask(p);`)).toEqual([]);
   });

@@ -102,6 +102,24 @@ describe('the recorded fee payment key belongs to the attempt', () => {
 // constant defeats it entirely — which is exactly what the waiver did, sending
 // the literal 'Waived by admin' as the "reason" on every call.
 // ---------------------------------------------------------------------------
+describe('[REVIEW-F2 S4-4] a queued fee payment cannot be recorded twice', () => {
+  it('202: says it waits for a second admin and locks Record fee payment on that row', async () => {
+    const fetchMock = mockApi(handler(() => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_f1' } } } })));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '5000', 'Bank or MMG reference of the transfer': 'BANK-9101' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Record payment');
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain("Sent for a second admin's approval");
+    const locked = screen.getByRole('button', { name: 'Payment waiting for approval' }) as HTMLButtonElement;
+    expect(locked.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
+    await user.click(locked);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1);
+  });
+});
+
 describe('[A-12] the console cannot satisfy the evidence requirement by itself', () => {
   it('a missing reference credits nothing', async () => {
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));

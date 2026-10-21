@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
 import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
 import { statusClass } from '@/lib/status';
+import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { PaymentDispute } from '@/components/mc/PaymentDispute';
 import { HeldDoorCash } from '@/components/mc/HeldDoorCash';
@@ -94,9 +95,9 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
       {/* Header — identity + the actions an operator actually has */}
       <div className="flex flex-wrap items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold font-mono">#{o.orderNumber}</h1>
-        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{String(o.status ?? '').replaceAll('_', ' ').toLowerCase()}</span>
+        <span className={`px-2.5 py-1 rounded-full text-xs ${statusClass(o.status)}`}>{label('OrderStatus', o.status)}</span>
         <span className="px-2.5 py-1 rounded-full text-xs bg-white/10 text-[var(--muted)]">
-          {String(o.orderType).replaceAll('_', ' ').toLowerCase()}
+          {label('OrderType', o.orderType)}
         </span>
         {isMmg ? (
           o.paymentStatus === 'CAPTURED' ? (
@@ -118,6 +119,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     ? <p>MMG payment stays between customer and store. If paid, it is refunded by {refundingStore}; Swift cannot refund it.</p>
                     : <p>The customer, the store and any mover on it are told.</p>,
                   confirmLabel: 'Cancel order',
+                  dismissLabel: 'Keep the order',
                   // [ADM-006] the operator's words, not a template
                   submit: ({ reason }) => cancelOrder(id, { refund: false }, reason),
                   success: () => `Order ${o.orderNumber} cancelled.`,
@@ -133,6 +135,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                     title: `Cancel ${o.orderNumber} and record that ${refundingStore} owes the customer a refund?`,
                     body: <p>This does not mark anything refunded. The order stays in the outstanding list until someone records the reference and the amount actually handed back.</p>,
                     confirmLabel: 'Cancel and record refund owed',
+                    dismissLabel: 'Keep the order',
                     submit: ({ reason }) => cancelOrder(id, { refund: true }, reason),
                     success: () => `Order ${o.orderNumber} cancelled; a refund is recorded as owed.`,
                   })}
@@ -243,7 +246,7 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                       {i < timeline.length - 1 && <span className="w-px flex-1 bg-[var(--border)]" />}
                     </div>
                     <div className={`pb-4 ${i === 0 ? '' : 'opacity-80'}`}>
-                      <p className="text-sm font-medium">{String(ev.status).replaceAll('_', ' ')}</p>
+                      <p className="text-sm font-medium">{label('OrderStatus', ev.status)}</p>
                       {ev.note ? <p className="text-xs text-[var(--muted)] mt-0.5">{ev.note}</p> : null}
                       <p className="text-xs text-[var(--muted)]/70 mt-0.5">{new Date(ev.createdAt).toLocaleString()}</p>
                     </div>
