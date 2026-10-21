@@ -191,9 +191,17 @@ describe('GET/POST /auth/legal-acceptance', () => {
     expect(await rows(person.id)).toHaveLength(0);
   });
 
-  it('[2026-10-18 non-material] a person who accepted 2026-10-17 is not asked again after the bump', async () => {
-    const person = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-17');
-    expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-18', acceptedVersion: '2026-10-17', needsAcceptance: false, summary: [] });
+  // [2026-10-18 non-material] stays proven above (acceptanceStatus at '2026-10-18' is pure). At the served
+  // 2026-10-21 (material), a person who accepted 2026-10-17 or 2026-10-18 is asked once, shown only what changed
+  // since — the waiting charge and crash reports — and after the tick is not asked again.
+  it('[2026-10-21 material] a person who accepted 2026-10-17 or 2026-10-18 is asked once, with the 2026-10-21 summary only', async () => {
+    const v21 = MATERIAL_CHANGES.find((c) => c.version === '2026-10-21')!.summary;
+    for (const accepted of ['2026-10-17', '2026-10-18']) {
+      const person = await mkUser(['CUSTOMER'] as UserRole[], accepted);
+      expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-21', acceptedVersion: accepted, needsAcceptance: true, summary: [...v21] });
+      expect((await call('POST', person.token, { version: '2026-10-21', accept: true })).statusCode).toBe(200);
+      expect((await call('GET', person.token)).json().data).toMatchObject({ acceptedVersion: '2026-10-21', needsAcceptance: false, summary: [] });
+    }
   });
 
   it('a person already at the served version is not asked', async () => {
