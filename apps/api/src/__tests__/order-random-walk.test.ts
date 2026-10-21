@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { writeFileSync } from 'node:fs';
-import { buildWalkWorld, type WalkWorld } from './helpers/order-walk-world';
+import { buildWalkWorld, releaseWorld, type WalkWorld } from './helpers/order-walk-world';
 import {
   describeAction, runTrace, shrink, walkSeed, violationKey,
   type Trace, type Violation, type WalkResult,
@@ -72,6 +72,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  await releaseWorld(w);
   await w.app.close();
 });
 

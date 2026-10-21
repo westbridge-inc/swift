@@ -19,7 +19,7 @@
  */
 import type { OrderStatus } from '@prisma/client';
 import { ORDER_TRANSITIONS, RECOVERY_TRANSITIONS, isTerminalOrderStatus } from '../../modules/order/order-status';
-import { adminCall, advance, call, castWalk, drainDue, placeCashOrder, type Cast, type WalkWorld } from './order-walk-world';
+import { adminCall, advance, call, castWalk, deleteUnfinished, drainDue, placeCashOrder, releaseCast, type Cast, type WalkWorld } from './order-walk-world';
 
 export const RIDER_STEPS = ['en-route-pickup', 'arrived-pickup', 'picked-up', 'en-route-delivery', 'arrived'] as const;
 export type RiderStep = (typeof RIDER_STEPS)[number];
@@ -370,16 +370,8 @@ async function walk(w: WalkWorld, riders: number, next: Next, opts: RunOptions =
     // stays; nothing dispatches a terminal order.)
     w.onTick = null;
     w.sched.pending = [];
-    for (const r of cast.riders) {
-      await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
-    }
-    await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false } }).catch(() => {});
-    for (const id of [...w.orderIds].filter((x) => !before.has(x))) {
-      const o = await w.app.prisma.order.findUnique({ where: { id }, select: { status: true } }).catch(() => null);
-      if (!o || isTerminalOrderStatus(o.status)) continue;
-      await w.app.prisma.$executeRawUnsafe('DELETE FROM dispatch_searches WHERE "subjectId" = $1', id).catch(() => {});
-      await w.app.prisma.order.delete({ where: { id } }).then(() => w.orderIds.delete(id)).catch(() => {});
-    }
+    await releaseCast(w, cast);
+    for (const id of [...w.orderIds].filter((x) => !before.has(x))) await deleteUnfinished(w, id);
   }
 }
 

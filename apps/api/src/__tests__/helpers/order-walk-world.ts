@@ -48,12 +48,13 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { makeDispatchService, reconcileStuckDispatch } from '../../modules/dispatch/dispatch.service';
+import { isTerminalOrderStatus } from '../../modules/order/order-status';
 import { autoCancelUnresponsiveOrder, inTenantOf, releaseHeldOrdersJob } from '../../jobs/queue';
 import { NotificationService } from '../../modules/notification/notification.service';
 import { loginWithOtp } from './otp';
 import { testPhone, fixtureTag, wordFreeTag } from './fixture-ids';
 import { TEST_ADMIN_REASON } from './admin-reason';
-import { injectWithApproval } from './admin-approval';
+import { cleanupSecondApprovers, injectWithApproval } from './admin-approval';
 
 export type QueueName = 'dispatch' | 'offer' | 'order' | 'notification';
 export interface WalkJob {
@@ -136,6 +137,8 @@ export interface WalkWorld {
   /** Wall-clock ms when the admin's access token was issued (it lives 15
    *  minutes of REAL time: the walk clock never fakes Date). */
   adminTokenAt: number;
+  /** Every cast made in this world, so a suite can release them all (releaseWorld). */
+  casts: Cast[];
   /** Every user and order a walk made, for ageing and cleanup. */
   userIds: Set<string>;
   orderIds: Set<string>;
@@ -186,7 +189,7 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
     app, sched,
     admin: { userId: adminUser.id, token: adminToken, phone: adminPhone }, adminTokenAt: Date.now(),
     userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), onTick: null,
-    clockMs: 0, jobErrors: [],
+    clockMs: 0, jobErrors: [], casts: [],
   };
   return world;
 }
@@ -238,7 +241,9 @@ export async function castWalk(w: WalkWorld, riderCount: number): Promise<Cast> 
     });
     riders.push({ ...p, riderId: rider.id, lat, lng });
   }
-  return { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
+  const cast: Cast = { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
+  w.casts.push(cast);
+  return cast;
 }
 
 /** The customer checks out ONE item, cash, through the real cart and checkout doors. */
@@ -290,6 +295,37 @@ export async function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: strin
     payload,
   } as never) as Promise<LightMyRequestResponse>);
   return refuseExpired(res, method, url);
+}
+
+/** Leave nothing of a cast that another walk or another suite could dispatch
+ *  to or list: its riders go offline (no current order) and its store closes.
+ *  A suite sharing the database (order-flow's browse reads the first 50 open
+ *  stores) must never find a test store left open. */
+export async function releaseCast(w: WalkWorld, cast: Cast): Promise<void> {
+  for (const r of cast.riders) {
+    await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
+  }
+  await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false } }).catch(() => {});
+}
+
+/** Delete one unfinished order (a finished one stays: nothing dispatches it). */
+export async function deleteUnfinished(w: WalkWorld, orderId: string): Promise<void> {
+  const o = await w.app.prisma.order.findUnique({ where: { id: orderId }, select: { status: true } }).catch(() => null);
+  if (!o || isTerminalOrderStatus(o.status)) return;
+  await w.app.prisma.$executeRawUnsafe('DELETE FROM dispatch_searches WHERE "subjectId" = $1', orderId).catch(() => {});
+  await w.app.prisma.order.delete({ where: { id: orderId } }).then(() => w.orderIds.delete(orderId)).catch(() => {});
+}
+
+/** A suite's afterAll: release every cast, delete every unfinished order, and
+ *  retire the world's admins. Ops pages go to EVERY admin, so admins left by
+ *  earlier runs would multiply each page (and slow the walk) on a reused DB. */
+export async function releaseWorld(w: WalkWorld): Promise<void> {
+  w.onTick = null;
+  w.sched.pending = [];
+  for (const cast of w.casts) await releaseCast(w, cast);
+  for (const id of [...w.orderIds]) await deleteUnfinished(w, id);
+  await w.app.prisma.user.update({ where: { id: w.admin.userId }, data: { roles: ['CUSTOMER'] as never, activeRole: 'CUSTOMER' as never } }).catch(() => {});
+  await cleanupSecondApprovers(w.app).catch(() => {});
 }
 
 // ─── Time ──────────────────────────────────────────────────────────────────

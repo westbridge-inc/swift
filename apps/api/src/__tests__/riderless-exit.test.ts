@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { nanoid } from 'nanoid';
 import {
-  advance, ageWorld, buildWalkWorld, call, castWalk, drainDue, placeCashOrder, runSweeps, type Cast, type WalkWorld,
+  advance, ageWorld, buildWalkWorld, call, castWalk, drainDue, placeCashOrder, releaseWorld, runSweeps, type Cast, type WalkWorld,
 } from './helpers/order-walk-world';
 import { readTooLateToDeliver } from '../modules/dispatch/rescue';
 
@@ -42,6 +42,8 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
+  // Its stores, riders and unfinished orders must not outlive the suite.
+  await releaseWorld(w);
   await w.app.close();
 });
 
