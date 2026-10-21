@@ -323,6 +323,12 @@ export async function releaseWorld(w: WalkWorld): Promise<void> {
   w.onTick = null;
   w.sched.pending = [];
   for (const cast of w.casts) await releaseCast(w, cast);
+  // A loud ops page about one of the world's orders (OF-33's long store wait)
+  // must not stay open for another suite's escalation sweep to pick up.
+  const numbers = await w.app.prisma.order.findMany({ where: { id: { in: [...w.orderIds] } }, select: { orderNumber: true } }).catch(() => []);
+  for (const { orderNumber } of numbers) {
+    await w.app.prisma.opsAlert.updateMany({ where: { body: { contains: orderNumber }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'walk teardown' } }).catch(() => {});
+  }
   for (const id of [...w.orderIds]) await deleteUnfinished(w, id);
   await w.app.prisma.user.update({ where: { id: w.admin.userId }, data: { roles: ['CUSTOMER'] as never, activeRole: 'CUSTOMER' as never } }).catch(() => {});
   await cleanupSecondApprovers(w.app).catch(() => {});

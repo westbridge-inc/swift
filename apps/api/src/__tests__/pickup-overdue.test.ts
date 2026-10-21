@@ -439,6 +439,8 @@ describe('[OF-33 · COORD security ruling 21 Oct] the at-the-counter exemption f
     expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', riderId: r.riderId });
     expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).completionRate).toBe(100);
     expect(count(await noticesOf(id, cast.customer.userId), CUSTOMER_TITLE)).toBe(0);
+    // An open page would be escalated by every other suite's ops-alert sweep on a shared database.
+    await w.app.prisma.opsAlert.updateMany({ where: { body: { contains: orderNumber }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'pickup-overdue.test teardown' } });
   }, 300_000);
 });
 
