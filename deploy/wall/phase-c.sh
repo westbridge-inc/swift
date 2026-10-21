@@ -12,6 +12,7 @@
 #
 # The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is NOT part of Phase C:
 # every step requires no OWNER_RLS_BIND line and no member of swift_owner_wall.
+# preflight and proof ask this host's API for /health: start the stack first if it is stopped (a stopped API holds).
 # Each step prints one line per check — a name, a count, a state, never a
 # secret or a row — and ends "PHASE-C <STEP> OK" (exit 0) or "PHASE-C <STEP>
 # HOLD: <n> check(s)" (exit 1).
@@ -44,10 +45,11 @@ done
 
 COMPOSE=(docker compose --project-directory "$DEPLOY" -f "$DEPLOY/docker-compose.yml")
 env_line() { [ -f "$DEPLOY/.env" ] && grep -E "^$1=" "$DEPLOY/.env" | head -1 | cut -d= -f2- | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' || true; }
-# As the migration owner inside the postgres container, read-only, one value out.
+# As the migration owner inside the postgres container, read-only, one value out. The session STARTS read-only
+# (PGOPTIONS): a `SET default_transaction_read_only` inside -c would only reach transactions after the one -c runs in.
 db() {
   "${COMPOSE[@]}" exec -T postgres sh -c \
-    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -tA -v ON_ERROR_STOP=1 -c "SET default_transaction_read_only = on; $1"' \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")" PGOPTIONS="-c default_transaction_read_only=on"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -tA -v ON_ERROR_STOP=1 -c "$1"' \
     sh "$1" </dev/null 2>/dev/null | tail -n 1
 }
 live_record() {
@@ -119,7 +121,7 @@ case "$STEP" in
     ;;
   snapshot)
     record="$(live_record)" || { hold "no live container to record"; finish; }
-    printf '%s\n' "$record" > "$BEFORE" && chmod 600 "$BEFORE" && ok "BEFORE: $(printf '%s\n' "$record" | grep -c .) live containers recorded"
+    ( umask 077 && printf '%s\n' "$record" > "$BEFORE" ) && chmod 600 "$BEFORE" && ok "BEFORE: $(printf '%s\n' "$record" | grep -c .) live containers recorded"
     ;;
   proof)
     nothing_left
@@ -151,9 +153,12 @@ case "$STEP" in
       case "$names" in *" POSTGRES_PASSWORD_FILE "*|*" POSTGRES_PASSWORD "*) hold "$c still carries the owner's password setting" ;; esac
       case "$names" in *" DATABASE_URL_FILE "*) case "$names" in *" SYSTEM_DATABASE_URL_FILE "*) ok "$c runs on the two least-privilege logins" ;;
         *) hold "$c has no SYSTEM_DATABASE_URL_FILE" ;; esac ;; *) hold "$c has no DATABASE_URL_FILE" ;; esac
-      boot="$(docker logs --tail 4000 "$id" </dev/null 2>&1)"
-      printf '%s' "$boot" | grep -q 'tenant wall: enforced' && ok "$c attested 'tenant wall: enforced'" || hold "$c has no 'tenant wall: enforced' boot line"
-      printf '%s' "$boot" | grep -q 'owner wall: inert' && ok "$c attested 'owner wall: inert'" || hold "$c has no 'owner wall: inert' boot line"
+      # Everything this container logged since it started (a boot line never falls out of a fixed tail), read
+      # from a here-string: a pipe into grep -q would die of SIGPIPE under pipefail on a long log (a false HOLD).
+      started="$(docker inspect -f '{{.State.StartedAt}}' "$id" </dev/null 2>/dev/null)"
+      boot="$(docker logs --since "${started:-0}" "$id" </dev/null 2>&1)"
+      grep -q 'tenant wall: enforced' <<<"$boot" && ok "$c attested 'tenant wall: enforced'" || hold "$c has no 'tenant wall: enforced' boot line"
+      grep -q 'owner wall: inert' <<<"$boot" && ok "$c attested 'owner wall: inert'" || hold "$c has no 'owner wall: inert' boot line"
     done
     health
     ;;

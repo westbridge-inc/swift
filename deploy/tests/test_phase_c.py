@@ -31,12 +31,19 @@ if argv[:1] == ['ps'] and 'swift-rehearsal' in text:
     out('\n'.join('leftover%d' % i for i in range(int(k('REH_CONTAINERS', '0')))))
 if argv[:2] == ['volume', 'ls']:
     out('\n'.join('vol%d' % i for i in range(int(k('REH_VOLUMES', '0')))))
+if argv[:1] == ['inspect'] and argv[1:3] == ['-f', '{{.State.StartedAt}}']:
+    out(k('STARTED', '2026-10-21T00:00:00.123456789Z'))
 if argv[:1] == ['inspect'] and '.Config.Env' in text:
     out(k('ENV_' + argv[-1].upper(), 'DATABASE_URL_FILE=/run/secrets/a\nSYSTEM_DATABASE_URL_FILE=/run/secrets/b\nPOSTGRES_PASSWORD_FILE='))
 if argv[:1] == ['inspect']:
     out('\n'.join('/swift-%s-1 2026-10-21T00:00:00Z restarts=0' % c for c in k('LIVE', 'api worker postgres').split()))
 if argv[:1] == ['logs']:
-    out(k('BOOT', 'tenant wall: enforced role=swift_app_login\nowner wall: inert (OWNER_RLS_BIND off, login not walled)'))
+    if argv[1:3] != ['--since', k('STARTED', '2026-10-21T00:00:00.123456789Z')]:
+        out('', 6)
+    print(k('BOOT', 'tenant wall: enforced role=swift_app_login\nowner wall: inert (OWNER_RLS_BIND off, login not walled)'))
+    if k('BIG_LOG') == '1':  # the boot lines come first, then far more than one pipe buffer of later log
+        sys.stdout.write(('{"level":30,"msg":"request completed"}\n') * 20000)
+    sys.exit(0)
 if argv[:1] == ['compose']:
     if 'ps' in argv and '-q' in argv:
         service = argv[-1] if argv[-1] in ('api', 'worker') else None
@@ -46,7 +53,8 @@ if argv[:1] == ['compose']:
     if 'exec' in argv and 'api' in argv:
         sys.exit(0 if k('HEALTH', '1') == '1' else 1)
     if 'exec' in argv and 'postgres' in argv:
-        if 'read_only = on' not in text:
+        # Read-only from the session's start (PGOPTIONS), never a SET inside the one -c transaction.
+        if 'PGOPTIONS="-c default_transaction_read_only=on"' not in text or 'SET default_transaction_read_only' in text:
             out('', 3)
         if 'deployment_identity' in text:
             out(k('IDENTITY', 'production'))
@@ -120,7 +128,7 @@ class PhaseC(unittest.TestCase):
             self.assertIn(line, result.stdout)
         sql = [c for c in calls if c['tool'] == 'docker' and 'postgres' in c['argv']]
         self.assertTrue(sql)
-        self.assertTrue(all('SET default_transaction_read_only = on;' in ' '.join(c['argv']) for c in sql))
+        self.assertTrue(all('PGOPTIONS="-c default_transaction_read_only=on"' in ' '.join(c['argv']) for c in sql))
         self.assertFalse([c for c in calls if c['tool'] == 'docker' and set(c['argv']) & {'up', 'down', 'rm', 'stop', 'restart', 'kill'}])
         self.assertFalse((self.tmp / 'phase-c-live-before.txt').exists())
 
@@ -213,6 +221,26 @@ class PhaseC(unittest.TestCase):
         result, _ = self.run_step('verify', good, env_api='DATABASE_URL_FILE=/run/secrets/a\nSYSTEM_DATABASE_URL_FILE=/run/secrets/b\nPOSTGRES_PASSWORD_FILE=/run/secrets/p')
         self.assertIn("api still carries the owner's password setting", self.holds(result))
         self.assertNotIn('/run/secrets/p', result.stdout)
+
+    def test_verify_reads_the_whole_boot_log_since_start_without_a_pipe(self):
+        """[#1967 REVIEW-F S3-1] A healthy stack whose log since start is far longer than a pipe buffer (the boot lines, then
+        ~760 KB of later log) still attests both lines: no SIGPIPE false HOLD under pipefail, no fixed --tail."""
+        good = 'PILOT_ENV=production\nTENANT_RLS_BIND=1\nTENANT_UNSCOPED_ACCESS=deny\n'
+        result, calls = self.run_step('verify', good, logins=2, big_log=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("worker attested 'tenant wall: enforced'", result.stdout)
+        self.assertIn("api attested 'owner wall: inert'", result.stdout)
+        logs = [c['argv'] for c in calls if c['tool'] == 'docker' and c['argv'][:1] == ['logs']]
+        self.assertEqual(len(logs), 2)
+        self.assertTrue(all(a[1:3] == ['--since', '2026-10-21T00:00:00.123456789Z'] and '--tail' not in a for a in logs), logs)
+
+    def test_the_before_record_is_never_readable_by_others_even_for_an_instant(self):
+        """[#1967 REVIEW-F S4-1] The BEFORE record is created under umask 077, not written world-readable then chmod-ed."""
+        script = (self.root / 'deploy' / 'wall' / 'phase-c.sh').read_text()
+        self.assertIn('( umask 077 && printf', script)
+        result, _ = self.run_step('snapshot', 'PILOT_ENV=production\n')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(oct((self.tmp / 'phase-c-live-before.txt').stat().st_mode & 0o777), '0o600')
 
 
 if __name__ == '__main__':
