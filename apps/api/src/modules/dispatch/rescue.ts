@@ -293,6 +293,10 @@ export interface RetireableOrder {
    *  fails to compile instead of silently cancelling paid money. */
   paymentStatus: string;
   fulfillmentModeVersion?: number;
+  /** [OF-01 · REVIEW-M S4-1] The riderless stretch's identity: a database
+   *  trigger bumps it on every assignment and release, so each stretch with no
+   *  rider gets its own warning and its own grace. */
+  riderAssignmentVersion?: number;
   readyAt: Date | null;
   vendor: { name: string; owner: { userId: string } } | null;
 }
@@ -819,9 +823,11 @@ export async function releaseFoodAgeHold(
  *  order past its tenant's cutoff — HOLD, un-cancelled, the ones whose money
  *  the store already holds ([TA-S0-001]) — and re-deliver the effects of
  *  every existing hold whose notices may still be owed. */
-/** [OF-01/17] The one "cancel free now" notice's key: at most one per order, ever. */
-export function riderlessCutoffNoticeKey(orderId: string): string {
-  return `riderless-cutoff:customer:${orderId}`;
+/** [OF-01/17] The "cancel free now" notice's key: at most one per riderless
+ *  stretch (REVIEW-M S4-1: a rider who took it and handed it back starts a new
+ *  stretch, which is warned afresh before any cancel). */
+export function riderlessCutoffNoticeKey(orderId: string, assignmentVersion = 0): string {
+  return `riderless-cutoff:customer:${orderId}:${assignmentVersion}`;
 }
 
 /**
@@ -846,7 +852,10 @@ async function settleAfterGrace(
   // deduped, on every tick until it lands — but its failure can never hold the
   // order past the grace, the 19-day class the cutoff exists to end.
   const told = await deps.prisma.algoDecision.findFirst({
-    where: { algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, outcome: RIDERLESS_TOLD_OUTCOME },
+    where: {
+      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, outcome: RIDERLESS_TOLD_OUTCOME,
+      inputs: { path: ['assignmentVersion'], equals: order.riderAssignmentVersion ?? 0 },
+    },
     orderBy: { createdAt: 'asc' },
     select: { createdAt: true },
   });
@@ -855,7 +864,7 @@ async function settleAfterGrace(
       algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId,
       outcome: RIDERLESS_TOLD_OUTCOME,
       sentence: `No rider ${ageMinutes - limitMinutes} min past the cutoff: the customer is told they can cancel for free, and the system cancels ${RIDERLESS_GRACE_MIN} min from now if no rider comes.`,
-      inputs: { ageMinutes, limitMinutes, basis, graceMinutes: RIDERLESS_GRACE_MIN },
+      inputs: { ageMinutes, limitMinutes, basis, graceMinutes: RIDERLESS_GRACE_MIN, assignmentVersion: order.riderAssignmentVersion ?? 0 },
     });
     // No durable "told at" means no grace has started: say nothing yet, try next tick.
     if (!recorded) return 'WAITING';
@@ -873,7 +882,7 @@ export const RIDERLESS_TOLD_OUTCOME = 'RIDERLESS_CUTOFF_TOLD';
 /** The ONE "you can cancel for free" notice (deduped per order, so a re-send of a
  *  delivered notice collapses into it). */
 async function sendRiderlessCutoffNotice(deps: RescueDeps, order: RetireableOrder, basis: WaitBasis): Promise<void> {
-  const dedupeKey = riderlessCutoffNoticeKey(order.id);
+  const dedupeKey = riderlessCutoffNoticeKey(order.id, order.riderAssignmentVersion ?? 0);
   // [#1890 owner wall · COORD 13:56Z] A system read of someone's inbox names its
   // capability. Nothing is DECIDED on this read (the grace runs from the
   // decision row): an empty read only re-sends a notice whose key collapses it
@@ -909,7 +918,7 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
   const notified: string[] = [];
   const select = {
     id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true, paymentStatus: true, readyAt: true,
-    fulfillmentModeVersion: true, acceptedAt: true, estimatedPrepTime: true, placedAt: true, holdExpiresAt: true, scheduledFor: true,
+    fulfillmentModeVersion: true, riderAssignmentVersion: true, acceptedAt: true, estimatedPrepTime: true, placedAt: true, holdExpiresAt: true, scheduledFor: true,
     vendor: { select: { name: true, owner: { select: { userId: true } } } },
   } as const;
   type WaitingRow = Prisma.OrderGetPayload<{ select: typeof select }>;

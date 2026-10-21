@@ -335,6 +335,49 @@ describe('[OF-01 · REVIEW-G S3-1/S3-2] the grace never hangs on a notice, and m
   }, 300_000);
 });
 
+describe('[OF-01 · REVIEW-M S4-1] each riderless stretch gets its own warning and its own grace', () => {
+  it('a rider takes it in the grace and hands it back after it: warned afresh, cancelled only 15 minutes after the NEW warning', async () => {
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token);
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    await advance(w, cast, (prep + 50) * MIN, SWEEP);
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
+    // A rider takes it inside the grace and holds it well past where that grace ended.
+    const r = cast.riders[0]!;
+    expect((await call(w, 'POST', '/api/v1/rider/go-online', r.token, { latitude: r.lat, longitude: r.lng })).statusCode).toBe(200);
+    expect((await call(w, 'POST', `/api/v1/rider/orders/${id}/accept`, r.token)).statusCode).toBe(200);
+    await advance(w, cast, 25 * MIN, SWEEP);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
+    // Handed back: a new riderless stretch. The next tick warns again; it does not cancel.
+    expect((await call(w, 'POST', `/api/v1/rider/orders/${id}/handback`, r.token, { reason: 'flat tyre, cannot ride' })).statusCode).toBe(200);
+    await offline(cast);
+    await runSweeps(w);
+    await drainDue(w);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(2);
+    const sinceNewWarning = async () => {
+      const told = await w.app.prisma.algoDecision.findFirstOrThrow({
+        where: { subjectId: id, outcome: RIDERLESS_TOLD_OUTCOME }, orderBy: { createdAt: 'desc' }, select: { createdAt: true },
+      });
+      return Date.now() - told.createdAt.getTime();
+    };
+    await ageWorld(w, 14 * MIN - await sinceNewWarning());
+    await runSweeps(w);
+    await drainDue(w);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    await ageWorld(w, 15 * MIN - await sinceNewWarning() + 1_000);
+    await runSweeps(w);
+    await drainDue(w);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(2);
+  }, 300_000);
+});
+
 describe('[OF-01] the dispatch notices are told once per order state, not once per search', () => {
   it('a waived order nobody delivers for a day tells each person each thing once; a handback (a new state) may tell once more', async () => {
     const cast = await castWalk(w, 1);
