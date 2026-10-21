@@ -53,6 +53,7 @@ vi.mock('../stores/vendorPreview', () => ({ useVendorPreview: (selector: (s: { p
 
 import { useVendorAnalytics, useVendorOrdersLive } from './vendorops';
 import { POLL } from '../lib/pollPolicy';
+import { OVERVIEW_EVENT_GAP_MS } from '../lib/vendorOrderFeed';
 
 beforeEach(() => { fx.opts.length = 0; fx.invalidated.length = 0; });
 
@@ -65,15 +66,22 @@ describe('[PERF partner #6] the store hooks', () => {
   });
 
   it('a new order and a status change refresh the overview query (and the orders)', () => {
-    useVendorOrdersLive('store-a', true);
-    fx.socket.fire('order:new', { orderId: 'o1' });
-    expect(fx.invalidated).toContainEqual(['vendor', 'analytics']);
-    expect(fx.invalidated).toContainEqual(['vendor', 'orders']);
-    fx.invalidated.length = 0;
-    fx.socket.fire('order:status_changed');
-    expect(fx.invalidated).toEqual(expect.arrayContaining([['vendor', 'analytics'], ['vendor', 'orders']]));
-    fx.invalidated.length = 0;
-    fx.socket.fire('order:prep_update');
-    expect(fx.invalidated).not.toContainEqual(['vendor', 'analytics']);
+    vi.useFakeTimers();
+    try {
+      useVendorOrdersLive('store-a', true);
+      fx.socket.fire('order:new', { orderId: 'o1' });
+      expect(fx.invalidated).toContainEqual(['vendor', 'analytics']);
+      expect(fx.invalidated).toContainEqual(['vendor', 'orders']);
+      fx.invalidated.length = 0;
+      fx.socket.fire('order:status_changed');
+      expect(fx.invalidated).toEqual([['vendor', 'orders']]); // the orders at once; the overview at most once per 30 s (#1932 S4-1)
+      vi.advanceTimersByTime(OVERVIEW_EVENT_GAP_MS);
+      expect(fx.invalidated).toEqual([['vendor', 'orders'], ['vendor', 'analytics']]);
+      fx.invalidated.length = 0;
+      fx.socket.fire('order:prep_update');
+      expect(fx.invalidated).not.toContainEqual(['vendor', 'analytics']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

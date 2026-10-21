@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { bindVendorOrderFeed } from './vendorOrderFeed';
+import { bindVendorOrderFeed, OVERVIEW_EVENT_GAP_MS } from './vendorOrderFeed';
 import { POLL } from './pollPolicy';
 const fx = vi.hoisted(() => ({ connected: false }));
 vi.mock('../services/socket', () => ({ getSocket: () => fx }));
-afterEach(() => { fx.connected = false; });
+afterEach(() => { fx.connected = false; vi.useRealTimers(); });
 
 function fakeSocket() {
   const handlers = new Map<string, Set<(payload?: any) => void>>();
@@ -67,9 +67,11 @@ describe('[PERF partner #6] the store overview follows the order feed', () => {
     const onNew = vi.fn();
     const refreshOverview = vi.fn();
     const off = bindVendorOrderFeed(socket, 'store-a', () => true, { onNew, refresh: noop, refreshBookings: noop, refreshOverview }, { serverAdmits: true });
+    vi.useFakeTimers();
     socket.fire('order:new', { orderId: 'o1', orderNumber: 'N1' });
     expect(onNew).toHaveBeenCalledWith({ orderId: 'o1', orderNumber: 'N1' });
     expect(refreshOverview).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(OVERVIEW_EVENT_GAP_MS);
     socket.fire('order:status_changed');
     expect(refreshOverview).toHaveBeenCalledTimes(2);
     socket.fire('order:prep_update');
@@ -93,6 +95,38 @@ describe('[PERF partner #6] the store overview follows the order feed', () => {
     socket.fire('connect');
     expect(refreshOverview).toHaveBeenCalledTimes(2);
     off();
+  });
+
+  it('[#1932 S4-1] a burst of order events reads the overview at most once per 30 s: the first at once, the last when the gap ends', () => {
+    vi.useFakeTimers();
+    const socket = fakeSocket();
+    const refreshOverview = vi.fn();
+    const off = bindVendorOrderFeed(socket, 'store-a', () => true, { onNew: noop, refresh: noop, refreshBookings: noop, refreshOverview }, { serverAdmits: true });
+    socket.fire('order:new', { orderId: 'o1' });
+    expect(refreshOverview).toHaveBeenCalledTimes(1); // at once
+    for (let i = 0; i < 5; i += 1) { vi.advanceTimersByTime(3_000); socket.fire('order:status_changed'); }
+    expect(refreshOverview).toHaveBeenCalledTimes(1); // the burst waits
+    vi.advanceTimersByTime(OVERVIEW_EVENT_GAP_MS - 15_000 - 1);
+    expect(refreshOverview).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1);
+    expect(refreshOverview).toHaveBeenCalledTimes(2); // the last of the burst, when the gap ends
+    socket.fire('disconnect');
+    expect(refreshOverview).toHaveBeenCalledTimes(3); // a drop is never held back, even inside the gap
+    vi.advanceTimersByTime(5 * OVERVIEW_EVENT_GAP_MS);
+    expect(refreshOverview).toHaveBeenCalledTimes(3); // nothing more without events
+    off();
+  });
+
+  it('[#1932 S4-1] a refresh still waiting when the feed unbinds never fires', () => {
+    vi.useFakeTimers();
+    const socket = fakeSocket();
+    const refreshOverview = vi.fn();
+    const off = bindVendorOrderFeed(socket, 'store-a', () => true, { onNew: noop, refresh: noop, refreshBookings: noop, refreshOverview }, { serverAdmits: true });
+    socket.fire('order:new', { orderId: 'o1' });
+    socket.fire('order:status_changed');
+    off();
+    vi.advanceTimersByTime(2 * OVERVIEW_EVENT_GAP_MS);
+    expect(refreshOverview).toHaveBeenCalledTimes(1);
   });
 
   it('a feed without an overview handler (older callers) still works', () => {

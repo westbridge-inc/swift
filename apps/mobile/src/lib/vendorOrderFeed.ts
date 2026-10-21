@@ -14,6 +14,9 @@ export interface VendorOrderFeedHandlers {
   refreshOverview?: () => unknown;
 }
 
+/** [#1932 S4-1] The shortest gap between two overview refreshes caused by order events (the old poll's pace). */
+export const OVERVIEW_EVENT_GAP_MS = 30_000;
+
 /** Stores whose live order feed is bound right now (the store-room listeners
  * are installed). Order polls may slow only while one is. */
 const liveStores = new Map<string, number>();
@@ -34,8 +37,19 @@ export function bindVendorOrderFeed(
   const refresh = () => { handlers.refresh(); };
   const refreshBookings = () => { handlers.refreshBookings(); };
   const refreshOverview = () => { handlers.refreshOverview?.(); };
-  const onNew = (payload?: { orderId?: string; orderNumber?: string }) => { handlers.onNew(payload); refreshOverview(); };
-  const onStatus = () => { refresh(); refreshOverview(); };
+  // [#1932 S4-1] Order events refresh the overview at most once per OVERVIEW_EVENT_GAP_MS: the first
+  // at once, the last of a burst when the gap ends. A busy store (several events a minute) so never
+  // reads it more often than the old 30 s poll did. A drop and its reconnect still refresh at once.
+  let lastEventRefresh = -Infinity;
+  let trailing: ReturnType<typeof setTimeout> | null = null;
+  const refreshOverviewForEvent = () => {
+    if (trailing) return;
+    const wait = lastEventRefresh + OVERVIEW_EVENT_GAP_MS - Date.now();
+    if (wait <= 0) { lastEventRefresh = Date.now(); refreshOverview(); return; }
+    trailing = setTimeout(() => { trailing = null; lastEventRefresh = Date.now(); refreshOverview(); }, wait);
+  };
+  const onNew = (payload?: { orderId?: string; orderNumber?: string }) => { handlers.onNew(payload); refreshOverviewForEvent(); };
+  const onStatus = () => { refresh(); refreshOverviewForEvent(); };
   // A drop refreshes the overview at once (its poll is back to full speed from then on);
   // the reconnect after a drop catches up on what the room said while it was down.
   let dropped = false;
@@ -57,6 +71,7 @@ export function bindVendorOrderFeed(
   return () => {
     if (!bound) return;
     bound = false;
+    if (trailing) { clearTimeout(trailing); trailing = null; }
     socket.off('connect', join);
     socket.off('connect', onBack);
     socket.off('disconnect', onDrop);
