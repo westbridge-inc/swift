@@ -140,7 +140,8 @@ export async function sessionProbe(): Promise<SessionAnswer> {
     }
     // [UI-SWEEP U23] A server failure says nothing about the session: it is
     // "unreachable", never "signed out", and the principal is kept.
-    if (res.status >= 500) return { ok: false, unreachable: true };
+    // [REVIEW-F2 #1968 S4-2] A timeout (408) or a rate limit (429) is the same: not an answer about the session.
+    if (res.status >= 500 || res.status === 408 || res.status === 429) return { ok: false, unreachable: true };
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;

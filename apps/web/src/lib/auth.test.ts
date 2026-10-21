@@ -241,7 +241,8 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
     const auth = await loadAuth();
     mockApi(() => signedInAs('u1'));
     await auth.sessionProbe();
-    for (const status of [500, 502, 503]) {
+    // [REVIEW-F2 #1968 S4-2 / REVIEW-M S4-1] A timeout (408) or a rate limit (429) says nothing about the session either.
+    for (const status of [500, 502, 503, 408, 429]) {
       mockApi(() => ({ status, body: { success: false } }));
       expect(await auth.sessionProbe(), String(status)).toEqual({ ok: false, unreachable: true });
       expect(auth.getSessionPrincipal(), String(status)).toBe('u1');

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { sessionProbe } from '@/lib/auth';
+import { restoreSession, sessionProbe, type SessionAnswer } from '@/lib/auth';
 import type { ShellPerson } from '@/components/customer-shell';
 
 // ---------------------------------------------------------------------------
@@ -13,6 +13,19 @@ import type { ShellPerson } from '@/components/customer-shell';
 // session" goes to /login now. When Swift cannot be reached the gate says so
 // and checks again on request; nothing is cleared.
 // ---------------------------------------------------------------------------
+
+/**
+ * [REVIEW-F2 #1968 S3-1] The console's session check. The access cookie lives
+ * 15 minutes and the refresh cookie 30 days, so "no session" from the probe may
+ * only mean an expired access cookie: the refresh cookie is spent ONCE (the
+ * customer shell does the same, (app)/layout) before the caller sends anyone to
+ * sign in. A check that could not reach Swift is never a sign-out.
+ */
+export async function checkConsoleSession(): Promise<SessionAnswer> {
+  const session = await sessionProbe();
+  if (session.ok || session.unreachable) return session;
+  return restoreSession();
+}
 
 export type ConsoleGate =
   | { phase: 'checking' }
@@ -29,7 +42,7 @@ export function useConsoleSession(): ConsoleGate {
   // asks the SERVER whether one exists instead of inspecting localStorage.
   useEffect(() => {
     let cancelled = false;
-    void sessionProbe().then((session) => {
+    void checkConsoleSession().then((session) => {
       if (cancelled) return;
       if (session.ok) {
         const name = [session.user?.['firstName'], session.user?.['lastName']].filter((v) => typeof v === 'string').join(' ');

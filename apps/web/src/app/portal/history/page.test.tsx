@@ -38,6 +38,24 @@ describe('phone history', () => {
   });
 });
 
+// [REVIEW-F2 #1968 S4-3 · COORD l.2680] A status this build does not know is a
+// neutral line, never the code made to look like words; a job still moving is "In progress".
+describe('[S4-3] history statuses never dress a code', () => {
+  it.each([['SOME_NEW_STATUS', 'Status unavailable'], ['PICKED_UP', 'In progress'], ['REFUNDED', 'Refunded']])('%s reads "%s"', async (status, words) => {
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/rider/profile') return { body: { data: { id: 'rider-1' } } };
+      if (url.pathname === '/api/v1/driver/profile') return { status: 404, body: { error: 'Absent' } };
+      if (url.pathname === '/api/v1/rider/orders') return { body: { data: [{ id: 'delivery-1', orderNumber: 'SW-1001', vendor: { name: 'Fixture Market' }, status, deliveryFee: '800.00', placedAt: '2026-09-29T18:00:00Z' }], meta: { totalPages: 1 } } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderWithQuery(<HistoryPage />);
+    const card = await screen.findByRole('article', { name: 'Delivery SW-1001' });
+    expect(card.textContent).toContain(words);
+    expect(card.textContent).not.toContain(status);
+    expect(card.textContent!.toLowerCase()).not.toMatch(/some new status|picked up/);
+  });
+});
+
 // [UI-SWEEP U24] A failed profile read said "No earner profile on this account" — to a working driver.
 describe('[U24] a failed profile read is not "no earner profile"', () => {
   it('says it could not check, and retries', async () => {

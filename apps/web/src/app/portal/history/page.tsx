@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getDriverProfile, getDriverRides, getRiderDeliveries, getRiderProfile } from '@/lib/mover-api';
+import { OrderStatus } from '@swift/types';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { formatMoney as money, parseAmount } from '@/lib/money';
 
@@ -15,8 +16,13 @@ function jobStatusWord(status: string, isRide: boolean): string {
   if (s === 'DELIVERED') return isRide ? 'Completed' : 'Delivered';
   if (s === 'COMPLETED') return 'Completed';
   if (s === 'CANCELLED') return 'Cancelled';
-  const words = s.replace(/_/g, ' ').toLowerCase();
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'In progress';
+  // [REVIEW-F2 #1968 S4-3 · COORD l.2680] Never a code dressed as words: the
+  // other endings by name, a job still moving is "In progress", and a status
+  // this build does not know is a neutral line.
+  if (s === 'REFUNDED') return 'Refunded';
+  if (s === 'FAILED') return 'Could not continue';
+  if (s === 'RETURNED') return 'Returned';
+  return (Object.values(OrderStatus) as string[]).includes(s) ? 'In progress' : 'Status unavailable';
 }
 
 function statusChip(s: string, isRide = false) {
