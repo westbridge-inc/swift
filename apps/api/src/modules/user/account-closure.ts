@@ -6,6 +6,17 @@ export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
 /** The server-written text of that request (no personal data): the erasure keeps it. */
 export const ACCOUNT_CLOSURE_MESSAGE = 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.';
 
+/** The audit action the erasure writes with its cut-off (marker + DEACTIVATED), in the same transaction. The
+ *  database's erasure exceptions open only for a person whose row carries the marker, DEACTIVATED and this row. */
+export const ACCOUNT_ERASURE_CUTOFF = 'ACCOUNT_ERASURE_CUTOFF';
+
+/** The same gate the database's erasure exceptions use (swift_erased_person): the erasure writes a token, hash or
+ *  sealed-item change only when this is true, so a refused write can never wedge the erasure's re-sweep. */
+export async function erasureExceptionOpen(tx: Prisma.TransactionClient, userId: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ open: boolean }>>`SELECT swift_erased_person(${userId}) AS "open"`;
+  return rows[0]?.open === true;
+}
+
 /** [#1879 S3-3 · REVIEW-G R1] The deletion write barrier for activation writes: the person's users row, read
  *  FOR SHARE, reads as erased (the deleted:<id> marker or the erasure's DEACTIVATED status). FOR SHARE waits for
  *  the erasure's FOR UPDATE (its cut-off commits under it) and holds the erasure off until this transaction ends,
