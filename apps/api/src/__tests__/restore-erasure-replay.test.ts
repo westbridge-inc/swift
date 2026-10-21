@@ -202,6 +202,32 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(one('postgres', `SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = '${r.scratch}'`)).not.toMatch(/(^|[{,])=/);
   });
 
+  it('[off-site ledger] with the live database gone, the shipped erasure ledger makes the copy erasure-complete up to its newest entry', () => {
+    // What the host unit ships: every entry the closure wrote in the live database, one JSON object per line.
+    const lines = psql(LIVE, `SELECT json_build_object('id', e.id, 'kind', e.kind, 'entry', e.entry,
+      'createdAt', to_char(e."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.MS'))::text FROM erasure_ledger_entry e ORDER BY e."createdAt", e.id`);
+    expect(lines).toContain('"closed_accounts"');
+    const file = join(tmp, 'offsite-ledger.jsonl');
+    writeFileSync(file, lines + '\n', { mode: 0o600 });
+    const newest = psql(LIVE, `SELECT to_char(max("createdAt"), 'YYYY-MM-DD"T"HH24:MI:SS.MS') FROM erasure_ledger_entry`);
+    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone', '--ledger-from', file] });
+    expect(r.status, r.stderr + r.stdout).toBe(3);
+    expect(r.stdout + r.stderr).toContain(`erasure-complete up to ${newest}`);
+    expect(r.stdout + r.stderr).not.toContain('RESTORE OK');
+    const s = r.scratch;
+    expect(one(s, `SELECT phone || '|' || "firstName" || '|' || coalesce(email, '-') || '|' || coalesce("passwordHash", '-') || '|' || status FROM users WHERE id = '${people.closed}'`))
+      .toBe(`deleted:${people.closed}|Deleted|-|-|DEACTIVATED`);
+    expect(one(s, `SELECT count(*) FROM sessions WHERE "userId" = '${people.closed}'`)).toBe('0');
+    expect(one(s, `SELECT count(*) FROM addresses WHERE "userId" = '${people.closed}'`)).toBe('0');
+    expect(one(s, `SELECT "wrappedDek" IS NULL FROM encrypted_objects WHERE "fileKey" = '${people.key}'`)).toBe('t');
+    expect(one(s, `SELECT "fileUrl" = '' AND "purgedAt" IS NOT NULL FROM verification_documents WHERE id = '${people.doc}'`)).toBe('t');
+    expect(one(s, `SELECT "valueCt" IS NULL FROM extracted_field WHERE id = '${people.field}'`)).toBe('t');
+    expect(one(s, `SELECT count(*) FROM deletion_receipt WHERE "subjectId" = '${people.closed}'`)).toBe('1');
+    expect(one(s, `SELECT phone || '|' || "firstName" FROM users WHERE id = '${people.kept}'`)).toBe('+15550000001|Keeper');
+    expect(one(s, `SELECT count(*) FROM sessions WHERE "userId" = '${people.kept}'`)).toBe('1');
+    expect(loginRolesThatCanConnect(s)).toBe('0');
+  });
+
   it('every ledger entry reads tables and columns that exist in the Swift schema', () => {
     const ledger = readFileSync(join(DEPLOY, 'restore-erasure-ledger.sql'), 'utf8');
     const entries = [...ledger.matchAll(/^-- ledger: ([a-z_]+)\n(SELECT .+)$/gm)].map((m) => ({ name: m[1]!, select: m[2]! }));
