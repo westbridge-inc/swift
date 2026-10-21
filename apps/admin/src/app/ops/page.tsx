@@ -6,6 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchLiveOps } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { label } from '@/lib/labels';
 
 // Leaflet touches `window` — client-only.
 const OpsMap = dynamic(() => import('@/components/ops/OpsMap'), {
@@ -88,7 +89,7 @@ export default function OpsPage() {
                 >
                   <span className="font-mono text-xs">{o.orderNumber}</span>
                   <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] ${statusClass(o.status)}`}>
-                    {o.status.replaceAll('_', ' ')}
+                    {label('OrderStatus', o.status)}
                   </span>
                 </Link>
               ))}

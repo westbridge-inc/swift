@@ -41,8 +41,8 @@ describe('Review Center applicant workspace', () => {
     await user.selectOptions(screen.getByLabelText('Document type'), 'police_clearance');
     expect(screen.getAllByRole('button', { name: 'Review' })).toHaveLength(1);
     await openAlice(user);
-    expect(screen.getByRole('button', { name: /national id.*PENDING/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /police clearance.*PENDING/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /national id.*Waiting for review/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /police clearance.*Waiting for review/i })).toBeTruthy();
     expect(await screen.findByText('Demo grocery')).toBeTruthy();
     expect(await screen.findByText('Review case opened')).toBeTruthy();
   });

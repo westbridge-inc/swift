@@ -194,6 +194,17 @@ the host:
     APPROVED_SHA='<full-40-character-origin-main-commit>'
     ./deploy/pilot-up.sh "$APPROVED_SHA"
 
+[Row 324] pilot-up.sh refuses a deploy whose API and worker do not share one
+durable upload store (`verify_upload_storage`, before anything is pulled,
+built or stopped). The first time a host deploys a revision that has this
+check, run it read-only first, outside the deploy window, so a refusal is
+never met mid-window. It prints `UPLOAD-STORAGE-OK` or `UPLOAD-STORAGE-REFUSED`,
+never a value:
+
+    cd /opt/swift
+    git fetch origin && git show "origin/main:deploy/check-upload-storage.py" > /tmp/check-upload-storage.py
+    docker compose --project-directory deploy -f deploy/docker-compose.yml config --format json | python3 /tmp/check-upload-storage.py; rm -f /tmp/check-upload-storage.py
+
 pilot-up.sh fetches origin/main, refuses a dirty checkout or a SHA outside
 current origin/main, switches to that exact commit, refuses a deploy/.env that
 declares a secret or a wired NAME_FILE whose name is not in the store,
@@ -613,20 +624,20 @@ scratch database through a transient unit that receives the same two keys:
       -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE" \
       -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
       -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
-      /opt/swift/deploy/restore.sh "$OFFSITE_OBJECT" "$SCRATCH_DB"
+      /opt/swift/deploy/restore.sh --project swift "$OFFSITE_OBJECT" "$SCRATCH_DB"
 
 On production the off-site objects are `.dump.gpg` and the host cannot
 decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
 OWNER's computer instead:
 
-    ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+    SWIFT_RESTORE_PROJECT=swift ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
 
 It asks for the private key (paste the armored block) and its passphrase at
 hidden prompts and keeps them only in a throwaway keyring for the run. The
 host streams the encrypted object out (`restore.sh --fetch-encrypted`, with
 the storage keys from the encrypted store), the owner's computer decrypts it
 on the way through, and the plain dump goes straight back into
-`restore.sh --compare-source -` on the host: a new scratch database, compared
+`restore.sh --project swift --compare-source -` on the host: a new scratch database, compared
 with the live one. Nothing plain is written on the owner's computer. Pass is
 the host's compare-source line and `RESTORE OK`, then `DRILL OK`. Before
 anything is decrypted, the drill checks the object's first packets: public-key
