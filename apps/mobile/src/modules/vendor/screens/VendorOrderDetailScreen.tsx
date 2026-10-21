@@ -6,6 +6,7 @@ import { color, radius, space } from '@swift/ui';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
+import { orderPaymentLine, storeTimelineWords } from '../storeWords';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
 import { storeSwapWaitText } from '../../orders/substitutionCopy';
@@ -23,7 +24,6 @@ import {
   formatSlot,
   MmgDisputeNotice,
   orderActions,
-  prettyStatus,
 } from '../shared';
 import { deliveryOwnerView } from './delivery-owner';
 
@@ -49,7 +49,7 @@ function TimelineRow({ entry, last }: { entry: any; last: boolean }) {
       <View style={{ flex: 1, paddingBottom: last ? 0 : space.md }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <T variant="label" weight="semibold">
-            {prettyStatus(entry.status)}
+            {storeTimelineWords(entry.status)}
           </T>
           <T variant="caption" tone="muted">
             {fmtWhen(entry.createdAt)}
@@ -445,7 +445,7 @@ export function VendorOrderDetailScreen({ navigation, route }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
             <MaterialCommunityIcons name="cash" size={16} color={color.success} />
             <T variant="caption" weight="semibold" tone="muted">
-              {order.paymentMethod === 'CASH' ? 'Cash on handover — you keep 100% of the goods total.' : String(order.paymentMethod ?? '')}
+              {orderPaymentLine(order.paymentMethod)}
             </T>
           </View>
         </Card>

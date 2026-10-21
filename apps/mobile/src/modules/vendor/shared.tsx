@@ -9,6 +9,7 @@ import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '..
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused, withoutForwardWorkWhilePaused } from './order-dispute';
 import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
+import { storeStatusWords } from './storeWords';
 
 export const GUTTER = space['2xl'];
 
@@ -124,11 +125,6 @@ export function formatSlot(iso?: string) {
   return formatAppointmentSlot(iso);
 }
 
-export function prettyStatus(status?: string) {
-  const s = (status || '').replace(/_/g, ' ').toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 /**
  * The board's THREE deliberate pill treatments. An order walking the lane is
  * the one thing a vendor reads across the room, so each stage owns a different
@@ -176,9 +172,10 @@ export function OrderStatusPill({ status }: { status: string }) {
   if (s === 'RIDER_EN_ROUTE_PICKUP') return <TonePill label="Rider en route" tone="brand" />;
   if (s === 'RIDER_ARRIVED_PICKUP') return <TonePill label="Rider at counter" tone="brand" />;
   if (s === 'PICKED_UP' || s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED') return <TonePill label="Out for delivery" tone="neutral" />;
-  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={prettyStatus(s)} tone="success" />;
+  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={storeStatusWords(s)} tone="success" />;
   if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" />;
-  return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;
+  // [UI-SWEEP U72] Any other status in words (Refunded, Returning to you ...), never the code.
+  return <TonePill label={storeStatusWords(s)} tone="neutral" />;
 }
 
 /** Small soft tag beside the order number (Takeaway / Appointment). */
