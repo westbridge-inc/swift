@@ -141,8 +141,11 @@ export function RevenuePulse({ newOrders }: { newOrders: VendorOrder[] }) {
   const oldestTimestamp = oldestKnown
     ? newOrders.map((order) => order.placedAt).filter(Boolean).sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
     : undefined;
+  // [BUG-GUARDS C3] A failed read is never "nothing waiting": the failure comes first.
   const waitingDetail = pendingCatchingUp
     ? 'updating live total'
+    : analyticsError
+      ? 'Total unavailable'
     : pendingOrders === 0
       ? 'Nothing waiting'
       : oldestTimestamp
