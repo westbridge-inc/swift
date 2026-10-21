@@ -1,4 +1,5 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
@@ -5095,7 +5096,9 @@ export class BillingService {
       return 'untold';
     }
     // The inbox row is what the payer was told: a retried send returns the first row, with its own date.
-    const inbox = await this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } });
+    // [item 20] The PAYER's row, read back by whoever runs the rise (an admin, the billing job): under the owner
+    // wall a plain read sees only the reader's own notices, so it names its capability.
+    const inbox = await ownerWallSystem('billing:fee-rise-notice-readback', () => this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } }));
     const told = (inbox?.data ?? {}) as Record<string, unknown>;
     const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null);
     const toldFrom = iso(told['appliesFrom']);
