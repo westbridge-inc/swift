@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { CircleCheck, Search, X } from 'lucide-react';
@@ -18,11 +18,12 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
 import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [owner, staging] Home's one place control: delivery or pickup together with
 // where (the phone app's Home has one location pill). Its code loads with the
 // page's other split code, as the app frame's bar does on the other pages.
-const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const OrderingContextBar = lazyRetry(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
 
 /**
  * [Q7b · WEB-REDESIGN] HOME — what swiftgy.com opens on, in the owner's

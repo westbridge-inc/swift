@@ -6,7 +6,7 @@ import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { todayHours } from '@/lib/store-hours';
 import { useGuestBasket } from '@/lib/basket-state';
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -15,7 +15,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { Pictogram } from '@/components/glyphs';
 import { useCustomerSession } from '@/components/customer-session';
-import { customerCartKey } from '@/lib/shell-data';
+import { customerCartKey } from '@/lib/cart-key';
 import {
   addAddress,
   cartQuoteFingerprint,
@@ -50,20 +50,30 @@ import {
   type CartPaymentSelection,
 } from '@/lib/app-rules';
 import styles from '@/app/(app)/cart/cart.module.css';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 const TIPS = [0, 200, 500, 1000];
-const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
+const GuestCart = lazyRetry(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
 // [WEB-PIN] Only a customer adding an address opens this form (a pin on the
 // map), so it loads on demand and the map's code never weighs on the checkout.
-const NewAddressForm = lazy(() => import('@/components/checkout/new-address-form').then(module => ({ default: module.NewAddressForm })));
+const NewAddressForm = lazyRetry(() => import('@/components/checkout/new-address-form').then(module => ({ default: module.NewAddressForm })));
 
 /** The checkout page for whoever is here: a guest sees their browser basket
  *  and signs in at Place order; a signed-in customer gets the one checkout. */
 export function Checkout() {
   const { status } = useCustomerSession();
   const basket = useGuestBasket();
-  if (status === 'checking' || !basket.loaded) return <CartSkeleton />;
-  if (status !== 'signed-in' || basket.lines.length) return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
+  // [PERF F6] Unless a signed-in customer is confirmed, the browser basket is
+  // what shows: its code is fetched alongside the session answer, not after it.
+  useEffect(() => {
+    if (status !== 'signed-in') void import('@/components/guest-basket').catch(() => undefined);
+  }, [status]);
+  if (!basket.loaded) return <CartSkeleton />;
+  // A basket with lines is shown whoever is signed in (an upload follows sign-in),
+  // so it never waits for the session answer. An empty one does: a saved cart may exist.
+  if (basket.lines.length) return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
+  if (status === 'checking') return <CartSkeleton />;
+  if (status !== 'signed-in') return <Suspense fallback={<CartSkeleton />}><GuestCart /></Suspense>;
   return <CheckoutPanel />;
 }
 
@@ -194,8 +204,13 @@ export function CheckoutPanel() {
       }
     }
     try {
-      const liveStore = await getPublicStorefront(c.vendor.slug);
+      // [PERF F6] The live store and its menu are read together (one round trip,
+      // not two). The checks run in the same order as before: the store's own
+      // answer decides first, and both must pass before Place order unlocks.
+      const [storeRead, menuRead] = await Promise.allSettled([getPublicStorefront(c.vendor.slug), getPublicVendor(c.vendor.id)]);
       if (request !== refreshSequence.current) return null;
+      if (storeRead.status === 'rejected') throw storeRead.reason;
+      const liveStore = storeRead.value;
       if (liveStore.id !== c.vendor.id) {
         return block('The public store no longer matches this saved cart. Remove its items and start again from a live store page.');
       }
@@ -205,8 +220,8 @@ export function CheckoutPanel() {
           ? 'This store has paused orders. Checkout stays locked until the live store starts taking orders again.'
           : 'This store is closed right now. Checkout stays locked until the live store is open.');
       }
-      const vendor = await getPublicVendor(c.vendor.id);
-      if (request !== refreshSequence.current) return null;
+      if (menuRead.status === 'rejected') throw menuRead.reason;
+      const vendor = menuRead.value;
       const liveItemIds = new Set(vendor.categories.flatMap((category) => category.items.map((item) => item.id)));
       if (c.items.some((line) => !liveItemIds.has(line.itemId))) {
         return block('These saved lines do not all belong to the store behind the server quote. Remove them and start a fresh single-store order.');

@@ -1,10 +1,11 @@
 'use client';
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { ChevronDown, MapPin } from 'lucide-react';
 import { useOrderingContext } from './ordering-context';
 import { MODE_LOCKED } from '@/lib/ordering-mode-lock';
-const Sheet = lazy(() => import('./sheet').then(module => ({ default: module.Sheet })));
+import { lazyRetry } from '@/lib/chunk-retry';
+const Sheet = lazyRetry(() => import('./sheet').then(module => ({ default: module.Sheet })));
 
 /**
  * "Delivery · address at checkout · ASAP" — the order's context, one tap to change.
