@@ -60,7 +60,7 @@ export function CategoryFeedScreen() {
       <Header title={name} />
       {vendorsQ.isLoading ? (
         <LoadingBlock />
-      ) : vendorsQ.isError ? (
+      ) : vendorsQ.isError && !vendorsQ.data ? (
         <ErrorState onRetry={() => vendorsQ.refetch()} />
       ) : vendors.length === 0 ? (
         <View style={{ flex: 1 }}>
