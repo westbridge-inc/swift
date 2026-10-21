@@ -9,13 +9,14 @@ import { color, radius, space } from '@swift/ui';
 import { haptic } from '../../../lib/haptics';
 import { useLiveOrders, useMyRating, useProfile } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo, useLogoutConfirm } from '../../../kit';
+import { Chip, EmptyState, ErrorState, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, SettingsRow, T, TrustHalo, useLogoutConfirm } from '../../../kit';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrandSwitch } from '../../../kit/controls';
+import { toast } from '../../../kit/toast';
 import { retryRead } from '../../../lib/appQueryPolicy';
 import { profileIdRowSub } from '../../../lib/customerIdCopy';
 
@@ -58,7 +59,7 @@ function RowGroup({ children }: { children: React.ReactNode }) {
 /** [DCR-1 NR1-03] Marketing messages toggle — the row the served consent
  *  text promises ("Account -> Marketing messages"). The switch reflects the
  *  ledger's current state; a flip is a new append-only consent row. */
-function MarketingConsentRow() {
+export function MarketingConsentRow() {
   const qc = useQueryClient();
   const consent = useQuery({
     queryKey: ['consent'],
@@ -69,8 +70,14 @@ function MarketingConsentRow() {
   });
   const marketingState = consent.data?.consents.find((c) => c.documentType === 'marketing_consent')?.state;
   const granted = marketingState === 'granted' || marketingState === 're_granted';
+  // [UI-SWEEP U71] The row states a choice only once the ledger has answered.
+  // A failed or unanswered read used to say "Off", telling a person who had
+  // agreed to marketing that they had not; a failed change snapped back
+  // without a word.
+  const unknown = consent.data === undefined;
   const toggle = useMutation({
     mutationFn: (next: boolean) => customerApi.setMarketingConsent(next),
+    onError: () => toast.error('Marketing messages were not changed', 'Check your connection and try again.'),
     onSettled: () => qc.invalidateQueries({ queryKey: ['consent'] }),
   });
   return (
@@ -80,15 +87,27 @@ function MarketingConsentRow() {
       // affordance, so the row goes plain. Chips mark destinations.
       plain
       label="Marketing messages"
-      sub={granted ? 'On — offers and promos' : 'Off — service messages only'}
+      sub={
+        unknown && consent.isError
+          ? 'Could not load your choice. Try again.'
+          : unknown
+            ? 'Checking your choice…'
+            : granted
+              ? 'On — offers and promos'
+              : 'Off — service messages only'
+      }
       onPress={() => openPayLink(`${API_URL}/legal/marketing`)}
       right={
-        <BrandSwitch
-          label="Marketing messages"
-          value={toggle.isPending ? !granted : granted}
-          disabled={consent.isLoading || toggle.isPending}
-          onChange={(next) => toggle.mutate(next)}
-        />
+        unknown && consent.isError ? (
+          <Chip label="Try again" onPress={() => consent.refetch()} />
+        ) : (
+          <BrandSwitch
+            label="Marketing messages"
+            value={toggle.isPending ? !granted : granted}
+            disabled={unknown || toggle.isPending}
+            onChange={(next) => toggle.mutate(next)}
+          />
+        )
       }
     />
   );
