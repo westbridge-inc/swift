@@ -15,7 +15,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { Pictogram } from '@/components/glyphs';
 import { useCustomerSession } from '@/components/customer-session';
-import { customerCartKey } from '@/lib/shell-data';
+import { customerCartKey } from '@/lib/cart-key';
 import {
   addAddress,
   cartQuoteFingerprint,
