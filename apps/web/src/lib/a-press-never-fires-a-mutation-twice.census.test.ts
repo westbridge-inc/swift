@@ -40,7 +40,10 @@ import ts from 'typescript';
 const SRC = join(process.cwd(), 'src');
 // >>> C2 shared scanner: byte-identical in apps/mobile and apps/web (the census checks it). Fix it once, copy it to both.
 const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending|cancelling|deleting|removing|adding)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending|Cancelling|Deleting|Removing|Adding)$/;
-const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(/;
+/** …or [#1936] TanStack's per-row hold: the pending mutations read back with useMutationState filtered on
+ *  status 'pending' (`const pending = new Set(useMutationState({ filters: { mutationKey, status: 'pending' }, … }))`,
+ *  `disabled={pending.has(row.id)}`): only the row whose request is running waits. */
+const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(|\buseMutationState\(\s*\{[\s\S]*?\bstatus:\s*['"]pending['"]/;
 const MAX_HOPS = 4;
 /** A function handed to one of these runs on its own (not a press). */
 const EFFECT = /^(useEffect|useLayoutEffect|useInsertionEffect|useFocusEffect)$/;
@@ -436,6 +439,10 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     expect(verdict(`function P(){ const s = useSave(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: () => s.mutate() }])} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); const cancel = () => s.mutate(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: cancel }])} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); useEffect(() => { s.mutate(); }, []); return null; }`)).toEqual([]);
+    // [#1936] A list held per row through useMutationState (status 'pending'); a filter on another status holds nothing.
+    const perRow = (status: string) => `function P({ rows }){ const s = useSave(); const busy = new Set(useMutationState({ filters: { mutationKey: K, status: '${status}' }, select: (m) => m.state.variables })); return rows.map((r) => <button onClick={() => s.mutate(r.id)} disabled={busy.has(r.id)} />); }`;
+    expect(verdict(perRow('pending'))).toEqual([]);
+    expect(verdict(perRow('success'))).toHaveLength(1);
     // [#1952 S3-2] A list: one shared isPending is not a per-row hold; holdRow(key, …) is.
     expect(verdict(`function P({ rows }){ const s = useSave(); const holdRow = useRowHold(); return rows.map((r) => <B onPress={() => holdRow(r.id, () => s.mutateAsync(r.id))} />); }`)).toEqual([]);
     expect(verdict(`function P({ rows }){ const s = useSave(); const other = useOther(); return rows.map((r) => <B onPress={() => other(r.id, () => s.mutateAsync(r.id))} />); }`)).toEqual(['s.mutateAsync <- <B onPress>']);

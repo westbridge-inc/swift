@@ -39,7 +39,10 @@ import ts from 'typescript';
 const SRC = join(process.cwd(), 'src');
 // >>> C2 shared scanner: byte-identical in apps/mobile and apps/web (the census checks it). Fix it once, copy it to both.
 const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending|cancelling|deleting|removing|adding)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending|Cancelling|Deleting|Removing|Adding)$/;
-const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(/;
+/** …or [#1936] TanStack's per-row hold: the pending mutations read back with useMutationState filtered on
+ *  status 'pending' (`const pending = new Set(useMutationState({ filters: { mutationKey, status: 'pending' }, … }))`,
+ *  `disabled={pending.has(row.id)}`): only the row whose request is running waits. */
+const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(|\buseMutationState\(\s*\{[\s\S]*?\bstatus:\s*['"]pending['"]/;
 const MAX_HOPS = 4;
 /** A function handed to one of these runs on its own (not a press). */
 const EFFECT = /^(useEffect|useLayoutEffect|useInsertionEffect|useFocusEffect)$/;
