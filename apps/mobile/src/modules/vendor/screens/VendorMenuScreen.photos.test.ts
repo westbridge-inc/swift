@@ -119,18 +119,18 @@ describe('a menu section\'s photo sheet', () => {
     let tree = open();
     pill(tree, 'Remove photo').props.onPress();
     tree = draw();
-    expect(h.mutations.removePhoto?.mutate ?? vi.fn()).not.toHaveBeenCalled();
+    expect(h.mutations['removePhoto']?.mutate ?? vi.fn()).not.toHaveBeenCalled();
     expect(texts(tree)).toContain('Remove this photo? It is deleted from Swift and customers stop seeing it.');
     pill(tree, 'Keep it').props.onPress();
     tree = draw();
     expect(pill(tree, 'Choose a new photo')).toBeTruthy();
-    expect(h.mutations.removePhoto!.mutate).not.toHaveBeenCalled();
+    expect(h.mutations['removePhoto']!.mutate).not.toHaveBeenCalled();
 
     pill(tree, 'Remove photo').props.onPress();
     tree = draw();
     pill(tree, 'Remove photo').props.onPress();
-    expect(h.mutations.removePhoto!.mutate).toHaveBeenCalledWith('c1', expect.any(Object));
-    const handlers = h.mutations.removePhoto!.mutate.mock.calls.at(-1)![1];
+    expect(h.mutations['removePhoto']!.mutate).toHaveBeenCalledWith('c1', expect.any(Object));
+    const handlers = h.mutations['removePhoto']!.mutate.mock.calls.at(-1)![1];
     handlers.onError({ response: { data: { error: { message: 'Only a store manager can do this' } } } });
     expect(texts(draw())).toContain('Only a store manager can do this');
     handlers.onSuccess();
