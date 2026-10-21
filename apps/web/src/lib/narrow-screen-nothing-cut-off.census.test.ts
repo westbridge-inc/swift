@@ -33,6 +33,7 @@ import ts from 'typescript';
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
+const GLOBALS = 'app/globals.css';
 
 interface Hit { file: string; line: number; text: string }
 interface Rule { base: Record<string, string>; narrow: Record<string, string> }
@@ -67,16 +68,20 @@ function parseCss(text: string): Map<string, Rule> {
       i = j;
     }
   };
-  walk(text.replace(/\/\*[\s\S]*?\*\//g, ''), 'none');
+  walk(text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/@[\w-]+[^;{}]*;/g, ''), 'none');
   return out;
 }
 
 interface Style { tw: string[]; all: string[]; css: Rule[] }
-const CONTROL = /^(button|a|Link|Button|input|select)$/;
+/** A control: button / a / input / select, or any component named …Button / …Link (<PillButton/>, <Nav.Link/>). */
+const CONTROL = /^(button|a|input|select|[\w.]*(Button|Link))$/;
 
 function census(files: Record<string, string>): Census {
   const out: Census = { hits: [], rows: 0, files: 0 };
   const cssCache = new Map<string, Map<string, Rule>>();
+  // [#1960 review S3-1] The design system's global classes (.sw-row, .sw-status, .sw-chip …) are
+  // plain `.x` rules in app/globals.css: a bare class token is looked up there too.
+  const globals = files[GLOBALS] !== undefined ? parseCss(files[GLOBALS]!) : new Map<string, Rule>();
   for (const [file, text] of Object.entries(files)) {
     if (!file.endsWith('.tsx')) continue;
     out.files++;
@@ -89,18 +94,55 @@ function census(files: Record<string, string>): Census {
       if (!cssCache.has(path)) cssCache.set(path, parseCss(files[path]!));
       modules.set(st.importClause.name.text, cssCache.get(path)!);
     }
+    // [#1960 review S4-2] className={row}: a const in this file whose value is a class string
+    // (or a ternary / join / module class of them) is read as if written in place.
+    const consts = new Map<string, ts.Expression>();
+    const collect = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && !consts.has(n.name.text)
+        && (ts.isStringLiteral(n.initializer) || ts.isNoSubstitutionTemplateLiteral(n.initializer) || ts.isTemplateExpression(n.initializer)
+          || ts.isConditionalExpression(n.initializer) || ts.isBinaryExpression(n.initializer) || ts.isParenthesizedExpression(n.initializer)
+          || (ts.isPropertyAccessExpression(n.initializer) && ts.isIdentifier(n.initializer.expression) && modules.has(n.initializer.expression.text)))) {
+        consts.set(n.name.text, n.initializer);
+      }
+      ts.forEachChild(n, collect);
+    };
+    collect(sf);
     const opening = (el: ts.JsxElement | ts.JsxSelfClosingElement) => (ts.isJsxElement(el) ? el.openingElement : el);
     const tag = (el: ts.JsxElement | ts.JsxSelfClosingElement) => opening(el).tagName.getText();
-    const classAttr = (el: ts.JsxElement | ts.JsxSelfClosingElement) => opening(el).attributes.properties
-      .find((a): a is ts.JsxAttribute => ts.isJsxAttribute(a) && a.name.getText() === 'className');
+    const attr = (el: ts.JsxElement | ts.JsxSelfClosingElement, name: string) => opening(el).attributes.properties
+      .find((a): a is ts.JsxAttribute => ts.isJsxAttribute(a) && a.name.getText() === name);
+    const classAttr = (el: ts.JsxElement | ts.JsxSelfClosingElement) => attr(el, 'className');
+    /** [#1960 review S4-2] style={{ display: 'flex', whiteSpace: 'nowrap' }} as a base CSS rule. */
+    const inlineStyle = (el: ts.JsxElement | ts.JsxSelfClosingElement): Rule | null => {
+      const init = attr(el, 'style')?.initializer;
+      const obj = init && ts.isJsxExpression(init) ? init.expression : undefined;
+      if (!obj || !ts.isObjectLiteralExpression(obj)) return null;
+      const base: Record<string, string> = {};
+      for (const p of obj.properties) {
+        if (!ts.isPropertyAssignment(p) || !(ts.isIdentifier(p.name) || ts.isStringLiteral(p.name))) continue;
+        const v = p.initializer;
+        if (ts.isStringLiteral(v) || ts.isNoSubstitutionTemplateLiteral(v) || ts.isNumericLiteral(v)) {
+          base[p.name.text.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)] = v.text;
+        }
+      }
+      return { base, narrow: {} };
+    };
     const style = (el: ts.JsxElement | ts.JsxSelfClosingElement): Style => {
       const s: Style = { tw: [], all: [], css: [] };
+      const inline = inlineStyle(el);
+      if (inline) s.css.push(inline);
       const init = classAttr(el)?.initializer;
       if (!init) return s;
+      const seen = new Set<string>();
       const visit = (n: ts.Node) => {
         if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) {
-          for (const t of n.text.split(/\s+/).filter(Boolean)) { s.all.push(t); if (!t.includes(':')) s.tw.push(t); }
+          for (const t of n.text.split(/\s+/).filter(Boolean)) {
+            s.all.push(t);
+            if (!t.includes(':')) { s.tw.push(t); const g = globals.get(t); if (g) s.css.push(g); }
+          }
         }
+        if (ts.isIdentifier(n) && consts.has(n.text) && !seen.has(n.text)
+          && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) { seen.add(n.text); visit(consts.get(n.text)!); }
         const mod = (ts.isPropertyAccessExpression(n) || ts.isElementAccessExpression(n)) && ts.isIdentifier(n.expression) ? modules.get(n.expression.text) : undefined;
         if (mod && ts.isPropertyAccessExpression(n)) { const r = mod.get(n.name.text); if (r) s.css.push(r); }
         if (mod && ts.isElementAccessExpression(n) && ts.isStringLiteral(n.argumentExpression)) { const r = mod.get(n.argumentExpression.text); if (r) s.css.push(r); }
@@ -121,8 +163,11 @@ function census(files: Record<string, string>): Census {
     const nowrapText = (s: Style) => (s.tw.includes('whitespace-nowrap') || decl(s, ['base'], 'white-space', /nowrap/))
       && !s.tw.some((t) => /^whitespace-(normal|pre-wrap|pre-line)$/.test(t)) && !decl(s, ['narrow'], 'white-space', /normal|pre-wrap|pre-line/) && !ellipsis(s);
     const controls = (n: ts.Node) => { let k = 0; const v = (x: ts.Node) => { if ((ts.isJsxElement(x) || ts.isJsxSelfClosingElement(x)) && CONTROL.test(tag(x))) k++; ts.forEachChild(x, v); }; v(n); return k; };
-    const showsValue = (el: ts.JsxElement | ts.JsxSelfClosingElement) => ts.isJsxElement(el)
-      && el.children.some((c) => ts.isJsxExpression(c) && !!c.expression && !ts.isJsxElement(c.expression) && !ts.isJsxSelfClosingElement(c.expression));
+    /** It shows a value ({…}) itself or [#1960 review S4-3] inside a child element: the no-wrap box keeps the
+     *  value's full width whatever the child does (an inline child's ellipsis cuts nothing). */
+    const showsValue = (el: ts.JsxElement | ts.JsxSelfClosingElement): boolean => ts.isJsxElement(el)
+      && el.children.some((c) => (ts.isJsxExpression(c) && !!c.expression && !ts.isJsxElement(c.expression) && !ts.isJsxSelfClosingElement(c.expression))
+        || (ts.isJsxElement(c) && showsValue(c)));
     /** A row's children, through {cond && …}, ternaries, fragments. */
     const kids = (el: ts.JsxElement) => {
       const found: Array<ts.JsxElement | ts.JsxSelfClosingElement> = [];
@@ -176,10 +221,11 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 
 /** Reviewed: it fits at 360px. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {
+  'components/advertiser-campaigns.tsx | R2 <span "sw-status"> no-wrap value, no ellipsis': 'Two rows (campaign card title, creative review): the pill shows a campaign/creative status in words, the longest "pending payment" (~130px at 13px with padding), beside a flex-1 name that wraps; it fits in 312px.',
   'app/(app)/orders/[id]/page.tsx | R2 <span {styles.estimate}> no-wrap value, no ellipsis': 'A short fixed phrase ("About N min prep", ~120px at 13px) beside a heading block that wraps (it has no no-wrap or min-width rule), so the heading takes the line break, not the estimate.',
 };
 
-const RESULT = census(Object.fromEntries(sources(SRC).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));
+const RESULT = census(Object.fromEntries([...sources(SRC), join(SRC, GLOBALS)].map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));
 
 describe('[BUG-GUARDS C8] on a 360px phone, nothing in a row is cut off', () => {
   it('reads the pages and their rows (the census is not vacuous)', () => {
@@ -202,7 +248,7 @@ describe('[BUG-GUARDS C8] on a 360px phone, nothing in a row is cut off', () => 
   });
 
   it('bites: the shapes that were cut off are refused, the ones that wrap pass', () => {
-    const verdict = (src: string, css = '') => census({ 'p/x.tsx': src, 'p/x.module.css': css }).hits.map((h) => h.text.split(' ')[0]);
+    const verdict = (src: string, css = '', globalsCss = '') => census({ 'p/x.tsx': src, 'p/x.module.css': css, [GLOBALS]: globalsCss }).hits.map((h) => h.text.split(' ')[0]);
     const group = `<span className="flex shrink-0 gap-2"><span>Hand {who}?</span><button>Yes</button><button>Cancel</button></span>`;
     // U03: a rigid group of two buttons in a row that does not wrap.
     expect(verdict(`const P = () => <div className="flex items-center justify-between"><span>{text}</span>${group}</div>;`)).toEqual(['R1']);
@@ -227,5 +273,27 @@ describe('[BUG-GUARDS C8] on a 360px phone, nothing in a row is cut off', () => 
     expect(verdict(`const P = () => <div className="flex"><b>{name}</b><span className="whitespace-nowrap truncate">{status}</span></div>;`)).toEqual([]);
     // Not a row: block / grid.
     expect(verdict(`const P = () => <div className="grid"><span>{text}</span>${group}</div>;`)).toEqual([]);
+  });
+
+  it('bites (#1960 review): global design-system classes, component buttons, a class held in a const, inline styles, a value one element down', () => {
+    const verdict = (src: string, globalsCss = '') => census({ 'p/x.tsx': src, [GLOBALS]: globalsCss }).hits.map((h) => h.text.split(' ')[0]);
+    // S3-1: .sw-row / .sw-status live in globals.css (after a block-less @import).
+    const pill = `const P = () => <div className="sw-row"><b>{name}</b><span className="sw-status">{status}</span></div>;`;
+    const globalsCss = `@import 'tailwindcss';\n.sw-row { display: flex; gap: 12px; }\n@layer components {\n  .sw-status { display: inline-flex; white-space: nowrap; }\n}`;
+    expect(verdict(pill, globalsCss)).toEqual(['R2']);
+    expect(verdict(pill, globalsCss.replace('white-space: nowrap;', 'white-space: nowrap; text-overflow: ellipsis;'))).toEqual([]);
+    expect(verdict(pill, globalsCss.replace('display: flex;', 'display: flex; flex-wrap: wrap;'))).toEqual([]);
+    // S4-1: a rigid group of two component buttons.
+    expect(verdict(`const P = () => <div className="flex"><span>{t}</span><span className="flex shrink-0 gap-2"><PillButton /><SignOutButton /></span></div>;`)).toEqual(['R1']);
+    expect(verdict(`const P = () => <div className="flex"><span>{t}</span><span className="flex shrink-0 gap-2"><Nav.Link href="/a">A</Nav.Link><Pill /></span></div>;`)).toEqual([]);
+    // S4-2: the row class in a const, and inline style rows.
+    expect(verdict(`const row = 'flex items-center';\nconst P = () => <div className={row}><b>{name}</b><span className="whitespace-nowrap">{status}</span></div>;`)).toEqual(['R2']);
+    expect(verdict(`const row = open ? 'flex' : 'flex gap-2';\nconst P = () => <div className={row}><b>{name}</b><span className="whitespace-nowrap">{status}</span></div>;`)).toEqual(['R2']);
+    expect(verdict(`const row = 'flex flex-wrap';\nconst P = () => <div className={row}><b>{name}</b><span className="whitespace-nowrap">{status}</span></div>;`)).toEqual([]);
+    expect(verdict(`const P = () => <div style={{ display: 'flex' }}><b>{name}</b><span style={{ whiteSpace: 'nowrap' }}>{status}</span></div>;`)).toEqual(['R2']);
+    expect(verdict(`const P = () => <div style={{ display: 'flex', flexWrap: 'wrap' }}><b>{name}</b><span style={{ whiteSpace: 'nowrap' }}>{status}</span></div>;`)).toEqual([]);
+    // S4-3: the value one element down.
+    expect(verdict(`const P = () => <div className="flex"><b>{name}</b><span className="whitespace-nowrap"><strong>{status}</strong></span></div>;`)).toEqual(['R2']);
+    expect(verdict(`const P = () => <div className="flex"><b>{name}</b><span className="whitespace-nowrap"><strong>Paid</strong></span></div>;`)).toEqual([]);
   });
 });
