@@ -288,10 +288,10 @@ describe('This isn’t my driver', () => {
 // once the browser allows it, never prompted for unasked.
 describe('SOS location during the ride', () => {
   function geo(state: PermissionState) {
-    let onFix: ((p: unknown) => void) | null = null;
-    const watchPosition = vi.fn((ok: (p: unknown) => void) => { onFix = ok; return 7; });
+    let onFix: ((_p: unknown) => void) | null = null;
+    const watchPosition = vi.fn((ok: (_p: unknown) => void) => { onFix = ok; return 7; });
     const clearWatch = vi.fn();
-    const getCurrentPosition = vi.fn((_ok: unknown, fail: (e: unknown) => void) => fail({ code: 3 }));
+    const getCurrentPosition = vi.fn((_ok: unknown, fail: (_e: unknown) => void) => fail({ code: 3 }));
     vi.stubGlobal('navigator', {
       ...navigator,
       permissions: { query: vi.fn().mockResolvedValue({ state, addEventListener: vi.fn(), removeEventListener: vi.fn() }) },
