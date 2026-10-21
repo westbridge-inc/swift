@@ -412,6 +412,10 @@ if [ "$PILOT_ENV" = production ]; then
   if [ "$DATA_ONLY" -eq 0 ]; then
     systemctl is-enabled --quiet swift-backup-hourly.timer && systemctl is-active --quiet swift-backup-hourly.timer ||
       die "PILOT_ENV=production needs the hourly backup timer enabled and active before the API starts (sudo systemctl enable --now swift-backup-hourly.timer; PILOT-RUNBOOK §4)"
+    # [Off-site erasure ledger] Every erasure must leave the host within minutes; the API pages
+    # production when one has not. The shipper exists before the API does.
+    systemctl is-enabled --quiet swift-erasure-ledger.timer && systemctl is-active --quiet swift-erasure-ledger.timer ||
+      die "PILOT_ENV=production needs the off-site erasure ledger timer enabled and active before the API starts (sudo systemctl enable --now swift-erasure-ledger.timer; PILOT-RUNBOOK §4)"
   fi
 fi
 if [ "$PILOT_ENV" = production ]; then

@@ -89,33 +89,31 @@ if [ -n "${AWS_S3_BUCKET:-}" ] && [ "$BACKUP_BUCKET" = "$AWS_S3_BUCKET" ]; then 
 . "$HERE/secret-env.sh"
 load_secret_env AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || exit 1
 
-# The owner's key, proven exactly as every backup proves it (backup.sh --check-key), whenever one is
-# configured, and always in production.
+# The owner's key, proven exactly as every backup proves it (backup.sh --check-key). Required in every
+# environment [#1984 REVIEW-F S4-1]: staging serves real people until the cutover, so no batch ever
+# leaves in clear.
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 NAME="erasure-ledger-$STAMP-${IDS:0:8}.jsonl"
 OUT="$TMP_DIR/$NAME"
-if [ "${PILOT_ENV:-}" = production ] || [ -n "${BACKUP_GPG_RECIPIENT_FILE:-}" ] || [ -n "${BACKUP_GPG_FINGERPRINT:-}" ]; then
-  "$HERE/backup.sh" --check-key >/dev/null || die "the owner's backup key is not proven (backup.sh --check-key); nothing was shipped"
-  GPG_HOME="$(mktemp -d)"
-  chmod 700 "$GPG_HOME"
-  KEYIDS="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --with-colons --show-keys "$BACKUP_GPG_RECIPIENT_FILE" 2>/dev/null |
-    awk -F: '/^(pub|sub):/ { print $5 }' | sort -u)"
-  gpg --homedir "$GPG_HOME" --no-autostart --batch --no-tty --yes --quiet --trust-model always \
-    --recipient-file "$BACKUP_GPG_RECIPIENT_FILE" --output "$OUT.gpg" --encrypt "$BATCH" ||
-    die "encrypting the batch to the owner's key failed; nothing was shipped"
-  RECIPIENTS="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --list-packets "$OUT.gpg" 2>/dev/null |
-    sed -n 's/^:pubkey enc packet:.* keyid \([0-9A-F]\{16\}\).*/\1/p' | sort -u || true)"
-  [ -n "$RECIPIENTS" ] || die "the encrypted batch names no recipient; nothing was shipped"
-  for keyid in $RECIPIENTS; do
-    printf '%s\n' "$KEYIDS" | grep -qx "$keyid" || die "the encrypted batch names a recipient that is not the owner's key; nothing was shipped"
-  done
-  rm -f -- "$BATCH"
-  OUT="$OUT.gpg"
-  NAME="$NAME.gpg"
-else
-  mv "$BATCH" "$OUT"
-  echo "WARNING: no backup key is configured here (not production): the batch leaves unencrypted" >&2
-fi
+[ -n "${BACKUP_GPG_RECIPIENT_FILE:-}" ] && [ -n "${BACKUP_GPG_FINGERPRINT:-}" ] ||
+  die "the owner's backup key is not configured (BACKUP_GPG_RECIPIENT_FILE and BACKUP_GPG_FINGERPRINT): no erasure ledger batch leaves this host in clear; nothing was shipped"
+"$HERE/backup.sh" --check-key >/dev/null || die "the owner's backup key is not proven (backup.sh --check-key); nothing was shipped"
+GPG_HOME="$(mktemp -d)"
+chmod 700 "$GPG_HOME"
+KEYIDS="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --with-colons --show-keys "$BACKUP_GPG_RECIPIENT_FILE" 2>/dev/null |
+  awk -F: '/^(pub|sub):/ { print $5 }' | sort -u)"
+gpg --homedir "$GPG_HOME" --no-autostart --batch --no-tty --yes --quiet --trust-model always \
+  --recipient-file "$BACKUP_GPG_RECIPIENT_FILE" --output "$OUT.gpg" --encrypt "$BATCH" ||
+  die "encrypting the batch to the owner's key failed; nothing was shipped"
+RECIPIENTS="$(gpg --homedir "$GPG_HOME" --no-autostart --batch --list-packets "$OUT.gpg" 2>/dev/null |
+  sed -n 's/^:pubkey enc packet:.* keyid \([0-9A-F]\{16\}\).*/\1/p' | sort -u || true)"
+[ -n "$RECIPIENTS" ] || die "the encrypted batch names no recipient; nothing was shipped"
+for keyid in $RECIPIENTS; do
+  printf '%s\n' "$KEYIDS" | grep -qx "$keyid" || die "the encrypted batch names a recipient that is not the owner's key; nothing was shipped"
+done
+rm -f -- "$BATCH"
+OUT="$OUT.gpg"
+NAME="$NAME.gpg"
 
 # The pinned AWS CLI container, as backup.sh runs it (credentials by NAME only).
 image="${AWS_CLI_IMAGE:-}"

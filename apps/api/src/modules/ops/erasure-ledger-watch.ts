@@ -49,15 +49,19 @@ export async function checkErasureLedgerShipping(prisma: PrismaClient): Promise<
 }
 
 /** A platform page through the durable ops path (OpsAlert + on-call texts + escalation), one per window;
- *  a shipped ledger closes it. */
+ *  a shipped ledger closes it. [#1984 REVIEW-G S3-1] Production only: there pilot-up refuses to start the
+ *  API without the shipper timer, so a stale ledger is a real stop. Elsewhere the shipper is a runbook
+ *  step; the stale state is still reported (the job log, deploy/doctor.sh FAILs), never paged by SMS. */
 export async function pageErasureLedgerShipping(
   deps: { prisma: PrismaClient; redis: Redis; notifications: NotificationService },
+  env: Record<string, string | undefined> = process.env,
 ): Promise<{ result: ErasureLedgerShipping; page: PageOutcome | null }> {
   const result = await checkErasureLedgerShipping(deps.prisma);
   if (!result.stale) {
     await resolveOpsPage(deps.prisma, ERASURE_LEDGER_PAGE_TITLE, 'erasure-ledger-shipped');
     return { result, page: null };
   }
+  if (env['PILOT_ENV'] !== 'production') return { result, page: null };
   const page = await pageOps(deps, {
     key: ERASURE_LEDGER_PAGE_KEY,
     windowSeconds: 3600,
