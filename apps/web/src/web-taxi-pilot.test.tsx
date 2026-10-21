@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -19,6 +19,11 @@ vi.mock('@/site.config', () => ({
   SITE_ORIGIN: 'https://swift.example',
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('@/lib/customer-rides', async (original) => ({
+  ...(await original<typeof import('@/lib/customer-rides')>()),
+  rideCapabilities: vi.fn().mockResolvedValue({ maxStops: 0 }),
+  activeRide: vi.fn().mockResolvedValue(null),
+}));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn().mockResolvedValue({ lat: 6.8, lng: -58.1 }) }));
 vi.mock('@/lib/customer', () => ({
   activeRide: vi.fn().mockResolvedValue(null),
@@ -68,12 +73,21 @@ describe('web taxi pilot restriction', () => {
     expect(config).toMatch(/scheme: 'swift'/);
   });
 
-  it('has no ride-creation wrapper, caller or proxy anywhere in web source', () => {
-    const offenders = sources(join(process.cwd(), 'src')).filter((path) => {
-      const code = readFileSync(path, 'utf8');
-      return /\brequestRide\b|\bcreateRideRequest\b|\/rides\/(?:request|queue\/join)/.test(code);
-    });
-    expect(offenders).toEqual([]);
+  // [Row 117 · owner 16 Oct 2026 20:40Z] Web booking is BUILT behind the
+  // server switch WEB_TAXI_BOOKING (off): ONE wrapper, ONE caller, no queue
+  // call and no proxy. The caller renders only while the server says
+  // webBooking (taxi-booking.test.tsx), and the server refuses every browser
+  // ride request while the switch is off, whatever this code does.
+  it('has exactly one ride-creation wrapper and one caller, and no queue call or proxy anywhere in web source', () => {
+    const root = join(process.cwd(), 'src');
+    const mentions = (pattern: RegExp) => sources(root)
+      .filter((path) => pattern.test(readFileSync(path, 'utf8')))
+      .map((path) => path.slice(root.length + 1).split(sep).join('/'))
+      .sort();
+    expect(mentions(/\brequestRide\b|\/rides\/request\b/)).toEqual(['app/(app)/taxi/taxi-booking.tsx', 'lib/customer-rides.ts']);
+    expect(mentions(/\bcreateRideRequest\b|\/rides\/queue\/join/)).toEqual([]);
+    const wrapper = readFileSync(join(root, 'lib/customer-rides.ts'), 'utf8');
+    expect(wrapper.match(/\/api\/v1\/rides\/request/g)).toHaveLength(1);
   });
 
   it('marks both customer taxi entry tiles as mobile-only', () => {

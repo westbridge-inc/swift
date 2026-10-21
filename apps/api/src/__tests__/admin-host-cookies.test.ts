@@ -201,6 +201,47 @@ describe('the browse gate reads only the pair that is this request\'s own', () =
   });
 });
 
+describe('the console\'s cookies are a credential only from the console\'s own origin (ADMIN_HOST)', () => {
+  // A script on the WEBSITE's origin (same site as the API, so SameSite=Strict cookies attach) could name
+  // itself admin-web and ride the console's __Host- pair. With the console's host configured, only its
+  // https origin is the admin-web client; from anywhere else the claim is not a browser client at all.
+  const FROM_WEB = { 'x-swift-client': 'admin-web', origin: WEB_ORIGIN, ...TLS } as const;
+  let consoleJar: Jar;
+  beforeAll(async () => {
+    process.env['ADMIN_HOST'] = new URL(ORIGIN).host;
+    consoleJar = (await signIn(ADMIN)).jar;
+  });
+  afterAll(() => { delete process.env['ADMIN_HOST']; });
+
+  it('O1: the console\'s own origin signs in and reads its session', async () => {
+    const res = await me(ADMIN, consoleJar);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().data.user.id).toBe(userIds[0]);
+    expect(res.json().data.client).toBe('admin-web');
+  });
+
+  it('O2: the website\'s origin naming admin-web does not ride the console\'s access cookie', async () => {
+    const res = await me(FROM_WEB, consoleJar);
+    expect(res.statusCode).toBe(401);
+  });
+
+  it('O3: nor its refresh cookie — and nothing is rotated', async () => {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', headers: { ...FROM_WEB, cookie: cookieHeader(consoleJar), 'content-type': 'application/json' }, payload: {} });
+    // not a browser client, so no cookie is a credential: it is a body-token refresh that carries no token
+    expect(res.statusCode, res.body).toBe(400);
+    expect(setCookies(res).some((l) => l.startsWith('__Host-'))).toBe(false);
+    expect((await me(ADMIN, consoleJar)).statusCode).toBe(200);
+  });
+
+  it('O4: a sign-in from the website\'s origin naming admin-web never writes the console\'s cookies (no fixation of the console)', async () => {
+    const code = await requestOtp(app, otherPhone);
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', headers: FROM_WEB, payload: { phone: otherPhone, code } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(setCookies(res).some((l) => l.startsWith('__Host-swift_'))).toBe(false);
+    expect((await me(ADMIN, consoleJar)).json().data.user.id).toBe(userIds[0]);
+  });
+});
+
 describe('everything else is unchanged', () => {
   it('the web app over TLS keeps its plain, path-scoped pair, and a __Host- cookie is not a web credential', async () => {
     const { jar, raw } = await signIn(WEB);
