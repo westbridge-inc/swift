@@ -200,7 +200,7 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   RS=$(db_query \
     "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
   if [ -z "$RH" ]; then
-    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh --project swift deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
   fi
