@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import { wordFreeTag } from './helpers/fixture-ids';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -55,7 +56,7 @@ beforeAll(async () => {
     await app.prisma.session.create({ data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `switch-${run}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } });
     const owner = await app.prisma.vendorOwner.create({ data: { userId: user.id } });
     const vendor = await app.prisma.vendor.create({ data: {
-      ownerId: owner.id, name: `Switch Store ${run}`, slug: `switch-${run.toLowerCase()}`, vendorType: 'RESTAURANT', phone: '+5920000562',
+      ownerId: owner.id, name: `Switch Store ${wordFreeTag(8)}`, slug: `switch-${run.toLowerCase()}`, vendorType: 'RESTAURANT', phone: '+5920000562',
       addressLine1: '1 St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
       isCurrentlyOpen: false, acceptingOrders: true,
     } });
