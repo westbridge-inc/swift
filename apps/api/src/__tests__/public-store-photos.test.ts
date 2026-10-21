@@ -74,6 +74,9 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { publicRoutes } from '../modules/public/public.routes';
+import { customerRoutes } from '../modules/user/customer.routes';
+import { toItemHit, toItemSearchDoc, itemHitFromSearchDoc } from '../modules/search/item-hit';
+import { servedPhotoAddress } from '../utils/photo-address';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicStorePhotos, resetStorePhotoCachesForTests } from '../utils/public-store-photos';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
@@ -165,6 +168,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
   await app.register(publicRoutes, { prefix: '/api/v1/public' });
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   registerPublicStorePhotos(app, fake);
   await app.ready();
   owner = await makeOwner();
@@ -174,6 +178,7 @@ beforeAll(async () => {
 beforeEach(() => { resetStorePhotoCachesForTests(); fake.stats.reads = 0; });
 
 afterAll(async () => {
+  if (userIds.length) await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
   if (vendorIds.length) {
     await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
@@ -585,5 +590,252 @@ describe('a store uploads its logo and cover; every store photo is kept redrawn'
     const outsiderDelete = await app.inject({ method: 'DELETE', url: '/api/v1/vendor/profile/cover', headers: { authorization: `Bearer ${token}` } });
     expect(outsiderDelete.statusCode).toBeGreaterThanOrEqual(401);
     expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).logoUrl).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [IMAGES-E2E PR4] Menu section photos are uploaded like every other store photo; and
+// (COORD ruling 19 Oct (a)) a menu item's photo is uploaded too: typed text may only take
+// one down or repeat it, a spreadsheet import never brings a photo address in, and an
+// outside address already saved is never handed to customers (their phones would load
+// it from that host: unscanned, with its camera data, and with the customer's IP).
+// ---------------------------------------------------------------------------
+
+const OUTSIDE = 'https://elsewhere.example/photo.jpg';
+
+async function makeCustomer(): Promise<{ userId: string; token: string }> {
+  const user = await app.prisma.user.create({
+    data: { phone: testPhone(), firstName: 'Photo', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true },
+  });
+  userIds.push(user.id);
+  const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
+  await app.prisma.session.create({
+    data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'photo-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+  });
+  return { userId: user.id, token };
+}
+
+const asOwner = (o: { token: string }, method: 'POST' | 'PUT' | 'DELETE', url: string, payload?: Record<string, unknown>) =>
+  app.inject({ method, url, ...(payload ? { payload } : {}), headers: { authorization: `Bearer ${o.token}` } });
+
+describe('a store uploads a photo for a menu section', () => {
+  it('a store manager uploads a section photo: kept clean in the store photo folder, served by the door, on the storefront', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const item = await makeItem(s.id, null);
+    const res = await uploadTo(`/api/v1/vendor/categories/${item.categoryId}/image`, o.token, await cameraJpeg());
+    expect(res.statusCode).toBe(200);
+    const key = res.json().data.imageUrl as string;
+    expect(key).toMatch(new RegExp(`^items/${s.id}/[A-Za-z0-9_-]{16}\\.jpg$`));
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id: item.categoryId } })).imageUrl).toBe(key);
+    await expectCleanStored(key);
+    const served = await get(`/${key}?w=320`);
+    expect(served.statusCode).toBe(200);
+    expect((await sharp(served.rawPayload).metadata()).width).toBe(320);
+    const page = await get(`/api/v1/customer/vendors/${s.id}`);
+    expect(page.statusCode).toBe(200);
+    const section = (page.json().data.categories as Array<{ id: string; imageUrl: string | null }>).find((c) => c.id === item.categoryId);
+    expect(section?.imageUrl).toBe(key);
+  });
+
+  it('taking a section photo down stops the door serving it', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const item = await makeItem(s.id, null);
+    const key = (await uploadTo(`/api/v1/vendor/categories/${item.categoryId}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+    const down = await asOwner(o, 'DELETE', `/api/v1/vendor/categories/${item.categoryId}/image`);
+    expect(down.statusCode).toBe(200);
+    expect(down.json().data.imageUrl).toBeNull();
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id: item.categoryId } })).imageUrl).toBeNull();
+    resetStorePhotoCachesForTests();
+    expect((await get(`/${key}`)).statusCode).toBe(404);
+  });
+
+  it('only the store\'s own live section takes a photo, and only a photo', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const mine = await makeItem(s.id, null);
+    const other = await makeItem((await makeStore((await makeOwner()).ownerId)).id, null);
+    const theirs = await uploadTo(`/api/v1/vendor/categories/${other.categoryId}/image`, o.token, await cameraJpeg());
+    expect(theirs.statusCode).toBe(404);
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id: other.categoryId } })).imageUrl).toBeNull();
+    const theirsDown = await asOwner(o, 'DELETE', `/api/v1/vendor/categories/${other.categoryId}/image`);
+    expect(theirsDown.statusCode).toBe(404);
+    const notPhoto = await uploadTo(`/api/v1/vendor/categories/${mine.categoryId}/image`, o.token, Buffer.from('#!/bin/sh\necho hi\n'.repeat(4)), 'x.png', 'image/png');
+    expect(notPhoto.statusCode).toBe(400);
+    expect(notPhoto.json().error.code).toBe('BAD_IMAGE');
+    await app.prisma.category.update({ where: { id: mine.categoryId }, data: { archivedAt: new Date() } });
+    const archived = await uploadTo(`/api/v1/vendor/categories/${mine.categoryId}/image`, o.token, await cameraJpeg());
+    expect(archived.statusCode).toBe(404);
+    const customer = await makeCustomer();
+    const outsider = await uploadTo(`/api/v1/vendor/categories/${other.categoryId}/image`, customer.token, await cameraJpeg());
+    expect(outsider.statusCode).toBeGreaterThanOrEqual(401);
+    expect(outsider.statusCode).toBeLessThan(500);
+  });
+
+  it('a typed section photo address is refused; typed text may only take the photo down or repeat it', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const other = await makeStore((await makeOwner()).ownerId);
+    for (const imageUrl of [OUTSIDE, `items/${other.id}/${photoName()}`, `items/${s.id}/${photoName()}`]) {
+      const created = await asOwner(o, 'POST', '/api/v1/vendor/categories', { name: `Sides ${wordFreeTag(4)}`, imageUrl });
+      expect(created.statusCode).toBe(400);
+      expect(created.json().error.code).toBe('STORE_PHOTO_UPLOAD_ONLY');
+    }
+    expect(await app.prisma.category.count({ where: { vendorId: s.id } })).toBe(0);
+    const plain = await asOwner(o, 'POST', '/api/v1/vendor/categories', { name: `Sides ${wordFreeTag(4)}`, imageUrl: '' });
+    expect(plain.statusCode).toBe(200);
+    const id = plain.json().data.id as string;
+    expect(plain.json().data.imageUrl).toBeNull();
+    const key = (await uploadTo(`/api/v1/vendor/categories/${id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    for (const imageUrl of [OUTSIDE, `items/${other.id}/${photoName()}`, `/uploads/items/${s.id}/${photoName()}`]) {
+      const res = await asOwner(o, 'PUT', `/api/v1/vendor/categories/${id}`, { imageUrl });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('STORE_PHOTO_UPLOAD_ONLY');
+    }
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id } })).imageUrl).toBe(key);
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/categories/${id}`, { imageUrl: key, name: 'Sides renamed' })).statusCode).toBe(200);
+    expect(await app.prisma.category.findUniqueOrThrow({ where: { id } })).toMatchObject({ imageUrl: key, name: 'Sides renamed' });
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/categories/${id}`, { imageUrl: '' })).statusCode).toBe(200);
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id } })).imageUrl).toBeNull();
+  });
+});
+
+describe('a menu item\'s photo is uploaded, never typed or imported [COORD ruling 19 Oct (a)]', () => {
+  it('creating an item with a typed photo address is refused; an empty one is no photo', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const cat = await app.prisma.category.create({ data: { vendorId: s.id, name: `Mains ${wordFreeTag(4)}`, sortOrder: 0 } });
+    for (const imageUrl of [OUTSIDE, `items/${s.id}/${photoName()}`]) {
+      const res = await asOwner(o, 'POST', '/api/v1/vendor/items', { categoryId: cat.id, name: `Plate ${wordFreeTag(6)}`, basePrice: 1200, imageUrl });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('STORE_PHOTO_UPLOAD_ONLY');
+    }
+    expect(await app.prisma.item.count({ where: { vendorId: s.id } })).toBe(0);
+    const plain = await asOwner(o, 'POST', '/api/v1/vendor/items', { categoryId: cat.id, name: `Plate ${wordFreeTag(6)}`, basePrice: 1200, imageUrl: '' });
+    expect(plain.statusCode).toBe(200);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: plain.json().data.id } })).imageUrl).toBeNull();
+  });
+
+  it('editing an item may take its photo down or repeat it, never type a new address', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const other = await makeStore((await makeOwner()).ownerId);
+    const item = await makeItem(s.id, null);
+    const key = (await uploadTo(`/api/v1/vendor/items/${item.id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    for (const imageUrl of [OUTSIDE, `items/${other.id}/${photoName()}`, `items/${s.id}/${photoName()}`]) {
+      const res = await asOwner(o, 'PUT', `/api/v1/vendor/items/${item.id}`, { imageUrl });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('STORE_PHOTO_UPLOAD_ONLY');
+    }
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).imageUrl).toBe(key);
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/items/${item.id}`, { imageUrl: key, basePrice: 1700 })).statusCode).toBe(200);
+    const kept = await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } });
+    expect([kept.imageUrl, Number(kept.basePrice)]).toEqual([key, 1700]);
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/items/${item.id}`, { imageUrl: '' })).statusCode).toBe(200);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).imageUrl).toBeNull();
+  });
+
+  it('a spreadsheet row with a photo address is still imported, without the photo, and the answer says so for that row', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const tag = wordFreeTag(6);
+    const csv = [
+      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
+      `Mains,Pepperpot ${tag},,2500,,,,true,DELIVERY,${OUTSIDE}`,
+      `Mains,Cookup ${tag},,2000,,,,true,DELIVERY,`,
+      `Mains,Roti ${tag},,900,,,,true,DELIVERY,items/${s.id}/${photoName()}`,
+    ].join('\n');
+    const res = await asOwner(o, 'POST', '/api/v1/vendor/items/import', { csv });
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect([data.imported, data.failedCount]).toEqual([3, 0]);
+    expect(data.notes).toEqual([
+      { row: 2, note: expect.stringMatching(/photo/i) },
+      { row: 4, note: expect.stringMatching(/photo/i) },
+    ]);
+    expect(data.notesCount).toBe(2);
+    const rows = await app.prisma.item.findMany({ where: { vendorId: s.id }, select: { name: true, imageUrl: true } });
+    expect(rows).toHaveLength(3);
+    expect(rows.every((r) => r.imageUrl === null)).toBe(true);
+  });
+
+  it('the import template no longer offers a photo column', async () => {
+    const o = await makeOwner();
+    await makeStore(o.ownerId);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/vendor/items/import/template', headers: { authorization: `Bearer ${o.token}` } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body.split('\n')[0]).toBe('category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment');
+  });
+});
+
+describe('an outside photo address already saved is never handed to customers [COORD ruling 19 Oct (a)]', () => {
+  it('only a path with no host is a photo customers are handed', () => {
+    for (const kept of ['items/v1/abcdefghijklmnop.jpg', '/uploads/items/v1/abcdefghijklmnop.png', '/uploads/items/review-pack/v1/store--item.png', 'portfolio/p1/abcdefghijklmnop.webp']) {
+      expect(servedPhotoAddress(kept)).toBe(kept);
+    }
+    for (const outside of [OUTSIDE, 'http://elsewhere.example/a.jpg', '//elsewhere.example/a.jpg', '/\\elsewhere.example/a.jpg', '\\\\elsewhere.example\\a.jpg',
+      ' https://elsewhere.example/a.jpg', 'HTTPS://elsewhere.example/a.jpg', 'data:image/png;base64,AAAA', 'javascript:alert(1)', 'items%2F..%2Fx', '', null, undefined]) {
+      expect(servedPhotoAddress(outside as string | null | undefined)).toBeNull();
+    }
+  });
+
+  it('the storefront (app and website), the cart and Home hand out a kept photo and never an outside one', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId, { averageRating: 5 });
+    const outsideItem = await makeItem(s.id, OUTSIDE, { totalOrdered: 2_000_000_000 });
+    const keptItem = await makeItem(s.id, null, { totalOrdered: 1_999_999_999 });
+    const key = (await uploadTo(`/api/v1/vendor/items/${keptItem.id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    await app.prisma.category.update({ where: { id: outsideItem.categoryId }, data: { imageUrl: 'https://elsewhere.example/section.jpg' } });
+    await app.prisma.category.update({ where: { id: keptItem.categoryId }, data: { imageUrl: key } });
+
+    type Row = { id: string; imageUrl: string | null; items?: Row[] };
+    const app_ = await get(`/api/v1/customer/vendors/${s.id}`);
+    expect(app_.statusCode).toBe(200);
+    const sections = app_.json().data.categories as Row[];
+    expect(sections.find((c) => c.id === outsideItem.categoryId)?.imageUrl).toBeNull();
+    expect(sections.find((c) => c.id === keptItem.categoryId)?.imageUrl).toBe(key);
+    const appItems = sections.flatMap((c) => c.items ?? []);
+    expect(appItems.find((i) => i.id === outsideItem.id)?.imageUrl).toBeNull();
+    expect(appItems.find((i) => i.id === keptItem.id)?.imageUrl).toBe(key);
+
+    const web = await get(`/api/v1/public/storefronts/${s.slug}`);
+    expect(web.statusCode).toBe(200);
+    const webItems = (web.json().data.categories as Row[]).flatMap((c) => c.items ?? []);
+    expect(webItems.find((i) => i.id === outsideItem.id)?.imageUrl).toBeNull();
+    expect(webItems.find((i) => i.id === keptItem.id)?.imageUrl).toBe(key);
+
+    const customer = await makeCustomer();
+    const cart = await app.prisma.cart.create({ data: { customerId: customer.userId, vendorId: s.id } });
+    await app.prisma.cartItem.createMany({ data: [outsideItem, keptItem].map((i) => ({ cartId: cart.id, itemId: i.id, quantity: 1, selectedOptions: [] })) });
+    const cartRes = await app.inject({ method: 'GET', url: '/api/v1/customer/cart', headers: { authorization: `Bearer ${customer.token}` } });
+    expect(cartRes.statusCode).toBe(200);
+    expect(cartRes.body).toContain(key);
+    expect(cartRes.body).not.toContain('elsewhere.example');
+
+    // A point no other request used, so Home is built now, not read from its cache.
+    const home = await get(`/api/v1/customer/home?lat=${(6.8 + Math.random() / 1000).toFixed(6)}&lng=-58.16`);
+    expect(home.statusCode).toBe(200);
+    const feed = home.json().data as { popularItems: Row[]; categories: Row[] };
+    expect(feed.popularItems.find((i) => i.id === outsideItem.id)?.imageUrl).toBeNull();
+    expect(feed.popularItems.find((i) => i.id === keptItem.id)?.imageUrl).toBe(key);
+    expect(feed.categories.find((c) => c.id === outsideItem.categoryId)?.imageUrl).toBeNull();
+    expect(feed.categories.find((c) => c.id === keptItem.categoryId)?.imageUrl).toBe(key);
+    expect(home.body).not.toContain('elsewhere.example');
+  });
+
+  it('search hits hand out a kept photo and never an outside one, from the database or from an older search document', () => {
+    const row = (imageUrl: string | null) => ({
+      id: 'i1', name: 'Plate', description: '', basePrice: 1000, imageUrl, vendorId: 'v1', createdAt: new Date(),
+      isAvailable: true, isPopular: false, dietaryTags: [], allergens: [], totalOrdered: 0,
+      vendor: { name: 'Store', isCurrentlyOpen: true }, category: { name: 'Mains' },
+    });
+    expect(toItemHit(row(OUTSIDE) as never).imageUrl).toBeNull();
+    expect(toItemHit(row('items/v1/abcdefghijklmnop.jpg') as never).imageUrl).toBe('items/v1/abcdefghijklmnop.jpg');
+    expect(toItemSearchDoc(row(OUTSIDE) as never, []).imageUrl).toBeNull();
+    expect(itemHitFromSearchDoc({ entityId: 'i1', name: 'Plate', vendorId: 'v1', imageUrl: OUTSIDE }).imageUrl).toBeNull();
+    expect(itemHitFromSearchDoc({ entityId: 'i1', name: 'Plate', vendorId: 'v1', imageUrl: 'items/v1/abcdefghijklmnop.jpg' }).imageUrl)
+      .toBe('items/v1/abcdefghijklmnop.jpg');
   });
 });
