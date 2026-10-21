@@ -97,6 +97,15 @@ describe('[ROLE-DOCS] production still holds the 2026-10-14.5 seed: its stored l
         expect(await lists.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual([]);
         expect(await lists.getMoverOptionalDocuments('GY', 'CAR')).toEqual(['police_clearance']);
         expect(await lists.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
+        // [security review · fail closed] a stored row MISSING a required profile key gets the code's list, never [];
+        // an explicit (signed) list still wins
+        const missing = { ...old } as Record<string, string[]>;
+        delete missing['MOVER_MOTOR'];
+        await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: missing } });
+        expect(await lists.getMoverChecklist('GY', 'MOTORCYCLE')).toEqual(['drivers_licence', 'vehicle_registration', 'vehicle_insurance']);
+        await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: { ...missing, MOVER_MOTOR: ['drivers_licence'] } } });
+        expect(await lists.getMoverChecklist('GY', 'MOTORCYCLE')).toEqual(['drivers_licence']);
+        await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: old } });
         await seedDocRegistry(app.prisma);
         const sets = await app.prisma.requirementSet.findMany({ where: { countryCode: 'GY', effectiveFrom: REGISTRY_EFFECTIVE_FROM, actorRole: { in: ['CUSTOMER_L2', 'MOVER'] } }, include: { items: true } });
         expect(sets.find((x) => x.actorRole === 'CUSTOMER_L2')).toBeUndefined();
@@ -107,7 +116,7 @@ describe('[ROLE-DOCS] production still holds the 2026-10-14.5 seed: its stored l
         await seedDocRegistry(app.prisma);
       }
     });
-  });
+  }, 180_000); // two full registry seeds
 });
 
 async function person(profile: 'NONE' | 'BICYCLE' | 'MOTORCYCLE' | 'CAR' | 'MOTORCYCLE+CAR') {
