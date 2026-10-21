@@ -110,7 +110,10 @@ export function ProviderPortfolioCard({ photos }: { photos: string[] }) {
       <PopupCard visible={confirming !== null} onClose={() => setConfirming(null)}>
         <PopupTitle variant="title" center>Remove this photo?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          It is deleted from Swift and customers stop seeing it.
+          {/* [REVIEW-F S4-2 on #1918 delta] An outside address has nothing of Swift's to delete. */}
+          {confirming && !isKeptPortfolioPhoto(confirming)
+            ? 'It is taken off your list.'
+            : 'It is deleted from Swift and customers stop seeing it.'}
         </T>
         <PillButton
           label="Remove photo"
