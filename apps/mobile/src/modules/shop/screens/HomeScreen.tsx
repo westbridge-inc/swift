@@ -465,7 +465,7 @@ export function HomeScreen() {
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
               <Pressable
-                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}
+                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' }, { pop: true })}
                 accessibilityRole="button"
                 accessibilityLabel="Profile"
               >

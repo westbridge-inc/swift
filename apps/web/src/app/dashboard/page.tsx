@@ -7,6 +7,7 @@ import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
+import { instantSwitch } from '@/lib/instant-toggle';
 
 function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -44,9 +45,20 @@ export default function TodayPage() {
   const lowStock = useQuery({ queryKey: storeKey(storeId, 'low-stock'), queryFn: getLowStock, refetchInterval: 60_000 });
   const catalogue = useCatalogueName();
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'overview') });
-  const openMut = useMutation({ mutationFn: toggleOpen, onSettled: invalidate });
-  const ordersMut = useMutation({ mutationFn: toggleOrders, onSettled: invalidate });
+  const overviewKey = storeKey(storeId, 'overview');
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: overviewKey });
+  // [PERF row 562] Both switches move at the tap (dimmed until the server confirms) and go back if it refuses.
+  // The server FLIPS what it holds and answers with both flags: that answer is shown as soon as it lands.
+  type Overview = { vendor: { isCurrentlyOpen: boolean; acceptingOrders: boolean } };
+  type Answer = { data?: { isCurrentlyOpen?: unknown; acceptingOrders?: unknown } } | undefined;
+  const flip = (field: 'isCurrentlyOpen' | 'acceptingOrders') => instantSwitch<boolean, Overview, Answer>(
+    queryClient, overviewKey, (data, next, undo) => ({ ...data, vendor: { ...data.vendor, [field]: undo ? !next : next } }), invalidate,
+    (data, answer) => (typeof answer?.data?.isCurrentlyOpen === 'boolean' && typeof answer.data.acceptingOrders === 'boolean'
+      ? { ...data, vendor: { ...data.vendor, isCurrentlyOpen: answer.data.isCurrentlyOpen, acceptingOrders: answer.data.acceptingOrders } }
+      : data),
+  );
+  const openMut = useMutation({ mutationFn: toggleOpen, ...flip('isCurrentlyOpen') });
+  const ordersMut = useMutation({ mutationFn: toggleOrders, ...flip('acceptingOrders') });
 
   const d = overview.data;
   if (overview.isLoading) return <p className="text-sm text-[var(--swift-muted)]">Loading…</p>;
