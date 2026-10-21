@@ -238,7 +238,7 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
 
   it('a customer\'s own ID is never an application', async () => {
     const u = await person('CUSTOMER');
-    const d = await doc(u, 'CUSTOMER', 'COMMITTED', 300, 'identity_l2');
+    const d = await doc(u, 'CUSTOMER', 'REJECTED', 300, 'identity_l2');
     expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
     expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
     expect((await docOf(d.id)).purgedAt).toBeNull();
