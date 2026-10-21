@@ -16,18 +16,21 @@ import type { UserRole } from '@prisma/client';
 const fake = vi.hoisted(() => {
   const { randomBytes } = require('node:crypto') as typeof import('node:crypto');
   const objects = new Map<string, Buffer>();
-  const stats = { reads: 0 };
+  const stats = { reads: 0, failDeletes: false };
+  const hooks = { afterUpload: null as null | (() => Promise<void>) };
   return {
+    hooks,
     objects,
     stats,
     async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
       const dot = input.filename.lastIndexOf('.');
       const key = `${input.folder}/${randomBytes(12).toString('base64url')}${dot >= 0 ? input.filename.slice(dot) : '.bin'}`;
       objects.set(key, input.buffer);
+      await hooks.afterUpload?.();
       return { url: key };
     },
     async getSignedUrl(key: string) { return `https://bucket.invalid/${key}?X-Amz-Signature=x`; },
-    async delete(key: string) { objects.delete(key); },
+    async delete(key: string) { if (stats.failDeletes) throw new Error('storage is down'); objects.delete(key); },
     async getObject(key: string) {
       const b = objects.get(key);
       if (!b) throw Object.assign(new Error('NoSuchKey'), { name: 'NoSuchKey' });
@@ -54,6 +57,9 @@ import { servicesRoutes, PORTFOLIO_MAX } from '../modules/services/services.rout
 import { providerChecklist } from '../modules/services/services.service';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { AccountService } from '../modules/user/account.service';
+import { queueStorageOrphan, retryStorageOrphan, retryStorageOrphans } from '../lib/storage-orphans';
+import { PUBLIC_PHOTO_REMOVED } from '../utils/public-photo-deletion';
 import { registerPublicStorePhotos, resetStorePhotoCachesForTests } from '../utils/public-store-photos';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -150,11 +156,12 @@ beforeAll(async () => {
   } }));
 });
 
-beforeEach(() => { resetStorePhotoCachesForTests(); fake.stats.reads = 0; });
+beforeEach(() => { resetStorePhotoCachesForTests(); fake.stats.reads = 0; fake.stats.failDeletes = false; fake.hooks.afterUpload = null; });
 
 afterAll(async () => {
   if (userIds.length) {
     await runWithoutTenant(async () => {
+      await app.prisma.storageOrphan.deleteMany({ where: { userId: { in: userIds } } });
       await app.prisma.serviceProvider.deleteMany({ where: { userId: { in: userIds } } });
       await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } });
       await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
@@ -243,5 +250,149 @@ describe('a provider uploads photos of their work; customers see them', () => {
     const u = await makeUser();
     const res = await uploadPortfolio(u.token, await cameraJpeg());
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [REVIEW-F S2-1 on #1918] A portfolio photo can show a customer's home or people. When it is
+// taken down, dropped by a profile save, or its owner's account is erased, its BYTES are deleted,
+// not just unlinked: the durable deletion row is written with the pointer change, the object is
+// deleted after, and a delete that fails stays owed until the standing retry finishes it.
+// [REVIEW-G S3-1] Customers browsing providers are handed only photos Swift keeps in that
+// provider's own folder; an outside address saved before photos were upload-only is dropped.
+// ---------------------------------------------------------------------------
+
+const orphanOf = (key: string) => runWithoutTenant(() => app.prisma.storageOrphan.findUnique({ where: { key } }));
+const portfolioOf = async (providerId: string) =>
+  (await runWithoutTenant(() => app.prisma.serviceProvider.findUniqueOrThrow({ where: { id: providerId } }))).portfolioPhotos;
+const io = { in: () => ({ disconnectSockets: () => undefined }) };
+
+describe('a portfolio photo that goes is deleted from storage, not just unlinked', () => {
+  it('a photo the provider takes down is deleted', async () => {
+    const p = await makeProvider(true);
+    const key = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    expect(fake.objects.has(key)).toBe(true);
+    const down = await send('DELETE', `/api/v1/services/providers/me/portfolio/${key.split('/').pop()}`, p.token);
+    expect(down.statusCode).toBe(200);
+    expect(fake.objects.has(key)).toBe(false);
+    expect((await orphanOf(key))?.purgedAt).toBeInstanceOf(Date);
+  });
+
+  it('a photo a profile save drops is deleted; the photos it keeps stay', async () => {
+    const p = await makeProvider(true);
+    const a = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const b = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const saved = await send('POST', '/api/v1/services/providers', p.token, { trade: 'plumber', bio: 'Pipes and taps', portfolioPhotos: [b] });
+    expect(saved.statusCode).toBe(200);
+    expect([fake.objects.has(a), fake.objects.has(b)]).toEqual([false, true]);
+    expect((await orphanOf(a))?.purgedAt).toBeInstanceOf(Date);
+    expect(await orphanOf(b)).toBeNull();
+  });
+
+  it('a delete that fails stays owed, and the standing retry finishes it', async () => {
+    const p = await makeProvider(true);
+    const key = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    fake.stats.failDeletes = true;
+    expect((await send('DELETE', `/api/v1/services/providers/me/portfolio/${key.split('/').pop()}`, p.token)).statusCode).toBe(200);
+    expect(await portfolioOf(p.providerId)).not.toContain(key);
+    expect(fake.objects.has(key)).toBe(true);
+    expect((await orphanOf(key))?.purgedAt).toBeNull();
+    fake.stats.failDeletes = false;
+    await runWithoutTenant(() => retryStorageOrphans(app.prisma, fake, app.log, 500));
+    expect(fake.objects.has(key)).toBe(false);
+    expect((await orphanOf(key))?.purgedAt).toBeInstanceOf(Date);
+  });
+
+  it('a deletion row never deletes a photo a row still shows, one outside the public folders, or one in a folder the row\'s person does not own', async () => {
+    const p = await makeProvider(true);
+    const other = await makeProvider(true);
+    const shown = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const theirs = (await uploadPortfolio(other.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const outside = `verification/${p.userId}/${'k'.repeat(16)}.enc`;
+    fake.objects.set(outside, Buffer.from('identity document'));
+    // In another provider's folder and listed by no one: only the folder's owner may have it deleted.
+    const unlistedTheirs = `portfolio/${other.providerId}/${'u'.repeat(16)}.jpg`;
+    fake.objects.set(unlistedTheirs, await cameraJpeg());
+    const user = await runWithoutTenant(() => app.prisma.user.findUniqueOrThrow({ where: { id: p.userId }, select: { tenantId: true } }));
+    for (const key of [shown, outside, theirs, unlistedTheirs]) {
+      const row = await runWithoutTenant(() => queueStorageOrphan(app.prisma, { key, reason: PUBLIC_PHOTO_REMOVED, userId: p.userId, tenantId: user.tenantId }));
+      expect(await runWithoutTenant(() => retryStorageOrphan(app.prisma, fake, app.log, row.id))).toBe(false);
+      expect(fake.objects.has(key)).toBe(true);
+      await runWithoutTenant(() => app.prisma.storageOrphan.delete({ where: { id: row.id } }));
+    }
+  });
+
+  it('an upload that loses a race (the portfolio filled, or the account closed, while it was kept) is refused and its photo deleted', async () => {
+    const p = await makeProvider(true);
+    const keys = Array.from({ length: PORTFOLIO_MAX }, (_, i) => `portfolio/${p.providerId}/${String(i).padStart(16, 'y')}.jpg`);
+    for (const [race, status, code] of [
+      [() => runWithoutTenant(() => app.prisma.serviceProvider.update({ where: { id: p.providerId }, data: { portfolioPhotos: keys } })), 409, 'PORTFOLIO_FULL'],
+      [() => runWithoutTenant(() => app.prisma.user.update({ where: { id: p.userId }, data: { status: 'SUSPENDED' } })), 403, 'ACCOUNT_NOT_ACTIVE'],
+    ] as const) {
+      await runWithoutTenant(() => app.prisma.serviceProvider.update({ where: { id: p.providerId }, data: { portfolioPhotos: [] } }));
+      const before = new Set(fake.objects.keys());
+      fake.hooks.afterUpload = async () => { await race(); };
+      const res = await uploadPortfolio(p.token, await cameraJpeg());
+      fake.hooks.afterUpload = null;
+      expect(res.statusCode).toBe(status);
+      expect(res.json().error.code).toBe(code);
+      expect((await portfolioOf(p.providerId)).filter((k) => !keys.includes(k))).toEqual([]);
+      expect([...fake.objects.keys()].filter((k) => !before.has(k))).toEqual([]);
+    }
+  });
+
+  it('account erasure deletes every portfolio photo and clears the list; a failed delete keeps the receipt pending until the retry', async () => {
+    const p = await makeProvider(false);
+    const a = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const b = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    // (The fixture's placeholder selfie address is not one Swift issued; it would keep its own obligation open.)
+    await runWithoutTenant(() => app.prisma.user.update({ where: { id: p.userId }, data: { avatar: null } }));
+    const account = () => new AccountService({ prisma: app.prisma, log: app.log, io: io as never });
+    fake.stats.failDeletes = true;
+    const first = await account().deleteAccount(p.userId);
+    expect(first).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
+    expect((first as { pendingUploads: number }).pendingUploads).toBeGreaterThanOrEqual(2);
+    expect(await portfolioOf(p.providerId)).toEqual([]);
+    expect([fake.objects.has(a), fake.objects.has(b)]).toEqual([true, true]);
+    fake.stats.failDeletes = false;
+    // Older owed deletions elsewhere fill the sweep's own small batch: this person's photos are retried by name.
+    const other = await makeProvider(false);
+    const otherUser = await runWithoutTenant(() => app.prisma.user.findUniqueOrThrow({ where: { id: other.userId }, select: { tenantId: true } }));
+    await runWithoutTenant(() => app.prisma.storageOrphan.createMany({ data: Array.from({ length: 6 }, (_, i) => ({
+      key: `portfolio/${other.providerId}/${String(i).padStart(16, 'z')}.jpg`, reason: PUBLIC_PHOTO_REMOVED,
+      userId: other.userId, tenantId: otherUser.tenantId, createdAt: new Date(Date.UTC(2000, 0, 1, 0, i)),
+    })) }));
+    const again = await account().deleteAccount(p.userId);
+    expect([fake.objects.has(a), fake.objects.has(b)]).toEqual([false, false]);
+    expect((await orphanOf(a))?.purgedAt).toBeInstanceOf(Date);
+    expect((await orphanOf(b))?.purgedAt).toBeInstanceOf(Date);
+    expect((again as { pendingUploads?: number }).pendingUploads ?? 0).toBe(0);
+  });
+});
+
+describe('customers browsing providers are handed only photos Swift keeps [REVIEW-G S3-1]', () => {
+  it('an outside address or another provider\'s key in a portfolio is dropped from the browse list', async () => {
+    const p = await makeProvider(true);
+    const other = await makeProvider(true);
+    const key = (await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    const theirs = (await uploadPortfolio(other.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string;
+    await runWithoutTenant(() => app.prisma.serviceProvider.update({
+      where: { id: p.providerId },
+      data: { portfolioPhotos: ['https://elsewhere.example/work.jpg', key, theirs, '//elsewhere.example/w.jpg'] },
+    }));
+    const found = async (): Promise<{ id: string; portfolioPhotos: string[] } | undefined> => {
+      let cursor: string | undefined;
+      for (let page = 0; page < 40; page += 1) {
+        const res = await send('GET', `/api/v1/services/providers?trade=plumber&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+        expect(res.statusCode).toBe(200);
+        const data = res.json().data as { providers: Array<{ id: string; portfolioPhotos: string[] }>; page: { nextCursor: string | null } };
+        const hit = data.providers.find((x) => x.id === p.providerId);
+        if (hit || !data.page.nextCursor) return hit;
+        cursor = data.page.nextCursor;
+      }
+      return undefined;
+    };
+    const listed = await found();
+    expect(listed?.portfolioPhotos).toEqual([key]);
   });
 });
