@@ -16,6 +16,9 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { isProduction } from '../../utils/runtime-mode';
 
 export const REGISTRY_TIER = 'STANDARD';
+/** [ROLE-DOCS · owner 21 Oct 2026] Lists retired by the owner (country-config RETIRED_LIST_KEYS says the same; a test
+ *  keeps them equal). Kept here too so the registry never imports the country service. */
+export const RETIRED_REGISTRY_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
 /** [R24 · research C4] A persisted (vehicle / business) image is kept while the relationship is
@@ -405,7 +408,9 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
   let docTypes = 0; let requirementSets = 0; let requirementItems = 0;
   for (const c of countries) {
     // Code defaults under the stored JSON (P3-2): a list added in code is seeded everywhere; an edited stored list wins.
-    const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
+    const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((c.documentChecklists ?? {}) as Record<string, string[]>) };
+    // [ROLE-DOCS · owner 21 Oct 2026] a retired list in a stored copy from an older seed declares nothing
+    for (const key of RETIRED_REGISTRY_LIST_KEYS) delete lists[key];
     // [VERIFY-DOCS] A type no list asks for any more keeps its registry row: documents of it already
     // exist (approved permits, TIN certificates) and their bucket and retention still have to be read.
     // A never-accepted type (a medical document) is never minted, whatever a stored list says.

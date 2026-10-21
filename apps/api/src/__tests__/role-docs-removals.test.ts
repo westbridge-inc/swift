@@ -20,7 +20,8 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { DEFAULT_DOCUMENT_CHECKLISTS, PLATFORM_CONFIG_VERSION } from '../modules/ops/platform-config';
-import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, LICENCE_DISCLOSURE_TYPES, AUTO_APPROVE_EXPIRY_DAYS } from '../modules/verification/doc-registry';
+import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, LICENCE_DISCLOSURE_TYPES, AUTO_APPROVE_EXPIRY_DAYS, RETIRED_REGISTRY_LIST_KEYS, REGISTRY_EFFECTIVE_FROM, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
+import { CountryConfigService, RETIRED_LIST_KEYS } from '../modules/country/country-config.service';
 
 const MIGRATION = '20261021160000_role_docs_retired_documents';
 const DAY = 86_400_000;
@@ -30,8 +31,8 @@ let app: FastifyInstance;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'role-docs-removals-test');
 
 /** The migration's statements, in order (comments stripped; the file has no semicolons inside a statement). */
-function statements(): string[] {
-  const sql = readFileSync(join(process.cwd(), 'prisma/migrations', MIGRATION, 'migration.sql'), 'utf8');
+function statements(file = 'migration.sql'): string[] {
+  const sql = readFileSync(join(process.cwd(), 'prisma/migrations', MIGRATION, file), 'utf8');
   return sql.split(/;\s*\n/).map((chunk) => chunk.split('\n').filter((line) => !line.trim().startsWith('--')).join('\n').trim()).filter(Boolean);
 }
 
@@ -76,6 +77,35 @@ describe('[ROLE-DOCS] the lists and the registry no longer ask for the removed d
       expect(AUTO_APPROVE_EXPIRY_DAYS[retired], retired).toBeUndefined();
     }
     expect(CATEGORY_GATES.some((g) => g.categorySlug === 'alcohol' || g.categorySlug === 'pharmacy')).toBe(false);
+  });
+});
+
+describe('[ROLE-DOCS] production still holds the 2026-10-14.5 seed: its stored lists never bring the removed documents back', () => {
+  it('a stored MOVER_OPTIONAL / CUSTOMER_L2 is ignored, and the taxi driver\'s optional police clearance comes from the code', async () => {
+    expect([...RETIRED_LIST_KEYS].sort()).toEqual([...RETIRED_REGISTRY_LIST_KEYS].sort());
+    await system(async () => {
+      const gy = await app.prisma.countryConfig.findUniqueOrThrow({ where: { code: 'GY' } });
+      const before = gy.documentChecklists;
+      // What production's stored copy looks like (the 2026-10-14.5 seed): the old optional lists, no taxi-only one.
+      const old = { ...(before as Record<string, string[]>), MOVER_OPTIONAL: ['national_id', 'police_clearance'], CUSTOMER_L2: ['national_id', 'selfie'] };
+      delete (old as Record<string, string[]>)['MOVER_TAXI_EXTRA_OPTIONAL'];
+      await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: old } });
+      try {
+        const lists = new CountryConfigService(app.prisma);
+        expect(await lists.getMoverOptionalDocuments('GY', 'MOTORCYCLE')).toEqual([]);
+        expect(await lists.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual([]);
+        expect(await lists.getMoverOptionalDocuments('GY', 'CAR')).toEqual(['police_clearance']);
+        expect(await lists.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
+        await seedDocRegistry(app.prisma);
+        const sets = await app.prisma.requirementSet.findMany({ where: { countryCode: 'GY', effectiveFrom: REGISTRY_EFFECTIVE_FROM, actorRole: { in: ['CUSTOMER_L2', 'MOVER'] } }, include: { items: true } });
+        expect(sets.find((x) => x.actorRole === 'CUSTOMER_L2')).toBeUndefined();
+        expect(sets.find((x) => x.actorRole === 'MOVER')?.items ?? []).toEqual([]);
+        expect(await app.prisma.requirementItem.count({ where: { requirementSet: { actorRole: 'MOVER_TAXI_EXTRA' }, docTypeCode: registryCode('GY', 'police_clearance'), isBlocking: false } })).toBe(1);
+      } finally {
+        await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: before as never } });
+        await seedDocRegistry(app.prisma);
+      }
+    });
   });
 });
 
@@ -135,6 +165,7 @@ describe('[ROLE-DOCS] the migration decides what happens to the copies already h
         liquorSooner: await doc(shopOwner, 'VENDOR_OWNER', 'liquor_licence', { retentionExpiresAt: sooner }),
         nis: await doc(shopOwner, 'VENDOR_OWNER', 'nis_employer_reg'),
         sanitary: await doc(shopOwner, 'VENDOR_OWNER', 'sanitary_certificate', { expiresAt: new Date(Date.now() + 300 * DAY) }),
+        rejectedClearance: await doc(rider, 'MOVER', 'police_clearance', { status: 'REJECTED', retentionExpiresAt: new Date(Date.now() + 20 * DAY) }),
       };
       const sp = await app.prisma.serviceProvider.create({ data: { userId: provider, trade: 'electrician' } });
       const gei = await app.prisma.serviceQualification.create({ data: { providerId: sp.id, trade: 'electrician', type: 'GEI_LICENCE', referenceNumber: 'GEI-1', status: 'PENDING' } });
@@ -183,6 +214,12 @@ describe('[ROLE-DOCS] the migration decides what happens to the copies already h
           const was = row.retentionExpiresAt?.getTime() ?? null; const now = again[i]!.retentionExpiresAt?.getTime() ?? null;
           if (was === null) expect(now, row.id).toBeNull(); else expect(now!, row.id).toBeLessThanOrEqual(was);
         }
+        // [REVIEW-G S4] rollback.sql: a copy the reaper has not deleted goes back to "kept while active" (no clock);
+        // a clock another rule set (a rejection) is never touched; the deleted qualification cannot come back.
+        for (const statement of statements('rollback.sql')) await tx.$executeRawUnsafe(statement);
+        for (const undone of [d.riderClearance, d.riderNationalId, d.taxiNationalId, d.liquor, d.nis]) expect(await clock(undone.id), undone.docType).toBeNull();
+        expect(await clock(d.rejectedClearance.id)).not.toBeNull();
+        expect(await tx.serviceQualification.count({ where: { id: gei.id } })).toBe(0);
         throw ROLLBACK;
       }, { timeout: 60_000 }).catch((err) => { if (err !== ROLLBACK) throw err; });
     });
