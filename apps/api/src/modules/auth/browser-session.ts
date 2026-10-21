@@ -78,7 +78,7 @@ type RequestPosture = Pick<FastifyRequest, 'headers'> & { protocol?: string };
 
 /** The session cookie names and paths for this request's browser client under this transport. */
 export function sessionCookieNamesFor(request: RequestPosture, env: Env = process.env): SessionCookieNames {
-  return browserClientOf(request) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
+  return browserClientOf(request, env) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
 }
 
 /** Whether a request carries ITS OWN session pair (the browse gate's "this is a session: authenticate it").
@@ -90,10 +90,29 @@ export function carriesOwnSessionCookie(request: RequestPosture, env: Env = proc
   return Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh);
 }
 
-export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
+/**
+ * The browser client a request names — and the console is that client only from
+ * the console's own origin. The CORS allowlist is ONE list for the website and the
+ * console, and both sit on the API's site, so a script on the website's origin
+ * could name itself `admin-web` and its requests would carry the console's
+ * SameSite=Strict `__Host-` pair. With the console's host configured
+ * (`ADMIN_HOST`, which deploy/pilot-up.sh also requires in CORS_ORIGIN), only
+ * `https://<ADMIN_HOST>` is `admin-web`; production without it serves no console,
+ * so nothing is; local development and tests keep the allowlist rule. A claim
+ * from elsewhere is no browser client at all: no cookie is read or written for it.
+ */
+export function browserClientOf(request: Pick<FastifyRequest, 'headers'>, env: Env = process.env): string | null {
   const raw = request.headers[BROWSER_CLIENT_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === 'string' && BROWSER_CLIENTS.has(value) ? value : null;
+  if (typeof value !== 'string' || !BROWSER_CLIENTS.has(value)) return null;
+  if (value === ADMIN_BROWSER_CLIENT && !isConsoleOrigin(originOf(request), env)) return null;
+  return value;
+}
+
+function isConsoleOrigin(origin: string | null, env: Env): boolean {
+  const host = (env['ADMIN_HOST'] ?? '').trim().toLowerCase();
+  if (host) return origin === `https://${host}`;
+  return !isProduction(env);
 }
 
 export function parseCookies(header: string | undefined): Record<string, string> {
@@ -142,7 +161,7 @@ export function bearerOrCookieToken(request: RequestPosture, env: Env = process.
   const cookies = parseCookies(request.headers['cookie']);
   const cookie = cookies[sessionCookieNamesFor(request, env).access];
   if (!cookie) return '';
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return ''; }
   browserSessionCounter.labels('cookie_auth').inc();
@@ -172,7 +191,7 @@ export function refreshCredentialOf(request: RequestPosture & Pick<FastifyReques
   if (typeof body.refreshToken === 'string' && body.refreshToken) return body.refreshToken;
   const cookie = parseCookies(request.headers['cookie'])[sessionCookieNamesFor(request, env).refresh];
   if (!cookie) return null;
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return null; }
   return cookie;

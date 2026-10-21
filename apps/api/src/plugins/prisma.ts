@@ -5,7 +5,8 @@ import { destructiveGuardExtension, isTestRuntime, refuseNonTestDatabaseInVitest
 import { sessionCredentialDigestExtension } from '../lib/session-credential';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
-import { getTenantContext, tenantContext, type TenantMode } from './tenant-context';
+import { getOwnerUserId, getTenantContext, tenantContext, type TenantMode } from './tenant-context';
+import { ownerRlsBindEnabled } from '../lib/owner-rls';
 import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
@@ -331,6 +332,17 @@ type ScopeParams = {
 /** Which connection a scoping extension is installed on. */
 type Connection = 'request' | 'system';
 type BatchClient = { $transaction: (q: never[]) => Promise<unknown[]>; $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => unknown };
+
+/** [TEN-03 · item 20] THE binding statement, issued wherever a tenant is bound
+ *  (a query's batch, a transaction's first statement): the tenant, and with
+ *  OWNER_RLS_BIND=1 the person the request acts for beside it — '' when it
+ *  acts for none, so an owner-walled table then shows nothing (fail closed).
+ *  Off, it is exactly the tenant binding it always was. */
+function bindingStatement<R>(client: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => R }, tenantId: string): R {
+  if (!ownerRlsBindEnabled()) return client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+  const userId = getOwnerUserId() ?? '';
+  return client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true), set_config('app.current_user', ${userId}, true)`;
+}
 /** The clients one scoping extension works with: the client whose batch binds
  *  the tenant, and the system connection for system work outside a transaction. */
 interface ScopeWiring { batch: () => BatchClient; system: () => PrismaClient | null }
@@ -523,7 +535,7 @@ type BindLabel = 'tenant' | 'nontenant';
 type SystemLabel = 'system' | 'nontenant_system';
 async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient, label: BindLabel = 'tenant'): Promise<unknown> {
   try {
-    const bind = client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)` as unknown as Record<symbol, boolean>;
+    const bind = bindingStatement(client, tenantId) as unknown as Record<symbol, boolean>;
     bind[TENANT_BIND_STATEMENT] = true;
     const [, result] = await client.$transaction([bind as never, query(args) as never]);
     tenantBindCounter.labels(label).inc();
@@ -622,7 +634,7 @@ async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unk
  *  context: the tenant, or the bypass role for system work. Idempotent. */
 export async function bindTenantTransaction(tx: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }): Promise<void> {
   const ctx = getTenantContext();
-  if (ctx.tenantId) await tx.$executeRaw`SELECT set_config('app.current_tenant', ${ctx.tenantId}, true)`;
+  if (ctx.tenantId) await bindingStatement(tx, ctx.tenantId);
   // system work has no binding on the walled login: it belongs on the system client
 }
 
@@ -701,14 +713,14 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
           if (id === undefined || id === null) throw new Error('[R5] a tenant-bound transaction could not be identified');
           txId = String(id);
           boundInteractiveTransactions.set(txId, tenantId);
-          await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+          await bindingStatement(tx, tenantId);
           return fn(tx);
         }, options) as Promise<unknown>;
         return run.finally(() => { if (txId !== undefined) boundInteractiveTransactions.delete(txId); });
       }
       if (Array.isArray(input)) {
         tenantBindCounter.labels('tenant_tx').inc();
-        const bindFirst = (client as unknown as BatchClient).$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+        const bindFirst = bindingStatement(client as unknown as BatchClient, tenantId);
         return tenantContext.run({ ...current, batchTenant: tenantId }, async () => ((await own([bindFirst, ...input], options)) as unknown[]).slice(1));
       }
     }
@@ -827,7 +839,7 @@ export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | nul
 // callers (auth, tests) that set the tenant through these re-exports are then
 // guaranteed to touch the SAME AsyncLocalStorage instance the extension reads —
 // immune to a test runner or bundler loading tenant-context twice.
-export { enterTenant, beginRequestTenantContext, runWithTenant, runWithoutTenant, getTenantId } from './tenant-context';
+export { enterTenant, enterOwner, beginRequestTenantContext, runWithTenant, runWithoutTenant, getTenantId } from './tenant-context';
 
 // $extends changes the client's TS type but not its runtime surface (create,
 // findMany, $transaction, $connect, $disconnect all remain). Consumers only need
