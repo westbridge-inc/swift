@@ -353,3 +353,67 @@ describe('[TAXI waiting charge] a ride charged for waiting', () => {
     expect(screen.queryByText('Trip fare')).toBeNull();
   });
 });
+
+describe('[TAXI multi-stop 8/8] a ride with stops', () => {
+  const ride = {
+    ...order,
+    orderType: 'TAXI',
+    status: 'RIDE_IN_PROGRESS',
+    vendor: null,
+    pickupAddress: 'Bartica Police Station',
+    deliveryAddress: 'Bartica Airstrip',
+    taxiFareTotal: 2800,
+    totalAmount: 2800,
+    deliveryFee: 0,
+  };
+  const stop = (sequence: number, extra: Record<string, unknown>) => ({
+    sequence, address: `Stop street ${sequence}`, status: 'PENDING', arrivedAt: null, departedAt: null, skippedAt: null, skipReason: null, evidenceNote: null, ...extra,
+  });
+
+  it('lists the stops between the pickup and the destination, in order, each with where the ride stands and the arrival evidence', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, {
+      ...ride,
+      nextStopSequence: 3,
+      stops: [
+        stop(1, { status: 'DEPARTED', arrivedAt: '2026-10-18T20:00:00.000Z', departedAt: '2026-10-18T20:06:00.000Z', evidenceNote: 'Driver reported arriving at stop 1 — near the pin 40m away, fix 5s old' }),
+        stop(2, { status: 'SKIPPED', skippedAt: '2026-10-18T20:15:00.000Z', skipReason: 'Road flooded' }),
+        stop(3, { status: 'ARRIVED', arrivedAt: '2026-10-18T20:20:00.000Z' }),
+      ],
+    }));
+
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+
+    const first = await screen.findByTestId('ride-stop-1');
+    expect(first.textContent).toContain('Stop street 1');
+    expect(first.textContent).toMatch(/Arrived \d\d:\d\d · left \d\d:\d\d/);
+    expect(first.textContent).toContain('Driver reported arriving at stop 1 — near the pin 40m away, fix 5s old');
+    expect(screen.getByTestId('ride-stop-2').textContent).toMatch(/Skipped \d\d:\d\d — Road flooded/);
+    expect(screen.getByTestId('ride-stop-3').textContent).toMatch(/Waiting here since \d\d:\d\d/);
+    // The itinerary reads top to bottom: pickup, the stops, the destination.
+    const text = document.body.textContent ?? '';
+    const at = (s: string) => text.indexOf(s);
+    expect(at('Bartica Police Station')).toBeLessThan(at('Stop street 1'));
+    expect(at('Stop street 1')).toBeLessThan(at('Stop street 2'));
+    expect(at('Stop street 3')).toBeLessThan(at('Bartica Airstrip'));
+  });
+
+  it('a stop not reached yet says whether it is the next one', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, { ...ride, nextStopSequence: 1, stops: [stop(1, {}), stop(2, {})] }));
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    expect((await screen.findByTestId('ride-stop-1')).textContent).toContain('Next stop');
+    expect(screen.getByTestId('ride-stop-2').textContent).toContain('Not reached yet');
+  });
+
+  it('a ride without stops renders no stop rows', async () => {
+    mockApi(orderHandler(() => {
+      throw new Error('no mutation expected');
+    }, ride));
+    renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
+    expect(await screen.findByText('Bartica Airstrip')).toBeTruthy();
+    expect(screen.queryByTestId('ride-stop-1')).toBeNull();
+  });
+});

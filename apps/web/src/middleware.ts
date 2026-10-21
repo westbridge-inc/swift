@@ -36,6 +36,10 @@ export const config = {
     '/explore',
     '/market',
     '/cart',
+    // [WEB-LAUNCH-CHECK F1] The checkout itself, and the selfie step it sends a
+    // first-time buyer to, were real on swiftgy.com before launch.
+    '/checkout/:path*',
+    '/selfie',
     '/orders/:path*',
     '/courier',
     '/taxi',
