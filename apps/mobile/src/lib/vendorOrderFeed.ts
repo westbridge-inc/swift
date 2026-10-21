@@ -8,6 +8,10 @@ export interface VendorOrderFeedHandlers {
   onNew: (payload?: { orderId?: string; orderNumber?: string }) => void;
   refresh: () => unknown;
   refreshBookings: () => unknown;
+  /** [PERF partner #6] The store overview (today's numbers): it changes only when orders do,
+   *  so it refreshes on a new order or a status change, and catches up whenever the feed
+   *  reconnects or drops (a drop also puts its poll back to full speed at once). */
+  refreshOverview?: () => unknown;
 }
 
 /** Stores whose live order feed is bound right now (the store-room listeners
@@ -29,10 +33,20 @@ export function bindVendorOrderFeed(
   const join = () => { if (mayJoin()) socket.emit('vendor:subscribe', { vendorId }); };
   const refresh = () => { handlers.refresh(); };
   const refreshBookings = () => { handlers.refreshBookings(); };
+  const refreshOverview = () => { handlers.refreshOverview?.(); };
+  const onNew = (payload?: { orderId?: string; orderNumber?: string }) => { handlers.onNew(payload); refreshOverview(); };
+  const onStatus = () => { refresh(); refreshOverview(); };
+  // A drop refreshes the overview at once (its poll is back to full speed from then on);
+  // the reconnect after a drop catches up on what the room said while it was down.
+  let dropped = false;
+  const onDrop = () => { dropped = true; refreshOverview(); };
+  const onBack = () => { if (!dropped) return; dropped = false; refreshOverview(); };
   join();
   socket.on('connect', join);
-  socket.on('order:new', handlers.onNew);
-  socket.on('order:status_changed', refresh);
+  socket.on('connect', onBack);
+  socket.on('disconnect', onDrop);
+  socket.on('order:new', onNew);
+  socket.on('order:status_changed', onStatus);
   socket.on('order:prep_update', refresh);
   socket.on('order:pick_state', refresh);
   socket.on('bookings:changed', refreshBookings);
@@ -44,8 +58,10 @@ export function bindVendorOrderFeed(
     if (!bound) return;
     bound = false;
     socket.off('connect', join);
-    socket.off('order:new', handlers.onNew);
-    socket.off('order:status_changed', refresh);
+    socket.off('connect', onBack);
+    socket.off('disconnect', onDrop);
+    socket.off('order:new', onNew);
+    socket.off('order:status_changed', onStatus);
     socket.off('order:prep_update', refresh);
     socket.off('order:pick_state', refresh);
     socket.off('bookings:changed', refreshBookings);

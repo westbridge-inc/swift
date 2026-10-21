@@ -328,6 +328,7 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
       onNew,
       refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
       refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
     }, { serverAdmits: ownsStore });
   }, [vendorId, ownsStore, qc, previewType]);
 
@@ -686,7 +687,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;
