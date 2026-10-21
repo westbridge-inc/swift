@@ -23,7 +23,7 @@ import unittest
 DEPLOY = Path(__file__).resolve().parents[1]
 SHA = 'd' * 40
 REAL_DOCKER = shutil.which('docker')
-BASE_FILES = ('pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile',
+BASE_FILES = ('pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'check-upload-storage.py', 'Caddyfile',
               'docker-compose.yml', 'docker-compose.routing.yml', 'docker-compose.wall.yml', 'docker-compose.rehearsal.yml',
               'gen-secrets.sh', 'doctor.sh')
 
@@ -148,6 +148,9 @@ if argv[:1] == ['compose'] and 'config' in argv and '--format' in argv:
         print(json.dumps({'services': {'osrm': {}}}))
     else:
         services = {n: {} for n in ('postgres', 'redis', 'meilisearch', 'migrate', 'api', 'worker')}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ('api', 'worker'):
+            services[_svc] = {'environment': {'STORAGE_DEPLOYMENT': 'managed', 'STORAGE_PROVIDER': 's3', 'STORAGE_ALLOW_LOCAL': '0', 'AWS_S3_BUCKET': 'synthetic-bucket'}}
         services['caddy'] = {'ports': [{'published': '80', 'target': 80, 'protocol': 'tcp'}, {'published': '443', 'target': 443, 'protocol': 'tcp'}]}
         print(json.dumps({'services': services}))
     sys.exit(0)
