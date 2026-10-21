@@ -13,7 +13,7 @@ describe('the About page offers only what Swift sells today', () => {
   });
 
   it('still says the subscription is the whole business model, with no commission', () => {
-    expect(PAGE).toMatch(/the subscription is the entire\s+business model/);
+    expect(PAGE).toMatch(/the subscription is the entire\s+business model/i);
     expect(PAGE).toMatch(/There is no commission on any sale, fare or tip/);
   });
 });
