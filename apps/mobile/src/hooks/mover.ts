@@ -323,17 +323,29 @@ export function useActiveJobs(kind: MoverKind | null) {
   const pv = usePreview();
   const single = useActiveJob(kind);
   const stacked = kind === 'RIDER' && !pv;
+  // [PERF partner #5] A rider's legs exist only while the rider has a job (the server keeps the
+  // active pointer on a live leg). An idle rider used to read both the active job and the legs
+  // every 12 s; now the legs are read only while the active job is there, and an idle rider is
+  // never shown a finished run's legs. The active read keeps its own poll (it also heals a
+  // stale pointer on the server).
+  const onJob = !!single.data;
   const legsQ = useQuery({
     queryKey: ['mover', 'active', kind, 'legs'],
     queryFn: activeLegsQueryFn,
-    enabled: stacked,
+    enabled: stacked && onJob,
     refetchInterval: POLL.moverLegs,
   });
   const fromSingle: any[] = single.data ? [single.data] : [];
-  if (!stacked) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  if (!stacked || !onJob) return { legs: fromSingle, run: null as RunSummary | null, refetch: single.refetch };
+  // [S3-1] The legs cache can still hold the run that just finished when the next job starts. The
+  // current run's legs always include the active job (the server keeps the pointer on a live leg),
+  // so an answer without it is the old run's: until the new legs arrive, the active job is shown
+  // alone, never the old run's stops or cash to collect.
+  const activeId = (single.data as { id?: unknown }).id;
+  const current = (legsQ.data?.legs as any[] | undefined)?.some((leg) => leg?.id === activeId) ? legsQ.data : undefined;
   return {
-    legs: (legsQ.data?.legs as any[] | undefined) ?? fromSingle,
-    run: legsQ.data?.run ?? null,
+    legs: (current?.legs as any[] | undefined) ?? fromSingle,
+    run: current?.run ?? null,
     refetch: legsQ.refetch,
   };
 }
