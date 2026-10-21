@@ -437,7 +437,7 @@ function RestaurantStore() {
                 size={44}
                 active={!!v.isFavorite}
                 onPress={() =>
-                  isAuthenticated ? toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
+                  isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
                 }
               />
               <CircleChip
