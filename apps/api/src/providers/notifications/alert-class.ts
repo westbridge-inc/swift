@@ -59,6 +59,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Orders, the customer side of a journey
     'substitution_pending', 'line_refunded', 'handover_review', 'delivery_options', 'delivery_cash_settlement',
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
+    // [OF-01/17] The ONE "no rider yet — you can cancel for free" notice; standard, like its dispatch peers.
+    'riderless_cutoff',
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
     'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
