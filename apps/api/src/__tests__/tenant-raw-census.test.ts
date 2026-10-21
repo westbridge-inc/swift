@@ -30,6 +30,8 @@ import { join, relative } from 'node:path';
 type Role = 'INFRA' | 'REQUEST' | 'JOB' | 'JOB_PENDING' | 'SHARED';
 const CENSUS: Record<string, { sites: number; role: Role }> = {
   'app.ts': { sites: 1, role: 'INFRA' },
+  // [item 20] The owner wall's boot attestation: catalogue reads only (role membership, row security, the policy).
+  'lib/owner-rls.ts': { sites: 2, role: 'INFRA' },
   'lib/rls-attestation.ts': { sites: 5, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },

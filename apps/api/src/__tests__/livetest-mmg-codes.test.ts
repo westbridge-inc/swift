@@ -19,7 +19,8 @@ function graded(src: string, pick: RegExp): Array<{ call: string; status: string
   const out: Array<{ call: string; status: string; codes: string[] }> = [];
   for (const m of src.matchAll(/const (\w+) = await ([^;]+);/g)) {
     if (!pick.test(m[2]!)) continue;
-    const deny = new RegExp(`rec\\.deny\\([^\\n]*?, ${m[1]}, \\[([^\\]]*)\\], \\[([^\\]]*)\\]`).exec(src);
+    // [REVIEW-G S4-2] The deny that FOLLOWS this declaration — a later step reusing the name is graded on its own.
+    const deny = new RegExp(`rec\\.deny\\([^\\n]*?, ${m[1]}, \\[([^\\]]*)\\], \\[([^\\]]*)\\]`).exec(src.slice(m.index! + m[0].length));
     out.push({ call: m[2]!, status: deny?.[1] ?? 'NOT GRADED', codes: (deny?.[2] ?? '').split(',').map((c) => c.trim().replace(/^'|'$/g, '')).filter(Boolean) });
   }
   return out;

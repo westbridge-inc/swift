@@ -241,7 +241,7 @@ const adapter: AxiosAdapter = async (config) => {
 let host: HTMLDivElement;
 let root: ReturnType<typeof createRoot>;
 let client: QueryClient;
-const navigation = { navigate: fx.navigate, goBack: vi.fn(), isFocused: () => true };
+const navigation = { navigate: fx.navigate, goBack: vi.fn(), replace: vi.fn(), isFocused: () => true };
 
 const snap = (name: string) => (globalThis as { __msCapture?: (n: string, html: string) => void }).__msCapture?.(name, host.innerHTML);
 async function settle(rounds = 6) {
@@ -692,6 +692,81 @@ describe('the price on screen is the price booked', () => {
     await click(sendButton() ?? null);
     expect(sent('post /courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
     expect(sent('post /courier/order').map((c) => bodyOf(c).declaresNoProhibitedItems)).toEqual([true, true]);
+  });
+});
+
+describe('[UI-SWEEP U01] a parcel is booked once', () => {
+  const created = (orderId: string): Reply => ({ status: 201, data: { success: true, data: { orderId, fee: 1160 } } });
+  const sendButton = () => Array.from(host.querySelectorAll('button')).find((b) => /^Send parcel/.test(b.textContent ?? '')) as HTMLElement | undefined;
+  const keysSent = () => sent('post /courier/order').map((c) => c.headers.get('Idempotency-Key'));
+  const courierQuote = (totalFee: number) => ok({ baseFee: 800, distanceFee: 360, sizeSurcharge: 0, speedMultiplier: 1, totalFee, estimatedMinutes: 45, currency: 'GYD', distanceKm: 3 });
+  async function type(el: HTMLInputElement | null, value: string) {
+    expect(el, 'the field is on screen').toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')!.set!.call(el, value);
+      const DomEvent = (el!.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+      el!.dispatchEvent(new DomEvent('input', { bubbles: true }));
+    });
+    await settle();
+  }
+  async function readyParcel() {
+    fx.routes['get /courier/orders'] = () => ok([]);
+    fx.routes['post /courier/estimate'] = () => courierQuote(1160);
+    await act(async () => root.render(React.createElement(QueryClientProvider, { client }, React.createElement(CourierScreen, { navigation }))));
+    await settle();
+    await pickFromSearch(byLabel('Set drop-off location'), LAMAHA);
+    await type(host.querySelector('input[placeholder="Recipient name"]'), 'Aunty Pat');
+    await type(host.querySelector('input[placeholder="Recipient phone"]'), '+5926001234');
+    await click(byLabel('This parcel has no prohibited items'));
+    expect(sendButton()?.hasAttribute('disabled')).toBe(false);
+  }
+
+  it('the sent parcel REPLACES the form: Back can never reach a filled, armed Send button', async () => {
+    fx.routes['post /courier/order'] = () => created('parcel-1');
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
+    expect(fx.navigate.mock.calls.filter((c) => c[0] === 'Delivery')).toEqual([]);
+  });
+
+  it('a retry after a lost answer sends the SAME Idempotency-Key (the server replays the one parcel)', async () => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? { status: 0, network: true } : created('parcel-1'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    // The key outlives the screen: a phone killed now retries with it.
+    const [first] = keysSent();
+    expect(first).toMatch(/^parcel_[0-9a-z]+_[0-9a-z]{10}$/);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1')).toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(navigation.replace).toHaveBeenCalledExactlyOnceWith('Delivery', { orderId: 'parcel-1' });
+  });
+
+  it('only that parcel\'s own answer retires its key: a parcel sent again later is a new intent', async () => {
+    fx.routes['post /courier/order'] = () => created('parcel-1');
+    await readyParcel();
+    await click(sendButton() ?? null);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null).toBeNull();
+    fx.routes['post /courier/order'] = () => created('parcel-2');
+    await click(sendButton() ?? null);
+    const keys = keysSent();
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toMatch(/^parcel_/);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('a refusal the server wrote nothing for retires the key; a 5xx keeps it for the retry', async () => {
+    let calls = 0;
+    fx.routes['post /courier/order'] = () => (++calls === 1 ? refuse(503, 'COURIER_RETRY_UNAVAILABLE') : refuse(409, 'PARCEL_TOO_BIG'));
+    await readyParcel();
+    await click(sendButton() ?? null);
+    const [first] = keysSent();
+    expect(fx.storage.get('swift.courier.requestAttempt.v1')).toContain(first);
+    await click(sendButton() ?? null);
+    expect(keysSent()).toEqual([first, first]);
+    expect(fx.storage.get('swift.courier.requestAttempt.v1') ?? null).toBeNull();
+    expect(navigation.replace).not.toHaveBeenCalled();
   });
 });
 

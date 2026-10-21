@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createGolden, DAY, type Actor } from './gold-7-helpers';
 import { documentHarness } from './gold-7-documents';
 import { reviewerTyped } from '../helpers/reviewer-typed';
+import { REAL_PNG } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-7 · VEND-01 — agreement refusal → join → encrypted documents → review
@@ -47,7 +48,9 @@ async function review(admin: Actor, document: { id: string; bytes: Buffer; docTy
   expect(link.statusCode).toBe(200);
   const rendered = await h.app.inject({ method: 'GET', url: link.json().data.url });
   expect(rendered.statusCode).toBe(200);
-  expect(Buffer.from(rendered.rawPayload).equals(document.bytes)).toBe(true);
+  // [Row 238] The reviewer sees the uploaded photo exactly, minus the metadata (the note) it carried.
+  expect(Buffer.from(rendered.rawPayload).equals(REAL_PNG)).toBe(true);
+  expect(document.bytes.equals(REAL_PNG)).toBe(false);
   const custody = await h.call('GET', `/api/v1/admin/verification/${document.id}/custody`, admin.token, undefined, REASON);
   expect(custody.statusCode, custody.json().error?.code).toBe(200);
   const open = custody.json().data.review.filter((c: { closedAt: string | null }) => c.closedAt === null);
