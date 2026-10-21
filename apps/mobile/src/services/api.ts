@@ -1221,8 +1221,9 @@ export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
-  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
-  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
+  toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
+  toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
