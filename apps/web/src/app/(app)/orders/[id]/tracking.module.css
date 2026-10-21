@@ -37,8 +37,11 @@
   .summaryCard { grid-column: 2; }
 }
 
+/* [UI-SWEEP U15] At 360 px the status pill squeezed the title and order number
+   until they overlapped: the pill now wraps under the copy when there is no room. */
 .hero {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 16px;
 }
@@ -56,7 +59,8 @@
 
 .heroCopy {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 200px;
+  overflow-wrap: anywhere;
 }
 
 .eyebrow {
@@ -88,8 +92,9 @@
   background: var(--swift-red-50);
   color: var(--swift-red-600);
   font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
-  text-transform: capitalize;
-  white-space: nowrap;
+  /* [UI-SWEEP U14 / U15] The phone's words, already cased; on its own line it
+     may wrap rather than be cut off at large text. */
+  max-width: 100%;
 }
 
 .statusComplete { background: var(--swift-soft-success); color: var(--swift-success); }
@@ -279,7 +284,6 @@
   display: block;
   color: var(--swift-ink);
   font: 600 15px/20px var(--swift-face-body), system-ui, sans-serif;
-  text-transform: capitalize;
 }
 
 .timeline time,
@@ -386,6 +390,9 @@
 .secondaryButton:hover:not(:disabled) { background: var(--swift-red-50); }
 
 .paymentAction { margin-top: 12px; }
+
+/* [UI-SWEEP U16] The order's support door, under its summary. */
+.reportProblem { margin-top: 12px; text-decoration: none; }
 
 .cancelButton {
   width: 100%;

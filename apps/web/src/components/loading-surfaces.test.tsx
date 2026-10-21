@@ -90,12 +90,14 @@ describe('loading surfaces become content in the reserved layout', () => {
   });
 
   it('orders use the same row size before and after the list arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrders>>>();
-    vi.spyOn(ordersApi, 'getOrders').mockReturnValue(response.promise);
+    // [UI-SWEEP U13] Two reads: live orders, and a page of history.
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrderHistoryPage>>>();
+    vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValue({ items: [], total: 0 });
+    vi.spyOn(ordersApi, 'getOrderHistoryPage').mockReturnValue(response.promise);
     const view = mount(<OrdersPage />);
     expect(screen.getByLabelText('Loading your orders').querySelector('.swift-order-row')).toBeTruthy();
-    await response.finish([{ id: 'o1', vendorName: 'Local store', status: 'PENDING', totalAmount: 500 }]);
-    // The row (its name first); the in-progress band's Track link names it too.
+    await response.finish({ items: [{ id: 'o1', vendorName: 'Local store', status: 'DELIVERED', totalAmount: 500 }], page: 1, totalPages: 1, total: 1 });
+    // The history row, its name first.
     expect(await screen.findByRole('link', { name: /^Local store/ })).toBeTruthy();
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });

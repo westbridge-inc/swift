@@ -4,6 +4,8 @@ import OrderDetailSkeleton from './loading';
 
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import { orderStatusLabel, presentedVertical } from '@/lib/order-words';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
   Banknote,
@@ -159,7 +161,8 @@ function stagesFor(order: OrderDetail): Stage[] {
  *  "Booked", "Requested"), never the raw PENDING; later steps keep their own words. */
 function timelineLabel(status: string, order: OrderDetail): string {
   if (status === 'PENDING') return stagesFor(order)[0]!.label;
-  return status.replaceAll('_', ' ').toLowerCase();
+  // [UI-SWEEP U14] The phone's words by the order's own vertical, never a code.
+  return orderStatusLabel(status, presentedVertical(order));
 }
 
 function stageIndex(status: string, stages: Stage[]): number {
@@ -511,7 +514,7 @@ export default function OrderDetailPage() {
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>
-          {order.status.replaceAll('_', ' ').toLowerCase()}
+          {orderStatusLabel(order.status, presentedVertical(order))}
         </span>
       </section>
 
@@ -846,6 +849,12 @@ export default function OrderDetailPage() {
               </div>
             </div>
           ) : null}
+
+          {/* [UI-SWEEP U16] Something wrong with this order: a support request
+              tied to it, as on the phone ("Report a problem"). */}
+          <Link href={`/account/help?orderId=${encodeURIComponent(order.id)}`} className={`${styles.secondaryButton} ${styles.reportProblem}`}>
+            Report a problem
+          </Link>
         </aside>
       </div>
     </div>
