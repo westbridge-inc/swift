@@ -22,7 +22,7 @@ const STATUS_COLORS: Record<string, string> = {
 const statusWords = (status: unknown) => String(status ?? '').replaceAll('_', ' ').toLowerCase();
 
 export function LiveOrderFeed() {
-  const { data, isLoading, refetch, dataUpdatedAt } = useQuery({
+  const { data, isLoading, isError, refetch, dataUpdatedAt } = useQuery({
     queryKey: ['recentOrders'],
     queryFn: fetchRecentOrders,
     refetchInterval: 10_000,
@@ -33,7 +33,7 @@ export function LiveOrderFeed() {
   // left a blank panel. Four states, each said once: loading, failed, none, rows.
   const orders: any[] | undefined = Array.isArray(data?.data) ? data.data : undefined;
   // A failed read, or an answer that is not a list, is never shown as "none".
-  const feedUnavailable = !isLoading && !orders;
+  const feedUnavailable = !orders && (isError || !isLoading);
 
   return (
     <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">

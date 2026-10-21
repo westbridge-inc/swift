@@ -64,7 +64,6 @@ export default function JobsPage() {
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['dlq'] });
-    setConfirmingDiscard(null);
     setMutationError(null);
   };
 

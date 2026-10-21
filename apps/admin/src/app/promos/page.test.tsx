@@ -72,7 +72,7 @@ describe('[U62] the new promo form is a dialog that keeps what was typed', () =>
     await user.click(within(panel).getByRole('button', { name: 'Create promo code' }));
     expect((await within(panel).findByRole('alert')).textContent).toContain('That code is already in use.');
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1);
-    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(panel).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.getByRole('dialog', { name: 'New promo code' })).toBeTruthy());
     expect((screen.getByLabelText('Code') as HTMLInputElement).value).toBe('WELCOME10');
   });

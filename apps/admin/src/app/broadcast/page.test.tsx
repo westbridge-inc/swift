@@ -64,7 +64,7 @@ describe('[U05] a broadcast shows "queued" honestly, and can never be asked twic
     const { user } = renderWithQuery(<BroadcastPage />);
     const panel = await compose(user);
     expect((await within(panel).findByRole('alert')).textContent).toContain('Title is too long');
-    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(panel).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect((screen.getByLabelText('Title (max 150)') as HTMLInputElement).value).toBe('Maintenance tonight');
   });

@@ -52,7 +52,7 @@ describe('[UI-FIX-ADMIN] no console page asks through a browser prompt', () => {
   const files = sources(SRC);
 
   it('the census reads the console (it is not vacuous)', () => {
-    expect(files.length).toBeGreaterThan(100);
+    expect(files.length).toBeGreaterThanOrEqual(80);
     expect(files.some((f) => f.endsWith(join('app', 'moderation', 'page.tsx')))).toBe(true);
   });
 

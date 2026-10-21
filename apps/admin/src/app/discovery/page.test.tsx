@@ -73,7 +73,8 @@ describe('the discovery taxonomy finally has a curator', () => {
     // a slug is never edited afterwards.
     const mapButton = screen.getByRole('button', { name: 'Map' }) as HTMLButtonElement;
     expect(mapButton.disabled).toBe(true);
-    await user.selectOptions(screen.getByRole('combobox', { name: '' }) ?? screen.getAllByRole('combobox')[0]!, 'hardware-tools');
+    // [U61] the select is labelled now
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Existing category to map to' }), 'hardware-tools');
     await user.click(screen.getByRole('button', { name: 'Map' }));
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
@@ -192,7 +193,8 @@ describe('[U60] hiding a category from customers is confirmed', () => {
     const { user } = renderWithQuery(<DiscoveryPage />);
     await screen.findByText('Power Tools');
     await user.click(screen.getByRole('button', { name: 'Taxonomy' }));
-    expect(await screen.findByText('Visible')).toBeTruthy();
+    const row = (await screen.findByText('Hardware & Tools')).closest('tr')!;
+    expect(within(row).getByText('Visible')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Visible' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Hide Hardware & Tools from customers' }));

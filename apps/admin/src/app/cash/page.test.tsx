@@ -26,7 +26,8 @@ function server(over: (_r: ApiRequest) => ApiReply | undefined = () => undefined
   return mockApi((r: ApiRequest) => {
     const answered = over(r);
     if (answered) return answered;
-    if (r.url.pathname === '/api/v1/admin/billing/cash-kpis') return fail();
+    // the rail figures stay loading: these tests are about the queue below them
+    if (r.url.pathname === '/api/v1/admin/billing/cash-kpis') return new Promise<ApiReply>(() => {});
     if (r.url.pathname === '/api/v1/admin/billing/agent-payments/unmatched') return { body: { success: true, data: [ROW] } };
     throw new Error(`Unexpected request: ${r.method} ${r.url}`);
   });
