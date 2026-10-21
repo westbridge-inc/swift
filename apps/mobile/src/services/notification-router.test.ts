@@ -287,6 +287,7 @@ const CENSUS: Case[] = [
   { k: 'dispatch_retrying', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — still looking for a mover' },
   { k: 'converted_to_pickup', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — the order became a pickup [audience rule]' },
   { k: 'dispatch_exhausted', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — no mover found' },
+  { k: 'riderless_cutoff', d: { ...O, orderNumber: 'SW-1', audience: 'customer', canCancelFree: true, cancelsInMinutes: 15 }, to: DELIVERY('o1'), why: 'customer — [OF-01/17] no rider yet, they can cancel for free; the cancel is on their tracking screen' },
   { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
   { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]. [Q10] It carries the auto-cancel deadline its push rings until, and the business audience' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
