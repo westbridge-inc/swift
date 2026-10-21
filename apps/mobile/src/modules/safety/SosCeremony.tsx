@@ -490,6 +490,7 @@ function SosCeremonyBody({
 export function SosCeremony(props: Parameters<typeof SosCeremonyBody>[0]) {
   const user = useAuthStore((s) => s.user);
   const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
-  const contextId = 'orderId' in props.context ? props.context.orderId : props.context.serviceJobId;
+  const target = sosTarget(props.context);
+  const contextId = target ? `${target.kind}:${target.id}` : 'none';
   return <SosCeremonyBody key={`${user?.id ?? 'guest'}:${sessionGeneration}:${contextId}:${props.resumeAlertId ?? ''}`} {...props} />;
 }

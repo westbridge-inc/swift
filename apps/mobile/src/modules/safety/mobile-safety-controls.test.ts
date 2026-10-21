@@ -51,6 +51,8 @@ vi.mock('../../services/emergencyPolicy', () => ({ useEmergencyPolicy: () => ({ 
 vi.mock('../../lib/emergencyPolicy', () => ({ locationAccuracyBand: () => 'none', recordSosLocation: vi.fn(), recordSosTransition: vi.fn(), telUrl: (n: string) => `tel:${n}` }));
 vi.mock('react-native', () => ({ View: 'View', ScrollView: 'ScrollView', Pressable: 'Pressable', StyleSheet: { hairlineWidth: 1 }, AccessibilityInfo: { announceForAccessibility: vi.fn() } }));
 vi.mock('expo-image', () => ({ Image: 'Image' }));
+// Profile's import graph reaches the app's encrypted store (native); nothing here persists.
+vi.mock('../../lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined } }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn() }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
