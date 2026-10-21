@@ -253,6 +253,14 @@ export function VendorBulkImportScreen({ navigation }: any) {
               {failedCount ? ` · ${failedCount} skipped` : ''}
               {importCheckSummary(result)}.
             </T>
+            {/* [IMAGES-E2E PR4] Rows whose photo address was not used (photos are uploaded, never imported). */}
+            {(result?.notesCount ?? 0) > 0 ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {result.notesCount === 1 ? '1 row was' : `${result.notesCount} rows were`} imported without a photo (row{result.notesCount === 1 ? '' : 's'}{' '}
+                {(result.notes ?? []).map((n: { row: number }) => n.row).join(', ')}{(result.notesCount ?? 0) > (result.notes ?? []).length ? '…' : ''}).
+                Add photos by uploading them on each item.
+              </T>
+            ) : null}
             <PillButton label="Back to menu" variant="outline" style={{ marginTop: space.md }} onPress={() => navigation?.goBack?.()} />
           </Card>
         ) : null}

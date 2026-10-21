@@ -325,6 +325,8 @@ export const confirmImport = (csv: string) =>
       imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }>;
       /** [GUARDRAILS §8] Imported rows a banned word is holding for a quick check (absent on older servers). */
       waitingForCheck?: Array<{ row: number; name: string }>; waitingForCheckCount?: number;
+      /** [IMAGES-E2E PR4] Imported rows whose photo address was not used (absent on older servers). */
+      notes?: Array<{ row: number; note: string }>; notesCount?: number;
     },
   );
 

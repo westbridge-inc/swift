@@ -77,6 +77,7 @@ import { publicRoutes } from '../modules/public/public.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { toItemHit, toItemSearchDoc, itemHitFromSearchDoc } from '../modules/search/item-hit';
 import { servedPhotoAddress } from '../utils/photo-address';
+import { AccountService } from '../modules/user/account.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicStorePhotos, resetStorePhotoCachesForTests } from '../utils/public-store-photos';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
@@ -179,6 +180,7 @@ beforeEach(() => { resetStorePhotoCachesForTests(); fake.stats.reads = 0; });
 
 afterAll(async () => {
   if (userIds.length) await app.prisma.cart.deleteMany({ where: { customerId: { in: userIds } } });
+  if (userIds.length) await app.prisma.storageOrphan.deleteMany({ where: { userId: { in: userIds } } });
   if (vendorIds.length) {
     await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
     await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
@@ -837,5 +839,79 @@ describe('an outside photo address already saved is never handed to customers [C
     expect(itemHitFromSearchDoc({ entityId: 'i1', name: 'Plate', vendorId: 'v1', imageUrl: OUTSIDE }).imageUrl).toBeNull();
     expect(itemHitFromSearchDoc({ entityId: 'i1', name: 'Plate', vendorId: 'v1', imageUrl: 'items/v1/abcdefghijklmnop.jpg' }).imageUrl)
       .toBe('items/v1/abcdefghijklmnop.jpg');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [IMAGES-E2E PR4 · the REVIEW-F S2-1 gap, for store photos] A store photo that is replaced,
+// taken down, or whose owner's account is erased is deleted from storage, not just unlinked
+// (the same durable deletion row as portfolio photos: lib/storage-orphans).
+// ---------------------------------------------------------------------------
+
+const kept = (key: string) => fake.objects.has(key);
+
+describe('a store photo that goes is deleted from storage, not just unlinked', () => {
+  it('a replaced or removed logo, cover, item photo or section photo is deleted', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const item = await makeItem(s.id, null);
+    const up = async (url: string, field: string) => (await uploadTo(url, o.token, await cameraJpeg())).json().data[field] as string;
+
+    const logo1 = await up('/api/v1/vendor/profile/logo', 'logoUrl');
+    const logo2 = await up('/api/v1/vendor/profile/logo', 'logoUrl');
+    expect([kept(logo1), kept(logo2)]).toEqual([false, true]);
+    expect((await asOwner(o, 'DELETE', '/api/v1/vendor/profile/logo')).statusCode).toBe(200);
+    expect(kept(logo2)).toBe(false);
+
+    const cover = await up('/api/v1/vendor/profile/cover', 'coverImageUrl');
+    expect((await asOwner(o, 'PUT', '/api/v1/vendor/profile', { coverImageUrl: '' })).statusCode).toBe(200);
+    expect(kept(cover)).toBe(false);
+
+    const photo1 = await up(`/api/v1/vendor/items/${item.id}/image`, 'imageUrl');
+    const photo2 = await up(`/api/v1/vendor/items/${item.id}/image`, 'imageUrl');
+    expect([kept(photo1), kept(photo2)]).toEqual([false, true]);
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/items/${item.id}`, { imageUrl: '' })).statusCode).toBe(200);
+    expect(kept(photo2)).toBe(false);
+
+    const section1 = await up(`/api/v1/vendor/categories/${item.categoryId}/image`, 'imageUrl');
+    const section2 = await up(`/api/v1/vendor/categories/${item.categoryId}/image`, 'imageUrl');
+    expect([kept(section1), kept(section2)]).toEqual([false, true]);
+    expect((await asOwner(o, 'DELETE', `/api/v1/vendor/categories/${item.categoryId}/image`)).statusCode).toBe(200);
+    expect(kept(section2)).toBe(false);
+    const section3 = await up(`/api/v1/vendor/categories/${item.categoryId}/image`, 'imageUrl');
+    expect((await asOwner(o, 'PUT', `/api/v1/vendor/categories/${item.categoryId}`, { imageUrl: '' })).statusCode).toBe(200);
+    expect(kept(section3)).toBe(false);
+
+    for (const key of [logo1, logo2, cover, photo1, photo2, section1, section2, section3]) {
+      expect((await app.prisma.storageOrphan.findUnique({ where: { key } }))?.purgedAt).toBeInstanceOf(Date);
+    }
+  });
+
+  it('a photo an archived (deleted) item still names is kept: the bytes go only when nothing names them', async () => {
+    const o = await makeOwner();
+    const item = await makeItem((await makeStore(o.ownerId)).id, null);
+    const key = (await uploadTo(`/api/v1/vendor/items/${item.id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    expect((await asOwner(o, 'DELETE', `/api/v1/vendor/items/${item.id}`)).statusCode).toBe(200);
+    expect(kept(key)).toBe(true);
+  });
+
+  it('erasing a store owner\'s account deletes every photo of their stores and clears the addresses', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const item = await makeItem(s.id, null);
+    const keys = [
+      (await uploadTo('/api/v1/vendor/profile/logo', o.token, await cameraJpeg())).json().data.logoUrl as string,
+      (await uploadTo('/api/v1/vendor/profile/cover', o.token, await cameraJpeg())).json().data.coverImageUrl as string,
+      (await uploadTo(`/api/v1/vendor/items/${item.id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string,
+      (await uploadTo(`/api/v1/vendor/categories/${item.categoryId}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string,
+    ];
+    expect(keys.every(kept)).toBe(true);
+    const io = { in: () => ({ disconnectSockets: () => undefined }) };
+    await new AccountService({ prisma: app.prisma, log: app.log, io: io as never }).deleteAccount(o.userId);
+    expect(keys.map(kept)).toEqual([false, false, false, false]);
+    const store = await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } });
+    expect([store.logoUrl, store.coverImageUrl]).toEqual([null, null]);
+    expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).imageUrl).toBeNull();
+    expect((await app.prisma.category.findUniqueOrThrow({ where: { id: item.categoryId } })).imageUrl).toBeNull();
   });
 });

@@ -41,7 +41,7 @@ import {
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
-import { mediaUrl } from '../../../lib/images';
+import { isKeptPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from '../../../lib/images';
 import { STORE_PICK } from '../../../lib/storePick';
 
 /**
@@ -343,7 +343,8 @@ export function VendorItemEditorScreen({ navigation, route }: any) {
   const valid =
     name.trim().length >= 1 && Number.isFinite(priceNum) && priceNum >= 0 && !!categoryId && (!isService || days.length > 0);
   const busy = save.isPending || uploadImage.isPending;
-  const previewUri = localPhoto?.uri ?? mediaUrl(existing?.imageUrl) ?? undefined;
+  // [IMAGES-E2E PR4] Only a photo Swift keeps is drawn (an outside address is not shown to customers either).
+  const previewUri = localPhoto?.uri ?? (isKeptPhoto(existing?.imageUrl) ? storePhotoUrl(existing?.imageUrl, HERO_PHOTO_WIDTH) : null) ?? undefined;
 
   const [photoMenu, setPhotoMenu] = useState(false);
 
