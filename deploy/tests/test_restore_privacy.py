@@ -15,6 +15,9 @@ DEPLOY = Path(__file__).resolve().parents[1]
 FAKE_DOCKER = r'''#!/usr/bin/env python3
 import os, sys
 args = sys.argv[1:]
+if '-p' in args:
+    with open(os.environ['CALL_LOG'] + '.projects', 'a') as projects:
+        projects.write(args[args.index('-p') + 1] + '\n')
 # compose ... exec -T postgres sh -c <script> sh <database> <psql args...>
 i = args.index('postgres')
 script = args[i + 3]
@@ -49,7 +52,7 @@ if 'count(*)' in sql: print('1')
 
 
 class RestoreQuarantineAndReplay(unittest.TestCase):
-    def run_restore(self, fail='', extra_args=(), **env_extra):
+    def run_restore(self, fail='', extra_args=(), project=('--project', 'swift-restore-test'), **env_extra):
         root = Path(tempfile.mkdtemp(prefix='swift-restore-privacy-'))
         self.addCleanup(shutil.rmtree, root, True)
         deploy = root / 'deploy'
@@ -68,8 +71,10 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         log = root / 'calls'
         log.write_text('')
         env = dict(os.environ, PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail, **env_extra)
-        r = subprocess.run(['bash', str(deploy / 'restore.sh'), *extra_args, str(dump), 'swift_restore_privacy'],
+        r = subprocess.run(['bash', str(deploy / 'restore.sh'), *project, *extra_args, str(dump), 'swift_restore_privacy'],
                            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+        projects = Path(str(log) + '.projects')
+        self.projects = projects.read_text().split() if projects.exists() else []
         return r, log.read_text().splitlines()
 
     @staticmethod
@@ -179,6 +184,37 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         r, _ = self.run_restore()
         self.assertIn('re-run the quarantine before use', r.stdout)
         self.assertIn('drop the copy after use', r.stdout)
+
+    # [#1977 · copy run #5c gap (a)] Closed from birth: the new database is created refusing every
+    # connection, closed to PUBLIC and to each login, and only then opened for the restore.
+    def test_the_copy_is_created_refusing_connections_and_opened_only_after_the_quarantine(self):
+        r, calls = self.run_restore()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        create = self.first(calls, 'CREATE DATABASE')
+        self.assertIn('ALLOW_CONNECTIONS false', calls[create])
+        revoke = self.first(calls, 'REVOKE ALL ON DATABASE "swift_restore_privacy" FROM PUBLIC')
+        opened = self.first(calls, 'ALTER DATABASE "swift_restore_privacy" WITH ALLOW_CONNECTIONS true')
+        restore = self.first(calls, 'pg_restore db=swift_restore_privacy')
+        self.assertLess(create, revoke)
+        self.assertLess(revoke, opened)
+        self.assertLess(opened, restore)
+
+    # [#1977 · copy run #5c] restore.sh never guesses which stack it works on: the Compose project is
+    # named explicitly, printed, and used for every database call.
+    def test_the_compose_project_must_be_named_and_is_used_for_every_call(self):
+        r, calls = self.run_restore(project=())
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--project', r.stderr)
+        self.assertEqual(calls, [])
+        for bad in ('Swift', '-x', 'a b'):
+            r, calls = self.run_restore(project=('--project', bad))
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertEqual(calls, [], bad)
+        r, calls = self.run_restore()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('compose project : swift-restore-test', r.stdout)
+        self.assertEqual(len(self.projects), len(calls))
+        self.assertEqual(set(self.projects), {'swift-restore-test'})
 
 
 class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):

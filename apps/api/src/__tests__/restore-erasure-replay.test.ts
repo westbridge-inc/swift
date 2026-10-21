@@ -56,7 +56,7 @@ function restore(dump: string, opts: { args?: string[]; replaySuffix?: string } 
   for (const f of ['restore.sh', 'restore-erasure-ledger.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, 'restore-replay-erasures.sql'), readFileSync(join(DEPLOY, 'restore-replay-erasures.sql'), 'utf8') + (opts.replaySuffix ?? ''));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${LIVE}\n`);
-  const res = spawnSync('bash', [join(here, 'restore.sh'), ...(opts.args ?? []), dump, scratch], {
+  const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? []), dump, scratch], {
     encoding: 'utf8', timeout: 180_000,
     env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: join(tmp, 'calls'), PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
   });
