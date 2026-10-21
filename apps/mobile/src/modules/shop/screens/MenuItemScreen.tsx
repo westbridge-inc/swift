@@ -215,7 +215,8 @@ export function MenuItemScreen() {
             icon="slash"
             title="This item is no longer on the menu."
             body="The store took it off. Pick something else from its menu."
-            actionLabel="Back to the store"
+            // [#1915 review S4-1] Opened from Home, Market or Search, Back does not lead to the store.
+            actionLabel="Go back"
             onAction={() => navigation.goBack()}
           />
         )}

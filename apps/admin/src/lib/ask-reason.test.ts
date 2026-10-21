@@ -1,60 +1,79 @@
-import { describe, it, expect, vi } from 'vitest';
-import { askReason, REASON_MIN } from '@/lib/ask-reason';
+import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
+import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 
 // ---------------------------------------------------------------------------
 // [ADM-006] THE OPERATOR STATES WHY, OR NOTHING HAPPENS.
 //
-// The server now refuses a consequential action without a reason. That alone
-// would not have fixed this console, because it DID send one — the literal
-// string 'Suspended by admin', hard-coded at the call site, on every ban and
-// every suspension. A reason nobody was asked for is a field, not an
-// explanation.
+// The server refuses a consequential action without a reason. That alone did
+// not fix this console, because it DID send one — the literal string
+// 'Suspended by admin', hard-coded at the call site. A reason nobody was asked
+// for is a field, not an explanation. The ask itself is the in-page panel
+// (components/mc/ReasonDialog); that a CANCELLED panel returns nothing, never
+// a default, is graded as behaviour in components/mc/primitives.test.tsx.
 //
-// So the failure mode to guard is not "no reason sent". It is "a reason
-// invented on the operator's behalf". A cancelled prompt must return NOTHING,
-// so the caller does nothing — never a default, which is exactly the shape
-// that produced the canned strings.
+// [UI-FIX-ADMIN] The browser prompt is gone from the console. Owner ruling (6
+// Oct): no browser prompts. A window.prompt / confirm / alert lost the typed
+// reason when the server refused, and the refusal was usually never shown. The
+// last pages on it (zones, compliance, discovery, promos, jobs, custody,
+// moderation, ads) now ask in the panel; this census keeps it that way.
 // ---------------------------------------------------------------------------
 
 const REAL = 'Three written warnings, then a no-show on a paid booking';
+const SRC = join(process.cwd(), 'src');
 
-describe('[ADM-006] askReason', () => {
-  it('returns the operator’s own words, trimmed', () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(`  ${REAL}  `));
-    expect(askReason({ action: 'ban this account' })).toBe(REAL);
+function sources(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) return e.name === 'test' || e.name === 'node_modules' ? [] : sources(p);
+    return /\.tsx?$/.test(e.name) && !/\.test\.tsx?$/.test(e.name) ? [p] : [];
+  });
+}
+
+/** Code only: comments may name the old shapes on purpose, to record what was removed. */
+const code = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+
+/** A browser dialog or the removed prompt helper, called from console code. */
+export function browserPrompts(source: string): string[] {
+  // [REVIEW-F2 S4-3] a bare confirm(…) / prompt(…) / alert(…) is the same browser
+  // dialog as window.confirm(…); a member call (actions.confirm) or a longer name
+  // (onConfirm, confirmLabel) is not.
+  return [...code(source).matchAll(/(\b(?:window|globalThis|self)\.(?:prompt|confirm|alert)|(?<![\w.$])(?<!function\s+)(?:prompt|confirm|alert)|\baskReason)\s*\(/g)].map((m) => m[1]!);
+}
+
+describe('[ADM-006] the reason floor', () => {
+  it('matches the server: fewer than REASON_MIN characters is not a reason', () => {
+    expect(REASON_MIN).toBe(12);
+    expect(reasonTooShort('Too short.')).toBe(true);
+    expect(reasonTooShort('   abcdefghijk   ')).toBe(true); // 11 once trimmed
+    expect(reasonTooShort(REAL)).toBe(false);
+  });
+});
+
+describe('[UI-FIX-ADMIN] no console page asks through a browser prompt', () => {
+  const files = sources(SRC);
+
+  it('the census reads the console (it is not vacuous)', () => {
+    expect(files.length).toBeGreaterThanOrEqual(80);
+    expect(files.some((f) => f.endsWith(join('app', 'moderation', 'page.tsx')))).toBe(true);
   });
 
-  it('a CANCELLED prompt returns nothing — it never invents a reason', () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(null));
-    vi.stubGlobal('alert', vi.fn());
-    expect(askReason({ action: 'ban this account' })).toBeNull();
+  it('no window.prompt / confirm / alert, and no askReason, anywhere in console code', () => {
+    const offenders = files.flatMap((f) => browserPrompts(readFileSync(f, 'utf8')).map((call) => `${relative(SRC, f)}: ${call}(…)`));
+    expect(offenders).toEqual([]);
   });
 
-  it('a word is not a reason: too short returns nothing, and says so, rather than sending it', () => {
-    const alert = vi.fn();
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('bad'));
-    vi.stubGlobal('alert', alert);
-    expect(askReason({ action: 'ban this account' })).toBeNull();
-    expect(alert).toHaveBeenCalledTimes(1);
-    expect(String(alert.mock.calls[0]![0])).toMatch(/Nothing was changed/);
-  });
-
-  it('an empty or whitespace answer is a cancellation too — not an empty reason', () => {
-    vi.stubGlobal('alert', vi.fn());
-    for (const answer of ['', '   ', '\n']) {
-      vi.stubGlobal('prompt', vi.fn().mockReturnValue(answer));
-      expect(askReason({ action: 'ban this account' })).toBeNull();
-    }
-  });
-
-  it('the question names the action and the subject, and states the length the server wants', () => {
-    const prompt = vi.fn().mockReturnValue(REAL);
-    vi.stubGlobal('prompt', prompt);
-    askReason({ action: 'suspend this account', subject: 'Ravi Persaud' });
-    const asked = String(prompt.mock.calls[0]![0]);
-    expect(asked).toContain('suspend this account');
-    expect(asked).toContain('Ravi Persaud');
-    expect(asked).toContain(String(REASON_MIN));
-    expect(asked).toMatch(/permanent record/);
+  it('bites: each shape that used to be here is found; a comment naming it is not', () => {
+    expect(browserPrompts(`const r = askReason({ action: 'ban' }); if (r) m.mutate(r);`)).toEqual(['askReason']);
+    expect(browserPrompts(`const id = window.prompt('Rider id:')?.trim();`)).toEqual(['window.prompt']);
+    expect(browserPrompts(`if (!window.confirm('Sure?')) return;`)).toEqual(['window.confirm']);
+    expect(browserPrompts(`window.alert('Nothing was changed.');`)).toEqual(['window.alert']);
+    expect(browserPrompts(`if (!confirm('Sure?')) return;`)).toEqual(['confirm']);
+    expect(browserPrompts(`const id = prompt('Rider id:');`)).toEqual(['prompt']);
+    expect(browserPrompts(`globalThis.alert('x');`)).toEqual(['globalThis.alert']);
+    expect(browserPrompts(`onConfirm(x); actions.confirm(x); const c = { confirmLabel: 'Go' }; promptText(x);`)).toEqual([]);
+    expect(browserPrompts(`// it used to call window.prompt('x') here\nconst reason = await ask(p);`)).toEqual([]);
+    expect(browserPrompts(`/** askReason(p) became ask(p) */ const reason = await ask(p);`)).toEqual([]);
   });
 });

@@ -15,6 +15,14 @@ import type { FastifyReply, FastifyRequest, HookHandlerDoneFunction } from 'fast
  *
  * Everything else is unchanged: workers, a send that must know whether it reached a phone
  * (sendReach), and fee demands (their own handoff ledger) still wait for the provider.
+ *
+ * Two things follow from the scope (#1917 review S4-1/S4-2), both benign:
+ * - Async work STARTED inside such a request (a lazy timer, a void-ed promise) inherits the
+ *   scope, so a push it sends also goes after the answer. Those sends are tracked and drained
+ *   like the rest, and sendReach / fee demands still wait whatever the scope.
+ * - The pushes from one tap, or two quick taps, are no longer handed to the provider in a
+ *   fixed order. Providers never guaranteed delivery order anyway; the inbox rows and socket
+ *   events, written inside the request, keep the order.
  */
 const scope = new AsyncLocalStorage<true>();
 const inFlight = new Set<Promise<void>>();

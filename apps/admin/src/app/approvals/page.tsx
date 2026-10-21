@@ -6,6 +6,8 @@ import {
   fetchApprovals, decideApproval, applyApproval, startSoloApproval, cancelApproval, sendStepUpCode, verifyStepUpCode,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 import {
   blockedBecause, BLOCK_COPY, minutesLeft, urgencyOf, describeAction,
   entityLabel, shortFingerprint, noteProblem, CLASS_MEANING, NOTE_MAX,
@@ -31,7 +33,7 @@ const FILTERS = ['PENDING', 'APPROVED', 'REJECTED', 'APPLIED', 'EXPIRED', 'CANCE
 export default function ApprovalsPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('PENDING');
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['approvals', filter],
     queryFn: () => fetchApprovals(filter),
     // Someone is blocked at the other end of every pending row.
@@ -54,7 +56,9 @@ export default function ApprovalsPage() {
         {FILTERS.map((f) => (
           <button
             key={f}
+            type="button"
             onClick={() => setFilter(f)}
+            aria-pressed={filter === f}
             className={`px-3 py-1.5 rounded-lg text-sm ${
               filter === f
                 ? 'bg-[var(--accent)] text-white font-semibold'
@@ -75,8 +79,9 @@ export default function ApprovalsPage() {
       )}
 
       {isLoading && <p className="text-[var(--muted)] text-sm">Loading the queue…</p>}
-      {error && <p className="text-sm text-red-500">{(error as Error).message}</p>}
-      {!isLoading && rows.length === 0 && (
+      {/* [U26] A failed read is never "Nothing is waiting": someone may be. */}
+      {isError && <QueryFailed error={error} what="the approvals queue" onRetry={() => void refetch()} retrying={isFetching} />}
+      {!isLoading && !isError && rows.length === 0 && (
         <p className="text-[var(--muted)] text-sm">
           {filter === 'PENDING' ? 'Nothing is waiting on a second signature.' : 'Nothing in this view.'}
         </p>
@@ -102,9 +107,23 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
     mutationFn: (approve: boolean) => decideApproval(row.id, approve, note.trim()),
     onSuccess: onDecided,
   });
-  const apply = useMutation({
-    mutationFn: () => applyApproval(row.id),
-    onSuccess: onDecided,
+  // [U63] Executing replays an approved money or platform action: one click
+  // used to run it. The panel names the action and the record first.
+  const actions = useActionRunner(onDecided);
+  const execute = () => void actions.run({
+    title: `Execute: ${describeAction(row.action)}?`,
+    body: (
+      <>
+        <p>{entityLabel(row) ? `Record ${entityLabel(row)}. ` : ''}This runs the approved request now, exactly as shown on the card. It cannot be undone from here.</p>
+        {snapshotEntries(row).length > 0 ? (
+          <ul>{snapshotEntries(row).map((entry) => <li key={entry.label}>{entry.label}: {entry.value}</li>)}</ul>
+        ) : null}
+      </>
+    ),
+    confirmLabel: 'Execute it',
+    reason: false,
+    submit: () => applyApproval(row.id),
+    success: () => 'Executed.',
   });
 
   const problem = intent ? noteProblem(note, intent === 'approve') : null;
@@ -184,25 +203,21 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
         </p>
       )}
 
+      {actions.banner}
       {canApply(row) && (
         <div className="border-t border-[var(--border)] pt-3 mb-3">
           <div className="flex flex-wrap items-center gap-3">
             <button
-              disabled={apply.isPending}
-              onClick={() => apply.mutate()}
+              type="button"
+              onClick={execute}
               className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
             >
-              {apply.isPending ? 'Executing…' : 'Execute the approved action'}
+              Execute the approved action
             </button>
             <span className="text-xs text-[var(--muted)]">
               Replays exactly the body shown above — the fingerprint check refuses anything else.
             </span>
           </div>
-          {apply.error && (
-            <div className="mt-2">
-              <MutationError error={apply.error} label="The approved action did not execute" />
-            </div>
-          )}
         </div>
       )}
 
@@ -231,6 +246,7 @@ function ApprovalCard({ row, onDecided }: { row: ApprovalRow; onDecided: () => v
             onChange={(e) => setNote(e.target.value)}
             rows={2}
             maxLength={NOTE_MAX}
+            aria-label="Your decision note"
             placeholder="Why do you agree, or why are you refusing? Required — it is kept on the record."
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm outline-none focus:border-[var(--accent)]"
           />
@@ -279,7 +295,17 @@ function SoloPanel({ row, onChanged }: { row: ApprovalRow; onChanged: () => void
   const [askCode, setAskCode] = useState(false);
 
   const start = useMutation({ mutationFn: () => startSoloApproval(row.id), onSuccess: onChanged });
-  const cancel = useMutation({ mutationFn: () => cancelApproval(row.id), onSuccess: onChanged });
+  // [S4] Cancelling withdraws the ask: confirmed in the panel, not one click.
+  const actions = useActionRunner(onChanged);
+  const cancelAsk = () => void actions.run({
+    title: 'Cancel this request?',
+    body: <p>{describeAction(row.action)} will not happen. To do it later, ask again and a second admin decides again.</p>,
+    confirmLabel: 'Cancel the request',
+    dismissLabel: 'Keep the request',
+    reason: false,
+    submit: () => cancelApproval(row.id),
+    success: () => 'Request cancelled. Nothing happened.',
+  });
   const decide = useMutation({
     mutationFn: () => decideApproval(row.id, true, note.trim()),
     onSuccess: onChanged,
@@ -329,6 +355,7 @@ function SoloPanel({ row, onChanged }: { row: ApprovalRow; onChanged: () => void
             onChange={(e) => setNote(e.target.value)}
             rows={2}
             maxLength={NOTE_MAX}
+            aria-label="Why it is still right after the wait"
             placeholder="Why it is still right after the wait. Required — it is kept on the record."
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm outline-none focus:border-[var(--accent)]"
           />
@@ -383,14 +410,14 @@ function SoloPanel({ row, onChanged }: { row: ApprovalRow; onChanged: () => void
 
       <div>
         <button
-          disabled={cancel.isPending}
-          onClick={() => cancel.mutate()}
+          type="button"
+          onClick={cancelAsk}
           className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted)] disabled:opacity-40"
         >
-          {cancel.isPending ? 'Cancelling…' : 'Cancel this request'}
+          Cancel this request
         </button>
       </div>
-      {cancel.error && <MutationError error={cancel.error} label="The request was not cancelled" />}
+      {actions.banner}
     </div>
   );
 }

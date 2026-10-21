@@ -1,8 +1,10 @@
+import { accountErasedUnderLock } from '../user/account-closure';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
@@ -2257,6 +2259,10 @@ export class VerificationService {
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
+      // [#1879 S3-3 · REVIEW-G R1] An erased account's stores are projected nothing (no flags, no promotion, no
+      // trial): the person's row is locked after the identity lock (the activation order), so an erasure either
+      // commits first and is seen here, or waits and winds down what this wrote.
+      if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
     const owner = await db.vendorOwner.findUnique({
@@ -2435,13 +2441,27 @@ export class VerificationService {
   // Expiry automation (daily job)
   // -------------------------------------------------------------------------
 
-  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend. */
+  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend.
+   *  [Expiry isolation] One document never stops the sweep. A lapsed row in a state the document machine does
+   *  not let expire is HELD as it is, for a person (no gate accepts an expired record, so it grants
+   *  nothing); a row whose expiry fails stays lapsed and is retried on the next run; a failed heal or
+   *  follow-up is reported. The admins are told once per run, and the reminders, retention reaper and
+   *  licence sweep after this in the daily job always run. */
   async expireLapsedDocuments(): Promise<number> {
+    const report = new ExpirySweepReport();
     // Reconcile first so a prior process failure after marking EXPIRED cannot
     // remain invisible forever merely because the next query skips terminal rows.
-    await reconcileProviderVerifications(this.prisma);
+    try {
+      await reconcileProviderVerifications(this.prisma);
+    } catch (err) {
+      report.add('provider_reconcile', null, err);
+    }
     // [STRAND-2 belt] Vendor projections ride the same daily heal.
-    await this.reconcileVendorActivations();
+    try {
+      await this.reconcileVendorActivations();
+    } catch (err) {
+      report.add('vendor_reconcile', null, err);
+    }
     const now = new Date();
     const lapsed = await this.prisma.verificationDocument.findMany({
       where: { status: { in: ['APPROVED', 'PENDING'] }, expiresAt: { lt: now } },
@@ -2449,65 +2469,80 @@ export class VerificationService {
 
     let expired = 0;
     for (const doc of lapsed) {
-      const transitioned = await this.projectionTransaction(async (tx) => {
-        const users = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "users"
-          WHERE "id" = ${doc.userId}
-          FOR UPDATE /* verification-document-expiry-authority */
-        `;
-        if (!users[0]) return false;
-        const won = await tx.verificationDocument.updateMany({
-          where: {
-            id: doc.id,
-            userId: doc.userId,
-            status: { in: ['APPROVED', 'PENDING'] },
-            expiresAt: { lt: now },
-          },
-          data: { status: 'EXPIRED' },
+      if (doc.state && !EXPIRABLE_DOC_STATES.has(doc.state)) {
+        report.add('not_expirable', doc.id);
+        continue;
+      }
+      let transitioned: boolean;
+      try {
+        transitioned = await this.projectionTransaction(async (tx) => {
+          const users = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id" FROM "users"
+            WHERE "id" = ${doc.userId}
+            FOR UPDATE /* verification-document-expiry-authority */
+          `;
+          if (!users[0]) return false;
+          const won = await tx.verificationDocument.updateMany({
+            where: {
+              id: doc.id,
+              userId: doc.userId,
+              status: { in: ['APPROVED', 'PENDING'] },
+              expiresAt: { lt: now },
+            },
+            data: { status: 'EXPIRED' },
+          });
+          // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
+          if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
+          if (won.count !== 1) return false;
+          await projectProviderVerificationLocked(tx, doc.userId);
+          // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
+          // transaction — document truth and the derived vendor flags are one
+          // generation, not "EXPIRED now, store closes at some later sweep".
+          await this.projectVendorActivation(tx, doc.userId);
+          return true;
         });
-        // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
-        if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
-        if (won.count !== 1) return false;
-        await projectProviderVerificationLocked(tx, doc.userId);
-        // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
-        // transaction — document truth and the derived vendor flags are one
-        // generation, not "EXPIRED now, store closes at some later sweep".
-        await this.projectVendorActivation(tx, doc.userId);
-        return true;
-      });
+      } catch (err) {
+        report.add('expiry_failed', doc.id, err);
+        continue;
+      }
       if (!transitioned) continue;
       expired += 1;
 
-      // L2 is permanent once earned — an expired ID does not demote the user
-      if (doc.docType === IDENTITY_DOC_TYPE) continue;
+      try {
+        // L2 is permanent once earned — an expired ID does not demote the user
+        if (doc.docType === IDENTITY_DOC_TYPE) continue;
 
-      // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
-      // and a mover whose live-operation status broke is pulled offline now —
-      // not "after they next toggle" (an uninsured taxi must stop getting jobs).
-      if (doc.role === 'MOVER') {
-        await this.forceMoverOfflineIfNotLive(doc.userId);
-      } else {
-        await this.suspendListingsIfUnverified(doc.userId);
+        // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
+        // and a mover whose live-operation status broke is pulled offline now —
+        // not "after they next toggle" (an uninsured taxi must stop getting jobs).
+        if (doc.role === 'MOVER') {
+          await this.forceMoverOfflineIfNotLive(doc.userId);
+        } else {
+          await this.suspendListingsIfUnverified(doc.userId);
+        }
+        // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
+        await this.propagateVehicleLapse(doc, 'expired');
+        // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+        // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
+        const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
+        await this.notifications.send({
+          userId: doc.userId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Document expired',
+          body: optional
+            ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+            : doc.docType === HIRE_PERMIT_DOC_TYPE
+              ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
+              : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+          audience: audienceForRole(doc.role),
+          data: { kind: 'verification_expired', docId: doc.id },
+        });
+      } catch (err) {
+        report.add('effects_failed', doc.id, err);
       }
-      // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
-      await this.propagateVehicleLapse(doc, 'expired');
-      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
-      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
-      const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
-      await this.notifications.send({
-        userId: doc.userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Document expired',
-        body: optional
-          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
-          : doc.docType === HIRE_PERMIT_DOC_TYPE
-            ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
-            : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
-        audience: audienceForRole(doc.role),
-        data: { kind: 'verification_expired', docId: doc.id },
-      });
     }
 
+    await report.report(this.prisma, this.notifications, expired);
     return expired;
   }
 

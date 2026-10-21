@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
 
 /** Shared vocabulary for the drill-down pages (order/user/vendor/mover). */
 
@@ -79,10 +80,13 @@ export function ActionButton({
   disabled?: boolean;
   danger?: boolean;
 }) {
+  // Confirmed in the in-page panel (owner ruling 6 Oct: no browser prompts).
+  const dialog = useActionDialog();
   return (
     <button
-      onClick={() => {
-        if (window.confirm(confirm)) onClick();
+      type="button"
+      onClick={async () => {
+        if (await dialog.askWith({ title: confirm, reason: false, confirmLabel: label })) onClick();
       }}
       disabled={disabled}
       className={`px-4 py-2 rounded-lg text-sm disabled:opacity-50 transition-colors ${
