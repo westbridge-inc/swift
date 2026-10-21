@@ -98,7 +98,7 @@ function StoreRow({ store, onDone }: { store: WaitingStore; onDone: (_outcome: O
       <p className="mc-label">Store · {label('VendorStatus', store.status)}</p>
       <h2 className="text-base font-semibold">{store.name}</h2>
       <p className="text-sm">
-        Held as <strong>{CLASS_LABELS[store.prohibitedClass] ?? store.prohibitedClass}</strong>: the word &ldquo;{store.term}&rdquo; in the{' '}
+        Held as <strong>{CLASS_LABELS[store.prohibitedClass] ?? 'goods Swift does not allow'}</strong>: the word &ldquo;{store.term}&rdquo; in the{' '}
         {STORE_FIELD_WORDS[store.field] ?? store.field}. Its items are hidden with it.
       </p>
       <dl className="mc-rows">
@@ -152,7 +152,7 @@ function Row({ item, onDone }: { item: WaitingItem; onDone: (_outcome: Outcome |
       <p className="mc-label">{item.vendor.name}</p>
       <h2 className="text-base font-semibold">{item.name}</h2>
       <p className="text-sm">
-        Held as <strong>{CLASS_LABELS[item.prohibitedClass] ?? item.prohibitedClass}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
+        Held as <strong>{CLASS_LABELS[item.prohibitedClass] ?? 'goods Swift does not allow'}</strong>: the word &ldquo;{item.term}&rdquo; in the{' '}
         {FIELD_WORDS[item.field] ?? item.field}.
       </p>
       <dl className="mc-rows">
