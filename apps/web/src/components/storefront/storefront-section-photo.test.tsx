@@ -43,12 +43,20 @@ describe('a menu section\'s photo on the store page', () => {
     const [photo] = imgs(section('mains'));
     expect(photo?.getAttribute('src')).toMatch(/^(?:https?:\/\/[^/]+)?\/media\/items\/menu-store\/abcdefghijklmnop\.jpg\?w=\d+/);
     expect(photo?.getAttribute('alt')).toBe('');
+    // [REVIEW-F S4-2] The first section may sit above the fold: its photo is not lazy.
+    expect(photo?.getAttribute('loading')).toBe('eager');
     expect(section('mains').querySelector('h2')?.textContent).toBe('Mains');
     for (const id of ['drinks', 'sides']) {
       expect(imgs(section(id)), id).toEqual([]);
       expect(section(id).querySelector('h2')).toBeTruthy();
     }
     expect(document.body.innerHTML).not.toContain('elsewhere.example');
+  });
+
+  it('a later section\'s photo loads lazily', () => {
+    const later = { ...storefront, categories: [{ ...storefront.categories[2]!, imageUrl: null }, { ...storefront.categories[0]!, id: 'mains2' }] } as unknown as StorefrontDetail;
+    render(<StorefrontExperience store={later} returnPath="/store/sample-kitchen" />);
+    expect(imgs(section('mains2'))[0]?.getAttribute('loading')).toBe('lazy');
   });
 
   it('a photo that fails to load is removed: the heading stays, no broken tile', () => {

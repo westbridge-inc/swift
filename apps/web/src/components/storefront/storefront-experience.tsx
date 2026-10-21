@@ -223,13 +223,14 @@ function useActiveSection(ids: string[]): [string | null, (_id: string) => void]
  * drawn (photo() picks the bounded /media route and its ladder loader for those alone); no
  * photo, an outside address or a photo that fails to load draws nothing: today's heading.
  */
-function SectionPhoto({ imageUrl }: { imageUrl?: string | null }) {
+function SectionPhoto({ imageUrl, first = false }: { imageUrl?: string | null; first?: boolean }) {
   const [failed, setFailed] = useState(false);
   const media = failed ? null : photo(imageUrl);
   if (!media?.loader) return null;
   return (
     <span className={styles.sectionPhoto}>
-      <Image {...media} alt="" fill sizes="(min-width: 760px) 640px, 100vw" loading="lazy" className="object-cover" onError={() => setFailed(true)} />
+      {/* [REVIEW-F S4-2 on #1973] The first section can sit above the fold: its photo loads at once; the rest lazily. */}
+      <Image {...media} alt="" fill sizes="(min-width: 760px) 640px, 100vw" loading={first ? 'eager' : 'lazy'} className="object-cover" onError={() => setFailed(true)} />
     </span>
   );
 }
@@ -872,9 +873,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                 This store has no orderable menu items right now. Check again later.
               </p>
             ) : null}
-            {sections.map((category) => (
+            {sections.map((category, index) => (
               <section key={category.id} id={`section-${category.id}`} className={styles.section}>
-                <SectionPhoto imageUrl={category.imageUrl} />
+                <SectionPhoto imageUrl={category.imageUrl} first={index === 0} />
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {
