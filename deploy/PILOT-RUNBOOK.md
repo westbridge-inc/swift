@@ -613,20 +613,20 @@ scratch database through a transient unit that receives the same two keys:
       -p "UnsetEnvironment=AWS_ACCESS_KEY_ID_FILE AWS_SECRET_ACCESS_KEY_FILE" \
       -p LoadCredentialEncrypted=AWS_ACCESS_KEY_ID:/etc/credstore.encrypted/swift/AWS_ACCESS_KEY_ID.cred \
       -p LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/credstore.encrypted/swift/AWS_SECRET_ACCESS_KEY.cred \
-      /opt/swift/deploy/restore.sh "$OFFSITE_OBJECT" "$SCRATCH_DB"
+      /opt/swift/deploy/restore.sh --project swift "$OFFSITE_OBJECT" "$SCRATCH_DB"
 
 On production the off-site objects are `.dump.gpg` and the host cannot
 decrypt them: restore.sh refuses an encrypted dump. The drill runs from the
 OWNER's computer instead:
 
-    ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
+    SWIFT_RESTORE_PROJECT=swift ./deploy/backup-drill.sh swift-deploy@<host> <ssh-key-file> 's3://<backup-bucket>/<prefix>/swift-<stamp>.dump.gpg'
 
 It asks for the private key (paste the armored block) and its passphrase at
 hidden prompts and keeps them only in a throwaway keyring for the run. The
 host streams the encrypted object out (`restore.sh --fetch-encrypted`, with
 the storage keys from the encrypted store), the owner's computer decrypts it
 on the way through, and the plain dump goes straight back into
-`restore.sh --compare-source -` on the host: a new scratch database, compared
+`restore.sh --project swift --compare-source -` on the host: a new scratch database, compared
 with the live one. Nothing plain is written on the owner's computer. Pass is
 the host's compare-source line and `RESTORE OK`, then `DRILL OK`. Before
 anything is decrypted, the drill checks the object's first packets: public-key
