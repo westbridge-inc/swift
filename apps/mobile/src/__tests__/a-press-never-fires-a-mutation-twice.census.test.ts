@@ -31,8 +31,9 @@ import ts from 'typescript';
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
+// >>> C2 shared scanner: byte-identical in apps/mobile and apps/web (the census checks it). Fix it once, copy it to both.
 const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending)$/;
-const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]/;
+const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(/;
 const MAX_HOPS = 4;
 
 type Fn = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
@@ -258,6 +259,8 @@ function census(files: Record<string, string>): Census {
   return out;
 }
 
+// <<< C2 shared scanner
+
 function sources(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
     const p = join(dir, e.name);
@@ -298,6 +301,13 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     for (const lane of Object.values(PENDING_ELSEWHERE)) expect(lane).toMatch(/^UI-(SWEEP|FIX-WEB|FIX-ADMIN) U\d+$/);
   });
 
+  it('runs the one shared scanner: the block is byte-identical in apps/mobile and apps/web', () => {
+    const block = (path: string) => /\/\/ >>> C2 shared scanner[\s\S]*\/\/ <<< C2 shared scanner/.exec(readFileSync(join(process.cwd(), '..', path), 'utf8'))?.[0];
+    const phone = block('mobile/src/__tests__/a-press-never-fires-a-mutation-twice.census.test.ts');
+    expect(phone).toBeTruthy();
+    expect(block('web/src/lib/a-press-never-fires-a-mutation-twice.census.test.ts'), 'apps/web differs from apps/mobile: copy the block').toBe(phone);
+  });
+
   it('bites: the shapes that fired twice are refused, the held ones pass', () => {
     const hook = { 'hooks.ts': `export function useSave() { return useMutation({ mutationFn: save }); }\nexport const useSaveAgain = () => useSave();\nfunction useWrapped(fn) { const m = useMutation({ mutationFn: fn }); const mutate = (p) => m.mutate(p); return { ...m, mutate }; }\nexport function useAddToCart() { return useWrapped(add); }` };
     const verdict = (src: string) => census({ ...hook, 'x.tsx': src }).hits.map((h) => h.text);
@@ -322,6 +332,9 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     // A custom component's own pending prop, and a busy flag set to a non-boolean value, hold it too.
     expect(verdict(`function P(){ const s = useSave(); return <Tools onStatement={() => s.mutate()} statementLoading={s.isPending} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); const [picking, setPicking] = useState(null); const pick = async (k) => { setPicking(k); await s.mutateAsync(k); setPicking(null); }; return <Row busy={picking === 'id'} onPress={() => pick('id')} />; }`)).toEqual([]);
+    // The shared in-flight count of a mutation key (useIsMutating / queryClient.isMutating) holds it too.
+    expect(verdict(`function P(){ const m = useSave(); const busy = useIsMutating({ mutationKey: k }) > 0; return <button disabled={busy} onClick={() => m.mutate()} />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const m = useSave(); const qc = useQueryClient(); const go = () => { if (qc.isMutating({ mutationKey: k })) return; m.mutate(); }; return <button onClick={go} />; }`)).toEqual([]);
     // A useState flag nobody sets to true is not a guard.
     expect(verdict(`function P(){ const s = useSave(); const [busy, setBusy] = useState(false); const done = () => setBusy(false); return <B disabled={busy} onPress={() => s.mutate(undefined, { onSettled: done })} />; }`)).toEqual(['s.mutate <- <B onPress>']);
     // Not a press: the system dialog's button, an effect.
