@@ -62,7 +62,8 @@ export const feeRiseKey = (subscriptionId: string) => `${FEE_RISE_PREFIX}${subsc
 /** The notification kind the apps already route (alert-class.ts, notification-router.ts). */
 export const FEE_RISE_NOTICE_KIND = 'billing_rate_change';
 
-export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION';
+/** [R27] WEEKLY_RETIER: the weekly re-tier (billing.service runWeeklyRetier) found a higher card rate. */
+export type FeeRiseSource = 'MOVER_FEE_RESOLVED' | 'TAXI_ACTIVATION' | 'WEEKLY_RETIER';
 
 export interface HeldFeeRise {
   /** The weekly rate the partner pays now, when the rise was held (major units). */
@@ -84,7 +85,7 @@ export interface HeldFeeRise {
 }
 
 const isIso = (v: unknown): v is string => typeof v === 'string' && !Number.isNaN(Date.parse(v));
-const SOURCES: readonly FeeRiseSource[] = ['MOVER_FEE_RESOLVED', 'TAXI_ACTIVATION'];
+const SOURCES: readonly FeeRiseSource[] = ['MOVER_FEE_RESOLVED', 'TAXI_ACTIVATION', 'WEEKLY_RETIER'];
 
 /**
  * A stored held rise, or null for anything that is not one. A record that
@@ -134,6 +135,15 @@ export function feeRiseDay(at: Date): string {
 /** The dedupe key of the one notice a held rise sends: a retry finds the first inbox row. */
 export const feeRiseDedupeKey = (subscriptionId: string, rise: Pick<HeldFeeRise, 'heldAt' | 'from' | 'to'>) =>
   `fee-rise:${subscriptionId}:${rise.heldAt}:${rise.from}->${rise.to}`;
+
+/** [R27] The words of a LOWER weekly fee: it applies from the next weekly fee; one already charged keeps its amount. */
+export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: string }): { title: string; body: string } {
+  const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
+  return {
+    title: 'Your weekly fee is going down',
+    body: `From your next weekly fee, your Swift weekly fee is ${money(p.to)} (it was ${money(p.from)}). A weekly fee already charged keeps its amount.`,
+  };
+}
 
 /** The words of each notice: the old fee, the new fee and the date, plainly, as the Agreements promise. */
 export function feeRiseCopy(kind: 'RISE' | 'CANCELLED', p: { from: number; to: number; currencyCode: string; date: Date | null }): { title: string; body: string } {

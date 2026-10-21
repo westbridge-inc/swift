@@ -325,9 +325,12 @@ describe('mover fee band — what a mover is actually charged', () => {
     await expect(app.prisma.moverFeeAuthority.update({ where: { userId }, data: { state: 'ACTIVE', holdReason: null } })).rejects.toThrow();
   });
 
-  it('a rider who buys a canter moves onto the heavy-delivery rate, with an audit event', async () => {
+  it('a rider who buys a canter is told the heavy-delivery rate 14 days ahead (held, never written at once)', async () => {
     // The revenue leak this closes: weeklyRate is a snapshot taken at signup,
     // so without the weekly re-tier a rider who upgrades pays 6,000 forever.
+    // [R27 · GUARDRAILS §7 standing rule 2] The higher fee is HELD for the 14-day
+    // notice (fee-rise-notice.ts), told and applied from the first weekly fee
+    // after it: the re-tier never raises a fee at once.
     const rider = await makeRider(await makeMoverUser(), 'MOTORCYCLE');
     const sub = await subscriptions.startTrialForRider(rider.id);
     expect(Number(sub.weeklyRate)).toBe(6000);
@@ -336,19 +339,61 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(await billing.recalculateMoverTiers()).toBeGreaterThanOrEqual(1);
 
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
-    expect(Number(after.weeklyRate)).toBe(9000);
+    expect(Number(after.weeklyRate)).toBe(6000);
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } })).toBe(0);
+    const held = await app.prisma.platformConfig.findUnique({ where: { key: `billing.fee_rise:${sub.id}` } });
+    expect(held?.value).toMatchObject({ from: 6000, to: 9000, source: 'WEEKLY_RETIER', noticeAt: null });
 
-    const event = await app.prisma.billingEvent.findFirst({
-      where: { subscriptionId: sub.id, type: 'TIER_CHANGE' },
-    });
-    expect(event).not.toBeNull();
-    expect(Number(event?.amount)).toBe(9000);
-
-    // ...and it moves back down when they sell the canter. The band is not a ratchet.
+    // ...and selling the canter before it applies drops the held rise. The band is not a ratchet.
     await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'MOTORCYCLE' } });
     await billing.recalculateMoverTiers();
     const back = await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } });
     expect(Number(back.weeklyRate)).toBe(6000);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: `billing.fee_rise:${sub.id}` } })).toBeNull();
+    expect(await app.prisma.auditLog.count({ where: { entityId: sub.id, action: 'BILLING_FEE_RISE_DROPPED' } })).toBe(1);
+  });
+
+  it('[R27] a lower fee applies from the next weekly fee, and the rider is told in the app', async () => {
+    const userId = await makeMoverUser();
+    const rider = await makeRider(userId, 'MOTORCYCLE');
+    const sub = await subscriptions.startTrialForRider(rider.id);
+    await app.prisma.subscription.update({ where: { id: sub.id }, data: { weeklyRate: 8000 } });
+
+    expect(await billing.recalculateMoverTiers()).toBeGreaterThanOrEqual(1);
+    expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).weeklyRate)).toBe(6000);
+    const told = await app.prisma.notification.findMany({ where: { userId, title: 'Your weekly fee is going down' } });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toBe('From your next weekly fee, your Swift weekly fee is GY$6,000 (it was GY$8,000). A weekly fee already charged keeps its amount.');
+    expect(told[0]!.data).toMatchObject({ kind: 'billing_rate_change', change: 'DECREASE', subscriptionId: sub.id, weeklyFee: 6000, previousWeeklyFee: 8000 });
+    // The next pass has nothing to move and tells nothing more.
+    await billing.recalculateMoverTiers();
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Your weekly fee is going down' } })).toBe(1);
+  });
+
+  it('[R27] a re-tier rise is told 14 days ahead by the hourly pass; if the card no longer gives it, it is dropped and the rider told', async () => {
+    const userId = await makeMoverUser();
+    const rider = await makeRider(userId, 'MOTORCYCLE');
+    const sub = await subscriptions.startTrialForRider(rider.id);
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'CANTER_LONG' } });
+    await billing.recalculateMoverTiers();
+
+    const now = new Date();
+    await billing.sweepFeeRises(now);
+    const key = `billing.fee_rise:${sub.id}`;
+    const held = (await app.prisma.platformConfig.findUniqueOrThrow({ where: { key } })).value as { noticeAt: string | null; appliesFrom: string | null; to: number };
+    expect(held.to).toBe(9000);
+    expect(held.noticeAt).not.toBeNull();
+    expect(new Date(held.appliesFrom!).getTime() - new Date(held.noticeAt!).getTime()).toBeGreaterThanOrEqual(14 * 24 * 60 * 60 * 1000);
+    expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).weeklyRate)).toBe(6000);
+    expect(await app.prisma.notification.count({ where: { userId, title: 'Your weekly fee is changing' } })).toBe(1);
+
+    await app.prisma.rider.update({ where: { id: rider.id }, data: { vehicleType: 'MOTORCYCLE' } });
+    await billing.recalculateMoverTiers();
+    expect(await app.prisma.platformConfig.findUnique({ where: { key } })).toBeNull();
+    const cancelled = await app.prisma.notification.findMany({ where: { userId, title: 'Your weekly fee is not changing' } });
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0]!.body).toContain('GY$6,000');
+    expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).weeklyRate)).toBe(6000);
   });
 
   it('a rider still on the old 8,000 moves to 6,000 at the next weekly re-tier, with an audit event — taxi is already on 8,000', async () => {

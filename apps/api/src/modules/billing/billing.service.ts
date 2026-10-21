@@ -28,7 +28,7 @@ import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { batchClock } from '../../utils/batch-clock';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -349,6 +349,9 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   if (error instanceof AppError && error.code === 'FEE_PAUSED') return FEE_PAUSED_ROW;
   throw error;
 }
+
+/** [R27] What one weekly re-tier pass did to one subscription. */
+type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -4862,10 +4865,11 @@ export class BillingService {
           const tariff = await moverFeeTariffSubject(tx, authority);
           const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
           const target = this.retierTarget(sub.id, tiers, tariff.subject);
-          if (!target || sub.weeklyRate.equals(target.rate)) return false;
-          return this.applyTierChange(sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`, tx);
+          if (!target) return false;
+          return this.retierInTx(tx, sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`);
         });
         if (moved) changed += 1;
+        if (moved) await this.afterRetier(candidate.id, moved);
       } catch (error) { this.holdTierChange(candidate.id, error); }
     }
     return changed;
@@ -4936,6 +4940,76 @@ export class BillingService {
   }
 
   /**
+   * [R27 · F2 · GUARDRAILS §7 standing rule 2] One subscription's move to the
+   * card rate the weekly re-tier found, under the payer's lock:
+   *   - a HIGHER rate is never written: it is held for the 14-day notice
+   *     (fee-rise-notice.ts holdFeeRiseInTx, source WEEKLY_RETIER), told and
+   *     applied by sweepFeeRises from the first weekly fee after the notice;
+   *     'held' only when a new rise was recorded (the same rise again is not a change);
+   *   - a LOWER rate applies from the next weekly fee: the rate moves now, with
+   *     its TIER_CHANGE event (a fee already charged keeps its amount), and the
+   *     caller tells the payer in the app after the commit (tellFeeDecrease).
+   */
+  private async retierInTx(
+    tx: Prisma.TransactionClient,
+    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
+    target: PartnerRate,
+    note: string,
+  ): Promise<RetierMove | false> {
+    const from = Number(sub.weeklyRate);
+    if (target.rate > from) {
+      await lockSubscriptionPayer(tx, sub.id);
+      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: new Date() });
+      return held === 'held' ? { held: true } : false;
+    }
+    // The card rate is not higher any more: a rise held for a higher one no longer stands (dropped, and
+    // the payer told it will not happen if they were told it would).
+    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, target.rate);
+    const lowered = target.rate < from && await this.applyTierChange(sub, target, note, tx);
+    if (!lowered && !dropped) return false;
+    return { ...(lowered ? { lowered: { from, to: target.rate } } : {}), ...(dropped ? { dropped } : {}) };
+  }
+
+  /** [R27] A held rise whose new fee is above what the card now gives: dropped in the caller's transaction. */
+  private async dropStaleFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, cardRate: number): Promise<HeldFeeRise | null> {
+    const row = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(subscriptionId) } });
+    const held = row ? readHeldFeeRise(row.value) : null;
+    if (!held || !(held.to > cardRate)) return null;
+    await lockSubscriptionPayer(tx, subscriptionId);
+    const sub = await tx.subscription.findUnique({ where: { id: subscriptionId } });
+    return (await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub as Subscription | null, !held.noticeAt)) ? held : null;
+  }
+
+  /** [R27] After a re-tier commit: tell a lower fee, and a told rise that will not happen. */
+  private async afterRetier(subscriptionId: string, moved: RetierMove): Promise<void> {
+    if (moved.lowered) await this.tellFeeDecrease(subscriptionId, moved.lowered);
+    if (moved.dropped?.noticeAt) {
+      const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } }).catch(() => null);
+      await this.tellFeeRiseCancelled(subscriptionId, moved.dropped, sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null);
+    }
+  }
+
+  /** [R27] Tell the payer their weekly fee went down (after the commit). A failed
+   *  send is logged: the lower fee already applies, so no one pays more for it. */
+  private async tellFeeDecrease(subscriptionId: string, moved: { from: number; to: number }): Promise<void> {
+    try {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+      });
+      if (!sub) return;
+      await this.notifications.send({
+        userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations),
+        ...feeDecreaseCopy({ from: moved.from, to: moved.to, currencyCode: sub.currencyCode }),
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'DECREASE', subscriptionId, weeklyFee: moved.to, previousWeeklyFee: moved.from, currencyCode: sub.currencyCode },
+        dedupeKey: `fee-decrease:${subscriptionId}:${moved.from}->${moved.to}:${new Date().toISOString().slice(0, 10)}`,
+      });
+    } catch (error) {
+      log().warn({ err: error, subscriptionId }, '[R27] the lower weekly fee applies; its notice could not be sent');
+    }
+  }
+
+  /**
    * The scheduled weekly re-tier (tier-recalc). OFF until partners are told 14
    * days ahead (weekly-retier.ts, owner legal plan R27): nobody moves to a new
    * price. The two passes below stay callable for the day it comes back on.
@@ -4995,10 +5069,14 @@ export class BillingService {
           isService: sub.vendor.vendorType === 'SERVICE',
           activeListings,
         });
-        if (!target || Number(sub.weeklyRate) === target.rate) continue;
+        if (!target) continue;
+        // Nothing to move, and no held rise to judge: no transaction.
+        if (Number(sub.weeklyRate) === target.rate && !(await this.prisma.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) }, select: { key: true } }))) continue;
 
         const note = `${activeListings} active listings -> ${target.tier} tier`;
-        if (await this.applyTierChange(sub, target, note)) changed += 1;
+        const moved = await this.prisma.$transaction((tx) => this.retierInTx(tx, sub, target, note));
+        if (moved) changed += 1;
+        if (moved) await this.afterRetier(sub.id, moved);
       } catch (error) {
         this.holdTierChange(sub.id, error);
       }
