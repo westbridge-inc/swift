@@ -298,14 +298,14 @@ export async function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: strin
 }
 
 /** Leave nothing of a cast that another walk or another suite could dispatch
- *  to or list: its riders go offline (no current order) and its store closes.
- *  A suite sharing the database (order-flow's browse reads the first 50 open
- *  stores) must never find a test store left open. */
+ *  to or list: its riders go offline (no current order) and its store closes
+ *  for good (CLOSED: browse lists closed-today stores too, by rating, and a
+ *  suite sharing the database reads only the first page). */
 export async function releaseCast(w: WalkWorld, cast: Cast): Promise<void> {
   for (const r of cast.riders) {
     await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
   }
-  await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false } }).catch(() => {});
+  await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false, status: 'CLOSED' } }).catch(() => {});
 }
 
 /** Delete one unfinished order (a finished one stays: nothing dispatches it). */
