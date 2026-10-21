@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { FlatList, Pressable, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
@@ -59,25 +59,41 @@ export function DestinationSearchScreen({ navigation, route }: any) {
   const near = latitude != null && longitude != null ? { lat: latitude, lng: longitude } : undefined;
 
   const [query, setQuery] = useState('');
-  const { data: suggestions, isFetching } = usePlacesAutocomplete(query, near);
+  const { data: suggestions, isFetching, isError: searchFailed, refetch: searchAgain } = usePlacesAutocomplete(query, near);
   const resolveDetails = usePlaceDetails();
   const { data: addresses } = useAddresses<any[]>();
 
   const [resolving, setResolving] = useState(false);
+  // [UI-SWEEP U69] A place that could not be opened says so, here.
+  const [pickError, setPickError] = useState<string | null>(null);
+  // [UI-SWEEP U68] One place is chosen, once: a second tap while the first
+  // is still opening (or after it was chosen) neither chooses again nor goes
+  // back a second time, which used to close the Taxi screen too.
+  const picking = useRef(false);
+  const chosen = useRef(false);
   const savedList = addresses ?? [];
   const showSaved = query.trim().length < 2;
 
   const choose = (place: PickedPlace) => {
+    if (chosen.current) return;
+    chosen.current = true;
     onSelect(place);
     navigation?.goBack?.();
   };
 
   const pickSuggestion = async (s: PlaceSuggestion) => {
+    if (picking.current || chosen.current) return;
+    picking.current = true;
+    setPickError(null);
     setResolving(true);
     try {
       const detail = await resolveDetails(s.placeId);
       if (detail) choose({ lat: detail.lat, lng: detail.lng, label: detail.label, placeId: detail.placeId });
+      else setPickError('That place could not be opened. Try another, or set it on the map.');
+    } catch {
+      setPickError('That place could not be opened. Check your connection and try again, or set it on the map.');
     } finally {
+      picking.current = false;
       setResolving(false);
     }
   };
@@ -154,8 +170,26 @@ export function DestinationSearchScreen({ navigation, route }: any) {
           keyExtractor={(s) => s.placeId}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space['3xl'] }}
+          ListHeaderComponent={
+            pickError ? (
+              <T variant="label" tone="error" style={{ marginBottom: space.md }}>
+                {pickError}
+              </T>
+            ) : null
+          }
           ListEmptyComponent={
-            isFetching ? null : (
+            // [UI-SWEEP U70] "No matches" only once the search has answered
+            // with nothing. A failed search says so and offers Try again; a
+            // search that has not answered yet claims nothing.
+            searchFailed ? (
+              <EmptyState
+                icon="wifi-off"
+                title="Search is not working right now"
+                body="Check your connection and try again, or set the place on the map."
+                actionLabel="Try again"
+                onAction={() => searchAgain()}
+              />
+            ) : isFetching || !Array.isArray(suggestions) ? null : (
               <EmptyState icon="search" title="No matches" body="Try a different place, or set it on the map." />
             )
           }
