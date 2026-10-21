@@ -558,7 +558,7 @@ export function MenuItemScreen() {
             size="md"
             onPress={() => {
               setAdded(false);
-              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }));
+              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true }));
             }}
           />
           <PillButton label="Keep browsing" variant="soft" size="md" onPress={() => setAdded(false)} />
