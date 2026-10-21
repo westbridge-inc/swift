@@ -1,4 +1,6 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
 import { exportPersonalData } from './data-export';
@@ -36,9 +38,7 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
-/** The subject of a closure request confirmed in the app. Support completes
- *  only these: a typed-in ticket is not a confirmed request. */
-export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 /** The server-written record that a closure request was confirmed in the app
  *  (behind the deletion step-up). Anyone can type the subject into a support
  *  ticket; only the confirmed request writes this record, so support completes
@@ -72,7 +72,7 @@ export class AccountService {
     const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
-        message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
+        message: ACCOUNT_CLOSURE_MESSAGE,
       } });
     // Same transaction as the request: the confirmation and its ticket commit
     // together. One record per ticket; a repeated request reuses it.
@@ -147,6 +147,9 @@ export class AccountService {
         // verification.service openForOwedWork), and the row's userId never
         // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
         await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
+        // [COORD 18 Oct 23:28Z · REVIEW-F #1879 §4] Notices, staged money-setting commands, finished mover
+        // revocations, unheld safety check-in deliveries, renewal reminders and staff permissions (erasure-coverage.ts).
+        await eraseOwedRowsInTransaction(tx, userId);
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
@@ -265,6 +268,10 @@ export class AccountService {
     if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
       this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
     }
+
+    // [COORD 19 Oct 03:46Z] Every saved card leaves service (REVOKED, unsent charges closed; the row is PT-1
+    // frozen) and card sessions that moved no money go; payment evidence stays (settlement history, §6).
+    await retireCardsAndSessions(prisma, userId);
 
     const memberships = await prisma.advertiserMember.findMany({
       where: { userId },
@@ -487,6 +494,13 @@ export class AccountService {
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
     await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+
+    // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
+    //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
+    //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
+    await deidentifyProfiles(prisma, userId);
+    await deidentifyCaseRecords(prisma, userId);
+    await deidentifySafetyRecords(prisma, userId);
 
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The
