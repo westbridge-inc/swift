@@ -876,6 +876,21 @@ describe('[U25] the order window carries what the phone shows', () => {
     expect(within(card).getByText('Customer changed their mind')).toBeTruthy();
   });
 
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] A code the server writes reads as words; an unknown code never shows.
+  it('a cancellation code the server writes reads as words, never as the code', async () => {
+    const { dialog } = await openWindow({ status: 'CANCELLED', cancelledAt: '2026-10-19T14:05:00.000Z', cancellationReason: 'FOOD_TOO_OLD' });
+    const card = within(dialog).getByRole('region', { name: 'Cancellation' });
+    expect(card.textContent).toContain('Too old to deliver: the order was ready but no rider could be found in time.');
+    expect(card.textContent).not.toContain('FOOD_TOO_OLD');
+  });
+
+  it('a cancellation code this build does not know reads as a neutral line, never the code', async () => {
+    const { dialog } = await openWindow({ status: 'CANCELLED', cancelledAt: '2026-10-19T14:05:00.000Z', cancellationReason: 'SOME_NEW_CODE' });
+    const card = within(dialog).getByRole('region', { name: 'Cancellation' });
+    expect(within(card).getByText('No further details are available.')).toBeTruthy();
+    expect(card.textContent).not.toMatch(/SOME_NEW_CODE|some new code/i);
+  });
+
   it('the timeline runs oldest first in words, and the quoted prep time is beside it', async () => {
     const { dialog } = await openWindow({
       status: 'READY_FOR_PICKUP', estimatedPrepTime: 20,
@@ -932,5 +947,18 @@ describe('[U45] statuses read as words, never as codes', () => {
     await user.click(row);
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(await within(dialog).findAllByText(words)).not.toHaveLength(0);
+  });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] An unknown status is a neutral line, never the code made to look like words.
+  it('a status this build does not know reads "Status unavailable", never the code', async () => {
+    const { dialog } = await openWindow({
+      status: 'PREPARING',
+      statusHistory: [
+        { status: 'SOME_NEW_STATUS', createdAt: '2026-10-19T14:10:00.000Z', note: null },
+        { status: 'ACCEPTED', createdAt: '2026-10-19T14:00:00.000Z', note: null },
+      ],
+    });
+    expect(within(dialog).getByText('Status unavailable')).toBeTruthy();
+    expect(dialog.textContent).not.toMatch(/SOME_NEW_STATUS|some new status/i);
   });
 });

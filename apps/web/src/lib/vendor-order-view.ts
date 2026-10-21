@@ -5,22 +5,13 @@
 // ---------------------------------------------------------------------------
 
 import { formatAppointmentSlot } from './appointmentTime';
+import { storeOrderStatusWords } from '@swift/types';
 import type { VendorOrder } from './vendor-api';
 
-/** The phone's pill words. A status this build does not know reads as words, never as a code. */
+/** The phone's pill words, from the one shared map (@swift/types order-words).
+ *  A status this build does not know reads "Status unavailable", never the code. */
 export function vendorStatusLabel(status: string | null | undefined): string {
-  const s = String(status ?? '').toUpperCase();
-  if (s === 'PENDING' || s === 'PLACED') return 'New';
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return 'Accepted';
-  if (s === 'PREPARING') return 'Preparing';
-  if (s === 'READY' || s === 'READY_FOR_PICKUP') return 'Ready';
-  if (s === 'RIDER_ASSIGNED') return 'Rider assigned';
-  if (s === 'RIDER_EN_ROUTE_PICKUP') return 'Rider en route';
-  if (s === 'RIDER_ARRIVED_PICKUP') return 'Rider at counter';
-  if (s === 'PICKED_UP' || s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED') return 'Out for delivery';
-  if (s === 'CANCELLED') return 'Cancelled';
-  const words = s.replace(/_/g, ' ').toLowerCase();
-  return words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Unknown';
+  return storeOrderStatusWords(status);
 }
 
 /** The money card: recorded amounts only. Optional lines show only when the order carries them. */

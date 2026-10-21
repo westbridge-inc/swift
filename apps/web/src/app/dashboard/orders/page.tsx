@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
+import { cancellationReasonWords } from '@swift/types';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import NewOrderTakeover from '@/components/NewOrderTakeover';
@@ -415,7 +416,8 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
       {s === 'CANCELLED' && (
         <section aria-label="Cancellation" className="mt-3 rounded-lg bg-[var(--swift-red)]/5 p-3 text-sm">
           <p className="font-semibold text-[var(--swift-red)]">Cancelled{whenLabel(o.cancelledAt) ? ` ${whenLabel(o.cancelledAt)}` : ''}</p>
-          {o.cancellationReason && <p className="mt-1 text-[var(--swift-muted)]">{o.cancellationReason}</p>}
+          {/* [UI-SWEEP U14] A code reads as words; a code this build does not know never shows. */}
+          {cancellationReasonWords(o.cancellationReason, 'store') && <p className="mt-1 text-[var(--swift-muted)]">{cancellationReasonWords(o.cancellationReason, 'store')}</p>}
         </section>
       )}
 

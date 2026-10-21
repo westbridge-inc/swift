@@ -17,6 +17,8 @@ describe('subscription summaries do not infer payment from period dates', () => 
       mockApi(({ url }) => {
         if (url.pathname.endsWith('/subscription')) return { body: { success: true, data: {
           status, weeklyRate: 1200, nextBillingDate: periodEnd, trialEndDate: trialEnd, isTrialActive: status === 'TRIAL',
+          // [REVIEW-F2 #1930 S4-1] currentPeriodEnd is a real field too (MMG checkout API); kept so the date rule bites on it.
+          currentPeriodEnd: periodEnd,
           latestMmgCheckout: null, recentCheckouts: [],
         } } };
         // The store's subscription card is the owner's (U20); the earner office has no roles.
