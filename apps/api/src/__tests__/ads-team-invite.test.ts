@@ -7,7 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
-import { ADS_TEAM_INVITES_PER_DAY } from '../modules/ads/advertiser.service';
+import { ADS_TEAM_INVITES_PER_DAY, ADS_TEAM_INVITE_DAYS } from '../modules/ads/advertiser.service';
 import { closesByRequest } from '../modules/user/account.service';
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ async function makeUser() {
 async function seedAdvertiser(ownerUserId: string) {
   const a = await app.prisma.advertiser.create({ data: { companyName: `Team Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000004', createdByUserId: ownerUserId, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER', acceptedAt: new Date() } });
   return a;
 }
 const get = (url: string, token: string) => app.inject({ method: 'GET', url, headers: { authorization: `Bearer ${token}` } });
@@ -156,6 +156,28 @@ describe('an advertiser team grows by invitation and acceptance, never by a type
     expect(over.statusCode).toBe(429);
     expect(over.json().error?.code ?? over.json().code).toBe('TEAM_INVITE_LIMIT');
     expect(await app.prisma.advertiserMember.count({ where: { advertiserId: a.id, userId: late.userId } })).toBe(0);
+  });
+
+  it('[#1995 REVIEW-G S4-1] a member row written without an acceptance is an open invitation (fail closed)', async () => {
+    const owner = await makeUser(); const other = await makeUser();
+    const a = await seedAdvertiser(owner.userId);
+    await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: other.userId, role: 'MANAGER' } });
+    expect((await get(`/api/v1/ads/advertiser/${a.id}/members`, other.token)).statusCode).toBe(404);
+  });
+
+  it(`[#1995 REVIEW-F S4-1] an invitation not accepted within ${ADS_TEAM_INVITE_DAYS} days is gone: not listed, not acceptable, and a new invitation starts afresh`, async () => {
+    const owner = await makeUser(); const invitee = await makeUser();
+    const a = await seedAdvertiser(owner.userId);
+    await invite(a.id, invitee.phone, owner.token);
+    await app.prisma.advertiserMember.updateMany({ where: { advertiserId: a.id, userId: invitee.userId }, data: { createdAt: new Date(Date.now() - (ADS_TEAM_INVITE_DAYS * 86_400_000 + 60_000)) } });
+    expect((await get('/api/v1/ads/advertiser/invites', invitee.token)).json().data).toEqual([]);
+    expect((await get(`/api/v1/ads/advertiser/${a.id}/members`, owner.token)).json().data).toEqual([expect.objectContaining({ role: 'OWNER' })]);
+    expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, invitee.token)).statusCode).toBe(404);
+    await invite(a.id, invitee.phone, owner.token);
+    const fresh = await app.prisma.advertiserMember.findUnique({ where: { advertiserId_userId: { advertiserId: a.id, userId: invitee.userId } } });
+    expect(fresh!.acceptedAt).toBeNull();
+    expect(Date.now() - fresh!.createdAt.getTime()).toBeLessThan(60_000);
+    expect((await post(`/api/v1/ads/advertiser/${a.id}/members/accept`, {}, invitee.token)).statusCode).toBe(200);
   });
 
   it('only the OWNER invites', async () => {

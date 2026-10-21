@@ -42,7 +42,7 @@ async function makeUser(roles: 'CUSTOMER'[] = ['CUSTOMER']) {
 async function seedAdvertiser(ownerUserId: string) {
   const a = await app.prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000004', createdByUserId: ownerUserId, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER' } });
+  await app.prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUserId, role: 'OWNER', acceptedAt: new Date() } });
   return a;
 }
 
