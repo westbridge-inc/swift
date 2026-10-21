@@ -9,7 +9,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { readPayAhead } from '../modules/billing/pay-ahead';
 import {
-  FEE_RISE_NOTICE_DAYS, feeRiseKey, firstFeeOnOrAfter, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type FeeRiseSource,
+  FEE_RISE_NOTICE_DAYS, feeRiseCopy, feeRiseKey, firstFeeOnOrAfter, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type FeeRiseSource,
 } from '../modules/billing/fee-rise-notice';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -149,6 +149,14 @@ describe('the dates', () => {
     expect(readHeldFeeRise({ ...told, appliesFrom: '2026-11-01T18:59:59.000Z' })).toBeNull(); // 1 s short of 14 days
     expect(readHeldFeeRise({ ...told, appliesFrom: '2026-11-01T19:00:00.000Z' })).toMatchObject({ appliesFrom: '2026-11-01T19:00:00.000Z' });
   });
+
+  it('a notice without a date (never sent: the run dates every notice) still promises only the 14 days, and names the phone\'s control', () => {
+    // [REVIEW-F #1884 S4-1/S4-2]
+    const { body } = feeRiseCopy('RISE', { from: 6000, to: 8000, currencyCode: 'GYD', date: null });
+    expect(body).toBe('From your first weekly fee due at least 14 days from today, your Swift weekly fee will be GY$8,000 (it is GY$6,000 now). '
+      + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
+      + 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.');
+  });
 });
 
 describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only from the fee it was told for', () => {
@@ -175,7 +183,7 @@ describe('[F2] a held weekly-fee rise is told 14 days ahead and applies only fro
     expect(notice!.data).toMatchObject({ kind: 'billing_rate_change', change: 'RISE', subscriptionId: rider.subId, weeklyFee: 8000, previousWeeklyFee: 6000, appliesFrom: firstNewFee.toISOString(), audience: 'earner' });
     expect(notice!.body).toBe(`From your weekly fee due ${guyanaDay(firstNewFee)}, your Swift weekly fee will be GY$8,000 (it is GY$6,000 now). `
       + 'Until then nothing changes, and any week you have already paid keeps the price you paid. '
-      + 'If you do not want the new fee, stop your plan in Swift before then and you will not pay it.');
+      + 'If you do not want the new fee, tap Stop weekly billing in Swift before then and you will not pay it.');
     const held = await heldOf(rider.subId);
     expect(held).toMatchObject({ from: 6000, to: 8000, appliesFrom: firstNewFee.toISOString(), inboxId: notice!.id });
     expect(new Date(held!.appliesFrom!).getTime() - new Date(held!.noticeAt!).getTime()).toBeGreaterThanOrEqual(FEE_RISE_NOTICE_DAYS * DAY);
