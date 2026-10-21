@@ -46,8 +46,9 @@ const REGISTER = /^(post|put|patch)$/;
 
 /** Create/money verbs, plus [#1964 review F2 S3-1 / G S4-1] the transitions that mint money rows inside a
  *  state change (earnings + cash settlement on delivered/complete, cash CAPTURED at handover/collect, a refund
- *  obligation on cancel) and the noun creators the review named (accept, house, fx-rates). */
-const VERB = /^(checkout|order|orders|request|payment-claim|refund[a-z-]*|topup|payout|paid|settle|confirm-payment|confirm-deposit|adjust[a-z-]*|reverse|card-sessions|mmg-checkout|reserve|campaigns|agent-payments|attach|tip|return|process|mark-paid|set-aside|release|settlement-import|backfill|notify|resolve|confirm|refund-settled|close-store-refund|jobs|delivered|complete|handover|collect|cancel|quote|accept|house|fx-rates)$/;
+ *  obligation on cancel) and the noun creators the review named (accept, house, fx-rates); [#1964 delta review
+ *  F2 S4-3] the compound terminals complete-pickup (cash takeaway CAPTURED, OF-05) and complete-appointment. */
+const VERB = /^(checkout|order|orders|request|payment-claim|refund[a-z-]*|topup|payout|paid|settle|confirm-payment|confirm-deposit|adjust[a-z-]*|reverse|card-sessions|mmg-checkout|reserve|campaigns|agent-payments|attach|tip|return|process|mark-paid|set-aside|release|settlement-import|backfill|notify|resolve|confirm|refund-settled|close-store-refund|jobs|delivered|complete|handover|collect|cancel|quote|accept|house|fx-rates|complete-pickup|complete-appointment)$/;
 
 /** Every route registration in a *.routes.ts file: app.post('/path', …, handler). */
 function routesOf(files: Record<string, string>, unreadable: string[] = []): Route[] {
@@ -136,6 +137,7 @@ const CUSTOMER = 'modules/user/customer.routes.ts';
 const ADMIN = 'modules/admin/admin.routes.ts';
 const VENDOR = 'modules/vendor/vendor.routes.ts';
 const ORDER_SVC = 'modules/order/order.service.ts';
+const SERVICES_SVC = 'modules/services/services.service.ts';
 const approval = (kind: Kind): Entry => ({ kind, guard: 'approval', pins: [] });
 const MMG_REPLY_CAS: Pin[] = [['modules/billing/mmg-checkout.service.ts', 'observeReply', 'where: { id: current.id, status: current.status },'], ['modules/billing/mmg-checkout.service.ts', 'observeReply', 'if (moved.count !== 1)']];
 /** Every order transition runs here: the order row locked FOR UPDATE, then the source status checked
@@ -213,6 +215,17 @@ const SCOPE: Record<string, Entry> = {
   'modules/courier/courier.routes.ts|POST|/order/:id/cancel': transition('refund', 'modules/courier/courier.routes.ts', 'allowedFrom: COURIER_CANCELLABLE_STATUSES,'),
   [`${ADMIN}|PUT|/orders/:id/cancel`]: transition('refund', ADMIN, '.filter((status) => !(TERMINAL_ORDER_STATUSES as string[]).includes(status))'),
   'modules/ads/ads.routes.ts|POST|/campaigns/:id/cancel': { kind: 'refund', guard: 'state', pins: [['modules/ads/ads.routes.ts', H, "lifecycle.transition(request.params.id, 'cancel'"], ['modules/ads/lifecycle.service.ts', 'transition', 'where: { id: campaignId, status: before.status },'], ['modules/ads/refund.service.ts', 'stage', 'if (existing) return { intentId: existing.id, staged: false']] },
+  // [#1964 delta review F2 S4-3] The store's compound terminals.
+  [`${VENDOR}|PUT|/orders/:id/complete-pickup`]: transition('payment-claim', VENDOR, "allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',"),
+  [`${VENDOR}|PUT|/orders/:id/complete-appointment`]: { kind: 'payout', guard: 'state', pins: [[VENDOR, H, "if (order.status !== 'ACCEPTED')"], [ORDER_SVC, 'updateStatus', 'const allowedFrom = opts?.allowedFrom ?? ORDER_TRANSITIONS[target];'], ...ORDER_CAS] },
+  // [#1972] A retried service request returns the first job: same customer, provider, words and photos,
+  // still REQUESTED, within the window, found under the customer's User-row lock. No key needed (builds 9/11).
+  'modules/services/services.routes.ts|POST|/jobs': { kind: 'order', guard: 'state', pins: [
+    [SERVICES_SVC, 'createServiceJobWithLiveAuthority', 'FOR UPDATE /* service-job-live-authority */'],
+    [SERVICES_SVC, 'createServiceJobWithLiveAuthority', 'createdAt: { gte: new Date(Date.now() - SERVICE_JOB_RETRY_WINDOW_MS) },'],
+    [SERVICES_SVC, 'createServiceJobWithLiveAuthority', 'if (earlier) return { job: earlier, created: false as const };'],
+    ['modules/services/services.routes.ts', H, 'if (!created) {'],
+  ] },
   // A tip after delivery is refused until a collection path exists.
   [`${CUSTOMER}|POST|/orders/:id/tip`]: { kind: 'payout', guard: 'refused', pins: [['modules/order/order.service.ts', 'addPostDeliveryTip', 'TIP_COLLECTION_UNAVAILABLE']] },
 };
@@ -255,7 +268,7 @@ const OUT: Record<string, string> = {
 
 /** Real gaps, each with its own server-fix PR to come (tolerated while listed). */
 const PENDING_FIX: Record<string, string> = {
-  'modules/services/services.routes.ts|POST|/jobs': 'A retried service request creates a SECOND REQUESTED job and chat room (no money: the quote comes later). Fix PR (RISKY G+M): optional Idempotency-Key + a server-side key from the request so a keyless retry is one job.',
+  // Empty: POST /services/jobs (the one gap) is fixed by #1972 and now sits in SCOPE.
 };
 
 /** Registrations the census cannot read (reviewed): not a creator of the eight. */
@@ -315,7 +328,7 @@ describe('[BUG-GUARDS C2 · server] a retried request never creates twice', () =
     const at = (method: string, path: string, handler = 'return settle(req.id);') => ({ 'modules/x/x.routes.ts': `export function r(app) { app.${method}('${path}', async (req) => { ${handler} }); }` });
     expect(census(at('put', '/orders/:id/delivered'), {}, {}, {}, []).unclassified).toEqual(['modules/x/x.routes.ts|PUT|/orders/:id/delivered']);
     expect(census(at('put', '/orders/:id/cancel'), {}, {}, {}, []).unclassified).toEqual(['modules/x/x.routes.ts|PUT|/orders/:id/cancel']);
-    for (const seg of ['complete', 'handover', 'collect', 'quote', 'accept']) expect(census(at('post', `/orders/:id/${seg}`), {}, {}, {}, []).unclassified, seg).toHaveLength(1);
+    for (const seg of ['complete', 'handover', 'collect', 'quote', 'accept', 'complete-pickup', 'complete-appointment']) expect(census(at('post', `/orders/:id/${seg}`), {}, {}, {}, []).unclassified, seg).toHaveLength(1);
     // [#1964 review F2 S4-2] A registration outside *.routes.ts, or with a computed path, is reported (M-F2-64).
     expect(census({ 'modules/x/x.plugin.ts': `export function r(app) { app.post('/orders/:id/payout', async () => ({})); }` }, {}, {}, {}, []).unreadable).toEqual(["modules/x/x.plugin.ts|POST|'/orders/:id/payout'"]);
     expect(census({ 'modules/x/x.routes.ts': 'export function r(app) { app.post(PATH, async () => ({})); }' }, {}, {}, {}, []).unreadable).toEqual(['modules/x/x.routes.ts|POST|PATH']);

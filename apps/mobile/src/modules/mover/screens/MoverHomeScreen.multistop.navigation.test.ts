@@ -13,7 +13,7 @@ import { BOARD_STOPS } from '../../../lib/taxiContract.fixtures';
 // order; a ride without them is exactly today's card.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any, active: null as any, boardArgs: [] as unknown[], pins: [] as string[] }));
+const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any, active: null as any, boardArgs: [] as unknown[], pins: [] as string[], boardAt: undefined as number | undefined }));
 // [RINGER] The ring itself (audio, vibration, AppState) is unit-tested in
 // hooks/useJobRing + services/jobRinger; here, only WHEN the card asks for it.
 const ring = vi.hoisted(() => ({ useJobRing: vi.fn() }));
@@ -60,7 +60,7 @@ vi.mock('../../../hooks', () => {
     useEarningsToday: () => ({ data: { total: 0 } }),
     useDailyEarnings: () => ({ data: [] }),
     useDemand: () => ({ data: {} }),
-    useAvailableJobs: (...args: unknown[]) => { fx.boardArgs = args; return { data: fx.jobs }; },
+    useAvailableJobs: (...args: unknown[]) => { fx.boardArgs = args; return { data: fx.jobs, dataUpdatedAt: fx.boardAt }; },
     useDispatchOffers: () => ({ offer: fx.offer, queuedBehind: 0, dismiss: vi.fn() }),
     useActiveJob: () => ({ data: fx.active }),
     useActiveJobs: () => ({ legs: [], run: null }),
@@ -106,6 +106,7 @@ beforeEach(() => {
   fx.active = null;
   fx.boardArgs = [];
   fx.pins = [];
+  fx.boardAt = undefined;
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => {
@@ -228,6 +229,20 @@ describe('[PERF partner #4] a taxi driver\'s board rests during a ride', () => {
     fx.jobs = [pinJob];
     await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
     expect(fx.boardArgs[2]).toBe(false);
+    expect(fx.pins).toContain('Board Pin');
+  });
+
+  it('right after a ride: the board\'s answer from before the ride draws no pin until the fresh read (#1919 review S4-1)', async () => {
+    fx.jobs = [pinJob];
+    fx.boardAt = Date.now() - 30 * 60_000; // read before a 30-minute ride
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.pins).not.toContain('Board Pin');
+  });
+
+  it('a recent board answer is drawn', async () => {
+    fx.jobs = [pinJob];
+    fx.boardAt = Date.now() - 5_000;
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
     expect(fx.pins).toContain('Board Pin');
   });
 });
