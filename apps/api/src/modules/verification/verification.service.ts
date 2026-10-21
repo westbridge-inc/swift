@@ -2804,18 +2804,30 @@ export class VerificationService {
    * days after the notice), never while anything of theirs waits on Swift, never for a role they were ever
    * verified for. Daily, before the reaper. One person failing never stops the others.
    */
-  async sweepAbandonedApplications(now = new Date(), batch = 500): Promise<{ noticed: number; purged: number }> {
-    const people = await this.prisma.verificationDocument.findMany({
-      where: { AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null, createdAt: { lt: new Date(now.getTime() - ABANDON_NOTICE_DAYS * DAY_MS) } },
-      distinct: ['userId'], select: { userId: true }, orderBy: { userId: 'asc' }, take: batch,
-    });
+  async sweepAbandonedApplications(now = new Date(), page = 500): Promise<{ noticed: number; purged: number }> {
+    // The cheap exclusions are in the query (synthetic, erased, anything waiting on Swift, nothing old enough), and every
+    // run walks ALL candidates a page at a time (keyset on userId), so people the per-person checks exclude (a verified
+    // role, an AML record) can never fill every page and starve the people behind them (COORD security review).
     const total = { noticed: 0, purged: 0 };
-    for (const { userId } of people) {
-      try {
-        const r = await this.abandonedApplicationStep(userId, now);
-        total.noticed += r.noticed; total.purged += r.purged;
-      } catch (err) {
-        if (!(err instanceof AppError) || err.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw err;
+    for (let after: string | undefined; ;) {
+      const people = await this.prisma.verificationDocument.findMany({
+        where: {
+          AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null,
+          createdAt: { lt: new Date(now.getTime() - ABANDON_NOTICE_DAYS * DAY_MS) },
+          ...(after ? { userId: { gt: after } } : {}),
+          user: { isSynthetic: false, NOT: { phone: { startsWith: 'deleted:' } }, verificationDocuments: { none: WAITING_ON_SWIFT_WHERE } },
+        },
+        distinct: ['userId'], select: { userId: true }, orderBy: { userId: 'asc' }, take: page,
+      });
+      if (!people.length) break;
+      after = people[people.length - 1]!.userId;
+      for (const { userId } of people) {
+        try {
+          const r = await this.abandonedApplicationStep(userId, now);
+          total.noticed += r.noticed; total.purged += r.purged;
+        } catch (err) {
+          if (!(err instanceof AppError) || err.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw err;
+        }
       }
     }
     return total;
@@ -2859,7 +2871,9 @@ export class VerificationService {
     if (!notice) {
       await this.notifications.send({
         userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
-        audience: candidates.some((d) => d.role === 'VENDOR_OWNER') ? 'business' : 'earner',
+        // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
+        ...(candidates.some((d) => d.role === 'VENDOR_OWNER') ? { audience: 'business' as const }
+          : candidates.some((d) => d.role !== 'CUSTOMER') ? { audience: 'earner' as const } : {}),
         data: { kind: 'verification_application_abandoned' },
         dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
       });

@@ -124,7 +124,7 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
  * a receipt written. Claimed objects belong to the document and mover passes.
  */
 export async function eraseUnclaimedUploads(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return eraseUnclaimed(db, storage, userId, { kind: 'closure' }, log);
+  return eraseUnclaimed(db, storage, userId, { scope: 'closure' }, log);
 }
 
 /**
@@ -135,7 +135,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
  * assertClaimableUpload), and in this mode an account-recovery pointer is a claim too (the case still needs it).
  */
 export async function eraseStaleUnclaimedUploads(db: PrismaClient, storage: StorageProvider, userId: string, olderThan: Date, log?: Log) {
-  return eraseUnclaimed(db, storage, userId, { kind: 'stale', olderThan }, log);
+  return eraseUnclaimed(db, storage, userId, { scope: 'stale', olderThan }, log);
 }
 
 
@@ -170,16 +170,16 @@ export async function sweepStaleUnclaimedUploads(
   return total;
 }
 
-type UnclaimedMode = { kind: 'closure' } | { kind: 'stale'; olderThan: Date };
+type UnclaimedMode = { scope: 'closure' } | { scope: 'stale'; olderThan: Date };
 
 async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId: string, mode: UnclaimedMode, log?: Log) {
-  const capability = mode.kind === 'closure' ? 'account:erasure-unclaimed-uploads' : 'verification:unclaimed-upload-sweep';
+  const capability = mode.scope === 'closure' ? 'account:erasure-unclaimed-uploads' : 'verification:unclaimed-upload-sweep';
   return owed(log, userId, 'unclaimed upload', { pending: 1, held: 0, erased: 0 }, () => runAsSystem(capability, () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const own = (await tx.encryptedObject.findMany({
-      where: { createdBy: userId, shreddedAt: null, ...(mode.kind === 'stale' ? { createdAt: { lt: mode.olderThan } } : {}) },
+      where: { createdBy: userId, shreddedAt: null, ...(mode.scope === 'stale' ? { createdAt: { lt: mode.olderThan } } : {}) },
       orderBy: { fileKey: 'asc' },
-    })).filter((c) => c.createdBy === userId && c.shreddedAt === null && (mode.kind !== 'stale' || c.createdAt < mode.olderThan));
+    })).filter((c) => c.createdBy === userId && c.shreddedAt === null && (mode.scope !== 'stale' || c.createdAt < mode.olderThan));
     if (!own.length) return { pending: 0, held: 0, erased: 0 };
     // A document that names the object exactly owns it (the document pass, and its hold).
     const named = new Set((await tx.verificationDocument.findMany({
@@ -188,7 +188,7 @@ async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId
     const candidates = own.filter((c) => !named.has(c.fileKey));
     if (!candidates.length) return { pending: 0, held: 0, erased: 0 };
     // Erasure: only a committed closure authorizes it. The open-account sweep: only the age of an unclaimed upload.
-    const user = mode.kind === 'closure'
+    const user = mode.scope === 'closure'
       ? await closedAccount(tx, userId)
       : await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
     let pending = 0;
@@ -218,7 +218,7 @@ async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId
       // A document or mover pointer claims it: those passes own it (and its hold).
       if (same.some((r) => r.source === 'document' || r.source === 'mover')) continue;
       // While the account is open, an account-recovery case that names the upload still needs it.
-      if (mode.kind === 'stale' && same.some((r) => r.source === 'recovery')) continue;
+      if (mode.scope === 'stale' && same.some((r) => r.source === 'recovery')) continue;
       if (same.some((r) => r.source !== 'envelope' ? r.owner !== userId : r.owner !== userId || r.key !== c.fileKey)) {
         leavePending(c.fileKey, 'Shared upload object');
         continue;
@@ -244,7 +244,7 @@ async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId
         data: { shreddedAt: new Date(), sha256: ERASED_FINGERPRINT },
       });
       await writeDeletionReceipt(tx, {
-        submissionId: `upload:${digest(c.fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: 'unclaimed_upload', deletedBy: mode.kind === 'closure' ? userId : UNCLAIMED_SWEEP_ACTOR,
+        submissionId: `upload:${digest(c.fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: 'unclaimed_upload', deletedBy: mode.scope === 'closure' ? userId : UNCLAIMED_SWEEP_ACTOR,
         evidence: {
           sha256: /^[a-f0-9]{64}$/i.test(c.sha256) ? Buffer.from(c.sha256, 'hex') : null,
           bytesDeleted: BigInt(c.sizeBytes),

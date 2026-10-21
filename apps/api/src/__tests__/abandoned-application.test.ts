@@ -80,9 +80,10 @@ afterAll(async () => {
 });
 
 let seq = 0;
-async function person(role: UserRole = 'RIDER') {
+async function person(role: UserRole = 'RIDER', id?: string) {
   seq += 1;
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
+    ...(id ? { id } : {}),
     phone: `+59263${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Left', lastName: `Halfway${seq}`,
     roles: role === 'CUSTOMER' ? ['CUSTOMER'] : ['CUSTOMER', role], activeRole: role, status: 'ACTIVE', countryCode: 'GY',
   } }));
@@ -111,6 +112,11 @@ async function doc(userId: string, role: UserRole, state: DocState, daysAgo: num
     ...(state === 'REVIEW_QUEUED' || state === 'CAPTURED' ? {} : { reviewedAt: at, reviewedBy: 'abandon-test' }),
   } }));
 }
+const riderOf = (userId: string) => system(() => app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } }));
+const subscribeRider = (riderId: string) => system(() => app.prisma.subscription.create({ data: {
+  riderId, type: 'DELIVERY_RIDER', weeklyRate: 1000,
+  currentPeriodStart: new Date(Date.now() - 400 * DAY), currentPeriodEnd: new Date(Date.now() - 393 * DAY), nextBillingDate: new Date(Date.now() - 393 * DAY),
+} }));
 const docOf = (id: string) => system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id } }));
 const stored = async (key: string) => { try { await storage.getObject(key); return true; } catch { return false; } };
 const notices = (userId: string) => system(() => app.prisma.notification.findMany({ where: { userId, body: ABANDON_NOTICE_BODY } }));
@@ -151,7 +157,7 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
 
   it('activity after the notice voids it: nothing goes, and a fresh notice is needed after a new 76 days', async () => {
     const u = await person('RIDER');
-    const d = await doc(u, 'RIDER', 'COMMITTED', 80);
+    const d = await doc(u, 'RIDER', 'REJECTED', 80);
     expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1 });
     await upload(u, -1); // the applicant uploads again tomorrow
     expect(await sweep(later(20), u)).toMatchObject({ noticed: 0, purged: 0 });
@@ -172,15 +178,52 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
 
   it('never for a role the person was ever verified for (a subscription is born on full verification)', async () => {
     const u = await person('RIDER');
-    const rider = await system(() => app.prisma.rider.create({ data: { userId: u, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } }));
-    await system(() => app.prisma.subscription.create({ data: {
-      riderId: rider.id, type: 'DELIVERY_RIDER', weeklyRate: 1000,
-      currentPeriodStart: new Date(Date.now() - 400 * DAY), currentPeriodEnd: new Date(Date.now() - 393 * DAY), nextBillingDate: new Date(Date.now() - 393 * DAY),
-    } }));
-    const d = await doc(u, 'RIDER', 'COMMITTED', 300);
+    await subscribeRider((await riderOf(u)).id);
+    const d = await doc(u, 'RIDER', 'REJECTED', 300);
     expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
     expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
     expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
+  it('[COORD security review (1)] a verified mover whose subscription is keyed on the OTHER profile is never purged', async () => {
+    const u = await person('DRIVER');
+    await subscribeRider((await riderOf(u)).id); // the fee is on the rider profile; the documents are the driver's
+    const d = await doc(u, 'DRIVER', 'REJECTED', 300);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
+  it('[COORD security review (1)] durable signals without any subscription: documents verified once, or a document of the role ever approved', async () => {
+    const a = await person('DRIVER');
+    const rider = await riderOf(a);
+    await system(() => app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: false, documentsVerifiedAt: new Date(Date.now() - 200 * DAY) } }));
+    const da = await doc(a, 'DRIVER', 'REJECTED', 300);
+    const b = await person('VENDOR_OWNER');
+    await doc(b, 'VENDOR_OWNER', 'EXPIRED', 300, 'business_registration');
+    const db = await doc(b, 'VENDOR_OWNER', 'REJECTED', 300, 'owner_national_id');
+    for (const u of [a, b]) {
+      expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+      expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    }
+    expect((await docOf(da.id)).purgedAt).toBeNull();
+    expect((await docOf(db.id)).purgedAt).toBeNull();
+  });
+
+  it('[COORD security review (2)] more than a page of excluded people still lets the person behind them be swept', async () => {
+    const tag = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
+    const excluded: string[] = [];
+    for (const n of [1, 2]) {
+      const x = await person('RIDER', `r249a${n}${tag}`);
+      await subscribeRider((await riderOf(x)).id);
+      await doc(x, 'RIDER', 'REJECTED', 200);
+      excluded.push(x);
+    }
+    const z = await person('RIDER', `r249z${tag}`);
+    await doc(z, 'RIDER', 'REJECTED', 100);
+    const r = await system(() => service([...excluded, z]).sweepAbandonedApplications(new Date(), 1));
+    expect(r).toMatchObject({ noticed: 1, purged: 0 });
+    expect(await notices(z)).toHaveLength(1);
   });
 
   it('a legal hold beats it: noticed, but nothing is deleted while the hold stands', async () => {
