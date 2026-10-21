@@ -6,6 +6,7 @@ import { AlertTriangle, Star } from 'lucide-react';
 import { getLowStock, getOverview, money, toggleOpen, toggleOrders } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
+import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { useCatalogueName } from '@/lib/catalogue-name';
 import { instantSwitch } from '@/lib/instant-toggle';
 
@@ -41,7 +42,9 @@ function Toggle({ label, on, onChange, busy }: { label: string; on: boolean; onC
 export default function TodayPage() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
-  const overview = useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, refetchInterval: 30_000 });
+  // [PERF row 8] Re-read on the store's new orders and status changes; the poll is the fallback.
+  const overviewPoll = useFeedPollInterval(storeId, 30_000, 120_000);
+  const overview = useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, refetchInterval: overviewPoll });
   const lowStock = useQuery({ queryKey: storeKey(storeId, 'low-stock'), queryFn: getLowStock, refetchInterval: 60_000 });
   const catalogue = useCatalogueName();
 

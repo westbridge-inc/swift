@@ -64,6 +64,8 @@ vi.mock('react-native-reanimated', () => {
 });
 vi.mock('@swift/ui', () => ({ color: { text: {}, border: {}, surface: {}, brand: {} }, radius: {}, space: {}, withAlpha: () => 'synthetic-color' }));
 vi.mock('../../kit/controls', () => ({ BrandSwitch: 'BrandSwitch' }));
+// Profile's marketing row imports the kit toast (native drawing); nothing here shows one.
+vi.mock('../../kit/toast', () => ({ toast: { error: vi.fn(), success: vi.fn(), show: vi.fn() } }));
 vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: 'RoleSwitcherSheet' }));
 vi.mock('../../kit', () => ({
   ...Object.fromEntries(['DecorativeIcon', 'EmptyState', 'ErrorState', 'IconChip', 'LoadingBlock', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'SettingsRow', 'T', 'TrustHalo'].map((name) => [name, name])),
