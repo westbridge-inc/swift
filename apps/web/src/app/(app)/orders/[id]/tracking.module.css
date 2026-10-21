@@ -51,6 +51,7 @@
   height: 56px;
   border-radius: var(--swift-radius-lg);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
 }
 
@@ -86,6 +87,7 @@
   padding: 2px 10px;
   border-radius: var(--swift-radius-full);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
   font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
   text-transform: capitalize;
@@ -440,6 +442,7 @@
   padding: 16px;
   border-radius: var(--swift-radius-md);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
   font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
 }
@@ -459,6 +462,7 @@
   justify-content: space-between;
   gap: 16px;
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   box-shadow: none;
 }
 

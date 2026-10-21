@@ -36,7 +36,7 @@ const PARTNER_FEE_KINDS = new Set([
 ]);
 
 /** [PUSH-ROUTING] Document notices sent to whoever owns the document. */
-const DOCUMENT_KINDS = new Set(['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder']);
+const DOCUMENT_KINDS = new Set(['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder', 'verification_application_abandoned']);
 
 /** [PUSH-ROUTING] Document notices only a mover receives (the API tags them earner). */
 const MOVER_DOCUMENT_KINDS = new Set(['verification_forced_offline', 'verification_vehicle_lapsed', 'compliance_review_failed']);

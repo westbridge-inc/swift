@@ -1,10 +1,17 @@
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
 import ModerationPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
 /** [ADM-006] what a reviewer would actually type. */
 const REVIEW_REASON = 'The review names a competitor and repeats a false claim';
+
+/** The reason is asked in the in-page panel (never a browser prompt): state it and continue. */
+async function giveReason(user: { type: (_e: Element, _t: string) => Promise<void>; click: (_e: Element) => Promise<void> }) {
+  const panel = await screen.findByRole('dialog');
+  await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), REVIEW_REASON);
+  await user.click(within(panel).getByRole('button', { name: 'Continue' }));
+}
 
 // ---------------------------------------------------------------------------
 // STORE-001. Three moderation queues were filling up with no admin page able
@@ -92,7 +99,6 @@ describe('the moderation queues finally have a reviewer', () => {
   });
 
   it('records a content decision through the exact endpoint, with the note', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/moderation/reports/report-1') {
         return { body: { success: true, data: {} } };
@@ -105,6 +111,7 @@ describe('the moderation queues finally have a reviewer', () => {
     await user.click(screen.getAllByRole('button', { name: 'Decide' })[0]!);
     await user.type(screen.getByPlaceholderText(/What did you decide/), 'removed by hand');
     await user.click(screen.getByRole('button', { name: 'Record as actioned' }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
@@ -113,7 +120,6 @@ describe('the moderation queues finally have a reviewer', () => {
   });
 
   it('upholding a reported REVIEW hits the endpoint that actually removes it', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'POST' && r.url.pathname === '/api/v1/admin/rating-reports/ratingreport-1/resolve') {
         return { body: { success: true, data: { action: 'uphold' } } };
@@ -125,6 +131,7 @@ describe('the moderation queues finally have a reviewer', () => {
     await user.click(await screen.findByRole('button', { name: /Reported reviews/ }));
     expect(await screen.findByText('reported review text')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: /Uphold/ }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
@@ -139,12 +146,12 @@ describe('the moderation queues finally have a reviewer', () => {
       }
       return undefined;
     }));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { user } = renderWithQuery(<ModerationPage />);
 
     await user.click(await screen.findByRole('button', { name: /Held reviews/ }));
     expect(await screen.findByText('held by the filter')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Publish it' }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
@@ -161,12 +168,12 @@ describe('the moderation queues finally have a reviewer', () => {
       }
       return undefined;
     }));
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { user } = renderWithQuery(<ModerationPage />);
 
     await user.click(await screen.findByRole('button', { name: /Held reviews/ }));
     await screen.findByText('held by the filter');
     await user.click(screen.getByRole('button', { name: 'Remove' }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [, init] = requestsByMethod(fetchMock, 'POST')[0]!;
@@ -209,12 +216,12 @@ describe('[A-17] the child-safety case panel', () => {
   });
 
   it('sends the coded disposition and the evidence — and names the authority report when there is one', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { fetchMock, user } = await openCsae();
     await user.type(screen.getByPlaceholderText(/user:banned/), 'user:banned:abc123');
     await user.type(screen.getByPlaceholderText('NCMEC-2026-00417'), 'NCMEC-2026-00417');
     await user.click(screen.getByLabelText(/evidence needed for those reports has been preserved/i));
     await user.click(screen.getByRole('button', { name: 'Record as actioned' }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
@@ -229,10 +236,10 @@ describe('[A-17] the child-safety case panel', () => {
   });
 
   it('a dismissal is PROPOSED, never taken in one click', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue(REVIEW_REASON));
     const { fetchMock, user } = await openCsae();
     expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Propose dismissal' }));
+    await giveReason(user);
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     expect(JSON.parse(String(requestsByMethod(fetchMock, 'PUT')[0]![1]?.body))).toEqual({

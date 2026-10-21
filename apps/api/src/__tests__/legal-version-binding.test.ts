@@ -198,6 +198,17 @@ const PUBLISHED: Record<
     driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
     vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
   },
+  // [Owner rulings 21 Oct 2026 · research E4 + B8 · MATERIAL] Terms s.4: the taxi waiting charge paragraph
+  // (GY$300 per full 10 minutes, as rides/taxi-waiting.ts applies it). Privacy: s.1 diagnostics line, s.5 the
+  // phone app's crash reports to Swift's own GlitchTip, s.6 crash and error reports kept 90 days. Nothing else
+  // changed: putting 18 October back and removing those words reproduces all four 2026-10-18 pins exactly.
+  // The date re-pins the two agreements.
+  '2026-10-21': {
+    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
+    privacy: '131bbf6e1c2e9b2f9a2b0062fc1a6e3bc126358e0e59885776cbb31da165ad08',
+    driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
+    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

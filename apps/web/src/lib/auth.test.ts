@@ -253,6 +253,44 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
     expect(auth.getSessionPrincipal()).toBeNull();
   });
 
+  // [REVIEW-F2 #1968 S4-4] The refresh step is rate limited per address and can
+  // fail for reasons that say nothing about the session. Only the server saying
+  // no (401/403, or another plain 4xx) is a sign-out; a 5xx, a timeout, a rate
+  // limit or a dropped connection is "unreachable" and keeps the person signed in.
+  it('a restore whose refresh could not reach Swift is "unreachable", never a sign-out', async () => {
+    for (const status of [500, 503, 408, 429]) {
+      const auth = await loadAuth();
+      mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status, body: { success: false } } : { status: 401, body: {} }));
+      expect(await auth.restoreSession(), String(status)).toEqual({ ok: false, unreachable: true });
+    }
+    const offline = await loadAuth();
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
+    expect(await offline.restoreSession()).toEqual({ ok: false, unreachable: true });
+    vi.unstubAllGlobals();
+    for (const status of [401, 403]) {
+      const auth = await loadAuth();
+      mockApi(({ url }) => (url.pathname.endsWith('/auth/refresh') ? { status, body: { success: false } } : { status: 401, body: {} }));
+      expect(await auth.restoreSession(), String(status)).toEqual({ ok: false });
+    }
+  });
+
+  it('a 401 whose refresh could not reach Swift does not sign the person out or leave the page', async () => {
+    const auth = await loadAuth();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me') ? signedInAs('u1') : url.pathname.endsWith('/auth/refresh') ? { status: 503, body: { success: false } } : { status: 401, body: {} }));
+    await auth.sessionProbe();
+    const assign = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { pathname: '/dashboard/orders', search: '', set href(v: string) { assign(v); } },
+      configurable: true,
+    });
+    const failure = await auth.apiFetch('/api/v1/vendor/orders').catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(auth.ApiRequestError);
+    expect((failure as InstanceType<typeof auth.ApiRequestError>).status).toBe(503);
+    expect((failure as Error).message).not.toMatch(/signed out/i);
+    expect(assign).not.toHaveBeenCalled();
+    expect(auth.getSessionPrincipal()).toBe('u1');
+  });
+
   it('a 200 that names nobody is not a session — a shape change must not read as signed in', async () => {
     const auth = await loadAuth();
     mockApi(() => ({ body: { success: true, data: { user: null } } }));
