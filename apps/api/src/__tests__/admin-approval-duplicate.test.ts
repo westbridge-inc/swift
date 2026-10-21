@@ -9,7 +9,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { purgeAuditLogs } from '../lib/audit-immutability';
-import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
+import { APPROVAL_HEADER, askTargetKey } from '../modules/admin/admin-approval';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -190,6 +190,40 @@ describe('[U06] a second ask for the same act is refused while the first stands'
     const key = freshKey();
     const answers = await Promise.all([1, 2, 3].map(() => writeConfig(requester.token, key, { rate: 9 })));
     expect(answers.map((r) => r.statusCode).sort()).toEqual([202, 409, 409]);
+    expect(await openRows('PUT /config/:key', key)).toBe(1);
+  });
+
+  it('an ask checks and writes under the act\'s lock: while another ask holds it, nothing is written', async () => {
+    // The race above rarely interleaves in one process, so it cannot prove the
+    // lock alone. Hold the act's lock here, as a racing ask would between its
+    // check and its write, and send an ask: it must wait for the lock and
+    // write nothing until it is released.
+    const key = freshKey();
+    const lockName = `privileged-approval-ask:${askTargetKey({ method: 'PUT', routeUrl: '/config/:key', params: { key } } as never, '')}`;
+    let held!: () => void; let release!: () => void;
+    const holding = new Promise<void>((resolve) => { held = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const holder = app.prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${lockName}, 0))`;
+      held();
+      await released;
+    }, { timeout: 20_000 });
+    await holding;
+
+    let settled = false;
+    const ask = writeConfig(requester.token, key, { rate: 7 }).finally(() => { settled = true; });
+    const waitsOnTheLock = async () => (await app.prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*)::bigint AS n FROM pg_locks
+      WHERE locktype = 'advisory' AND NOT granted
+        AND ((classid::bigint << 32) | objid::bigint) = hashtextextended(${lockName}, 0)`)[0]!.n > 0n;
+    for (let i = 0; i < 400 && !settled && !(await waitsOnTheLock()); i++) await new Promise((r) => setTimeout(r, 25));
+
+    expect(settled).toBe(false);
+    expect(await openRows('PUT /config/:key', key)).toBe(0);
+    release();
+    await holder;
+    const answer = await ask;
+    expect(answer.statusCode, answer.body).toBe(202);
     expect(await openRows('PUT /config/:key', key)).toBe(1);
   });
 });
