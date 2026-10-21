@@ -91,6 +91,7 @@ import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
 import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
@@ -1255,6 +1256,12 @@ export async function adminRoutes(app: FastifyInstance) {
       subjectId: id, purpose: 'saved addresses on the admin user detail (support: delivery disputes)',
     } });
     const addresses = await runAsSystem(ADMIN_USER_ADDRESSES_CAPABILITY, () => app.prisma.address.findMany({ where: { userId: id } }));
+    // [item 20 · notifications] The inbox count (a number, never a notice) is
+    // walled to its person too: with the wall on it is counted through the
+    // named capability, so support sees the same number it always did.
+    if (ownerRlsBindEnabled()) {
+      user._count.notifications = await ownerWallSystem('admin:user-detail-notice-count', () => app.prisma.notification.count({ where: { userId: id } }));
+    }
 
     // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
