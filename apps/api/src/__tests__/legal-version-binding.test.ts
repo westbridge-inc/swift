@@ -198,6 +198,14 @@ const PUBLISHED: Record<
     driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
     vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
   },
+  // [ROLE-DOCS · owner 21 Oct 2026] police clearance: optional for TAXI drivers only (Privacy "With your explicit
+  // consent" line; Mover Agreement documents paragraph). Terms and Business Agreement change only by the date.
+  '2026-10-21': {
+    terms: 'a4d222f1c3bf4c7a9e4240120cc6dcf2a0a8a27253d4ffcab7bd1621e3e82604',
+    privacy: '52419357af9ca5f4705cd6e5e3a7848b5ed359270074400d1a6e589de4b98349',
+    driver_agreement: '3d1ad774321c726ae2263b9c38abc101240aba9c8380d9634267f4f8b6f29fa2',
+    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {

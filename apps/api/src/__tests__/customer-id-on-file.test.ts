@@ -179,17 +179,21 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
   // Store builds 9 and 10 (iPhone 9.1, release 14a8cf3b) send exactly { idDocumentUrl, selfieUrl,
   // consent: true, privacyNoticeVersion: 'v1' } after POST /verification/upload; the build reads only
   // success. That payload must keep working (the build under review talks to staging).
-  it('store builds 9 and 10 still send a selfie: their own selfie is accepted (never compared); someone else’s is refused', async () => {
-    const c = await customer();
-    const other = await customer();
-    const foreign = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(other.token, readable()) });
-    expect(foreign.statusCode).toBe(400);
-    expect(foreign.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
-    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
-
-    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: await upload(c.token, readable()) });
-    expect(res.statusCode, res.body).toBe(201);
-    expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+  // [ROLE-DOCS · owner ruling 21 Oct 2026 — a DELIBERATE change] The selfie they send is now DROPPED by the
+  // route, unread: never resolved, compared, stored or linked to the ID (a customer never gives a photo). So a
+  // foreign key in that field is no longer refused — it is simply never touched, and the payload keeps working.
+  it('store builds 9 and 10 still send a selfie: it is dropped unread (their own or anyone else’s), and the ID goes on file', async () => {
+    for (const whose of ['own', 'foreign'] as const) {
+      const c = await customer();
+      const other = await customer();
+      const selfieUrl = await upload(whose === 'own' ? c.token : other.token, readable());
+      const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl });
+      expect(res.statusCode, res.body).toBe(201);
+      expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+      expect(res.json().data.fileUrl).not.toBe(selfieUrl);
+      // nothing anywhere points at the selfie: no document, record or review case was made from it
+      expect(await app.prisma.verificationDocument.count({ where: { fileUrl: selfieUrl } })).toBe(0);
+    }
   });
 
   it('a second ID on an account already on file is refused in plain words', async () => {
@@ -288,7 +292,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
   it('PROCESSOR_REFERRED: an engine that reads documents and refers one to a person is not overruled', async () => {
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), new SandboxKycProvider());
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('PROCESSOR_REFERRED');
@@ -303,7 +307,7 @@ describe('(1) an automatic check holds the ID for a person', () => {
     };
     const service = new VerificationService(app.prisma, new NotificationService(app.prisma, app.io), down);
     const c = await customer();
-    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), undefined, 'v1');
+    const doc = await service.submitIdentity(c.id, await upload(c.token, readable()), 'v1');
     expect(doc).toMatchObject({ status: 'PENDING', reviewedBy: null });
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     expect(String(((await audit(doc.id)).find((a) => a.action === 'CUSTOMER_ID_HELD')?.changes as { reason?: string } | null)?.reason)).toContain('CHECKS_UNAVAILABLE');
