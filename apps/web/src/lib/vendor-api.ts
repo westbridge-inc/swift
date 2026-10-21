@@ -240,6 +240,38 @@ export const putHours = (hours: Array<{ dayOfWeek: number; openTime?: string; cl
   apiFetch(`${V}/hours`, { method: 'PUT', body: JSON.stringify({ hours }) });
 export const getSubscription = () => apiFetch(`${V}/subscription`).then((r) => r.data);
 
+// ── Services schedule (the app's Schedule tab: apps/mobile hooks/vendorops.ts) ──
+/** One appointment on a Services store's day (GET /vendor/bookings). */
+export interface VendorBooking {
+  id: string;
+  serviceName: string;
+  price: number | null;
+  slotStart: string;
+  slotEnd: string;
+  status: string;
+  orderId: string | null;
+  customer: { firstName: string } | null;
+}
+/** Blocked time: a full day (start/end null) or a window, "HH:MM" in Guyana. */
+export interface VendorBookingException {
+  id: string;
+  itemId: string | null;
+  date: string;
+  start: string | null;
+  end: string | null;
+  reason: string | null;
+}
+/** The coming two weeks of appointments (the server's default window). */
+export const getBookings = (): Promise<VendorBooking[]> =>
+  apiFetch(`${V}/bookings`).then((r) => ((r.data ?? []) as Array<VendorBooking & { price: unknown }>).map((b) => ({ ...b, price: toAmount(b.price) })));
+/** Blocked time in the coming month (owners and managers). */
+export const getBookingExceptions = (): Promise<VendorBookingException[]> =>
+  apiFetch(`${V}/bookings/exceptions`).then((r) => (r.data ?? []) as VendorBookingException[]);
+export const createBookingException = (body: { date: string; start?: string; end?: string; reason?: string }) =>
+  apiFetch(`${V}/bookings/exceptions`, { method: 'POST', body: JSON.stringify(body) });
+export const deleteBookingException = (id: string) =>
+  apiFetch(`${V}/bookings/exceptions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
 // ── Orders ───────────────────────────────────────────────────────────────────
 export const getOrders = (
   params: { status?: string; search?: string; page?: number; limit?: number } = {},
