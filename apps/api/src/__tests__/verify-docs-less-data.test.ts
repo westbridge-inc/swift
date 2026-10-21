@@ -192,7 +192,8 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
     await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: {
       ...stored,
       MOVER: [medical], MOVER_NO_LICENCE: ['national_id', medical],
-      MOVER_OPTIONAL: ['police_clearance', medical],
+      // [ROLE-DOCS · owner 21 Oct 2026] the movers' optional list is the taxi profile's (a stored MOVER_OPTIONAL is retired)
+      MOVER_TAXI_EXTRA_OPTIONAL: ['police_clearance', medical],
       VENDOR: ['business_registration', medical], VENDOR_UNREGISTERED: ['owner_national_id', medical],
       VENDOR_OPTIONAL: ['police_clearance', medical],
       SERVICE_PROVIDER: ['national_id', 'police_clearance', medical],
@@ -206,12 +207,13 @@ describe('[VERIFY-DOCS] a medical certificate is never accepted', () => {
       expect(await country.getDocumentChecklist('GY', 'VENDOR', 'UNREGISTERED')).toEqual(['owner_national_id']);
       expect(await country.getOptionalDocuments('GY', 'VENDOR', ['business_registration'])).toEqual(['police_clearance']);
       expect(await country.getMoverChecklist('GY', 'BICYCLE')).toEqual(['national_id']);
-      expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual(['police_clearance']);
+      expect(await country.getMoverOptionalDocuments('GY', 'BICYCLE')).toEqual([]);
+      expect(await country.getMoverOptionalDocuments('GY', 'CAR')).toEqual(['police_clearance']);
       expect(await providerChecklist(app.prisma, m.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
       const status = await app.inject({ method: 'GET', url: '/api/v1/verification/status?role=MOVER', headers: { authorization: `Bearer ${m.token}` } });
       expect(status.statusCode).toBe(200);
       expect(status.json().data.checklist).toEqual(['national_id']);
-      expect(status.json().data.optional).toEqual(['police_clearance']);
+      expect(status.json().data.optional).toEqual([]);
     } finally {
       await app.prisma.countryConfig.update({ where: { code: 'GY' }, data: { documentChecklists: stored } });
     }
