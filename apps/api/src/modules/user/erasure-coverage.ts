@@ -17,8 +17,8 @@ export const ERASED_CARD = {
   vaultTokenSealed: new Uint8Array(29), vaultTokenDek: new Uint8Array(33), brand: 'ERASED', last4: '0000', expMonth: 1, expYear: 2000,
 } as const;
 /** [REVIEW-G S4-2] What a support ticket's subject and message read after the erasure, so support sees why
- *  (owner G2: the text goes, even on an open ticket). */
-export const TICKET_TEXT_REMOVED = "[text removed at the customer's request]";
+ *  (owner G2: the text goes, even on an open ticket). "Account holder": partners' tickets get it too (COORD 21 Oct). */
+export const TICKET_TEXT_REMOVED = "[text removed at the account holder's request]";
 /** The checkout replay record keeps its order ids and date; this replaces its frozen response and request hash. */
 export const ERASED_CHECKOUT_RESULT = { erased: true } as const;
 

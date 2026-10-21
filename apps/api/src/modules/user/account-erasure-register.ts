@@ -55,7 +55,7 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'EnforcementAction.accountId': 'G1: the decision stays (level, reason code, dates); the signals fired and the appeal note are dropped',
   // G2 case and request free text.
   'MoneySurfaceCommand.userId': "REVIEW-G S4-1: the person's own surface (their driver profile) goes in the erasure transaction; a command they staged on a store or partner account that still exists stays in that entity's generation chain (an audit record) with the person replaced by the erased marker and its notice to them withdrawn",
-  'SupportTicket.userId': "G2: the ticket stays (category, status, dates, order link); subject and message read \"[text removed at the customer's request]\" and the staff note goes. Kept because server-written: the confirmed closure request (the support queue completes by its subject and text)",
+  'SupportTicket.userId': "G2: the ticket stays (category, status, dates, order link); subject and message read \"[text removed at the account holder's request]\" and the staff note goes. Kept because server-written: the confirmed closure request (the support queue completes by its subject and text)",
   'ComplianceViolation.userId': 'G2: the check stays (reason code, action, dates); its evidence is dropped',
   'ComplianceReviewCase.userId': 'G2: the case stays (status, dates, decider); its note is dropped',
   'RectificationRequest.userId': 'G2: the rights request stays (field code, dates, resolution); its note is replaced',
