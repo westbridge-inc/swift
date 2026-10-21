@@ -596,6 +596,24 @@ backups. Before the first production backup:
    swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
+4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
+   erasure writes its ledger entry in its own transaction; this unit ships the
+   unshipped entries every minute, encrypted to the same owner key, to
+   `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`:
+
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.service /etc/systemd/system/swift-erasure-ledger.service
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.timer /etc/systemd/system/swift-erasure-ledger.timer
+       systemctl daemon-reload
+       systemctl enable --now swift-erasure-ledger.timer
+       systemctl list-timers swift-erasure-ledger.timer
+
+   The ledger objects live under the backups' own prefix, so the bucket
+   keeps them at least as long as the backups. Never give the
+   `erasure-ledger/` prefix a shorter lifecycle rule than the dumps. An entry
+   still unshipped after 10 minutes pages the platform responders (the API's
+   erasure-ledger watch), and doctor.sh FAILs. A restore without the live
+   database replays the shipped entries: the owner decrypts them on his own
+   computer and passes them to `restore.sh --ledger-from <file>`.
 
 ## 5. Restore drill, with no live overwrite
 
