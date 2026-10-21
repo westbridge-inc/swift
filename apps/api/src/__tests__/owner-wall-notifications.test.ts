@@ -283,6 +283,20 @@ describe('[item 20] notifications written for someone else', () => {
     expect(await tx((t) => t.notification.count({ where: { userId: ids.storeOwner } }))).toBe(0);
   });
 
+  it('the account erasure removes the person\'s notices from inside an admin\'s transaction, and only theirs', async () => {
+    // #1905's erasure pass (eraseOwedRowsInTransaction) runs in the erasure transaction of whoever closes the account.
+    const { eraseOwedRowsInTransaction } = await import('../modules/user/erasure-coverage');
+    const erased = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    for (const userId of [erased, erased, ids.other]) {
+      await owner.notification.create({ data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Erase', body: `erase-${RUN}` } });
+    }
+    const mine = () => owner.notification.count({ where: { userId: ids.other, body: `erase-${RUN}` } });
+    expect(await mine()).toBe(1);
+    await asPerson(ids.other, () => app.prisma.$transaction((tx) => eraseOwedRowsInTransaction(tx, erased)));
+    expect(await owner.notification.count({ where: { userId: erased } })).toBe(0);
+    expect(await mine()).toBe(1);
+  });
+
   it('the go-live projection asks a store owner for a callable number once, from inside an admin\'s transaction', async () => {
     const { VerificationService } = await import('../modules/verification/verification.service');
     const { getKycProvider } = await import('../providers/kyc/kyc-provider');
@@ -457,10 +471,10 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       for (const m of text.matchAll(/\.\s*notification\s*\.\s*(create|upsert)\s*\(/g)) if (rel !== HELPER) writes.push(`${rel}: notification.${m[1]}`);
       for (let n = (text.match(/\.\s*notification\s*\.\s*createMany\s*\(/g) ?? []).length; n > 0; n -= 1) bump(bulk, rel);
       for (const m of text.matchAll(/\b(insertNoticeFor|upsertNoticeFor)\s*\(/g)) if (!/function\s+$/.test(text.slice(0, m.index))) bump(helperCalls, `${rel} ${m[1]}`);
-      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked)\s*\(/g)) {
+      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked|eraseNoticesOf)\s*\(/g)) {
         if (!/function\s+$/.test(text.slice(0, m.index))) bump(actionCalls, `${rel} ${m[1]}`);
       }
-      if (rel !== HELPER && /swift_owner_wall_(notice_id|pending_staff_invites|close_staff_invites|staff_invitees|public_phone_asked)/.test(text)) writes.push(`${rel}: calls a notice action by name`);
+      if (rel !== HELPER && /swift_owner_wall_(notice_id|pending_staff_invites|close_staff_invites|staff_invitees|public_phone_asked|erase_notices)/.test(text)) writes.push(`${rel}: calls a notice action by name`);
       for (const m of text.matchAll(/\.\s*notification\s*\.\s*(findFirst|findFirstOrThrow|findMany|findUnique|findUniqueOrThrow|count|aggregate|groupBy|update|updateMany|delete|deleteMany)\s*\(/g)) {
         const before = text.slice(Math.max(0, m.index! - 200), m.index);
         if (!/(ownerWallSystem|runAsSystem)\(\s*'[^']+',\s*\(\)\s*=>\s*[\w.$]*$/.test(before)) bump(plainReads, rel);
@@ -489,6 +503,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
+      'modules/user/erasure-coverage.ts eraseNoticesOf': 1,
       'modules/vendor/staff-invites.ts closeStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts pendingStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts staffInviteesOf': 1,

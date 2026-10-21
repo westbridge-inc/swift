@@ -4,6 +4,7 @@ import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-cl
 import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { accountErasedUnderLock } from '../user/account-closure';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
@@ -168,6 +169,12 @@ export class SubscriptionService {
       // [#1393] One weekly fee per mover payer: the payer and every one of its
       // sources are locked (and ownership re-read) before the activation is read.
       const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      // [#1879 S3-3 · REVIEW-G R1] No activation write for an erased account. The person's users row is locked
+      // here (a mover's already is, by lockMoverPayer), so an erasure either commits its cut-off first and this
+      // refuses, or waits behind this transaction and its wind-down then cancels what was written.
+      if (await accountErasedUnderLock(tx, payer?.userId ?? (await this.humanFor(entity, tx)).userId)) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Nothing can be activated for it.');
+      }
       const activation = await this.activation(entity, tx);
       const sub = payer && !('vendorId' in entity)
         ? await this.moverRow(entity, payer, activation, tx)

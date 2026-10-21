@@ -1,7 +1,30 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
+import type userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import SubscriptionsPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
+
+type User = ReturnType<typeof userEvent.setup>;
+
+/**
+ * [U06] Every money action here asks in the in-page panel, never a browser
+ * prompt: open it with the row's button, type into its labelled fields, then
+ * confirm with the panel's own button.
+ */
+async function answerPanel(user: User, opener: string, answers: { fields?: Record<string, string>; choose?: string; reason?: string }) {
+  await user.click(screen.getAllByRole('button', { name: opener })[0]!);
+  const panel = await screen.findByRole('dialog');
+  for (const [label, value] of Object.entries(answers.fields ?? {})) await user.type(within(panel).getByLabelText(label), value);
+  if (answers.choose) await user.click(within(panel).getByLabelText(answers.choose));
+  if (answers.reason !== undefined) {
+    const box = within(panel).getByRole('textbox', { name: /reason|why/i });
+    await user.clear(box);
+    if (answers.reason) await user.type(box, answers.reason);
+  }
+  return panel;
+}
+const confirmPanel = async (user: User, panel: HTMLElement, label: string) => user.click(within(panel).getByRole('button', { name: label }));
+const REASON_TYPED = 'Amount and reference match the deposit slip';
 
 // ---------------------------------------------------------------------------
 // [M-08] The console's top-up carries an Idempotency-Key the ATTEMPT owns.
@@ -37,21 +60,18 @@ afterEach(() => vi.unstubAllGlobals());
 // records a weekly-fee payment that arrived by cash or bank is "Record fee payment".
 describe('the recorded fee payment key belongs to the attempt', () => {
   it('sends an Idempotency-Key, reuses it when the same attempt is retried after an error, and mints a new one for the next attempt', async () => {
-    // [A-12] A top-up now names the transfer it is evidence of, and confirms the
-    // target and the delta before it credits anything.
-    vi.stubGlobal('prompt', vi.fn((msg: string) => {
-      if (String(msg).includes('reference')) return 'BANK-9001';
-      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
-      return '5000';
-    }));
-    vi.stubGlobal('confirm', vi.fn(() => true));
+    // [A-12] A top-up names the transfer it is evidence of, and the panel names
+    // the target before it credits anything.
     const fetchMock = mockApi(handler((_r, n) => (n === 1
       ? { status: 500, body: { success: false, error: { code: 'INTERNAL', message: 'lost' } } }
       : { body: { success: true, replayed: false, data: { balance: 5000, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    const answers = { fields: { 'Amount received (GYD)': '5000', 'Bank or MMG reference of the transfer': 'BANK-9001' }, reason: REASON_TYPED };
+    const panel = await answerPanel(user, 'Record fee payment', answers);
+    expect(panel.textContent).toContain('Shanta Kitchen');
+    await confirmPanel(user, panel, 'Record payment');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const first = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(first[0]).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/topup`);
@@ -59,15 +79,16 @@ describe('the recorded fee payment key belongs to the attempt', () => {
     const key = keyOf(first[1]);
     expect(key).toMatch(/^[0-9a-f-]{36}$/);
 
-    // The same attempt again (the admin retries after the error): the same key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Record fee payment' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    // The same attempt again (the admin retries from the panel, which kept what they typed): the same key.
+    expect(await within(panel).findByRole('alert')).toBeTruthy();
+    await confirmPanel(user, panel, 'Record payment');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(2));
     expect(keyOf(requestsByMethod(fetchMock, 'POST')[1]![1])).toBe(key);
+    expect(await screen.findByText('Payment recorded for Shanta Kitchen.')).toBeTruthy();
 
     // Answered — the next top-up is a new attempt with a new key.
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Record fee payment' }) as HTMLButtonElement).disabled).toBe(false));
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    const again = await answerPanel(user, 'Record fee payment', answers);
+    await confirmPanel(user, again, 'Record payment');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(3));
     const third = keyOf(requestsByMethod(fetchMock, 'POST')[2]![1]);
     expect(third).toMatch(/^[0-9a-f-]{36}$/);
@@ -81,50 +102,63 @@ describe('the recorded fee payment key belongs to the attempt', () => {
 // constant defeats it entirely — which is exactly what the waiver did, sending
 // the literal 'Waived by admin' as the "reason" on every call.
 // ---------------------------------------------------------------------------
+describe('[REVIEW-F2 S4-4] a queued fee payment cannot be recorded twice', () => {
+  it('202: says it waits for a second admin and locks Record fee payment on that row', async () => {
+    const fetchMock = mockApi(handler(() => ({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_f1' } } } })));
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '5000', 'Bank or MMG reference of the transfer': 'BANK-9101' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Record payment');
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain("Sent for a second admin's approval");
+    const locked = screen.getByRole('button', { name: 'Payment waiting for approval' }) as HTMLButtonElement;
+    expect(locked.disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Record fee payment' })).toBeNull();
+    await user.click(locked);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1);
+  });
+});
+
 describe('[A-12] the console cannot satisfy the evidence requirement by itself', () => {
-  it('abandoning the reference prompt credits nothing', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? null : '5000')));
-    vi.stubGlobal('confirm', vi.fn(() => true));
+  it('a missing reference credits nothing', async () => {
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '5000' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Record payment');
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 
-  it('declining the target-and-delta confirmation credits nothing', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? 'BANK-9002' : '5000')));
-    const confirm = vi.fn(() => false);
-    vi.stubGlobal('confirm', confirm);
+  it('closing the panel credits nothing', async () => {
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('GY$5,000'));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('BANK-9002'));
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '5000', 'Bank or MMG reference of the transfer': 'BANK-9002' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Cancel');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 
   it('a fractional amount is not a top-up', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('reference') ? 'BANK-9003' : '5000.5')));
-    vi.stubGlobal('confirm', vi.fn(() => true));
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '5000.5', 'Bank or MMG reference of the transfer': 'BANK-9003' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Record payment');
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
   });
 });
 
 describe('[A-12] a waived fee carries the operator’s own words', () => {
   it('sends what the operator typed — never the constant the console used to hard-code', async () => {
-    const reason = 'Outage on 2 Sep — vendor could not trade for three days';
-    vi.stubGlobal('prompt', vi.fn(() => reason));
+    const reason = 'Outage on 2 Sep - vendor could not trade for three days';
     const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: 'Waive fee' }));
+    const panel = await answerPanel(user, 'Waive fee', { reason });
+    await confirmPanel(user, panel, 'Waive fee');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'PUT')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/waive-fee`);
@@ -132,15 +166,70 @@ describe('[A-12] a waived fee carries the operator’s own words', () => {
     expect(JSON.parse(String(init?.body)).reason).not.toBe('Waived by admin');
   });
 
-  it('an abandoned or empty reason waives nothing', async () => {
-    for (const answer of [null, '   ', 'ok']) {
-      vi.stubGlobal('prompt', vi.fn(() => answer));
+  it('an abandoned, empty or one-word reason waives nothing', async () => {
+    for (const answer of [null, '', 'ok']) {
       const fetchMock = mockApi(handler(() => ({ body: { success: true, replayed: false, data: { balance: 0, currencyCode: 'GYD' } } })));
-      const { user } = renderWithQuery(<SubscriptionsPage />);
+      const { user, unmount } = renderWithQuery(<SubscriptionsPage />);
       expect(await screen.findAllByText('Shanta Kitchen')).toBeTruthy();
-      await user.click(screen.getAllByRole('button', { name: 'Waive fee' })[0]!);
+      const panel = await answerPanel(user, 'Waive fee', answer === null ? {} : { reason: answer });
+      await confirmPanel(user, panel, answer === null ? 'Cancel' : 'Waive fee');
       expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+      unmount();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [U06] A waiver is C4: its first answer is a second admin's approval. That
+// used to show nothing, so the operator pressed again and filed a second
+// approval; a refusal was swallowed. Every answer is now shown, and once the
+// waiver is queued its button is locked.
+// ---------------------------------------------------------------------------
+describe('[U06] a queued or refused waiver is shown, and a queued one cannot be asked twice', () => {
+  const reason = 'Outage on 2 Sep - vendor could not trade for three days';
+  const serve = (reply: { status?: number; body: unknown }) => mockApi((request: ApiRequest) => {
+    if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [subscription] } };
+    if (request.method === 'PUT' && request.url.pathname === '/api/v1/admin/subscriptions/sub-1/waive-fee') return reply;
+    throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+  });
+
+  it('202: says it waits for a second admin and locks the button', async () => {
+    const fetchMock = serve({ status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens.', details: { approvalId: 'apr_w1' } } } });
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await answerPanel(user, 'Waive fee', { reason });
+    await confirmPanel(user, panel, 'Waive fee');
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain("Sent for a second admin's approval");
+    expect(status.textContent).toContain('apr_w1');
+    expect(screen.queryByText(/failed|try again/i)).toBeNull();
+    const locked = screen.getByRole('button', { name: 'Waiver waiting for approval' }) as HTMLButtonElement;
+    expect(locked.disabled).toBe(true);
+    await user.click(locked);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1);
+  });
+
+  it('409 APPROVAL_ALREADY_OPEN (asked before a reload): shown as already waiting, never as a failure, and locked', async () => {
+    serve({ status: 409, body: { success: false, error: { code: 'APPROVAL_ALREADY_OPEN', message: 'This is already waiting for a second admin in Approvals.', details: { approvalId: 'apr_w0', approvalStatus: 'PENDING' } } } });
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await answerPanel(user, 'Waive fee', { reason });
+    await confirmPanel(user, panel, 'Waive fee');
+    const status = await screen.findByRole('status');
+    expect(status.textContent).toContain("Already waiting for a second admin's approval");
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((screen.getByRole('button', { name: 'Waiver waiting for approval' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('a refusal is shown in the server words and keeps the reason typed', async () => {
+    serve({ status: 409, body: { success: false, error: { code: 'ALREADY_WAIVED', message: 'This period is already waived for this account.' } } });
+    const { user } = renderWithQuery(<SubscriptionsPage />);
+    expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
+    const panel = await answerPanel(user, 'Waive fee', { reason });
+    await confirmPanel(user, panel, 'Waive fee');
+    expect((await within(panel).findByRole('alert')).textContent).toContain('This period is already waived');
+    expect((within(panel).getByRole('textbox', { name: /why/i }) as HTMLTextAreaElement).value).toBe(reason);
   });
 });
 
@@ -165,14 +254,12 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   const queued = { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this before it happens. It is in the approvals queue.', details: { approvalId: 'apr_9' } } } };
 
   it('asking for a refund sets the credit aside first, says not to pay yet, and shows the approval it is waiting on', async () => {
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal('confirm', confirm);
-    vi.stubGlobal('prompt', vi.fn(() => REASON));
     const fetchMock = refundServer(withCredit, () => queued);
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Refund credit' }));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Do not pay anything yet'));
+    const panel = await answerPanel(user, 'Refund credit', { reason: REASON });
+    expect(panel.textContent).toContain('Do not pay anything yet');
+    await confirmPanel(user, panel, 'Set aside for refund');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/set-aside`);
@@ -185,24 +272,20 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   });
 
   it('a refusal is shown in the server words', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn(() => REASON));
     refundServer(withCredit, () => ({ status: 409, body: { success: false, error: { code: 'FEE_CREDIT_CHANGED', message: 'The unused credit is now 3000 GYD. Nothing was set aside: ask again for exactly that amount.' } } }));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Refund credit' }));
+    await confirmPanel(user, await answerPanel(user, 'Refund credit', { reason: REASON }), 'Set aside for refund');
     expect((await screen.findByRole('alert')).textContent).toContain('The unused credit is now 3000 GYD. Nothing was set aside');
   });
 
   it('a set-aside row says to pay it, then records the payout with its method and reference, and shows the answer', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'MMG' : String(msg).includes('Reference of the refund') ? 'REFUND9001' : REASON)));
     const fetchMock = refundServer(setAsideRow, () => ({ body: { success: true, replayed: false, data: { amount: 5000, currencyCode: 'GYD', balance: 0, refundSetAside: 0 } } }));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
     expect(screen.getByText(/set aside: pay it outside Swift, then record the payout/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Refund credit' })).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await confirmPanel(user, await answerPanel(user, 'Record payout', { choose: 'MMG', fields: { 'Reference of the refund you paid': 'REFUND9001' }, reason: REASON }), 'Record payout');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/paid`);
@@ -212,12 +295,10 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   });
 
   it('a replay of an earlier payout does not say a new set-aside is complete', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'EARLIER9001' : REASON)));
     refundServer(setAsideRow, () => ({ body: { success: true, replayed: true, data: { amount: 5000, currencyCode: 'GYD', balance: 0, refundSetAside: 5000 } } }));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     await screen.findByText('Shanta Kitchen');
-    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await confirmPanel(user, await answerPanel(user, 'Record payout', { choose: 'MMG', fields: { 'Reference of the refund you paid': 'EARLIER9001' }, reason: REASON }), 'Record payout');
     const message = (await screen.findByRole('status')).textContent;
     expect(message).toContain('earlier payout');
     expect(message).toContain('still set aside');
@@ -225,12 +306,10 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   });
 
   it('a queued payout record says payment was reported and prevents another payment or release', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9001' : REASON)));
     refundServer(setAsideRow, () => queued);
     const { user } = renderWithQuery(<SubscriptionsPage />);
     await screen.findByText('Shanta Kitchen');
-    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await confirmPanel(user, await answerPanel(user, 'Record payout', { choose: 'MMG', fields: { 'Reference of the refund you paid': 'SENT9001' }, reason: REASON }), 'Record payout');
     const message = (await screen.findByRole('status')).textContent;
     expect(message).toContain('Payment reported');
     expect(message).not.toContain('Nothing has moved');
@@ -249,8 +328,6 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   });
 
   it('[DS1122 S3] a payout reported for one set-aside never blocks the next set-aside on the same account', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (msg.includes('Paid back by') ? 'MMG' : msg.includes('Reference of the refund') ? 'SENT9002' : REASON)));
     let row: unknown = setAsideRow;
     mockApi((request: ApiRequest) => {
       if (request.url.pathname === '/api/v1/admin/subscriptions') return { body: { success: true, data: [row] } };
@@ -259,7 +336,7 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
     });
     const { user, queryClient } = renderWithQuery(<SubscriptionsPage />);
     await screen.findByText('Shanta Kitchen');
-    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await confirmPanel(user, await answerPanel(user, 'Record payout', { choose: 'MMG', fields: { 'Reference of the refund you paid': 'SENT9002' }, reason: REASON }), 'Record payout');
     await waitFor(() => expect((screen.getByRole('button', { name: 'Release' }) as HTMLButtonElement).disabled).toBe(true));
     // That payout is recorded; credit is later set aside again (a new set-aside).
     row = { ...setAsideRow, refundSetAsideId: 'evt-aside-2' };
@@ -280,22 +357,18 @@ describe('fee credit refund: set aside, pay, record, and every answer is shown',
   });
 
   it('a payout refusal (a bad reference) is shown, not swallowed', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn((msg: string) => (String(msg).includes('Paid back by') ? 'BANK' : String(msg).includes('Reference of the refund') ? 'x' : REASON)));
     refundServer(setAsideRow, () => ({ status: 400, body: { success: false, error: { code: 'REFUND_REFERENCE_INVALID', message: 'That does not look like a transfer reference. Copy it from the MMG or bank record.' } } }));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Record payout' }));
+    await confirmPanel(user, await answerPanel(user, 'Record payout', { choose: 'Bank transfer', fields: { 'Reference of the refund you paid': 'X1Y2' }, reason: REASON }), 'Record payout');
     expect((await screen.findByRole('alert')).textContent).toContain('That does not look like a transfer reference');
   });
 
   it('a set-aside that could not be paid is released with the whole amount', async () => {
-    vi.stubGlobal('confirm', vi.fn(() => true));
-    vi.stubGlobal('prompt', vi.fn(() => REASON));
     const fetchMock = refundServer(setAsideRow, () => queued);
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Release' }));
+    await confirmPanel(user, await answerPanel(user, 'Release', { reason: REASON }), 'Return to credit');
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(url).toBe(`${API_ORIGIN}/api/v1/admin/subscriptions/sub-1/refund-credit/release`);
@@ -323,17 +396,12 @@ describe('[owner 8 Oct] recording a fee payment by hand', () => {
   });
 
   it('shows the server’s words when it refuses one', async () => {
-    vi.stubGlobal('prompt', vi.fn((msg: string) => {
-      if (String(msg).includes('reference')) return 'BANK-9100';
-      if (String(msg).includes('Why are you about to')) return 'Amount and reference match the deposit slip';
-      return '9000';
-    }));
-    vi.stubGlobal('confirm', vi.fn(() => true));
     const refusal = 'This would pay more than one week ahead on this account. Record at most GY$8,400 now and refund the rest to the partner (finance procedure: weekly fee refunds).';
     mockApi(handler(() => ({ status: 409, body: { success: false, error: { code: 'PAY_AHEAD_LIMIT', message: refusal } } })));
     const { user } = renderWithQuery(<SubscriptionsPage />);
     expect(await screen.findByText('Shanta Kitchen')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Record fee payment' }));
-    expect((await screen.findByRole('alert')).textContent).toContain('Record at most GY$8,400');
+    const panel = await answerPanel(user, 'Record fee payment', { fields: { 'Amount received (GYD)': '9000', 'Bank or MMG reference of the transfer': 'BANK-9100' }, reason: REASON_TYPED });
+    await confirmPanel(user, panel, 'Record payment');
+    expect((await within(panel).findByRole('alert')).textContent).toContain('Record at most GY$8,400');
   });
 });

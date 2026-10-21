@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useId, cloneElement } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchPromos, createPromo, type CreatePromoInput, type Promo } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { Modal } from '@/components/Modal';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 const EMPTY: CreatePromoInput = {
   code: '',
@@ -20,25 +21,40 @@ export default function PromosPage() {
   const { data, isLoading, isError, error: readError, refetch, isFetching } = useQuery({ queryKey: ['promos'], queryFn: fetchPromos });
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<CreatePromoInput>(EMPTY);
-  const [error, setError] = useState<string | null>(null);
 
-  const create = useMutation({
-    mutationFn: (reason: string) =>
-      createPromo({
-        ...form,
-        code: form.code.trim(),
-        discountValue: Number(form.discountValue),
-        ...(form.minOrderAmount != null ? { minOrderAmount: Number(form.minOrderAmount) } : {}),
-        ...(form.maxUses != null ? { maxUses: Number(form.maxUses) } : {}),
-      }, reason),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['promos'] });
-      setOpen(false);
-      setForm(EMPTY);
-      setError(null);
-    },
-    onError: (e) => setError((e as Error).message || 'Could not create promo.'),
+  // [U62] The form is the shared dialog (focus kept inside, Escape and a click
+  // outside close it) and, once anything is typed, only Cancel closes it, so a
+  // stray click never throws the typed promo away. Creating it goes through the
+  // reason panel: the form steps aside (its values kept) while the panel runs
+  // the request once, and comes back if the operator cancels or is refused.
+  const actions = useActionRunner(() => {
+    void qc.invalidateQueries({ queryKey: ['promos'] });
+    setForm(EMPTY);
   });
+  const dirty = JSON.stringify(form) !== JSON.stringify(EMPTY);
+  const submit = async () => {
+    const body: CreatePromoInput = {
+      ...form,
+      code: form.code.trim(),
+      discountValue: Number(form.discountValue),
+      ...(form.minOrderAmount != null ? { minOrderAmount: Number(form.minOrderAmount) } : {}),
+      ...(form.maxUses != null ? { maxUses: Number(form.maxUses) } : {}),
+    };
+    setOpen(false);
+    const outcome = await actions.run({
+      title: `Create the promo code ${body.code}?`,
+      body: (
+        <p>
+          {body.discountType === 'PERCENTAGE' ? `${body.discountValue}% off` : body.discountType === 'FIXED_AMOUNT' ? `GY$${body.discountValue.toLocaleString()} off` : 'Free delivery'}
+          , valid {body.validFrom} to {body.validUntil}{body.maxUses ? `, at most ${body.maxUses} uses` : ''}.
+        </p>
+      ),
+      confirmLabel: 'Create promo code',
+      submit: ({ reason }) => createPromo(body, reason),
+      success: () => `Promo code ${body.code} created.`,
+    });
+    if (outcome?.tone !== 'success' && outcome?.tone !== 'queued') setOpen(true);
+  };
 
   const set = (patch: Partial<CreatePromoInput>) => setForm((f) => ({ ...f, ...patch }));
 
@@ -47,13 +63,15 @@ export default function PromosPage() {
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold">Promo Codes</h1>
         <button
-          onClick={() => { setError(null); setOpen(true); }}
+          type="button"
+          onClick={() => { actions.clear(); setOpen(true); }}
           className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm hover:bg-[var(--accent)]/80"
         >
           Create Promo
         </button>
       </div>
 
+      {actions.banner}
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
           <thead>
@@ -104,9 +122,9 @@ export default function PromosPage() {
       </div>
 
       {open && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50" onClick={() => setOpen(false)}>
-          <div className="w-full max-w-md bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-6" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold mb-4">New Promo Code</h2>
+        <Modal title="New promo code" onClose={() => setOpen(false)} busy={dirty} overlayTestId="promo-form-overlay">
+          <div className="w-full max-w-md bg-[var(--panel)] rounded-2xl border border-[var(--border)] p-6">
+            <h2 className="text-lg font-semibold mb-4">New promo code</h2>
             <div className="space-y-3">
               <Field label="Code">
                 <input value={form.code} onChange={(e) => set({ code: e.target.value.toUpperCase() })}
@@ -146,16 +164,15 @@ export default function PromosPage() {
                 </Field>
               </div>
             </div>
-            {error && <p className="mt-3 text-sm text-[var(--accent)]">{error}</p>}
             <div className="flex justify-end gap-3 mt-5">
-              <button onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
-              <button onClick={() => { const reason = askReason({ action: `create this promo code`, subject: form.code.trim() }); if (reason) create.mutate(reason); }} disabled={create.isPending || form.code.trim().length < 2 || !form.description.trim()}
+              <button type="button" onClick={() => setOpen(false)} className="px-4 py-2 text-sm text-[var(--muted)] hover:text-white">Cancel</button>
+              <button type="button" onClick={() => void submit()} disabled={form.code.trim().length < 2 || !form.description.trim()}
                 className="px-5 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50">
-                {create.isPending ? 'Creating…' : 'Create'}
+                Create
               </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

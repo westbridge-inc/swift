@@ -385,6 +385,11 @@ export function decodeProviderCursor(
   return (claims as ProviderCursorClaims).afterId;
 }
 
+/** How long an unanswered request counts as "the same request" when the
+ *  customer sends it again (a lost response, a second tap). Longer than any
+ *  client timeout plus a re-tap; far shorter than a real second ask. */
+export const SERVICE_JOB_RETRY_WINDOW_MS = 10 * 60 * 1000;
+
 export interface ServiceJobAuthorityObserver {
   /** Test-only observation seam. Production does not provide an observer. */
   afterAuthorityChecked?: (snapshot: Readonly<{
@@ -465,6 +470,30 @@ export async function createServiceJobWithLiveAuthority(
       trade,
     });
 
+    // [C2 server] A RETRIED REQUEST IS THE SAME REQUEST. The phone sends no
+    // Idempotency-Key here (builds 9/11 cannot be changed), so a response lost
+    // on a slow network, or a second tap, used to mint a second REQUESTED job
+    // and a second chat room for the same ask. The natural key is the ask
+    // itself: this customer, this provider, the same words and photos, still
+    // unanswered (REQUESTED), asked moments ago. The customer's User row is
+    // locked FOR UPDATE above, so two copies of one request run one after the
+    // other and the second one sees the first. It gets the first job back —
+    // same job, same room, and no second notice to the provider.
+    const earlier = await tx.serviceJob.findFirst({
+      where: {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        providerId: provider.id,
+        description: input.description,
+        photos: { equals: input.photos },
+        status: 'REQUESTED',
+        chatRoomId: { not: null },
+        createdAt: { gte: new Date(Date.now() - SERVICE_JOB_RETRY_WINDOW_MS) },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (earlier) return { job: earlier, created: false as const };
+
     const job = await tx.serviceJob.create({
       data: {
         // [TA-S1-006] Both parties were just proven to live in input.tenantId;
@@ -488,6 +517,7 @@ export async function createServiceJobWithLiveAuthority(
         },
       },
     });
-    return tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    const linked = await tx.serviceJob.update({ where: { id: job.id }, data: { chatRoomId: room.id } });
+    return { job: linked, created: true as const };
   });
 }

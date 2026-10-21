@@ -101,13 +101,25 @@ CREATE OR REPLACE FUNCTION public.swift_owner_wall_public_phone_asked(p_user_id 
      AND n.data -> 'kind' = '"vendor_needs_public_phone"'::jsonb
      AND n.data -> 'vendorId' = to_jsonb(p_vendor_id))
 $$;
+-- [#1905 erasure] The account erasure removes the person's notices from inside its own transaction, run by
+-- the person, an admin completing a closure, or the retry sweep: under the wall a plain DELETE by anyone but
+-- the person would silently remove nothing. Keyed by the erased person; the caller holds the users row lock.
+CREATE OR REPLACE FUNCTION public.swift_owner_wall_erase_notices(p_user_id text) RETURNS integer
+  LANGUAGE sql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  WITH erased AS (
+    DELETE FROM public.notifications WHERE "userId" = p_user_id
+    RETURNING 1)
+  SELECT count(*)::integer FROM erased
+$$;
 REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_notice_id(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_pending_staff_invites(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_close_staff_invites(text, text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_staff_invitees(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_public_phone_asked(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.swift_owner_wall_erase_notices(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.swift_owner_wall_notice_id(text, text) TO swift_app;
 GRANT EXECUTE ON FUNCTION public.swift_owner_wall_pending_staff_invites(text, text) TO swift_app;
 GRANT EXECUTE ON FUNCTION public.swift_owner_wall_close_staff_invites(text, text, text, text) TO swift_app;
 GRANT EXECUTE ON FUNCTION public.swift_owner_wall_staff_invitees(text, text) TO swift_app;
 GRANT EXECUTE ON FUNCTION public.swift_owner_wall_public_phone_asked(text, text) TO swift_app;
+GRANT EXECUTE ON FUNCTION public.swift_owner_wall_erase_notices(text) TO swift_app;

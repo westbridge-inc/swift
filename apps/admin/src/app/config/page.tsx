@@ -1,10 +1,11 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchConfig, updateConfig } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { outcomeOf } from '@/lib/outcome';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 // EVERY FIELD ON THIS PAGE MUST BE READ BY PRODUCTION CODE.
 //
@@ -79,22 +80,41 @@ export default function ConfigPage() {
   const qc = useQueryClient();
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['config'], queryFn: fetchConfig });
   const [edits, setEdits] = useState<Record<string, string>>({});
-  const [status, setStatus] = useState<string | null>(null);
 
   const rows: { key: string; value: unknown }[] = data?.data ?? [];
   const values = Object.fromEntries(rows.map((r) => [r.key, r.value]));
 
-  const save = useMutation({
-    mutationFn: async (reason: string) => {
-      await Promise.all(Object.entries(edits).map(([key, v]) => updateConfig(key, Number(v), reason)));
-    },
-    onSuccess: () => {
-      setStatus('Saved.');
-      setEdits({});
-      qc.invalidateQueries({ queryKey: ['config'] });
-    },
-    onError: (e) => setStatus((e as Error).message || 'Save failed.'),
+  // [U28] A configuration change is C5: its first answer is a second admin's
+  // approval. It used to read "Saved." (or the 202 as an error) with the form
+  // still dirty, so a second save filed a duplicate approval. The panel names
+  // old -> new per setting; once it went through OR was queued the edits are
+  // cleared, so nothing is left to press twice. A refusal outranks a queued
+  // answer: the operator is shown what did not go.
+  const actions = useActionRunner(() => {
+    setEdits({});
+    void qc.invalidateQueries({ queryKey: ['config'] });
   });
+  const save = () => {
+    const changes = Object.entries(edits);
+    void actions.run({
+      title: changes.length === 1 ? 'Change this setting?' : `Change these ${changes.length} settings?`,
+      body: (
+        <ul>
+          {changes.map(([key, v]) => <li key={key}><code>{key}</code>: {String(values[key] ?? 'not set')} to {v}</li>)}
+        </ul>
+      ),
+      confirmLabel: 'Save configuration',
+      submit: async ({ reason }) => {
+        const results = await Promise.allSettled(changes.map(([key, v]) => updateConfig(key, Number(v), reason)));
+        const failures = results.flatMap((r) => (r.status === 'rejected' ? [r.reason as unknown] : []));
+        const refused = failures.find((e) => outcomeOf(e, { kind: 'write' }).tone !== 'queued');
+        if (refused) throw refused;
+        if (failures.length) throw failures[0];
+        return results;
+      },
+      success: () => 'Saved.',
+    });
+  };
 
   const dirty = Object.keys(edits).length > 0;
 
@@ -118,15 +138,13 @@ export default function ConfigPage() {
                 {section.items.map((item) => (
                   <div key={item.key} className="p-3 rounded-lg bg-white/5">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm">{item.label}</label>
+                      <label htmlFor={`config-${item.key}`} className="text-sm">{item.label}</label>
                       <input
+                        id={`config-${item.key}`}
                         type="number"
                         step="any"
                         value={edits[item.key] ?? String(values[item.key] ?? '')}
-                        onChange={(e) => {
-                          setStatus(null);
-                          setEdits((prev) => ({ ...prev, [item.key]: e.target.value }));
-                        }}
+                        onChange={(e) => setEdits((prev) => ({ ...prev, [item.key]: e.target.value }))}
                         className="bg-[var(--panel-2)] text-white px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none w-32 text-right"
                       />
                     </div>
@@ -173,20 +191,15 @@ export default function ConfigPage() {
             </div>
           </div>
 
+          {actions.banner}
           <div className="flex items-center justify-end gap-4">
-            {status && <span className="text-sm text-[var(--muted)]">{status}</span>}
             <button
-              onClick={() => {
-                const reason = askReason({
-                  action: `change ${Object.keys(edits).length === 1 ? 'this configuration' : 'these configurations'}`,
-                  subject: Object.keys(edits).join(', '),
-                });
-                if (reason) save.mutate(reason);
-              }}
-              disabled={!dirty || save.isPending}
+              type="button"
+              onClick={save}
+              disabled={!dirty}
               className="px-6 py-2.5 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
             >
-              {save.isPending ? 'Saving…' : 'Save Configuration'}
+              Save Configuration
             </button>
           </div>
         </div>

@@ -115,3 +115,18 @@ describe('[PAYMENT-SIMPLIFY] the pay link card follows the server switch', () =>
     expect(screen.queryByText(/Your MMG pay link/)).toBeNull();
   });
 });
+
+// [UI-SWEEP U24] A failed profile read rendered a blank Account page: the MMG
+// pay-link card, where a driver's earnings land, silently disappeared.
+describe('[U24] a failed profile read says so', () => {
+  it('shows "Couldn\'t load your earner profile" and retries, never a blank page', async () => {
+    const read = vi.spyOn(moverApi, 'getDriverProfile')
+      .mockRejectedValueOnce(new Error('Server error'))
+      .mockResolvedValue(driverProfile() as never);
+    renderWithQuery(<AccountPage />);
+    expect(await screen.findByText("Couldn't load your earner profile.")).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('Your MMG pay link (taxi)')).toBeTruthy();
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+});

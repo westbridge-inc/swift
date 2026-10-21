@@ -1191,7 +1191,7 @@ export function VendorOps({ store, navigation }: any) {
           {surface.canToggleOpen ? (
             <Pressable
               disabled={inPreview || toggleOpen.isPending}
-              onPress={() => toggleOpen.mutate()}
+              onPress={() => toggleOpen.mutate(!open)}
               accessibilityRole="switch"
               accessibilityLabel="Store open to customers"
               accessibilityHint={open ? 'Close the store to new customers' : 'Open the store to new customers'}
@@ -1219,7 +1219,7 @@ export function VendorOps({ store, navigation }: any) {
               size="md"
               style={{ marginTop: space.md }}
               loading={toggleOrders.isPending}
-              onPress={() => toggleOrders.mutate()}
+              onPress={() => toggleOrders.mutate(!accepting)}
             />
           ) : null}
           {toggleOrders.isError ? (

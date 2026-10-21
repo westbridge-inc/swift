@@ -281,6 +281,49 @@ describe('[MMG REVERSAL] returning a whole payment', () => {
     expect(new Headers(post![1]!.headers).get('x-swift-reason')).toBe('The partner paid this week twice by mistake');
   });
 
+  // [U07] After "Sent for a second admin's approval" the amount and reason
+  // stayed filled and the button worked again: every press filed another
+  // return approval for the same payment.
+  it('[U07] once queued the return is locked: no second ask, however it is pressed', async () => {
+    const { fetchMock, user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView();
+      if (request.method === 'POST' && request.url.pathname === `${PATH}/${confirmed.id}/reverse`) {
+        return { status: 202, body: { success: false, error: { code: 'APPROVAL_REQUIRED', message: 'A second admin must approve this', details: { approvalId: 'ap_9' } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    await user.type(within(panel).getByLabelText('Why it is being returned'), 'The partner paid this week twice by mistake');
+    await user.type(within(panel).getByLabelText('Amount to return'), '2100');
+    await user.click(within(panel).getByRole('button', { name: 'Return this payment' }));
+    expect(await within(panel).findByText(/Sent for a second admin's approval/)).toBeTruthy();
+    const waiting = within(panel).getByRole('button', { name: 'Waiting for approval' }) as HTMLButtonElement;
+    expect(waiting.disabled).toBe(true);
+    expect((within(panel).getByLabelText('Amount to return') as HTMLInputElement).disabled).toBe(true);
+    expect(within(panel).getByRole('link', { name: 'Approvals' }).getAttribute('href')).toBe('/approvals');
+    await user.click(waiting);
+    await user.type(within(panel).getByLabelText('Amount to return'), '{Enter}');
+    const posts = fetchMock.mock.calls.filter(([input, init]) => String(input).endsWith('/reverse') && init?.method === 'POST');
+    expect(posts).toHaveLength(1);
+  });
+
+  it('[U07 · U06] the server saying the earlier ask still stands reads as waiting, never as a failure', async () => {
+    const { user } = await openConfirmed((request) => {
+      if (request.url.pathname === REVERSAL_PATH) return reversalView();
+      if (request.method === 'POST' && request.url.pathname === `${PATH}/${confirmed.id}/reverse`) {
+        return { status: 409, body: { success: false, error: { code: 'APPROVAL_ALREADY_OPEN', message: 'This is already waiting for a second admin in Approvals. Nothing new was asked.', details: { approvalId: 'ap_9', approvalStatus: 'PENDING', askedByYou: true } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const panel = await screen.findByRole('region', { name: 'Return this payment' });
+    await user.type(within(panel).getByLabelText('Why it is being returned'), 'The partner paid this week twice by mistake');
+    await user.type(within(panel).getByLabelText('Amount to return'), '2100');
+    await user.click(within(panel).getByRole('button', { name: 'Return this payment' }));
+    expect(await within(panel).findByText(/Sent for a second admin's approval/)).toBeTruthy();
+    expect(within(panel).queryByRole('alert')).toBeNull();
+    expect((within(panel).getByRole('button', { name: 'Waiting for approval' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it('[Opus delta S3-N1] MMG no longer finds the payment: the held return offers the "returned, not booked" close; otherwise it does not', async () => {
     await openConfirmed((request) => {
       if (request.url.pathname === REVERSAL_PATH) return reversalView({ canReverse: false, reversals: [{ ...heldReversal, lookupStatus: 'PAYMENT_NOT_FOUND', heldReason: 'NOT_PROVEN_IN_TIME' }] });
