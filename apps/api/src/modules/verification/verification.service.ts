@@ -2431,7 +2431,7 @@ export class VerificationService {
   // -------------------------------------------------------------------------
 
   /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend.
-   *  [Row 209] One document never stops the sweep. A lapsed row in a state the document machine does
+   *  [Expiry isolation] One document never stops the sweep. A lapsed row in a state the document machine does
    *  not let expire is HELD as it is, for a person (no gate accepts an expired record, so it grants
    *  nothing); a row whose expiry fails stays lapsed and is retried on the next run; a failed heal or
    *  follow-up is reported. The admins are told once per run, and the reminders, retention reaper and

@@ -3,7 +3,7 @@ import { notifyAdmins, type NotificationService } from '../notification/notifica
 import { log } from '../../utils/logger';
 import { DOC_TRANSITIONS } from './doc-state';
 
-/** [Row 209] The states the document machine lets EXPIRE, read from the machine itself. A lapsed row
+/** [Expiry isolation] The states the document machine lets EXPIRE, read from the machine itself. A lapsed row
  *  in any other state would be refused by the database (DOC_STATE_ILLEGAL), so the sweep holds it. */
 export const EXPIRABLE_DOC_STATES: ReadonlySet<DocState> = new Set(
   DOC_TRANSITIONS.filter((t) => t.to === 'EXPIRED').map((t) => t.from),
@@ -20,7 +20,7 @@ export type ExpiryHeldReason =
 const ID_SAMPLE = 10;
 
 /**
- * [Row 209] What the daily expiry sweep could not finish, so that one row never stops the rest:
+ * [Expiry isolation] What the daily expiry sweep could not finish, so that one row never stops the rest:
  * each failure is counted and logged by document id and error class only (never a message, which
  * can carry values), and the admins are told ONCE per run. Nothing here throws.
  */
@@ -48,11 +48,15 @@ export class ExpirySweepReport {
   async report(prisma: PrismaClient, notifications: NotificationService, expired: number): Promise<void> {
     if (this.total === 0) return;
     const summary = Object.entries(this.counts).map(([reason, n]) => `${reason}=${n}`).join(' ');
+    // A failed follow-up is NOT retried (the document already left the lapsed set): say what it can mean.
+    const followUp = this.counts.effects_failed
+      ? ' A follow-up failed after a document expired and is not retried: the person may still be online or listed until someone checks.'
+      : '';
     log().error({ counts: this.counts, documentIds: this.documentIds, expired }, 'verification expiry sweep held or failed rows; the rest of the sweep ran');
     await notifyAdmins(prisma, notifications, {
       tenantId: null,
       title: 'Document expiry needs attention',
-      body: `${this.total} step(s) of today's document expiry could not finish (${summary}). Every other document was handled and the retention work ran. Failed rows are retried on the next run; a held row needs a person.`,
+      body: `${this.total} step(s) of today's document expiry could not finish (${summary}). Every other document was handled and the rest of the daily job continues. A row whose expiry failed is retried on the next run; a held row needs a person.${followUp}`,
       data: { kind: 'ops_reaper_failed', error: `expiry sweep: ${summary}`.slice(0, 200) },
     }).catch((err: unknown) => {
       log().error({ errName: err instanceof Error ? err.name : typeof err }, 'verification expiry sweep: the admin notice failed');
