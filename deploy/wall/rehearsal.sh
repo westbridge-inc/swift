@@ -12,8 +12,8 @@
 # (pilot-up builds it), production's database is running (the copy's source),
 # and no rehearsal is already there. Production is only READ: a role list
 # without passwords (pg_dumpall --roles-only --no-role-passwords, filtered to
-# the four group roles), a pg_dump streamed straight into the copy, and the
-# read-only census. Every line printed is a step, a count, a digest or a
+# the four group roles, plus swift_owner_wall when the source has it), a pg_dump
+# streamed straight into the copy, and the read-only census. Every line printed is a step, a count, a digest or a
 # reason code: never a secret, never a row.
 #
 # Every provider secret the copy's processes are wired to read gets a fresh
@@ -170,9 +170,11 @@ cmd_up() {
   # 2. The copy's database and its neighbours, on the rehearsal network.
   STEP=copy
   "${REH[@]}" up -d --wait postgres redis meilisearch >/dev/null || die "the rehearsal database did not become healthy"
-  # 3. The four group roles, without passwords, then production's database streamed in.
+  # 3. The four group roles (and the owner wall's swift_owner_wall when the source has it: its
+  #    addresses policy names the role, and pg_dump does not carry cluster roles), without
+  #    passwords, then production's database streamed in.
   "${PROD[@]}" exec -T postgres sh -c "$OWNER"' exec pg_dumpall -h 127.0.0.1 -U "$POSTGRES_USER" --roles-only --no-role-passwords' |
-    python3 -I "$HERE/rehearsal-roles.py" $WALL_GROUPS |
+    python3 -I "$HERE/rehearsal-roles.py" $WALL_GROUPS --optional swift_owner_wall |
     "${REH[@]}" exec -T postgres sh -c "$OWNER"' exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d postgres -X -q -v ON_ERROR_STOP=1' >/dev/null ||
     die "could not copy the group roles"
   "${REH[@]}" exec -T postgres sh -c "$OWNER"' printf "DROP DATABASE \"%s\" WITH (FORCE);\nCREATE DATABASE \"%s\" OWNER \"%s\";\n" "$POSTGRES_DB" "$POSTGRES_DB" "$POSTGRES_USER" | psql -h 127.0.0.1 -U "$POSTGRES_USER" -d postgres -X -q -v ON_ERROR_STOP=1' >/dev/null ||
