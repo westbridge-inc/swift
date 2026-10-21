@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import RouteError from './error';
 import StorefrontError from './(app)/store/[slug]/error';
 
@@ -15,11 +15,11 @@ import StorefrontError from './(app)/store/[slug]/error';
 
 const chunkLost = () => Object.assign(new Error('Loading chunk 4410 failed.\n(error: https://example.test/_next/static/chunks/4410.js)'), { name: 'ChunkLoadError' });
 const STAMP = 'swift.chunk-reload';
-let reload: ReturnType<typeof vi.fn>;
+let reload: Mock<() => void>;
 
 beforeEach(() => {
   window.sessionStorage.clear();
-  reload = vi.fn();
+  reload = vi.fn<() => void>();
   vi.spyOn(window.location, 'reload').mockImplementation(() => { reload(); });
   vi.spyOn(console, 'error').mockImplementation(() => {});
 });
