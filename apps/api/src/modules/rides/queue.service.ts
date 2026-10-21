@@ -5,6 +5,7 @@ import type { DispatchService } from '../dispatch/dispatch.service';
 import type { FareService } from './fare.service';
 import type { NotificationService } from '../notification/notification.service';
 import { createRideRequest, type RideRequestApp } from './rides.service';
+import { formatMoney } from '../../utils/currency-amount';
 import { log } from '../../utils/logger';
 import { SERVED_RIDE_CLASSES } from '../../config/vehicle-classes';
 
@@ -223,6 +224,11 @@ export async function scanRideQueue(
           dropoffAddress: e.dropoffAddress,
           passengerCount: e.passengerCount,
           rideClass: e.rideClass as RideClass,
+          // [PRICE-LOCK · row 448] Booked only at the fare the passenger was shown
+          // when they joined (or, from an app before the lock, the fare at the
+          // join); a fare that moved since is refused (FARE_CHANGED) and handled
+          // below. Entries from before this migration have none.
+          ...(e.quotedFare != null ? { expectedFare: Number(e.quotedFare) } : {}),
         },
         false, // the scan just read supply — no availability pre-check race
         e.tenantId,
@@ -248,6 +254,42 @@ export async function scanRideQueue(
         .catch(() => {});
     } catch (err) {
       const code = (err as { code?: string }).code;
+      if (code === 'FARE_CHANGED') {
+        // [PRICE-LOCK · row 448] The fare moved while they waited: nothing was
+        // booked. The entry ends and the passenger is asked again, with the trip
+        // one tap away (the same re-request link an expired entry carries); the
+        // new fare is quoted to them before anything is booked.
+        const details = (err as { details?: { fare?: number; currencyCode?: string } }).details;
+        const fareNow = details?.fare;
+        const shown = (n: number) => formatMoney(n, details?.currencyCode ?? 'GYD', { code: true, whole: true });
+        const ended = await prisma.rideQueueEntry
+          .updateMany({
+            where: { id: e.id, tenantId: e.tenantId, status: 'MATCHED' },
+            data: { status: 'EXPIRED', expiredNotifiedAt: new Date() },
+          })
+          .catch(() => ({ count: 0 }));
+        if (ended.count > 0) {
+          await notifications
+            .send({
+              userId: e.customerId,
+              type: 'ORDER_UPDATE',
+              title: `The fare to ${e.dropoffAddress} changed`,
+              body: typeof fareNow === 'number'
+                ? `A driver freed up, but the fare is now ${shown(fareNow)}, not the ${shown(Number(e.quotedFare))} you joined at. Nothing was booked. Tap to see it and request again.`
+                : 'A driver freed up, but the fare changed since you joined. Nothing was booked. Tap to see the new fare and request again.',
+              audience: 'customer',
+              data: {
+                kind: 'ride_queue_expired',
+                pickup: { lat: e.pickupLat, lng: e.pickupLng, address: e.pickupAddress },
+                dropoff: { lat: e.dropoffLat, lng: e.dropoffLng, address: e.dropoffAddress },
+                rideClass: e.rideClass,
+                passengerCount: e.passengerCount,
+              },
+            })
+            .catch(() => {});
+        }
+        continue;
+      }
       if (
         code === 'RIDE_IN_PROGRESS'
         || code === 'RIDE_QUEUE_TENANT_CHANGED'
