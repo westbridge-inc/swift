@@ -85,6 +85,7 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'DepositConfirmation', field: 'depositedGyd', unit: 'MAJOR_2DP' },
   { model: 'Earning', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FeeReceipt', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'FeeReceiptAllocation', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FxRate', field: 'rate', unit: 'FX_RATE' },
   { model: 'Item', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },

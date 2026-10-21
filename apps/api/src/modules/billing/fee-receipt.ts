@@ -31,6 +31,8 @@ export const NOT_A_VAT_INVOICE = 'Not a VAT invoice';
  *  fall due. No week is named: which week it pays is decided when it is spent,
  *  and inferring it later by comparing clocks named the wrong week. */
 export const PAID_TOWARD = 'Paid toward: your Swift weekly fees, in the order they fall due';
+/** [R12 · REVIEW-G #1771 S3-1 option a] The part of a receipt's money no debit has used yet. */
+export const NOT_USED_YET = (amount: string) => `Not used yet: ${amount}`;
 /** The company's GRA taxpayer number, set by the owner in the admin config (digits). */
 export const COMPANY_TIN_KEY = 'finance.company_tin';
 /** Set only once GRA registers the company for VAT: { vatNumber }. */
@@ -72,6 +74,8 @@ export interface FeeReceiptDocument {
 }
 
 const day = (at: Date) => formatGuyanaTime(at, { day: 'numeric', month: 'long', year: 'numeric' });
+/** [REVIEW-F #1963 S4-2] A week's ends with their time: billing weeks start at any hour, so dates alone read as 8 days. */
+const dayTime = (at: Date) => formatGuyanaTime(at, { day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hourCycle: 'h12' });
 
 /** The receipt for one receipt number, or null. A caller acting for a tenant
  *  (an admin) passes its scope: a receipt of another tenant, or of a
@@ -83,7 +87,10 @@ export async function feeReceiptDocument(
   /** The company settings, read once by a caller printing a list. */
   settings?: { tin: string | null; vat: { vatNumber: string } | null },
 ): Promise<FeeReceiptDocument | null> {
-  const receipt = await db.feeReceipt.findFirst({ where: { receiptNumber, ...(scope ? { tenantId: scope.tenantId } : {}) } });
+  const receipt = await db.feeReceipt.findFirst({
+    where: { receiptNumber, ...(scope ? { tenantId: scope.tenantId } : {}) },
+    include: { allocations: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }], select: { kind: true, amount: true, periodStart: true, periodEnd: true } } },
+  });
   if (!receipt) return null;
   if (scope && await db.subscription.count({ where: { AND: [{ id: receipt.subscriptionId }, scope.subscriptionWhere] } }) === 0) return null;
   const [event, sub, tin, vat] = await Promise.all([
@@ -110,14 +117,54 @@ export async function feeReceiptDocument(
     `Receipt ${receipt.receiptNumber}`,
     `Date: ${day(receipt.issuedAt)}`,
     `Partner: ${partnerName}`,
-    PAID_TOWARD,
-    `Weekly fee: ${formatMoney(amount, currencyCode, { whole: false })}`,
+    ...receiptUsage(receipt.allocations, amount, currencyCode),
+    // [REVIEW-F #1963 S4-5] The payment's amount, never labelled as the fee's price.
+    `Amount paid: ${formatMoney(amount, currencyCode, { whole: false })}`,
     ...(vat ? [`Price includes VAT at ${Math.round(VAT_RATE * 100)}%: ${formatMoney(included, currencyCode)}`] : [NOT_A_VAT_INVOICE]),
   ];
   return {
     receiptNumber: receipt.receiptNumber, issuedAt: receipt.issuedAt.toISOString(), issuer, partnerName,
     amount, currencyCode, vat: vat ? { vatNumber: vat.vatNumber, rate: VAT_RATE, included } : null, lines,
   };
+}
+
+/** [R12] What a receipt's money paid, from the debits recorded against it
+ *  (fee-receipt-allocation.ts): each week it covered (and how much of that
+ *  week's fee it paid), what MMG returned, what is set aside for a refund, and
+ *  what is not used yet. A receipt nothing has used yet, or one issued before
+ *  this was recorded, keeps the "paid toward" line: no week is ever inferred. */
+function receiptUsage(
+  allocations: { kind: string; amount: unknown; periodStart: Date | null; periodEnd: Date | null }[],
+  amount: number,
+  currencyCode: string,
+): string[] {
+  if (allocations.length === 0) return [PAID_TOWARD];
+  const cents = (v: unknown) => Math.round(Number(v) * 100);
+  const money = (c: number) => formatMoney(c / 100, currencyCode, { whole: false });
+  const out: string[] = [];
+  let used = 0;
+  let returned = 0;
+  let setAside = 0;
+  for (const a of allocations) {
+    const c = cents(a.amount);
+    used += c;
+    // [REVIEW-F #1963 S4-1/S4-2] The part of THIS payment that went to the week (a week paid from two payments
+    // shows each its own part), between the week's start and end instants. A WEEK row always has both ends
+    // (fee_receipt_allocations_period_check), so S4-4's no-period case cannot occur.
+    if (a.kind === 'WEEK' && a.periodStart && a.periodEnd) {
+      out.push(`Week covered: ${dayTime(a.periodStart)} to ${dayTime(a.periodEnd)}: ${money(c)} of this payment`);
+    } else if (a.kind === 'RETURNED') {
+      returned += c;
+    } else {
+      setAside += c; // REFUND_SET_ASIDE adds, REFUND_RELEASED (negative) gives back
+    }
+  }
+  // [REVIEW-F #1963 S4-3] Says what MMG did, never where the money went.
+  if (returned > 0) out.push(`Payment reversed by MMG: ${money(returned)}`);
+  if (setAside > 0) out.push(`Set aside for a refund: ${money(setAside)}`);
+  const unused = cents(amount) - used;
+  if (unused > 0) out.push(NOT_USED_YET(money(unused)));
+  return out;
 }
 
 /** A subscription's receipts, newest first: what the weekly-fee screen lists. */

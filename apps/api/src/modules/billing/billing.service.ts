@@ -45,6 +45,7 @@ import {
 } from '../../providers/card/card-provider';
 import { formatMoney, toProviderMinor } from '../../utils/currency-amount';
 import { openVaultToken } from './card-vault';
+import { recordWalletDebitInTx } from './fee-receipt-allocation';
 import { observedStatus, recordCardObservation } from './card-observations';
 import { activeOverdueMs, activeDeadline, advanceDunningObligation, beginConfirmationInTx, currentDunningClock, FULL_FEE_GRACE_MS, FEE_RETRY_MS, hasConfirmationInTx, resolveConfirmationInTx, resumedNoEarlierThan, scheduleDunningFailure, suspensionRetentionMs } from './dunning-clock';
 import { lockBillingAuthority, paymentConfirmationSource, projectDunningClock, resolvePaymentConfirmationInTx } from './dunning-clock';
@@ -2255,6 +2256,7 @@ export class BillingService {
     // 0 and we throw, rolling back the payment row, the period move and the
     // ledger entry with it. The cycle simply retries. Skipping a week is
     // recoverable; taking money without granting service is not.
+    let prepaidSpent: { amount: number; balanceBefore: number } | null = null;
     if (spendPrepaid && spendPrepaid > 0) {
       const debited = await tx.prepaidBalance.updateMany({
         where: { subscriptionId: sub.id, currencyCode: sub.currencyCode, balance: { gte: spendPrepaid } },
@@ -2263,6 +2265,9 @@ export class BillingService {
       if (debited.count !== 1) {
         throw new Error(`prepaid balance no longer covers ${spendPrepaid} for subscription ${sub.id}`);
       }
+      // [R12] The wallet row is locked by the debit: its balance now is exact.
+      const walletAfter = await tx.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: sub.id }, select: { balance: true } });
+      prepaidSpent = { amount: spendPrepaid, balanceBefore: Number(walletAfter.balance) + spendPrepaid };
       await this.observer.afterSuccessfulChargePrepaidDebit?.(sub.id, tx);
     }
 
@@ -2304,7 +2309,7 @@ export class BillingService {
       },
     });
 
-    await tx.billingEvent.create({
+    const successEvent = await tx.billingEvent.create({
       data: {
         subscriptionId: sub.id,
         type: 'CHARGE_SUCCESS',
@@ -2315,6 +2320,14 @@ export class BillingService {
         ...(usdTrio ?? {}),
       },
     });
+    // [R12] The week the prepaid money bought is written on the receipts that
+    // money came from (oldest money first), in this transaction.
+    if (prepaidSpent) {
+      await recordWalletDebitInTx(tx, {
+        subscriptionId: sub.id, amount: prepaidSpent.amount, balanceBefore: prepaidSpent.balanceBefore,
+        kind: 'WEEK', billingEventId: successEvent.id, periodStart, periodEnd,
+      });
+    }
 
     // The obligation advances on the success record just booked, in the
     // currency this settlement was pinned to (never relabelled).
@@ -2467,6 +2480,11 @@ export class BillingService {
         idempotencyKey: opts.eventKey,
         note: opts.note,
       },
+    });
+    // [R12] The returned payment's own receipt gives its money back first.
+    await recordWalletDebitInTx(tx, {
+      subscriptionId: opts.subscriptionId, amount: opts.amount, balanceBefore: Number(wallet.balance),
+      kind: 'RETURNED', billingEventId: event.id, ownMmgRef: opts.mmgRef,
     });
     await postLedger(tx, {
       idempotencyKey: `ledger:${opts.eventKey}`,
