@@ -141,7 +141,7 @@ function ResolveForm({ row, decision, locks, onCancel, onQueued }: { row: Paymen
       setError(new Error('The server did not confirm a queued approval. Reload confirmations and check Approvals before sending again.'));
     } catch (err) {
       const approvalId = errorDetails(err)?.['approvalId'];
-      if (errorCode(err) === 'APPROVAL_REQUIRED' && typeof approvalId === 'string' && approvalId.length > 0) { answer = 'queued'; onQueued(approvalId); return; }
+      if ((errorCode(err) === 'APPROVAL_REQUIRED' || errorCode(err) === 'APPROVAL_ALREADY_OPEN') && typeof approvalId === 'string' && approvalId.length > 0) { answer = 'queued'; onQueued(approvalId); return; }
       // The approval gate answers every request it accepts with 202 before the resolver runs, so a 4xx here is a refusal
       // from an earlier gate (session, permission, reason) and nothing was queued. No answer, a 5xx or a 202 without an
       // approval id may have queued one.

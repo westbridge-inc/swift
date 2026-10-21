@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import React from 'react';
 import { Share, View } from 'react-native';
-import { color, space } from '@swift/ui';
+import { space } from '@swift/ui';
 import { useProfile } from '../../../hooks/customer';
 import { Card, ErrorState, Header, IconChip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { toast } from '../../../kit/toast';
@@ -16,7 +16,14 @@ export function InviteFriendsScreen() {
   const code: string | undefined = p?.customer?.referralCode;
   const referred: number = p?.customer?.referredCount ?? 0;
 
-  if (profile.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (profile.isLoading) {
+    return (
+      <Screen>
+        <Header title="Invite Friends" />
+        <LoadingBlock />
+      </Screen>
+    );
+  }
   if (profile.isError || !p) {
     return (
       <Screen>

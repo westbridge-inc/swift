@@ -116,7 +116,7 @@ describe('[UI-SWEEP U34] Deliver To: one pick at a time, and the pick says so', 
     await act(async () => { rowFor('Work')!.click(); });
     await act(async () => { answer.reject(new Error('Network Error')); });
     await settle();
-    expect(fx.alert).toHaveBeenCalledWith('Could not use this address', 'Check your connection and try again.');
+    expect(fx.alert).toHaveBeenCalledWith('Could not use this address', expect.stringMatching(/check your connection/i));
     expect(rowFor('Work')!.disabled).toBe(false);
     expect(rowFor('Work')!.textContent).not.toContain('Saving…');
     fx.setCartAddress.mockResolvedValueOnce({});
@@ -124,5 +124,13 @@ describe('[UI-SWEEP U34] Deliver To: one pick at a time, and the pick says so', 
     await settle();
     expect(fx.setCartAddress).toHaveBeenCalledTimes(2);
     expect(fx.goBack).toHaveBeenCalledTimes(1);
+  });
+
+  it('[#1907 review S4-1] a refusal that carries its own words shows them, not "check your connection"', async () => {
+    const refusal = Object.assign(new Error('Request failed'), { response: { status: 400, data: { error: { message: 'That address is outside the delivery area.' } } } });
+    fx.setCartAddress.mockRejectedValueOnce(refusal);
+    await act(async () => { rowFor('Work')!.click(); });
+    await settle();
+    expect(fx.alert).toHaveBeenCalledWith('Could not use this address', 'That address is outside the delivery area.');
   });
 });

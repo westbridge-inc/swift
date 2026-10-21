@@ -198,11 +198,23 @@ const PUBLISHED: Record<
     driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
     vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
   },
-  // [ROLE-DOCS · owner 21 Oct 2026] police clearance: optional for TAXI drivers only (Privacy "With your explicit
-  // consent" line; Mover Agreement documents paragraph). Terms and Business Agreement change only by the date.
+  // [Owner rulings 21 Oct 2026 · research E4 + B8 · MATERIAL] Terms s.4: the taxi waiting charge paragraph
+  // (GY$300 per full 10 minutes, as rides/taxi-waiting.ts applies it). Privacy: s.1 diagnostics line, s.5 the
+  // phone app's crash reports to Swift's own GlitchTip, s.6 crash and error reports kept 90 days. Nothing else
+  // changed: putting 18 October back and removing those words reproduces all four 2026-10-18 pins exactly.
+  // The date re-pins the two agreements.
   '2026-10-21': {
-    terms: 'a4d222f1c3bf4c7a9e4240120cc6dcf2a0a8a27253d4ffcab7bd1621e3e82604',
-    privacy: '52419357af9ca5f4705cd6e5e3a7848b5ed359270074400d1a6e589de4b98349',
+    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
+    privacy: '131bbf6e1c2e9b2f9a2b0062fc1a6e3bc126358e0e59885776cbb31da165ad08',
+    driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
+    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  },
+  // [ROLE-DOCS · owner 21 Oct 2026 · COORD ruling (A), NON-material] On top of 2026-10-21: police clearance optional for
+  // TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents paragraph). Same day, so the
+  // human date is unchanged: Terms and the Business Agreement keep their 2026-10-21 hashes exactly.
+  '2026-10-21.1': {
+    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
+    privacy: '0904106f583020771b1cddd74122f30a6f050f509a7817cae9ffda92a9ffa20c',
     driver_agreement: '3d1ad774321c726ae2263b9c38abc101240aba9c8380d9634267f4f8b6f29fa2',
     vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
   },
@@ -259,10 +271,13 @@ describe('legal version binding [F-035-08]', () => {
   });
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
-    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // [ROLE-DOCS · COORD ruling 21 Oct 2026 — a DELIBERATE extension] A second stamp on the same day carries a
+    // same-day suffix (2026-10-21.1): versions compare as strings, so it sorts after 2026-10-21 and before the next
+    // day. The date part still has to match LAST_UPDATED.
+    expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     // The human form is rendered into both documents — same date, or the
     // page contradicts its own version.
-    const [y, m, d] = LEGAL_VERSION.split('-').map(Number);
+    const [y, m, d] = LEGAL_VERSION.split('.')[0]!.split('-').map(Number);
     const human = new Date(Date.UTC(y!, m! - 1, d!)).toLocaleDateString('en-GB', {
       day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC',
     });

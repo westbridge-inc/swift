@@ -163,9 +163,10 @@ describe('Child Safety (Part 4)', () => {
 
 describe('one version for the whole batch', () => {
   // The V1b batch shipped as 2026-10-16; the human-only identity + no-customer-photo words follow as 2026-10-17;
-  // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; [ROLE-DOCS · owner 21 Oct 2026] police clearance
-  // optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-21.
-  it('is 2026-10-21', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-21');
+  // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; the taxi waiting charge (Terms s.4) and phone
+  // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); [ROLE-DOCS · owner
+  // 21 Oct 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-21.1.
+  it('is 2026-10-21.1', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-21.1');
   });
 });

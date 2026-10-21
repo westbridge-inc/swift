@@ -38,8 +38,13 @@ import type { ReasonPrompt } from '@/lib/ask-reason';
 // ---------------------------------------------------------------------------
 
 export type ReasonField =
-  | { kind: 'amount'; name: string; label: string; hint?: string; /** The route takes cents (default: whole GYD). */ cents?: boolean }
-  | { kind: 'reference'; name: string; label: string; hint?: string };
+  | { kind: 'amount'; name: string; label: string; hint?: string; /** The route takes cents (default: whole GYD). */ cents?: boolean;
+      /** Amounts that may go below zero (a correcting entry). */ signed?: boolean }
+  | { kind: 'reference'; name: string; label: string; hint?: string }
+  /** Free text: a short note, or an identifier typed by hand. Optional unless `required`. */
+  | { kind: 'text'; name: string; label: string; hint?: string; required?: boolean; minLength?: number; maxLength?: number; pattern?: RegExp; patternMessage?: string }
+  /** One of a few fixed answers (MMG or bank). The first option is NOT pre-chosen: the operator picks. */
+  | { kind: 'choice'; name: string; label: string; hint?: string; options: ReadonlyArray<{ value: string; label: string }> };
 
 export interface ReasonAnswer {
   /** The reason as it is sent: trimmed, smart punctuation made plain. Empty when none was asked. */
@@ -55,6 +60,9 @@ export interface ActionDialogRequest<T = unknown> {
   body?: ReactNode;
   /** The button that does it: "Approve store". */
   confirmLabel: string;
+  /** The button that closes it without acting ("Cancel" by default). A dialog whose act IS a
+   *  cancellation names what is kept instead ("Keep the order"), never [Cancel] next to [Cancel order]. */
+  dismissLabel?: string;
   /** Ask for a reason (the default) with optional wording; `false` makes this a plain in-page confirmation. */
   reason?: false | { label?: string; hint?: string };
   fields?: ReasonField[];
@@ -142,7 +150,33 @@ export function useAskReason(): (_prompt: ReasonPrompt) => Promise<string | null
 }
 
 function checkField(field: ReasonField, raw: string): FieldCheck<string | number> {
+  if (field.kind === 'text') {
+    const value = raw.trim();
+    const max = field.maxLength ?? 500;
+    if (field.required && !value) return { ok: false, message: `Enter ${field.label.toLowerCase()}.` };
+    if (value && field.minLength && value.length < field.minLength) return { ok: false, message: `Enter at least ${field.minLength} characters.` };
+    if (value && field.pattern && !field.pattern.test(value)) return { ok: false, message: field.patternMessage ?? 'Check what you typed: it is not in the expected form.' };
+    if (value.length > max) return { ok: false, message: `Keep it to ${max} characters.` };
+    return { ok: true, value };
+  }
+  if (field.kind === 'choice') {
+    return field.options.some((o) => o.value === raw) ? { ok: true, value: raw } : { ok: false, message: `Choose ${field.label.toLowerCase()}.` };
+  }
+  if (field.kind === 'amount' && field.signed && raw.trim().startsWith('-')) {
+    const magnitude = parseAmountGyd(raw.trim().slice(1), { cents: field.cents });
+    return magnitude.ok ? { ok: true, value: -magnitude.value } : magnitude;
+  }
   return field.kind === 'amount' ? parseAmountGyd(raw, { cents: field.cents }) : checkReference(raw);
+}
+
+function fieldHint(field: ReasonField): string {
+  if (field.hint) return field.hint;
+  switch (field.kind) {
+    case 'amount': return field.signed ? 'In whole GYD; start with a minus sign to correct downwards, e.g. -4500' : field.cents ? 'In GYD, e.g. 4500 or 4500.50' : 'In whole GYD, e.g. 4500';
+    case 'reference': return 'As written on the receipt or transfer';
+    case 'text': return field.required ? 'Required' : 'Optional';
+    case 'choice': return 'Choose one';
+  }
 }
 
 function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unknown>; onSettle: (_s: Settlement) => void }) {
@@ -204,6 +238,30 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
           const id = `${uid}-${field.name}`;
           const check = fieldChecks[i]!;
           const showError = shown[field.name] && !check.ok;
+          const described = `${id}-help${showError ? ` ${id}-error` : ''}`;
+          if (field.kind === 'choice') {
+            return (
+              <fieldset key={field.name} aria-describedby={described} aria-invalid={showError || undefined}>
+                <legend>{field.label}</legend>
+                {field.options.map((option) => (
+                  <label key={option.value} className="mc-choice">
+                    <input
+                      type="radio"
+                      id={option === field.options[0] ? id : undefined}
+                      name={id}
+                      value={option.value}
+                      checked={values[field.name] === option.value}
+                      onChange={() => { setValues((v) => ({ ...v, [field.name]: option.value })); setShown((s) => ({ ...s, [field.name]: true })); }}
+                      disabled={busy}
+                    />
+                    {' '}{option.label}
+                  </label>
+                ))}
+                <p id={`${id}-help`} className="mc-field-help"><span>{fieldHint(field)}</span></p>
+                {showError && !check.ok ? <p id={`${id}-error`} className="mc-field-error">{check.message}</p> : null}
+              </fieldset>
+            );
+          }
           return (
             <div key={field.name}>
               <label htmlFor={id}>{field.label}</label>
@@ -212,15 +270,15 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
                 value={values[field.name] ?? ''}
                 onChange={(e) => setValues((v) => ({ ...v, [field.name]: e.target.value }))}
                 onBlur={() => setShown((s) => ({ ...s, [field.name]: true }))}
-                inputMode={field.kind === 'amount' ? 'decimal' : 'text'}
+                inputMode={field.kind === 'amount' && !field.signed ? 'decimal' : 'text'}
                 autoCapitalize={field.kind === 'reference' ? 'characters' : undefined}
                 autoComplete="off"
                 disabled={busy}
                 aria-invalid={showError || undefined}
-                aria-describedby={`${id}-help${showError ? ` ${id}-error` : ''}`}
+                aria-describedby={described}
               />
               <p id={`${id}-help`} className="mc-field-help">
-                <span>{field.hint ?? (field.kind === 'amount' ? (field.cents ? 'In GYD, e.g. 4500 or 4500.50' : 'In whole GYD, e.g. 4500') : 'As written on the receipt or transfer')}</span>
+                <span>{fieldHint(field)}</span>
               </p>
               {showError && !check.ok ? <p id={`${id}-error`} className="mc-field-error">{check.message}</p> : null}
             </div>
@@ -257,7 +315,7 @@ function ActionDialog({ request, onSettle }: { request: ActionDialogRequest<unkn
 
         <div className="mc-dialog-actions">
           <button type="button" className="mc-btn" onClick={cancel} disabled={busy}>
-            {refusal ? 'Close' : 'Cancel'}
+            {refusal ? 'Close' : (request.dismissLabel ?? 'Cancel')}
           </button>
           <button type="submit" className="mc-btn mc-btn-primary" disabled={busy}>
             {busy ? 'Sending…' : request.confirmLabel}
