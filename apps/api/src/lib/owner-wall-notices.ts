@@ -111,6 +111,7 @@ export const OWNER_WALL_NOTICE_ACTIONS = [
   'swift_owner_wall_close_staff_invites',
   'swift_owner_wall_staff_invitees',
   'swift_owner_wall_public_phone_asked',
+  'swift_owner_wall_erase_notices',
 ] as const;
 
 /** One person's PENDING staff invites from one store (id + data). */
@@ -135,4 +136,12 @@ export async function staffInviteesOf(tx: TxRaw, vendorId: string, since: Date):
 export async function publicPhoneAsked(tx: TxRaw, userId: string, vendorId: string): Promise<boolean> {
   const [row] = await tx.$queryRaw<Array<{ asked: boolean }>>`SELECT public.swift_owner_wall_public_phone_asked(${userId}, ${vendorId}) AS asked`;
   return row?.asked === true;
+}
+
+/** [#1905 erasure] Remove every notice of a person being erased, from inside the erasure transaction (which
+ *  holds their users row lock), whoever runs it: the person, an admin closing the account, the retry sweep.
+ *  Returns how many. */
+export async function eraseNoticesOf(tx: TxRaw, userId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_erase_notices(${userId}) AS n`;
+  return row?.n ?? 0;
 }
