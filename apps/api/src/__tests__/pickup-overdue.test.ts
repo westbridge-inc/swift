@@ -127,20 +127,20 @@ describe('[OF-33] a rider who accepts and never picks up: one nudge, then back t
 
     // One minute short of the release: still the rider's.
     await tickAt(cast, id, due + RELEASE_MIN - 1);
-    let row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
     expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ASSIGNED', riderId: r.riderId });
 
     // The release: back to its honest kitchen stage, never cancelled.
     const jobsBefore = w.sched.pending.filter((j) => j.name === 'dispatch-order' && j.data['orderId'] === id).length;
     await ageWorld(w, (due + RELEASE_MIN) * MIN - await sinceAccept(id) + 1_000);
     await runSweeps(w);
-    row = await w.app.prisma.order.findUniqueOrThrow({ where: { id }, include: { statusHistory: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } } });
-    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
-    expect(row.statusHistory.filter((l) => l.status === 'CANCELLED')).toHaveLength(0);
-    expect(row.statusHistory.at(-1)!.note).toContain('Rider no-show');
+    const released = await w.app.prisma.order.findUniqueOrThrow({ where: { id }, include: { statusHistory: { orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } } });
+    expect({ status: released.status, riderId: released.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    expect(released.statusHistory.filter((l) => l.status === 'CANCELLED')).toHaveLength(0);
+    expect(released.statusHistory.at(-1)!.note).toContain('Rider no-show');
     // Re-dispatched, and not back to the rider who did not come.
     expect(w.sched.pending.filter((j) => j.name === 'dispatch-order' && j.data['orderId'] === id).length).toBeGreaterThan(jobsBefore);
-    expect(await w.app.redis.sismember(dispatchDeclinedKey(id, row.fulfillmentModeVersion), r.riderId)).toBe(1);
+    expect(await w.app.redis.sismember(dispatchDeclinedKey(id, released.fulfillmentModeVersion), r.riderId)).toBe(1);
     const rider = await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } });
     expect(rider.currentOrderId).toBeNull();
     expect(rider.completionRate).toBeCloseTo(80, 5); // 100 * 0.8: one no-show
