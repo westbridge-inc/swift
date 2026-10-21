@@ -9,6 +9,7 @@ import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { algoConfig } from '../algo/algo-config';
 import { sweepPage } from '../../lib/sweep-cursor';
 import { log } from '../../utils/logger';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { haversineDistance } from '../../utils/distance';
 import { recordDecision } from '../algo/decisions';
 import { openOpsAlert } from '../safety/ops-alert';
@@ -223,9 +224,19 @@ export async function settlePickupLeg(
   }
   if (now < clock.releaseAt) {
     const nudgeKey = pickupNudgeKey(leg.id, version);
-    const told = await deps.prisma.notification.findUnique({
-      where: { userId_dedupeKey: { userId: leg.rider.userId, dedupeKey: nudgeKey } }, select: { id: true },
-    });
+    // [#1890 owner wall · COORD 13:56Z] A system read of the rider's inbox names
+    // its capability. Nothing is decided on it: the release runs from the clock,
+    // never from this row; an empty read only re-sends a nudge whose key
+    // collapses it, and a refused read sends nothing this tick.
+    let told: { id: string } | null;
+    try {
+      told = await runAsSystem('pickup-overdue-nudge-held', () => deps.prisma.notification.findUnique({
+        where: { userId_dedupeKey: { userId: leg.rider!.userId, dedupeKey: nudgeKey } }, select: { id: true },
+      }));
+    } catch (err) {
+      log().warn({ err, orderId: leg.id }, 'pickup-overdue: could not read whether the nudge is held; not re-sending this tick');
+      return 'WAITING';
+    }
     if (told) return 'WAITING';
     const left = Math.max(1, Math.round((clock.releaseAt.getTime() - now.getTime()) / 60_000));
     await deps.notifications.send({

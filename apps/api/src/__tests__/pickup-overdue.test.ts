@@ -5,7 +5,7 @@ import {
 } from './helpers/order-walk-world';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { dispatchDeclinedKey } from '../modules/dispatch/dispatch-generation-keys';
-import { releaseOverdueLeg } from '../modules/dispatch/pickup-overdue';
+import { releaseOverdueLeg, sweepPickupOverdue } from '../modules/dispatch/pickup-overdue';
 import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
@@ -439,5 +439,47 @@ describe('[OF-33 · COORD security ruling 21 Oct] the at-the-counter exemption f
     expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', riderId: r.riderId });
     expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).completionRate).toBe(100);
     expect(count(await noticesOf(id, cast.customer.userId), CUSTOMER_TITLE)).toBe(0);
+  }, 300_000);
+});
+
+describe('[OF-33 · #1890 owner wall] a blind or failing inbox read decides nothing', () => {
+  it('with the nudge read returning nothing, then refused: still one nudge, and the release still comes at due + 20', async () => {
+    const blind = (mode: 'empty' | 'throw') => new Proxy(w.app.prisma, {
+      get(target, prop) {
+        if (prop === 'notification') {
+          return new Proxy(target.notification, {
+            get(n, np) {
+              if (np === 'findUnique' || np === 'findFirst') {
+                return async () => { if (mode === 'throw') throw new Error('permission denied for table notifications'); return null; };
+              }
+              const v = Reflect.get(n, np);
+              return typeof v === 'function' ? v.bind(n) : v;
+            },
+          });
+        }
+        const v = Reflect.get(target, prop);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    }) as typeof w.app.prisma;
+    const cast = await castWalk(w, 1);
+    const id = await readyOrder(cast);
+    await riderTakes(cast, id);
+    const r = cast.riders[0]!;
+    const notifications = new NotificationService(w.app.prisma, w.app.io);
+    const sweepAt = async (atMin: number, mode: 'empty' | 'throw') => {
+      const ms = atMin * MIN - await sinceAccept(id) + 1_000;
+      if (ms > 0) await ageWorld(w, ms);
+      await call(w, 'PUT', '/api/v1/rider/location', r.token, { latitude: r.lat, longitude: r.lng, accuracy: 8 });
+      await sweepPickupOverdue({ prisma: blind(mode), redis: w.app.redis, io: w.app.io, notifications }, noEnqueue);
+    };
+    await sweepAt(TRAVEL_MIN + NUDGE_MIN, 'empty');
+    await sweepAt(TRAVEL_MIN + NUDGE_MIN + 3, 'empty'); // "nothing held": the re-send collapses into the one nudge
+    await sweepAt(TRAVEL_MIN + NUDGE_MIN + 6, 'throw'); // refused: nothing sent, nothing decided
+    expect(count(await noticesOf(id, r.userId), NUDGE_TITLE)).toBe(1);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
+    await sweepAt(TRAVEL_MIN + RELEASE_MIN, 'throw');
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    expect(count(await noticesOf(id, r.userId), NUDGE_TITLE)).toBe(1);
   }, 300_000);
 });
