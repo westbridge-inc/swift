@@ -6,6 +6,8 @@ import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { sendOnBehalfOf } from '../../providers/notifications/review-seal';
 import { alertClassOf } from '../../providers/notifications/alert-class';
 import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
@@ -652,6 +654,24 @@ export class NotificationService {
       notificationFailuresCounter.inc({ channel: 'fanout', stage: 'send' });
     }
     return pushSubmitted;
+  }
+
+  /**
+   * [WEB-TAXI] A direct service text that says whether it LEFT Swift: true only
+   * when the provider accepted it (sms-outcome.ts — an allowlist refusal, the
+   * review seal or a held handoff all read false). Fail-soft like `sms`: a
+   * failure is logged (never the number or the words) and counted, never thrown.
+   * `onBehalfOfTenantId` names whose background send this is (review-seal.ts).
+   */
+  async smsReach(to: string, body: string, onBehalfOfTenantId?: string | null): Promise<boolean> {
+    try {
+      const send = () => this.channels.sms.sendSms(to, body);
+      return smsAccepted(onBehalfOfTenantId ? await sendOnBehalfOf(onBehalfOfTenantId, send) : await send());
+    } catch (err) {
+      log().warn({ err }, 'service SMS delivery failed');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'reach' });
+      return false;
+    }
   }
 
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */

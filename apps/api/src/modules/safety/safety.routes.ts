@@ -408,6 +408,22 @@ export async function safetyRoutes(app: FastifyInstance) {
     return { success: true, data: await guardian.outstandingCheckin(request.user.userId) };
   });
 
+  // [WEB-TAXI · owner 21 Oct 2026] The texted answer link (guardian-delivery
+  // passengerCheckinSms): a passenger no push reached answers here WITHOUT
+  // signing in — a sign-in code would eat the deadline. UNAUTHENTICATED BY
+  // DESIGN, like the trip share: the one-time secret of ONE ask IS the
+  // credential, it answers only that waiting check-in, and every miss is the
+  // same 404 (no oracle). Per-IP limited; an honest passenger taps once.
+  app.post('/public/checkin', { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (request, reply) => {
+    const body = z.object({ ref: z.string().min(1).max(64), secret: z.string().min(1).max(64), response: z.enum(['OK', 'NEED_HELP']) }).parse(request.body ?? {});
+    const answer = await guardian.answerByLink(body.ref, body.secret, body.response);
+    if (!answer) {
+      reply.code(404);
+      return { success: false, error: { code: 'CHECKIN_NOT_AVAILABLE', message: 'This safety check is already closed, or the link is not valid. If you are in danger, call 911.' } };
+    }
+    return { success: true, data: answer };
+  });
+
   // [F-028-19] NOT lifeSafety. The exemption exists so a throttle can never
   // stand between a person and HELP — SOS, and a passenger's NEED_HELP. This
   // is the opposite message: a driver saying "I'm OK". Exempting an

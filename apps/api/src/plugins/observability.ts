@@ -1006,7 +1006,7 @@ export const guardianDeliveryGauge = new client.Gauge({
 });
 export const guardianDeliveryCounter = new client.Counter({
   name: 'swift_guardian_checkin_delivery_events_total',
-  help: 'Guardian check-in delivery events (staged, sent, skipped, failed, dead_letter, backfilled, deadline_held, deadline_without_delivery_escalated)',
+  help: 'Guardian check-in delivery events (staged, sent, skipped, failed, dead_letter, backfilled, deadline_held, deadline_without_delivery_escalated, sms_fallback, passenger_unreached, answered_by_link)',
   labelNames: ['event'] as const,
   registers: [registry],
 });

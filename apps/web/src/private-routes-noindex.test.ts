@@ -89,6 +89,7 @@ const PRIVATE_PAGES = [
 const TOKEN_DISALLOWED_PAGES = [
   'track/[token]/page.tsx',
   'trip/[token]/page.tsx',
+  'safety-check/page.tsx', // [WEB-TAXI] Trip Guardian's texted answer link (its secret is after the #)
 ];
 
 // Token-bearing HTML route handlers carry response headers instead of metadata.
