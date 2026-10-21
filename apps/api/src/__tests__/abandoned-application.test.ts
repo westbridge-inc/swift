@@ -112,7 +112,7 @@ async function doc(userId: string, role: UserRole, state: DocState, daysAgo: num
     ...(state === 'REVIEW_QUEUED' || state === 'CAPTURED' ? {} : { reviewedAt: at, reviewedBy: 'abandon-test' }),
   } }));
 }
-const riderOf = (userId: string) => system(() => app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType: 'BICYCLE' } }));
+const riderOf = (userId: string, vehicleType: 'BICYCLE' | 'MOTORCYCLE' = 'BICYCLE') => system(() => app.prisma.rider.create({ data: { userId, riderType: 'DELIVERY', vehicleType } }));
 const subscribeRider = (riderId: string) => system(() => app.prisma.subscription.create({ data: {
   riderId, type: 'DELIVERY_RIDER', weeklyRate: 1000,
   currentPeriodStart: new Date(Date.now() - 400 * DAY), currentPeriodEnd: new Date(Date.now() - 393 * DAY), nextBillingDate: new Date(Date.now() - 393 * DAY),
@@ -194,20 +194,40 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect((await docOf(d.id)).purgedAt).toBeNull();
   });
 
-  it('[COORD security review (1)] durable signals without any subscription: documents verified once, or a document of the role ever approved', async () => {
+  it('[COORD security review (1) + 16:50Z] durable signals without any subscription: the checklist verified once, or ever online in the role', async () => {
     const a = await person('DRIVER');
-    const rider = await riderOf(a);
-    await system(() => app.prisma.rider.update({ where: { id: rider.id }, data: { documentsVerified: false, documentsVerifiedAt: new Date(Date.now() - 200 * DAY) } }));
+    const ra = await riderOf(a);
+    await system(() => app.prisma.rider.update({ where: { id: ra.id }, data: { documentsVerified: false, documentsVerifiedAt: new Date(Date.now() - 200 * DAY) } }));
     const da = await doc(a, 'DRIVER', 'REJECTED', 300);
-    const b = await person('VENDOR_OWNER');
-    await doc(b, 'VENDOR_OWNER', 'EXPIRED', 300, 'business_registration');
-    const db = await doc(b, 'VENDOR_OWNER', 'REJECTED', 300, 'owner_national_id');
+    const b = await person('RIDER');
+    const rb = await riderOf(b);
+    await system(() => app.prisma.rider.update({ where: { id: rb.id }, data: { isOnline: false, lastLocationUpdate: new Date(Date.now() - 200 * DAY) } }));
+    const db = await doc(b, 'RIDER', 'REJECTED', 300);
     for (const u of [a, b]) {
       expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
       expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
     }
     expect((await docOf(da.id)).purgedAt).toBeNull();
     expect((await docOf(db.id)).purgedAt).toBeNull();
+  });
+
+  it('[COORD 16:50Z] one approved document is not a verified role: ID approved, insurance never sent -> noticed, then deleted', async () => {
+    const u = await person('RIDER');
+    await riderOf(u, 'MOTORCYCLE'); // a motorcycle needs a licence and insurance too; never verified, never online, no fee
+    const id = await doc(u, 'RIDER', 'COMMITTED', 100, 'national_id');
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    expect(await sweep(later(14.01), u)).toMatchObject({ purged: 1 });
+    expect((await docOf(id.id)).purgedAt).not.toBeNull();
+    expect(await system(() => app.prisma.deletionReceipt.count({ where: { submissionId: id.id, deletedBy: ABANDON_PURGE_ACTOR } }))).toBe(1);
+  });
+
+  it('[COORD 16:50Z] the full checklist approved IS a verified role: a bicycle courier needs only the ID, so that ID is kept', async () => {
+    const u = await person('RIDER');
+    await riderOf(u, 'BICYCLE');
+    const id = await doc(u, 'RIDER', 'COMMITTED', 100, 'national_id');
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect((await docOf(id.id)).purgedAt).toBeNull();
   });
 
   it('[COORD security review (2)] more than a page of excluded people still lets the person behind them be swept', async () => {

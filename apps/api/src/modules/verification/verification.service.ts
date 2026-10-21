@@ -2849,7 +2849,7 @@ export class VerificationService {
     const lastActivityAt = new Date(last);
     if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
     // The application's documents: partner documents of a role never verified, not held, not an AML record.
-    const verified = await everVerifiedRoles(this.prisma, userId);
+    const verified = await everVerifiedRoles(this.prisma, userId, () => this.isRoleVerified(userId, 'MOVER'));
     const config = await this.countryConfig.getByCode(user.countryCode);
     const candidates = [];
     for (const d of await this.prisma.verificationDocument.findMany({

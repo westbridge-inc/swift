@@ -59,50 +59,48 @@ export function abandonPurgeDueAt(lastActivityAt: Date, noticeAt: Date): Date {
   return new Date(Math.max(lastActivityAt.getTime() + ABANDON_PURGE_DAYS * DAY_MS, noticeAt.getTime() + ABANDON_NOTICE_LEAD_DAYS * DAY_MS));
 }
 
-type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvider' | 'subscription' | 'moverFeeAuthority' | 'verificationDocument'>;
+type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvider' | 'subscription' | 'moverFeeAuthority'>;
 
 /** The mover roles: one person's riding and driving are one mover account, so a signal for either counts for all three. */
 export const MOVER_ROLES: readonly UserRole[] = ['RIDER', 'DRIVER', 'MOVER'];
 
-/** A document Swift once approved (it may since have lapsed, or its image gone): the role was verified for it. */
-export const EVER_APPROVED_WHERE: Prisma.VerificationDocumentWhereInput = {
-  OR: [{ state: { in: ['AUTO_APPROVED', 'APPROVED', 'COMMITTED', 'EXPIRED'] } }, { status: { in: ['APPROVED', 'EXPIRED'] } }, { imagePurgedAt: { not: null } }],
-};
-
 /**
- * The partner roles this person was EVER verified for, from durable signals only (COORD 16:2xZ security review: never
- * from which id a subscription row happens to be keyed on). When in doubt the role counts as verified: its documents are
- * kept (fail toward keeping).
- *  - Mover (RIDER, DRIVER, MOVER together): a rider or driver profile's documents verified now or ever (documentsVerifiedAt),
- *    a mover fee authority (born on activation), any subscription held by the person's rider OR driver.
- *  - Store (VENDOR_OWNER): any store verified now or ever activated (activationValidUntil), or holding a subscription.
+ * The partner roles this person was EVER verified for (COORD rulings 16:2xZ security review + 16:50Z). Durable signals
+ * only, never which id a subscription row happens to be keyed on; one approved document alone does NOT count (an
+ * incomplete application is swept on the 76/90-day clock).
+ *  - Mover (RIDER, DRIVER, MOVER together): the full checklist verified now or ever (documentsVerified / documentsVerifiedAt,
+ *    or `moverChecklistComplete` now), a mover fee authority (born on activation), any subscription held by the person's
+ *    rider OR driver profile, or ever online in the role (online now, a location or a liveness pass on record, an order
+ *    ever assigned).
+ *  - Store (VENDOR_OWNER): any store verified now, ever activated (activationValidUntil), or holding a subscription.
  *  - Service provider (CUSTOMER partner documents): verified now, or ever given a job.
- *  - Any role: a document of that role Swift ever approved (EVER_APPROVED_WHERE).
  */
-export async function everVerifiedRoles(db: Db, userId: string): Promise<Set<UserRole>> {
-  const [rider, driver, owner, provider, feeAuthority, approved] = await Promise.all([
-    db.rider.findUnique({ where: { userId }, select: { id: true, documentsVerified: true, documentsVerifiedAt: true } }),
-    db.driver.findUnique({ where: { userId }, select: { id: true, documentsVerified: true, documentsVerifiedAt: true } }),
+export async function everVerifiedRoles(db: Db, userId: string, moverChecklistComplete?: () => Promise<boolean>): Promise<Set<UserRole>> {
+  const moverSelect = {
+    id: true, documentsVerified: true, documentsVerifiedAt: true, isOnline: true, lastLocationUpdate: true,
+    lastLivenessPassAt: true, _count: { select: { orders: true } },
+  } as const;
+  const [rider, driver, owner, provider, feeAuthority] = await Promise.all([
+    db.rider.findUnique({ where: { userId }, select: moverSelect }),
+    db.driver.findUnique({ where: { userId }, select: moverSelect }),
     db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, isVerified: true, activationValidUntil: true } } } }),
     db.serviceProvider.findUnique({ where: { userId }, select: { isVerified: true, _count: { select: { jobs: true } } } }),
     db.moverFeeAuthority.findUnique({ where: { userId }, select: { userId: true } }),
-    db.verificationDocument.findMany({ where: { userId, ...EVER_APPROVED_WHERE }, distinct: ['role'], select: { role: true } }),
   ]);
   const vendorIds = owner?.vendors.map((v) => v.id) ?? [];
-  const moverIds = [rider?.id, driver?.id].filter((id): id is string => !!id);
+  const movers = [rider, driver].filter((p): p is NonNullable<typeof p> => !!p);
+  const moverIds = movers.map((p) => p.id);
   const [moverSubscriptions, vendorSubscriptions] = await Promise.all([
     moverIds.length ? db.subscription.count({ where: { OR: [{ riderId: { in: moverIds } }, { driverId: { in: moverIds } }] } }) : 0,
     vendorIds.length ? db.subscription.count({ where: { vendorId: { in: vendorIds } } }) : 0,
   ]);
   const roles = new Set<UserRole>();
-  const mover = [rider, driver].some((p) => p && (p.documentsVerified || p.documentsVerifiedAt))
-    || !!feeAuthority || moverSubscriptions > 0;
+  const verifiedMover = movers.some((p) => p.documentsVerified || p.documentsVerifiedAt);
+  const everOnline = movers.some((p) => p.isOnline || p.lastLocationUpdate || p.lastLivenessPassAt || p._count.orders > 0);
+  const mover = verifiedMover || everOnline || !!feeAuthority || moverSubscriptions > 0
+    || (movers.length > 0 && !!moverChecklistComplete && await moverChecklistComplete());
   if (mover) for (const r of MOVER_ROLES) roles.add(r);
   if (vendorSubscriptions > 0 || owner?.vendors.some((v) => v.isVerified || v.activationValidUntil)) roles.add('VENDOR_OWNER');
   if (provider && (provider.isVerified || provider._count.jobs > 0)) roles.add('CUSTOMER');
-  for (const { role } of approved) {
-    roles.add(role);
-    if (MOVER_ROLES.includes(role)) for (const r of MOVER_ROLES) roles.add(r);
-  }
   return roles;
 }
