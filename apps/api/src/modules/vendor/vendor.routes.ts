@@ -1,4 +1,5 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
@@ -747,6 +748,10 @@ export async function storePhotoFieldsForWrite(
 
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
+  // [PERF item 3] A store's order taps answer without waiting for the push to the customer's
+  // phone (lib/push-after-response): the inbox row and socket events stay in the request.
+  const tap = { ...auth, onRequest: pushAfterResponse };
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
@@ -1855,7 +1860,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
-  app.put<{ Params: IdParam }>('/orders/:id/accept', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
@@ -2021,7 +2026,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
-  app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
@@ -2044,7 +2049,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
-  app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
@@ -2130,6 +2135,11 @@ export async function vendorRoutes(app: FastifyInstance) {
           fulfillmentMode: true,
           fulfillmentModeVersion: true,
           riderId: true,
+          // [#1875 · REVIEW-G/M S4] the MMG dispatch gate is judged on THIS locked row, not the route's pre-read
+          paymentMethod: true,
+          orderType: true,
+          paymentStatus: true,
+          mmgClaimMismatchAt: true,
         },
       });
       if (live.fulfillment !== 'DELIVERY') {
@@ -2162,7 +2172,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
     if (mode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
-    } else if (!committed.riderId) {
+    } else if (!committed.riderId && !mmgDispatchBlocked(committed)) {
+      // [#1848 follow-up · REVIEW-M S4-1] Like acceptance: an MMG order not yet "Paid by MMG" arms no
+      // dispatch here — "Paid by MMG" arms it. Decided on the committed row (the locked read, or the row the
+      // switch wrote), so a "Paid by MMG" that landed while the switch waited for the lock is seen.
       await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };
@@ -2487,7 +2500,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
@@ -2507,7 +2520,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
@@ -2534,7 +2547,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  mode check is the barrier that keeps it out of the platform-rider lane:
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
-  app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
@@ -2556,7 +2569,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
-  app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.

@@ -7,7 +7,7 @@ import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/brow
 const fakes = vi.hoisted(() => ({
   session: vi.fn(), user: vi.fn(), createRide: vi.fn(), gates: vi.fn(), queueCreate: vi.fn(), queueUpdate: vi.fn(),
 }));
-vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), getTenantId: () => 'tenant-test' }));
+vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), enterOwner: vi.fn(), getTenantId: () => 'tenant-test' }));
 vi.mock('../modules/auth/auth.service', () => ({ AuthService: class {} }));
 vi.mock('../modules/review/gate', () => ({ reviewGate: vi.fn() }));
 vi.mock('../modules/rides/fare.service', () => ({ FareService: class {} }));

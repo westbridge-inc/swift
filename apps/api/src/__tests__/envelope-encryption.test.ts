@@ -14,7 +14,7 @@ import {
 } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import crypto from 'node:crypto';
-import { uniquePng } from './helpers/real-image';
+import { REAL_PNG, uniquePng } from './helpers/real-image';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -171,7 +171,8 @@ describe('encrypted upload → render → shred', () => {
     const meta = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey } });
     expect(meta.wrappedDek).toBeTruthy();
     expect(meta.mimeType).toBe('image/png');
-    expect(meta.sizeBytes).toBe(PLAINTEXT.length);
+    // [Row 238] What is sealed is the photo WITHOUT the note (metadata) it was uploaded with.
+    expect(meta.sizeBytes).toBe(REAL_PNG.length);
 
     // The object in storage must NOT be the plaintext.
     const stored = await getStorageProvider().getObject(fileKey);
@@ -190,7 +191,8 @@ describe('encrypted upload → render → shred', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('image/png');
     expect(res.headers['cache-control']).toContain('no-store');
-    expect(Buffer.from(res.rawPayload).equals(PLAINTEXT)).toBe(true);
+    // [Row 238] The uploaded photo, byte for byte, minus its metadata.
+    expect(Buffer.from(res.rawPayload).equals(REAL_PNG)).toBe(true);
   });
 
   it('rejects a bad signature and an expired token', async () => {

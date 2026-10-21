@@ -1,5 +1,5 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,9 @@ const CONVERTED: Array<{ file: string; afterDismissCalls: number }> = [
   { file: 'src/modules/orders/screens/FeedbackScreen.tsx', afterDismissCalls: 2 },
   { file: 'src/modules/shop/screens/MenuItemScreen.tsx', afterDismissCalls: 1 },
   { file: 'src/modules/orders/screens/DeliveryScreen.tsx', afterDismissCalls: 1 },
+  // [UI-SWEEP U04, U12] Trip complete -> Back; Request sent -> My jobs.
+  { file: 'src/modules/mover/screens/ActiveJobScreen.tsx', afterDismissCalls: 1 },
+  { file: 'src/modules/services/screens/ServicesScreen.tsx', afterDismissCalls: 1 },
 ];
 
 // The wedge shape: a modal-visibility setter to false, immediately followed
@@ -66,4 +69,95 @@ describe('modal exits close in their own tick — navigation is deferred', () =>
     expect((seam.match(/requestAnimationFrame/g) ?? []).length).toBeGreaterThanOrEqual(2);
     expect(seam).toMatch(/export function afterDismiss\(go: \(\) => void\): void/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U04, U12] The list above only guarded the files it named, and its
+// shape missed optional chaining (`navigation?.goBack?.()`) and a popup closed
+// by clearing its record (`setRatePopup(null)`): the driver's Trip complete
+// popup and Services' Request sent both slipped through. This census reads
+// EVERY source file. A same-tick close-then-navigate is allowed only where the
+// navigation provably runs after the modal's teardown, and each such site
+// names the proof that must stay in its file.
+// ---------------------------------------------------------------------------
+
+// [REVIEW-F #1903 S4-1] Wider than the literal pair: any close call
+// (`setX(false|null|undefined)`, or another name such as `hide(false)`), up
+// to two plain statements in between (no block boundary), and any navigation
+// receiver: `navigation`, an alias (`nav`, `navigationRef`), a destructured
+// `navigate(…)`, or `safeNavigate(…)`.
+const CLOSE = String.raw`\b[A-Za-z_$][\w$]*\((?:false|null|undefined)\);`;
+const BETWEEN = String.raw`(?:[ \t]*\n?[ \t]*[^\n{}]*?;){0,2}`;
+const NAVIGATES = String.raw`[ \t]*\n?[ \t]*(?:\b[A-Za-z_$][\w$]*\??\.)?(?:navigate|goBack|replace|popToTop|popTo|push|pop|dispatch|safeNavigate)\??\.?\(`;
+const WIDE = new RegExp(CLOSE + BETWEEN + NAVIGATES, 'g');
+
+const AFTER_TEARDOWN: Array<{ file: string; setter: string; why: string; proof: RegExp[] }> = [
+  {
+    file: 'modules/mover/screens/ActiveJobScreen.tsx',
+    setter: 'setDriverHandbackFlow(null)',
+    why: 'finishDriverHandbackDismissal runs from the popup\'s onDismissed (iOS) or two frames after it hid (elsewhere)',
+    proof: [/onDismissed=\{finishDriverHandbackDismissal\}/, /requestAnimationFrame\(finishDriverHandbackDismissal\)/, /phase !== 'dismissing'/],
+  },
+  {
+    file: 'modules/cart/screens/CartScreen.tsx',
+    setter: 'setPendingTrackId(null)',
+    why: 'the order-placed ceremony clears its staged id inside the second animation frame (cartCeremonyNav.test.ts)',
+    proof: [/raf2 = requestAnimationFrame\(\(\) => \{\s*setPendingTrackId\(null\)/],
+  },
+];
+
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) return name === 'node_modules' || name === '__tests__' ? [] : sourceFiles(path);
+    return /\.(ts|tsx)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name) ? [path] : [];
+  });
+}
+
+describe('[UI-SWEEP U04, U12] no source file closes a popup and navigates in the same tick', () => {
+  const SRC = join(process.cwd(), 'src');
+  const files = sourceFiles(SRC);
+  const code = (file: string) => readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  const hits = files.flatMap((file) => [...code(file).matchAll(WIDE)].map((m) => ({ file: relative(SRC, file), shape: m[0].replace(/\s+/g, ' ') })));
+
+  it('reads the whole app, and sees the sites it allows (the census is not vacuous)', () => {
+    expect(files.length).toBeGreaterThan(300);
+    for (const site of AFTER_TEARDOWN) {
+      expect(hits.some((h) => h.file === site.file && h.shape.startsWith(site.setter)), `${site.file} ${site.setter}`).toBe(true);
+    }
+  });
+
+  it('sees every way the wedge can be written (the reader is not blind)', () => {
+    const wedges = [
+      "setOpen(false);\n    navigation.navigate('Orders');",
+      "setOpen(false);\n    nav.goBack();",
+      "setRatePopup(null);\n    navigationRef.navigate('Delivery', { orderId });",
+      "setOpen(false);\n    toast.success('Saved');\n    navigation.goBack();",
+      "setOpen(false); track('closed'); navigate('Orders');",
+      "hidePopup(false);\n    navigation?.replace?.('Home');",
+      "setSheet(undefined);\n    safeNavigate('WeeklyFee');",
+    ];
+    for (const snippet of wedges) expect([...snippet.matchAll(WIDE)].length, snippet).toBe(1);
+    const notTheWedge = [
+      // the deferral seam itself
+      "setOpen(false);\n    afterDismiss(() => navigation.navigate('Orders'));",
+      // a different handler: the block boundary ends the window
+      "setOpen(false);\n  }}\n  onPress={() => navigation.goBack()}",
+    ];
+    for (const snippet of notTheWedge) expect([...snippet.matchAll(WIDE)], snippet).toEqual([]);
+    // The window is two statements; a longer handler is left to review.
+    expect([..."setOpen(false);\n    a();\n    b();\n    c();\n    navigation.goBack();".matchAll(WIDE)]).toEqual([]);
+  });
+
+  it('every same-tick close-then-navigate is one of the sites proven to run after the teardown', () => {
+    const unproven = hits.filter((h) => !AFTER_TEARDOWN.some((site) => site.file === h.file && h.shape.startsWith(site.setter)));
+    expect(unproven).toEqual([]);
+  });
+
+  for (const site of AFTER_TEARDOWN) {
+    it(`${site.file}: ${site.why}`, () => {
+      const src = code(join(SRC, site.file));
+      for (const proof of site.proof) expect(src).toMatch(proof);
+    });
+  }
 });

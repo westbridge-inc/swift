@@ -1,4 +1,5 @@
 import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
+import { batchClock } from '../../utils/batch-clock';
 import { lockFeePaymentDecision } from './fee-payment-authority';
 import { amountDueNow } from './amount-due';
 import { weeklyFeeAmount } from './subscription-fee';
@@ -27,6 +28,8 @@ import { assertPayAheadRoom } from './pay-ahead';
 import { openCheckoutUrl, sealCheckoutUrl } from './checkout-url-seal';
 import { checkoutAmountGyd, mmgCheckoutLive, type ClientPlatform } from './fee-pay-actions';
 import { claimProviderPaymentInTx, ProviderIdentityError, type ProviderIdentityCode } from './provider-identity';
+import { MMG_HISTORY_CLOCK_TOLERANCE_MS, mmgHistoryQueryFor, mmgHistoryTruncated } from '../../providers/mmg/mmg-history';
+export { MMG_HISTORY_ROWS, MMG_HISTORY_MARGIN_MS, mmgStampOf } from '../../providers/mmg/mmg-history';
 import { instantOfGuyanaWallClock } from '../../utils/guyana-day';
 import { ensureProviderIdentityBackfill, providerIdentityBackfillDone } from './provider-identity-backfill';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
@@ -79,7 +82,7 @@ const BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 600_000, 1_800_000, 3_600_
  *  for the payment ([7 Oct] its history record's modificationDate), and for
  *  when MMG's success answer reached us. [DS632] Also how far MMG's time may
  *  run past the first reply naming it. */
-export const CHECKOUT_CLOCK_TOLERANCE_MS = 2 * 60_000;
+export const CHECKOUT_CLOCK_TOLERANCE_MS = MMG_HISTORY_CLOCK_TOLERANCE_MS;
 /** An MMG transaction id or ledger number as MMG writes it. */
 export const MMG_TXN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_CANDIDATES = 5;
@@ -335,22 +338,8 @@ export function creationZoneInUse(checkout: () => MmgCheckoutProvider | null): M
 // dates are read the same way, and its `offset` is a row COUNT, oldest first.
 // ---------------------------------------------------------------------------
 
-/** How many history rows Swift asks for (MMG's `offset`). An answer this long may have been cut short. */
-export const MMG_HISTORY_ROWS = 100;
-/** How far beyond the accepted bounds the query reaches, so a payment just outside them is seen and held as outside. */
-export const MMG_HISTORY_MARGIN_MS = 10 * 60_000;
 /** The one transactionStatus history writes for a finished payment (UAT, 7 Oct). Anything else holds. */
 export const MMG_HISTORY_SUCCESS: readonly string[] = ['completed'];
-
-/** An instant written the way MMG reads (and writes) its times, to the whole
- *  second: the inverse of mmgCreationInstant for the configured zone. */
-export function mmgStampOf(instant: number, zone: MmgCreationZone, round: 'floor' | 'ceil' = 'floor'): string {
-  const second = (round === 'ceil' ? Math.ceil(instant / 1000) : Math.floor(instant / 1000)) * 1000;
-  if (zone === 'UTC') return new Date(second).toISOString();
-  // Guyana wall clock: the face whose wall-clock reading is this instant.
-  const shift = instantOfGuyanaWallClock(new Date(second)).getTime() - second;
-  return new Date(second - shift).toISOString();
-}
 
 /** The history query for one checkout: every row from two minutes and the
  *  margin before it opened, to two minutes and the margin after the first
@@ -359,9 +348,8 @@ export function mmgStampOf(instant: number, zone: MmgCreationZone, round: 'floor
 export function historyQueryFor(
   intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, firstReplyAt: Date, zone: MmgCreationZone, now: Date,
 ): MmgHistoryQuery {
-  const from = intent.createdAt.getTime() - CHECKOUT_CLOCK_TOLERANCE_MS - MMG_HISTORY_MARGIN_MS;
-  const bound = Math.min(intent.expiresAt.getTime(), firstReplyAt.getTime()) + CHECKOUT_CLOCK_TOLERANCE_MS + MMG_HISTORY_MARGIN_MS;
-  return { fromdate: mmgStampOf(from, zone), todate: mmgStampOf(Math.min(bound, now.getTime()), zone, 'ceil'), rows: MMG_HISTORY_ROWS };
+  const bound = new Date(Math.min(intent.expiresAt.getTime(), firstReplyAt.getTime()));
+  return mmgHistoryQueryFor(intent.createdAt, bound, zone, now);
 }
 
 /** The history rows that name this transaction: transactionReference or
@@ -860,7 +848,12 @@ export class MmgCheckoutService {
   /** Every two minutes (the poll-mmg-billing job): first make sure every
    *  earlier credit carries its provider identity [F2], then expire the
    *  checkouts no reply ever came for, and look again at every one that is due. */
-  async pollIntents(now: Date = new Date()): Promise<{ expired: number; checked: number }> {
+  async pollIntents(at?: Date): Promise<{ expired: number; checked: number }> {
+    // [REVIEW-M #1832 S3-1] Each checkout is expired, verified and credited at the time it is
+    // really processed (utils/batch-clock.ts), never at the poll's start instant; a chosen
+    // `at` (a test, a replay) stays exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     return runAsSystem('mmg-checkout-poll', async () => {
       const out = { expired: 0, checked: 0 };
       try {
@@ -886,7 +879,7 @@ export class MmgCheckoutService {
         select: { id: true },
         take: POLL_BATCH,
       });
-      for (const row of stale) if (await this.expireUnanswered(row.id, now)) out.expired += 1;
+      for (const row of stale) if (await this.expireUnanswered(row.id, clock())) out.expired += 1;
       const due = await this.prisma.mmgCheckoutIntent.findMany({
         where: { status: { in: ['CONFIRMING', 'EXPIRED', 'NOT_PAID'] }, nextCheckAt: { lte: now } },
         orderBy: { nextCheckAt: 'asc' },
@@ -895,14 +888,14 @@ export class MmgCheckoutService {
       });
       for (const row of due) {
         try {
-          await this.verify(row.id, now);
+          await this.verify(row.id, clock());
           out.checked += 1;
         } catch (err) {
           log().error({ err, checkoutId: row.id }, '[MMG checkout] verification failed; it stays due and is retried');
         }
       }
       try {
-        await this.reconcileUnappliedPages(now);
+        await this.reconcileUnappliedPages(clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the unapplied-payment page reconcile failed; it is retried on the next poll');
       }
@@ -911,7 +904,7 @@ export class MmgCheckoutService {
       // [review S2-1] Always run (two small bounded reads when idle): a return
       // closed as "not returned" is watched for a week even when nothing is open.
       try {
-        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(now);
+        await new MmgFeeReversalService({ prisma: this.prisma, billing: this.billing, notifications: this.notifications, ...(this.reversal ? { client: this.reversal } : {}) }).sweep(clock());
       } catch (err) {
         log().error({ err }, '[MMG checkout] the fee-reversal sweep failed; it is retried on the next poll');
       }
@@ -1172,7 +1165,11 @@ export class MmgCheckoutService {
     // lookup declines them all. A redirect's error path, a transaction MMG does
     // not know, or a decline after a success answer is never "not paid": the
     // checkout keeps confirming, then expires without declaring failure.
-    const failed = verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound) ?? await this.declinedAsAnswered(intent, verdicts);
+    // [#1552 S4-1] A payment MMG's answer ties to this checkout, still waiting
+    // for MMG's history to show it, outranks any decline: it is never "not
+    // paid" while MMG may hold the money (it waits; a late check holds it).
+    const tiedWaiting = verdicts.some((v) => v.verdict === 'HOLD' && v.decisiveWhenLate === true);
+    const failed = tiedWaiting ? undefined : verdicts.find((v): v is Declined => v.verdict === 'DECLINED' && v.bound) ?? await this.declinedAsAnswered(intent, verdicts);
     if (failed) return this.notPaid(intent, failed.reason, now);
 
     // Nothing is certain yet. A mismatch that may concern another transaction
@@ -1191,7 +1188,7 @@ export class MmgCheckoutService {
     mmgCheckoutLookupsCounter.labels(`history_${answer.outcome}`).inc();
     const naming = answer.outcome === 'rows' ? rowsNaming(answer.rows, txnId) : [];
     const record = answer.outcome === 'rows'
-      ? { body: { query, rowsReturned: answer.rows.length, truncated: answer.rows.length >= query.rows, naming }, failure: naming.length === 0 ? 'HISTORY_NOT_FOUND' : null }
+      ? { body: { query, rowsReturned: answer.rows.length, truncated: mmgHistoryTruncated(answer.rows.length, query), naming }, failure: naming.length === 0 ? 'HISTORY_NOT_FOUND' : null }
       : { body: { query, error: answer.reason }, failure: HISTORY_FAILED };
     const body = redactedObject(record.body);
     await this.observe({

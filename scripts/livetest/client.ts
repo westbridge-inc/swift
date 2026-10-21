@@ -135,10 +135,15 @@ export async function signupOrLogin(
   return sessionFrom(rd);
 }
 
-// Smallest valid PNG (correct magic bytes) — the /auth/selfie route magic-byte
-// sniffs the upload, so a real header is required, not arbitrary bytes.
+// A real 1×1 PNG: IHDR, IDAT, IEND, every chunk length and CRC correct. The
+// storage seam (#1722) walks the chunks to strip metadata and refuses a photo
+// it cannot walk, then reads it with the real decoder, so magic bytes are not
+// enough. The earlier fixture's IDAT declared 11 bytes and carried 12, which
+// misaligned IEND: every courier pickup and drop-off photo upload was refused
+// 400 IMAGE_UNREADABLE (COUR-01, copy run #2). Same bytes as the API suite's
+// REAL_PNG (apps/api/src/__tests__/helpers/real-image.ts).
 const PNG_1x1 = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA3fxQ8AAAAABJRU5ErkJggg==',
   'base64',
 );
 

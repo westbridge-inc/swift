@@ -11,7 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
-import { expireUnpaidMmgAcceptance, expireUnpaidMmgAcceptancesJob, type JobContext } from '../jobs/queue';
+import { escalateStoreSilentMmgClaim, expireUnpaidMmgAcceptance, expireUnpaidMmgAcceptancesJob, type JobContext } from '../jobs/queue';
 import { MMG_ACCEPT_EXPIRY_REASON, MMG_STORE_SILENT_SUBJECT } from '../modules/order/mmg-accept-expiry';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -338,6 +338,20 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     expect((await preparing(orderId)).statusCode).toBe(200);
     // [REVIEW-G S4] The case closed with the tap, in the same commit.
     expect(await cases(orderId)).toMatchObject([{ status: 'RESOLVED', resolution: 'ACTION_TAKEN' }]);
+  });
+
+  // [#1848 follow-up · REVIEW-G S4-4] The case is decided under the order row lock, not only by the sweep's filter:
+  // two escalations at once (two workers, a retry) still open ONE case and push the store ONCE.
+  it('two escalations of the same order at once open one case and one store push', async () => {
+    const orderId = await placeOrder('MOBILE_MONEY');
+    await acceptedAgo(orderId, 10 * MIN);
+    expect((await customerSaysPaid(orderId, `MP${nanoid(10).toUpperCase().replace(/[^A-Z0-9]/g, '7')}`)).statusCode).toBe(200);
+    await backdate(orderId, 31 * MIN);
+    const results = await Promise.all([1, 2, 3].map(() => sys(() => escalateStoreSilentMmgClaim(ctx, orderId))));
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await sys(() => escalateStoreSilentMmgClaim(ctx, orderId))).toBe(false);
+    expect(await cases(orderId)).toHaveLength(1);
+    expect((await notices(owner.userId, orderId)).filter((n) => n.title.startsWith('Check your MMG for order'))).toHaveLength(1);
   });
 
   it('a customer who takes back "I paid" after 30:00 is cancelled by the rule, and the case closes with it', async () => {

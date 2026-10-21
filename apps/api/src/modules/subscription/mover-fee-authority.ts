@@ -6,6 +6,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { moverSourceFinancialFingerprint, paidMoverResolutionBlocker } from './mover-fee-history';
 import { capabilitiesOf, holdsCapability } from '../admin/admin-authority';
 import { partnerRateFor, subscriptionTiersIn } from '../country/country-config.service';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -291,6 +292,126 @@ export async function readFeeCollectionAuthority(db: Db, subscriptionId: string)
   }
 }
 
+type FeeCollectionRead = { allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null };
+const NOT_COLLECTABLE: FeeCollectionRead = { allowed: false, canonical: false, mover: null };
+const MOVER_FEE_TYPES: Array<Subscription['type']> = ['TAXI_DRIVER', 'DELIVERY_RIDER', 'COURIER_RIDER'];
+const PAYER_SELECT = {
+  id: true, riderId: true, driverId: true, vendorId: true,
+  rider: { select: { user: { select: { id: true, tenantId: true } } } },
+  driver: { select: { user: { select: { id: true, tenantId: true } } } },
+  vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
+} as const;
+type PayerRow = Prisma.SubscriptionGetPayload<{ select: typeof PAYER_SELECT }>;
+
+/** subscriptionPayer's rule on a row already read: exactly one owner, and that owner's user. */
+function payerOfRow(sub: PayerRow): SubscriptionPayer | null {
+  if ([sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) return null;
+  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
+  if (!user) return null;
+  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+}
+
+/**
+ * [PERF row 561] readFeeCollectionAuthority for a whole list, in a fixed number of reads.
+ * The admin console's home asked it once per ACTIVE subscription, each mover's in a transaction
+ * of its own: about 0.4 s at 210 subscriptions and 0.8 s at 500, on every 30 s refresh.
+ *
+ * The answer per subscription is the same as readFeeCollectionAuthority's. Payers are read once:
+ * owners, users, every mover's sources and their persisted authority. A payer whose answer can
+ * depend on money history (an ACTIVE authority with alias sources, or several sources and no
+ * authority yet) is not decided here: its subscriptions go through readFeeCollectionAuthority
+ * unchanged. Read-only, for the dashboard's forecast; money effects still take the locked decision.
+ */
+export async function readFeeCollectionAuthorities(db: PrismaClient, subscriptionIds: string[]): Promise<Map<string, FeeCollectionRead>> {
+  const out = new Map<string, FeeCollectionRead>();
+  if (!subscriptionIds.length) return out;
+  const rows = await db.subscription.findMany({ where: { id: { in: subscriptionIds } }, select: PAYER_SELECT });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const moverSubs = new Map<string, { payer: SubscriptionPayer; subs: string[] }>();
+  for (const id of subscriptionIds) {
+    const row = byId.get(id);
+    const payer = row ? payerOfRow(row) : null;
+    if (!payer) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+    if (payer.kind === 'VENDOR') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
+    const group = moverSubs.get(payer.userId) ?? { payer, subs: [] };
+    group.subs.push(id);
+    moverSubs.set(payer.userId, group);
+  }
+  if (!moverSubs.size) return out;
+
+  const userIds = [...moverSubs.keys()];
+  const read = await db.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    const [users, sources, persisted] = await Promise.all([
+      tx.user.findMany({ where: { id: { in: userIds } }, select: { id: true, tenantId: true } }),
+      tx.subscription.findMany({
+        where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }] },
+        orderBy: { id: 'asc' },
+        select: { ...PAYER_SELECT, type: true, createdAt: true, rider: { select: { userId: true, user: { select: { id: true, tenantId: true } } } }, driver: { select: { userId: true, user: { select: { id: true, tenantId: true } } } } },
+      }),
+      tx.moverFeeAuthority.findMany({ where: { userId: { in: userIds } }, include: { members: true } }),
+    ]);
+    return { users, sources, persisted };
+  });
+  const users = new Map(read.users.map((u) => [u.id, u]));
+  const authorities = new Map(read.persisted.map((a) => [a.userId, a]));
+  const sourcesOf = new Map<string, typeof read.sources>();
+  for (const source of read.sources) {
+    for (const userId of new Set([source.rider?.userId, source.driver?.userId])) {
+      if (!userId || !moverSubs.has(userId)) continue;
+      sourcesOf.set(userId, [...(sourcesOf.get(userId) ?? []), source]);
+    }
+  }
+
+  const fallback: string[] = [];
+  for (const [userId, { payer, subs }] of moverSubs) {
+    const decide = (): MoverFeeResolution | null | 'INVALID' | 'FALLBACK' => {
+      const user = users.get(userId);
+      if (!user || user.tenantId !== payer.tenantId) return 'INVALID';
+      const sources = sourcesOf.get(userId) ?? [];
+      for (const source of sources) {
+        const owner = payerOfRow(source);
+        if (!owner || owner.kind !== 'MOVER' || owner.userId !== payer.userId || owner.tenantId !== payer.tenantId) return 'INVALID';
+      }
+      if (!sources.length) return null;
+      const ids = sources.map((s) => s.id).sort();
+      const p = authorities.get(userId);
+      if (p) {
+        if (p.tenantId !== payer.tenantId || !ids.includes(p.canonicalSubscriptionId)) return 'INVALID';
+        const knownIds = p.members.map((m) => m.subscriptionId).sort();
+        const addedSource = JSON.stringify(knownIds) !== JSON.stringify(ids);
+        const aliases = sources.filter((s) => s.id !== p.canonicalSubscriptionId);
+        if (p.state === 'ACTIVE' && !addedSource && aliases.length) return 'FALLBACK'; // money history decides
+        return {
+          payerUserId: payer.userId, tenantId: payer.tenantId,
+          canonicalSubscriptionId: p.canonicalSubscriptionId, sourceSubscriptionIds: ids,
+          feeType: p.feeType, revision: p.revision,
+          state: addedSource ? 'FINANCE_HOLD' : p.state,
+          holdReason: addedSource ? 'UNREGISTERED_MOVER_SOURCE' : p.holdReason,
+        };
+      }
+      if (sources.length > 1) return 'FALLBACK'; // ambiguity needs the trial and money-history checks
+      const canonical = sources[0]!;
+      if (!MOVER_FEE_TYPES.includes(canonical.type)) return 'INVALID';
+      return {
+        payerUserId: payer.userId, tenantId: payer.tenantId,
+        canonicalSubscriptionId: canonical.id, sourceSubscriptionIds: ids,
+        feeType: canonical.type, revision: 0, state: 'ACTIVE', holdReason: null,
+      };
+    };
+    const mover = decide();
+    if (mover === 'FALLBACK') { fallback.push(...subs); continue; }
+    for (const id of subs) {
+      if (mover === 'INVALID') { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+      const canonical = !!mover && mover.canonicalSubscriptionId === id;
+      out.set(id, { allowed: canonical && mover?.state === 'ACTIVE', canonical, mover });
+    }
+  }
+  const slow = await Promise.all(fallback.map(async (id) => [id, await readFeeCollectionAuthority(db, id)] as const));
+  for (const [id, answer] of slow) out.set(id, answer);
+  return out;
+}
+
 /** Authenticated readers use one canonical view while retaining each original
  * financial source for review. No classification or SAN assignment happens here. */
 export async function readMoverFeeSubscription(db: Db, payer: { userId: string; tenantId: string }) {
@@ -418,10 +539,18 @@ export async function resolveMoverFeeHold(
   const tiers = await subscriptionTiersIn(tx, tariff.countryCode);
   const target = partnerRateFor(tiers, tariff.subject);
   const previousRate = Number(canonical.weeklyRate);
+  // [REVIEW-M #1844 S4-1] A weekly rate of 0 or less is legacy or hand-made data (no writer sets one, the
+  // card never prices one): it is never kept as the floor of a fee, and never quietly healed to the card
+  // rate either. The resolution is refused until finance corrects that source's weekly fee. (A negotiated
+  // or waived source never reaches this rate logic: both resolution paths refuse it first, REVIEW-M S4-2.)
+  if (!(previousRate > 0)) {
+    throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'The chosen source has no weekly fee above zero; correct its weekly fee before this resolution.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+  }
   // [COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A finance resolution never raises a weekly
-  // fee at once: a higher card rate needs at least 14 days' in-app notice first (the F2 fee-change
-  // notice, not built yet), so until that notice exists the source keeps the rate it was paying.
-  // A lower card rate applies at once: there is nothing to be told before a cut.
+  // fee at once: a higher card rate needs at least 14 days' in-app notice first, so the source keeps
+  // the rate it was paying and the rise is HELD for the F2 notice (billing/fee-rise-notice.ts): the
+  // payer is told the old fee, the new fee and the first weekly fee it applies to, at least 14 days
+  // ahead, and only then does it apply. A lower card rate applies at once: nothing to be told first.
   const nextRate = Math.min(previousRate, target.rate);
   const heldRise = target.rate > previousRate ? { heldRise: target.rate, heldUntil: 'FEE_CHANGE_NOTICE_14_DAYS' } : {};
   if (nextRate !== previousRate) {
@@ -430,6 +559,10 @@ export async function resolveMoverFeeHold(
     await tx.billingEvent.create({ data: { subscriptionId: canonical.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: canonical.currencyCode,
       idempotencyKey: `tier:${canonical.id}:${sequence}:${previousRate}->${nextRate}`,
       note: `Finance authority resolution changes the future weekly rate from ${previousRate} to ${nextRate}; issued charges and paid periods retained.` } });
+  }
+  if (target.rate > previousRate) {
+    await holdFeeRiseInTx(tx, { subscriptionId: canonical.id, from: previousRate, to: target.rate, currencyCode: canonical.currencyCode,
+      source: 'MOVER_FEE_RESOLVED', sourceRef: input.approvalId, now: new Date() });
   }
   const aliasEvidence: Record<string, string> = {};
   const sourceEvidence: Record<string, string> = {};
