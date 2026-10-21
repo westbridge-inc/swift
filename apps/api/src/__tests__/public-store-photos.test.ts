@@ -22,13 +22,16 @@ const fake = vi.hoisted(() => {
   const { randomBytes } = require('node:crypto') as typeof import('node:crypto');
   const objects = new Map<string, Buffer>();
   const stats = { reads: 0 };
+  const hooks = { afterUpload: null as null | (() => Promise<void>) };
   const provider = {
     objects,
     stats,
+    hooks,
     async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
       const dot = input.filename.lastIndexOf('.');
       const key = `${input.folder}/${randomBytes(12).toString('base64url')}${dot >= 0 ? input.filename.slice(dot) : '.bin'}`;
       objects.set(key, input.buffer);
+      await hooks.afterUpload?.();
       return { url: key };
     },
     async getSignedUrl(key: string) { return `https://bucket.invalid/${key}?X-Amz-Signature=x`; },
@@ -893,6 +896,35 @@ describe('a store photo that goes is deleted from storage, not just unlinked', (
     const key = (await uploadTo(`/api/v1/vendor/items/${item.id}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
     expect((await asOwner(o, 'DELETE', `/api/v1/vendor/items/${item.id}`)).statusCode).toBe(200);
     expect(kept(key)).toBe(true);
+  });
+
+  it('a photo kept for a row that went meanwhile (section or item archived, or the save failed) is deleted, not left behind', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const item = await makeItem(s.id, null);
+    const cases: Array<[string, () => Promise<void>]> = [
+      [`/api/v1/vendor/categories/${item.categoryId}/image`, async () => {
+        await app.prisma.category.update({ where: { id: item.categoryId }, data: { archivedAt: new Date() } });
+      }],
+      [`/api/v1/vendor/items/${item.id}/image`, async () => {
+        await app.prisma.item.update({ where: { id: item.id }, data: { archivedAt: new Date(), isAvailable: false } });
+      }],
+      ['/api/v1/vendor/profile/logo', async () => {
+        vi.spyOn(app.prisma, '$transaction').mockImplementationOnce((() => Promise.reject(new Error('database went away'))) as never);
+      }],
+    ];
+    for (const [url, race] of cases) {
+      const before = new Set(fake.objects.keys());
+      let keptKey = '';
+      fake.hooks.afterUpload = async () => { keptKey = [...fake.objects.keys()].find((k) => !before.has(k)) ?? ''; await race(); };
+      const res = await uploadTo(url, o.token, await cameraJpeg());
+      fake.hooks.afterUpload = null;
+      vi.restoreAllMocks();
+      expect(res.statusCode, url).not.toBe(200);
+      expect(keptKey, url).toMatch(new RegExp(`^items/${s.id}/`));
+      expect(kept(keptKey), url).toBe(false);
+      expect((await app.prisma.storageOrphan.findUnique({ where: { key: keptKey } }))?.purgedAt, url).toBeInstanceOf(Date);
+    }
   });
 
   it('erasing a store owner\'s account deletes every photo of their stores and clears the addresses', async () => {
