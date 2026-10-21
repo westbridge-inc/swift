@@ -286,7 +286,8 @@ describe('[owner 19 Oct G1 + G2] fraud marks and case rows stay without their id
     const rating = await app.prisma.ratingReport.create({ data: { tenantId: T, ratingId: `rt-${nanoid(8)}`, reporterId: u, reason: 'ABUSIVE', note: 'Free text', status: 'DISMISSED' } });
     await erase(u);
     const t = await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: ticket.id } });
-    // [REVIEW-G S4-2] Support sees why the text is gone.
+    // [REVIEW-G S4-2 · COORD 21 Oct] Support sees why the text is gone; "account holder" is true for partners' tickets too.
+    expect(TICKET_TEXT_REMOVED).toBe("[text removed at the account holder's request]");
     expect([t.category, t.subject, t.message, t.adminNote]).toEqual(['ORDER_ISSUE', TICKET_TEXT_REMOVED, TICKET_TEXT_REMOVED, null]);
     const c = await app.prisma.supportTicket.findUniqueOrThrow({ where: { id: closure.id } });
     expect([c.subject, c.message]).toEqual([ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_CLOSURE_MESSAGE]);
