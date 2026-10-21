@@ -54,3 +54,21 @@ export async function outstandingCheckin(): Promise<GuardianCheckin | null> {
 export async function answerCheckin(response: 'OK' | 'NEED_HELP'): Promise<{ escalated: boolean }> {
   return (await apiFetch('/api/v1/safety/guardian/checkin', { method: 'POST', body: JSON.stringify({ response }) })).data;
 }
+
+// ── [WEB-TAXI] The phone's other trip-page safety calls ────────────────────
+/** [S-16] Mint a live, expiring, revocable link to this trip (the phone's Share trip). */
+export async function shareTrip(id: string): Promise<{ token: string; url: string; expiresAt: string }> {
+  return (await apiFetch(`/api/v1/safety/trips/${encodeURIComponent(id)}/share`, { method: 'POST', body: '{}' })).data;
+}
+/** The caller's own live links for this trip (metadata only, never a token). */
+export async function tripShares(id: string): Promise<Array<{ id: string; expiresAt: string }>> {
+  return (await apiFetch(`/api/v1/safety/trips/${encodeURIComponent(id)}/shares`)).data ?? [];
+}
+/** Stop every live link for this trip. */
+export async function stopTripShares(id: string): Promise<unknown> {
+  return (await apiFetch(`/api/v1/safety/trips/${encodeURIComponent(id)}/shares`, { method: 'DELETE' })).data;
+}
+/** [§7.3] "This isn't my driver": releases the ride to a new driver, locks the driver for review, pages Swift safety. */
+export async function reportNotMyDriver(id: string): Promise<unknown> {
+  return (await apiFetch(`/api/v1/safety/rides/${encodeURIComponent(id)}/not-my-driver`, { method: 'POST', body: '{}' })).data;
+}
