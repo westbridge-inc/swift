@@ -795,7 +795,7 @@ function TaxiBooking({ navigation }: any) {
                 style={{ marginTop: space.md }}
                 loading={joinQueue.isPending}
                 // [PRICE-LOCK · row 448] Like Request, Join needs the fare on screen:
-                // nobody joins the line without seeing what they pay (the payload
+                // nobody joins the line without seeing what they pay (the join
                 // carries it as expectedFare, and the queue books only at it).
                 disabled={!tripPayload() || !selectedTier || stops.length > 0}
                 onPress={() => {
@@ -804,7 +804,7 @@ function TaxiBooking({ navigation }: any) {
                   // with stops is not silently queued without them.
                   if (payload && selectedTier && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
-                    joinQueue.mutate(payload);
+                    joinQueue.mutate({ ...payload, expectedFare: selectedTier.fare });
                   }
                 }}
               />
