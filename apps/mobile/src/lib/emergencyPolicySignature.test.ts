@@ -137,6 +137,27 @@ describe('[AUD-G7-023] the phone checks the signature, not the shape', () => {
     expect(new Set(EMERGENCY_POLICY_PINS.map((p) => p.kid)).size).toBe(EMERGENCY_POLICY_PINS.length);
   });
 
+  it('a pin with notAfter is trusted only before that instant, and its policy is held no later than it; a pin without one is unaffected', () => {
+    const END = NOW + HOUR;
+    const S = testKey('ep1-5555555555555555');
+    const expiring: EmergencyPolicyPin = { ...S.pin, notAfter: END };
+    // Before notAfter: accepted, but trusted only until notAfter (not for the signed 24 h).
+    expect(verify(envelope(S), 'GY', NOW, [expiring])?.expiresAt).toBe(END);
+    expect(verify(envelope(S), 'GY', END - 1, [expiring])?.expiresAt).toBe(END);
+    // At and after notAfter: refused, even an envelope the key holder dated to fit.
+    expect(verify(envelope(S), 'GY', END, [expiring]), 'at notAfter').toBeNull();
+    expect(verify(envelope(S, payloadFor({ issuedAt: END - 60_000, expiresAt: END + HOUR })), 'GY', END + 1, [expiring])).toBeNull();
+    expect(verify(envelope(S, payloadFor({ issuedAt: END + HOUR, expiresAt: END + 2 * HOUR })), 'GY', END + HOUR, [expiring])).toBeNull();
+    // A pin without notAfter (production), pinned beside the expired one, keeps its signed lifetime.
+    const later = payloadFor({ issuedAt: END + HOUR, expiresAt: END + 2 * HOUR });
+    expect(verify(envelope(A, later), 'GY', END + HOUR, [A.pin, expiring])?.expiresAt).toBe(END + 2 * HOUR);
+    expect(verify(envelope(A), 'GY', NOW, [A.pin, expiring])?.expiresAt).toBe(NOW + 24 * HOUR);
+    // A malformed notAfter fails closed.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, END + 0.5, '2026-12-15T05:00:00Z', null]) {
+      expect(verify(envelope(S), 'GY', NOW, [{ ...S.pin, notAfter: bad as unknown as number }]), `notAfter ${String(bad)}`).toBeNull();
+    }
+  });
+
   it('ships exactly two pins (production + staging), each id derived from its own key, each a real curve point', () => {
     // A third pin is a key nobody reviewed; one fewer leaves that host's phones on the bundled numbers.
     expect(EMERGENCY_POLICY_PINS).toHaveLength(2);
@@ -151,6 +172,10 @@ describe('[AUD-G7-023] the phone checks the signature, not the shape', () => {
       expect(point?.isSmallOrder(), `${pin.kid} is not a small-order point`).toBe(false);
     }
     expect(new Set(EMERGENCY_POLICY_PINS.map((p) => p.ed25519)).size, 'two hosts never share a key').toBe(2);
+    // The staging pin ends with the store-review demo; the production pin never expires.
+    const byKid = new Map(EMERGENCY_POLICY_PINS.map((p) => [p.kid, p]));
+    expect(byKid.get('ep1-5ebb7d4699ee0f78')?.notAfter, 'production has no expiry').toBeUndefined();
+    expect(byKid.get('ep1-4a6de1b1e5c92f48')?.notAfter, 'staging stops at 2026-12-15T05:00:00Z').toBe(Date.parse('2026-12-15T05:00:00.000Z'));
     expect(EMERGENCY_POLICY_PINS.map((p) => p.kid), 'the cross-implementation vector is never pinned').not.toContain('ep1-4d4fac578075383c');
   });
 
