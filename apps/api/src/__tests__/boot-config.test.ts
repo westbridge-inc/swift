@@ -252,9 +252,23 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: 'yes' })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
     expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
+  });
+
+  // [S1 · SWITCHES 21 Oct, Option A] Live MMG in production is the checkout page, its lookup and
+  // reversals; the reference round-trip flag only proves the push rail, which production refuses.
+  it.each([undefined, '', '0', 'yes', '1'])('boots live MMG whatever the round-trip flag says (%j): it is not a condition of the checkout', (verified) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified })).not.toThrow();
+  });
+
+  it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses the MMG push rail switch in production (MMG_PUSH_RAIL_ON=%j), whatever the driver', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+  });
+
+  it.each([undefined, '', '0'])('boots with the MMG push rail switch off (%j)', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).not.toThrow();
   });
 
   it('SWIFT-012: refuses the dev (console) notification provider in production — OTP would never send', () => {
@@ -771,51 +785,52 @@ describe('CONSENT_IP_PEPPER visibility [V8]', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [R13 on current main] Two production boot rules meet here. #1272 lets a
-// cash-only launch start with the card rail declared OFF; R13 keeps live MMG
-// collection off until sandbox UAT proves the merchant reference round-trips
-// (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1). The merged configuration must keep
-// both: cards OFF is not a way past the MMG gate, and the MMG gate does not
-// stop a cash-only launch. Checked everywhere a booting server consults it:
-// the boot guard, the value-free preflight, and the two provider factories
-// the billing workers construct.
+// [R13 on current main → S1 · SWITCHES 21 Oct, Option A] #1272 lets a
+// cash-only launch start with the card rail declared OFF. R13 used to keep
+// live MMG off entirely until sandbox UAT proved the merchant reference round
+// trip (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1), but that same flag ARMED the
+// unproven push rail. Now: live MMG boots for the checkout, its lookup and
+// reversals without the flag; the push rail is a separate switch production
+// refuses; the push factory the billing worker uses refuses in production
+// whatever the flags say. Checked everywhere a booting server consults it:
+// the boot guard, the value-free preflight, and the provider factories.
 // ---------------------------------------------------------------------------
-describe('[R13 on current main] cash-only production boot keeps the MMG reference gate', () => {
-  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' };
-  const unverified = [undefined, '', '0', 'true', 'yes', '1 '];
+describe('[R13 → Option A] cash-only production boot: live MMG checkout, never the push rail', () => {
+  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined };
+  const flags = [undefined, '', '0', 'true', 'yes', '1 ', '1'];
 
   afterEach(() => vi.unstubAllEnvs());
 
-  it('boots with cards OFF once the MMG reference round-trip is verified', () => {
-    expect(() => assertSafeBootConfig(cashOnly)).not.toThrow();
+  it.each(flags)('boots with cards OFF and live MMG whatever the round-trip flag says (%s)', (verified) => {
+    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified })).not.toThrow();
   });
 
-  it.each(unverified)('refuses cards OFF while the MMG reference round-trip is unverified (%s)', (verified) => {
-    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified }))
-      .toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
-  });
-
-  it('the value-free preflight gives the same two verdicts', () => {
+  it('the value-free preflight gives the same verdicts: live boots without the flag, the push switch is held', () => {
     const pass = runPreflight(cashOnly);
     expect(pass.status, pass.stdout + pass.stderr).toBe(0);
-    const held = runPreflight({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined });
+    const held = runPreflight({ ...cashOnly, MMG_PUSH_RAIL_ON: '1' });
     expect(held.status, held.stdout + held.stderr).toBe(1);
-    expect(held.stdout).toContain('MMG_REFERENCE_ROUNDTRIP_VERIFIED');
+    expect(held.stdout).toContain('MMG_PUSH_RAIL_ON');
   });
 
-  it('the workers get a card rail that refuses locally and live MMG only once verified', async () => {
+  it('the workers get a card rail that refuses locally, live MMG for the checkout lookup and reversals, and NO push rail', async () => {
     const { getPaymentProvider } = await import('../providers/payment/payment-provider');
-    const { getMmgProvider, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
+    const { getMmgProvider, getMmgLookupProvider, getMmgReversalClient, mmgPushRailOn, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a boot check never contacts a provider'));
     try {
       for (const [name, value] of Object.entries(cashOnly)) vi.stubEnv(name, value);
       const cards = getPaymentProvider();
       await expect(cards.chargeToken({ token: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'boot-check', description: 'boot check' }))
         .resolves.toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
-      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
-      for (const verified of unverified) {
-        vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
-        expect(() => getMmgProvider(), String(verified)).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      expect(getMmgLookupProvider()).toBeInstanceOf(LiveMmgProvider);
+      expect(getMmgReversalClient()).toBeInstanceOf(LiveMmgProvider);
+      for (const verified of flags) {
+        for (const push of [undefined, '1']) {
+          vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
+          vi.stubEnv('MMG_PUSH_RAIL_ON', push);
+          expect(mmgPushRailOn(), `${verified}/${push}`).toBe(false);
+          expect(() => getMmgProvider(), `${verified}/${push}`).toThrow(/MMG_PUSH_RAIL_ON|MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+        }
       }
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -1046,9 +1061,9 @@ describe('[PROD-PATH] production with MMG fully off', () => {
     expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: driver })).toThrow(/MMG_DRIVER/);
   });
 
-  it('keeps every live gate: live is still refused without its credentials or round-trip proof', () => {
+  it('keeps every live gate: live is still refused without its credentials, and the push rail switch is refused', () => {
     expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: 'live' })).toThrow(/MMG_/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: '1' })).toThrow(/MMG_PUSH_RAIL_ON/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
   });
 
