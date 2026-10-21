@@ -16,6 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, everVerifiedRoles, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -2798,6 +2799,86 @@ export class VerificationService {
   }
 
   /**
+   * [Row 249 · COORD ruling option A] The abandoned-application sweep (abandoned-application.ts): a notice at
+   * day 76 of the applicant's inactivity, the documents through purgeDocumentNow at day 90 (never sooner than 14
+   * days after the notice), never while anything of theirs waits on Swift, never for a role they were ever
+   * verified for. Daily, before the reaper. One person failing never stops the others.
+   */
+  async sweepAbandonedApplications(now = new Date(), batch = 500): Promise<{ noticed: number; purged: number }> {
+    const people = await this.prisma.verificationDocument.findMany({
+      where: { AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null, createdAt: { lt: new Date(now.getTime() - ABANDON_NOTICE_DAYS * DAY_MS) } },
+      distinct: ['userId'], select: { userId: true }, orderBy: { userId: 'asc' }, take: batch,
+    });
+    const total = { noticed: 0, purged: 0 };
+    for (const { userId } of people) {
+      try {
+        const r = await this.abandonedApplicationStep(userId, now);
+        total.noticed += r.noticed; total.purged += r.purged;
+      } catch (err) {
+        if (!(err instanceof AppError) || err.code !== 'VERIFICATION_OBJECT_UNAVAILABLE') throw err;
+      }
+    }
+    return total;
+  }
+
+  private async abandonedApplicationStep(userId: string, now: Date): Promise<{ noticed: number; purged: number }> {
+    const none = { noticed: 0, purged: 0 };
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, isSynthetic: true, countryCode: true, tenantId: true } });
+    if (!user || user.isSynthetic || user.phone === `deleted:${userId}`) return none;
+    // Anything waiting on Swift: never abandoned.
+    if (await this.prisma.verificationDocument.count({ where: { userId, ...WAITING_ON_SWIFT_WHERE } }) > 0) return none;
+    // The applicant's last activity: a submission, a decision of ours, an upload.
+    const [docs, upload] = await Promise.all([
+      this.prisma.verificationDocument.findMany({ where: { userId }, select: { createdAt: true, reviewedAt: true } }),
+      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+    ]);
+    let last = upload?.createdAt.getTime() ?? 0;
+    for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);
+    const lastActivityAt = new Date(last);
+    if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
+    // The application's documents: partner documents of a role never verified, not held, not an AML record.
+    const verified = await everVerifiedRoles(this.prisma, userId);
+    const config = await this.countryConfig.getByCode(user.countryCode);
+    const candidates = [];
+    for (const d of await this.prisma.verificationDocument.findMany({
+      where: { userId, AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null },
+      select: { id: true, userId: true, fileUrl: true, docType: true, role: true },
+      orderBy: { id: 'asc' },
+    })) {
+      if (verified.has(d.role)) continue;
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: user.countryCode, docType: d.docType, role: d.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      candidates.push({ ...d, user: { tenantId: user.tenantId } });
+    }
+    if (!candidates.length) return none;
+    // The notice about THIS inactivity (one written after the last activity); activity since voids an older one.
+    const notice = await this.prisma.auditLog.findFirst({
+      where: { userId, action: ABANDON_NOTICE_ACTION, createdAt: { gt: lastActivityAt } },
+      orderBy: { createdAt: 'asc' }, select: { createdAt: true },
+    });
+    if (!notice) {
+      await this.notifications.send({
+        userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
+        audience: candidates.some((d) => d.role === 'VENDOR_OWNER') ? 'business' : 'earner',
+        data: { kind: 'verification_application_abandoned' },
+        dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
+      });
+      await this.prisma.auditLog.create({ data: {
+        userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
+        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length },
+      } });
+      return { noticed: 1, purged: 0 };
+    }
+    if (now.getTime() < abandonPurgeDueAt(lastActivityAt, notice.createdAt).getTime()) return none;
+    let purged = 0;
+    for (const doc of candidates) {
+      const outcome = await this.purgeDocumentNow(doc, ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, now, still: stillAbandoned(lastActivityAt) });
+      if (outcome === 'PURGED') purged += 1;
+    }
+    return { noticed: 0, purged };
+  }
+
+  /**
    * The one purge of one document: delete the bytes, shred the key, PROBE
    * (DOC-INV-7 — a receipt without a passing probe is not a receipt), then the
    * compare-and-set under the person's row lock, the receipt in the same
@@ -2809,14 +2890,17 @@ export class VerificationService {
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
     deletedBy: string,
-    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date },
+    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput },
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
+    // [Row 249] A caller's own condition (the abandoned-application sweep: still abandoned) is re-checked
+    // under the person's lock at both steps, with the hold and the retention clock.
+    const still: Prisma.VerificationDocumentWhereInput = opts.still ?? {};
     // [Row 243] The bytes are destroyed only under the person's lock and only while still unheld.
     const evidence = doc.fileUrl
       ? await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
-        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) })
+        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still })
       : NOTHING_STORED;
     if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
@@ -2832,7 +2916,7 @@ export class VerificationService {
       `;
       if (!users[0]) return false;
       const won = await tx.verificationDocument.updateMany({
-        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) },
+        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still },
         data: { purgedAt: new Date(), fileUrl: '' },
       });
       if (won.count !== 1) return false;
