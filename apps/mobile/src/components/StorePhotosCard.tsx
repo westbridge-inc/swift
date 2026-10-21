@@ -85,6 +85,8 @@ export function StorePhotosCard({ store }: { store: { logoUrl?: string | null; c
         const current = store[field] ?? null;
         const uri = storePhotoUrl(current, 320);
         const working = busy === slot;
+        // One photo request at a time: while either slot uploads or removes, no press on the card sends another.
+        const sending = upload.isPending || remove.isPending;
         return (
           <View key={slot} style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.md }}>
             <View
@@ -110,9 +112,9 @@ export function StorePhotosCard({ store }: { store: { logoUrl?: string | null; c
               <View style={{ flexDirection: 'row', gap: space.md, marginTop: 4 }}>
                 <LinkText
                   label={working ? 'Working…' : current ? 'Change' : 'Add photo'}
-                  onPress={working ? undefined : () => { void pick(slot, aspect); }}
+                  onPress={sending ? undefined : () => { void pick(slot, aspect); }}
                 />
-                {current && !working ? <LinkText label="Remove" tone="muted" onPress={() => remove.mutate(slot)} /> : null}
+                {current && !working ? <LinkText label="Remove" tone="muted" onPress={() => { if (remove.isPending || upload.isPending) return; remove.mutate(slot); }} /> : null}
               </View>
             </View>
           </View>
