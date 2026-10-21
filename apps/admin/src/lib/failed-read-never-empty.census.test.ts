@@ -161,8 +161,8 @@ export function scan(file: string, source: string): Hit[] {
           || conds.some((c) => !c.negated && dataPresent(c.text, n, sf))
           || conds.some((c) => c.negated && c.text.split('||').some((part) => {
             // `if (!q.data) return …` / `!campaign ? … :` (campaign taken from the data): past it, the read answered.
-            const m = /^!\s*\(?\s*([\w.?$]+)\s*\)?$/.exec(part.trim());
-            return m !== null && dataPresent(m[1], n, sf);
+            const name = /^!\s*\(?\s*([\w.?$]+)\s*\)?$/.exec(part.trim())?.[1];
+            return name !== undefined && dataPresent(name, n, sf);
           }));
         examined += 1;
         if (dataGated && !inRow && !failureAware && !(component && /^[A-Z]/.test(component) && parentGuards(component, sf))) hits.push({ file, line: lineOf(n), kind: 'empty', text });
