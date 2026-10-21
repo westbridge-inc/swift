@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
 import { money } from '@/lib/customer';
@@ -11,10 +11,11 @@ import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place'
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
 import { LocationField } from '@/components/location-field';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [WEB-PIN] Pinning either end on the map, as the phone does ("Set location on
 // map"). The map's code loads only when a pin is asked for.
-const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
+const PlacePinPanel = lazyRetry(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // [W-19] The text in the box IS the place, or there is no place. This form used
 // to keep the two apart — pick "42 Lamaha Street", edit the box to "9 Camp

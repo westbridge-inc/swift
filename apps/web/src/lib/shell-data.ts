@@ -12,9 +12,8 @@ import type { ShellPerson } from '@/components/customer-shell';
  * person never shows the last person's answer.
  */
 
-export function customerCartKey(scope: string, epoch: number) {
-  return ['customer', 'cart', scope, epoch] as const;
-}
+// The cart key lives in lib/cart-key (the checkout shares it without this module).
+export { customerCartKey } from './cart-key';
 
 export function shellPersonKey(scope: string, epoch: number) {
   return ['customer', 'me', scope, epoch] as const;

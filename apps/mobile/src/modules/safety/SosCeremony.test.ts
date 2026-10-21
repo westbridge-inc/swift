@@ -49,12 +49,12 @@ describe('every rendered state is the server’s', () => {
     expect(page).toContain('const status = serverStatus(data);');
     expect(page).toContain("recordSosTransition('ACTIVE', 'UNKNOWN')");
     expect(page).toContain("setOutcome('confirm-unknown')");
-    expect(page).not.toMatch(/setAlert\(\{ \.\.\.alert, status: 'ACTIVE' \}\)/);
+    expect(page).not.toMatch(/(set|change)Alert\(\{ \.\.\.alert, status: 'ACTIVE' \}\)/);
     // the error path is UNKNOWN or OFFLINE, never a paged state
     const onError = page.slice(page.indexOf('onError:'));
     expect(onError).toContain("isOffline(err) ? 'offline' : 'confirm-unknown'");
     expect(onError).not.toContain("status: 'ACTIVE'");
-    expect(onError).not.toContain('setAlert(');
+    expect(onError).not.toMatch(/(set|change)Alert\(/);
   });
   it('cancel treats ONLY a 409 SOS_NOT_CANCELLABLE as too-late; anything else is unknown or offline', () => {
     const cancel = between('const cancelAlert = () => {', 'const live = alert');
@@ -64,12 +64,12 @@ describe('every rendered state is the server’s', () => {
     expect(helper).toContain("=== 'SOS_NOT_CANCELLABLE'");
     // the ACTIVE inference exists only inside the 409 branch
     const branch = cancel.slice(cancel.indexOf('if (isSosNotCancellable(err)) {'), cancel.indexOf('return;', cancel.indexOf('if (isSosNotCancellable(err)) {')));
-    expect(branch).toContain("setAlert({ ...alert, status: 'ACTIVE' })");
+    expect(branch).toContain("changeAlert({ ...alert, status: 'ACTIVE' })");
     const after = cancel.slice(cancel.indexOf('return;', cancel.indexOf('if (isSosNotCancellable(err)) {')));
     expect(after).not.toContain("status: 'ACTIVE'");
     expect(after).toContain("setOutcome(isOffline(err) ? 'offline' : 'cancel-unknown')");
     // a successful cancel is CANCELLED only when the server says so
-    expect(cancel).toContain("if (status === 'CANCELLED') { setAlert({ ...alert, status: 'CANCELLED' }); return; }");
+    expect(cancel).toContain("if (status === 'CANCELLED') { changeAlert({ ...alert, status: 'CANCELLED' }); return; }");
   });
   it('serverStatus admits only the five real statuses; isOffline is "no response at all"', () => {
     const status = between('function serverStatus(data: unknown)', 'function isOffline(err: unknown): boolean {');
@@ -99,5 +99,17 @@ describe('the paged copy is honest about the evidence', () => {
     expect(STRIPPED).toContain("You appear to be offline — Swift was NOT alerted.");
     const raise = between('const startRaise = () => {', 'const pageNow = () => {');
     expect(raise).toContain("if (isOffline(err)) setOutcome('offline')");
+  });
+});
+
+describe('[#1955 REVIEW-F S4-2] a slow recovery poll never undoes a local Cancel or send', () => {
+  it('the recovery answer is taken only when it was fetched after the last local change', () => {
+    expect(STRIPPED).toMatch(/if \(recovery\.data && !recovery\.isError && recoveryIsNewer\(recovery\.dataUpdatedAt, localChangeAt\.current\)\) setAlert\(recovery\.data\);/);
+  });
+  it('every local change of the alert is stamped (no bare setAlert of a new alert)', () => {
+    const bare = [...STRIPPED.matchAll(/setAlert\(([^)]*)/g)].map((m) => m[1]!.trim())
+      .filter((arg) => arg !== 'null' && arg !== 'recovery.data' && arg !== 'next');
+    expect(bare).toEqual([]);
+    expect(STRIPPED).toContain('const changeAlert = (next: SosRaised | null) => { localChangeAt.current = Date.now(); setAlert(next); };');
   });
 });

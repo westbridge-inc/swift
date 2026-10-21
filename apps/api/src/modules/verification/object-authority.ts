@@ -1,6 +1,7 @@
 import type { PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
+import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-visibility';
 
 export type VerificationObjectStore = Pick<PrismaClient, 'encryptedObject' | 'verificationDocument'>;
 export interface VerificationObjectReference {
@@ -136,18 +137,28 @@ export async function resolveUnreferencedAvatarObject(
     if (!canonicalOwnedAvatarKey(ref.fileKey, ref.userId)) throw verificationObjectUnavailable();
     // This is deliberately raw SQL. The request-scoped Prisma extension adds
     // tenantId to User.findMany, which would hide a poisoned reference held by
-    // another tenant. With the future NOBYPASSRLS credential, however, raw SQL
-    // on this request transaction is itself tenant-filtered and a sanctioned
-    // system client would be a different connection outside these locks. Prove
-    // on THIS transaction connection that PostgreSQL is not applying RLS to
-    // users; an application flag is not database evidence. Any active/unknown
-    // wall refuses deletion until structural object lineage replaces this
-    // compatibility census.
-    const visibility = await db.$queryRaw<Array<{ active: boolean }>>`
-      SELECT row_security_active('users'::regclass) AS "active"
+    // another tenant. On the walled credentials raw SQL on a request
+    // transaction is itself tenant-filtered, so the caller runs this inside a
+    // transaction that BEGAN on the system login (retryStorageOrphan) and holds
+    // its locks there. Prove on THIS transaction connection that it sees every
+    // users row (lib/census-visibility: no row security applied, or a
+    // swift_bypass_rls member under the tenant contract alone); an
+    // application flag is not database evidence. Any narrowed/unknown
+    // visibility refuses deletion until structural object lineage replaces
+    // this compatibility census.
+    const visibility = await db.$queryRaw<CensusVisibilityRow[]>`
+      SELECT row_security_active('users'::regclass) AS "active",
+             COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+             COALESCE((SELECT json_agg(json_build_object(
+                         'permissive', p.polpermissive,
+                         'cmd', p.polcmd::text,
+                         'applies', p.polroles = '{0}'::oid[]
+                                    OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                         'qual', pg_get_expr(p.polqual, p.polrelid)))
+                         FROM pg_policy p WHERE p.polrelid = 'users'::regclass), '[]'::json) AS "policies"
       /* avatar-global-census-visibility */
     `;
-    if (visibility.length !== 1 || visibility[0]?.active !== false) throw verificationObjectUnavailable();
+    if (!censusSeesEveryRow(visibility)) throw verificationObjectUnavailable();
     const references = storageProviderKind() === 'local'
       ? await localReferences((after) => db.$queryRaw<Array<{ id: string; avatar: string }>>`
         SELECT "id", "avatar" FROM "users"

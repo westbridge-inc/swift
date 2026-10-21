@@ -1,5 +1,6 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -2666,12 +2667,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
     const { readFareBreakdown } = await import('../rides/taxi-waiting');
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops names them, in order.
+    const { readReceiptStops } = await import('../rides/taxi-stops-read');
+    const stops = order.orderType === 'TAXI' ? await readReceiptStops(app.prisma, order) : null;
     // [Triage row 248 · R3] The receipt names who sold, from the ONE seller block the store page shows.
     const { publicStorefrontSeller } = await import('../verification/storefront-seller');
     const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
     const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}) } as never);
+    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
@@ -3584,11 +3588,13 @@ export async function customerRoutes(app: FastifyInstance) {
    *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
     const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
-    await app.prisma.deviceToken.upsert({
+    // [item 20] The token may still belong to the account last signed in on
+    // this device: moving it is a write on someone else's row (owner wall).
+    await ownerWallSystem('device:register', () => app.prisma.deviceToken.upsert({
       where: { token },
       create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
       update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
-    });
+    }));
     return { success: true, data: { message: 'Device registered' } };
   });
 

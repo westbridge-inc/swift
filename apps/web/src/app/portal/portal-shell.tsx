@@ -1,12 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { LayoutDashboard, History, FileCheck2, Receipt, UserRound } from 'lucide-react';
 import { Providers } from '@/components/providers';
-import type { ShellPerson } from '@/components/customer-shell';
+import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import { ConsoleShell } from '@/components/console-shell';
-import { sessionProbe } from '@/lib/auth';
 
 export const NAV = [
   { href: '/portal', label: 'Earnings', icon: LayoutDashboard, exact: true },
@@ -17,23 +14,14 @@ export const NAV = [
 ];
 
 export function PortalShell({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
-  const [ready, setReady] = useState(false);
-  const [person, setPerson] = useState<ShellPerson | null>(null);
-  useEffect(() => {
-    // [W-01] The session is an HttpOnly cookie: gate on the SERVER's word,
-    // never on a token's presence, because there is no token to be present.
-    let cancelled = false;
-    void sessionProbe().then((session) => {
-      if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else { setPerson({ name: [session.user?.['firstName'], session.user?.['lastName']].filter(v => typeof v === 'string').join(' '), phone: null }); setReady(true); }
-    });
-    return () => { cancelled = true; };
-  }, [router]);
-  if (!ready) return <div className="sw-page sw-empty" role="status">Opening your office…</div>;
+  // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
+  // a check that could not reach Swift says so instead (components/console-session).
+  const gate = useConsoleSession();
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your office…</div>;
+  const person = gate.person;
   return (
-    <Providers>
+    <Providers offline="fail">
       <ConsoleShell person={person} home="/portal" title="Earner" description="Jobs are accepted in the app — this is your office."
         navigation={NAV}
         signOutBody="This signs you out of this browser only, not the Swift app on your phone. Your earnings, history and documents stay with your account.">

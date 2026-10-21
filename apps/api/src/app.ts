@@ -37,6 +37,7 @@ import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegra
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
+import { registerPublicStorePhotos } from './utils/public-store-photos';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
@@ -285,6 +286,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
   registerPublicUploads(app, UPLOAD_BASE);
+  // [IMAGES-E2E] Stores' photos in object storage, at the address both apps build
+  // ("<api>/items/<store>/<file>"): only a photo a visible store still shows.
+  registerPublicStorePhotos(app);
 
   // API routes
   await app.register(authRoutes, { prefix: '/api/v1/auth' });
