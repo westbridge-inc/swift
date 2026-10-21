@@ -23,6 +23,17 @@
 # to the live database since the dump is a mismatch, reported by table. The
 # backup and rehearsal heartbeats in platform_config are left out — backup.sh
 # writes them after the dump by design.
+#
+# [item 196] A restored copy is QUARANTINED and the LIVE erasure ledger is
+# replayed onto it before anything is reported. The scratch database is closed
+# to every login role except the operator's own (and superusers) from the moment
+# it exists, before any row arrives. A backup is older than the live database:
+# people who closed their account, documents purged and keys destroyed since
+# the dump are still whole in it. restore-erasure-ledger.sql says what is read
+# from the live database, restore-replay-erasures.sql re-applies it to the copy
+# in one transaction; a failure leaves the copy quarantined and unreported. On a
+# fresh dump the replay changes nothing, so --compare-source still proves the
+# copy equal to its source.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -82,6 +93,67 @@ db_psql() {
 }
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf -- "$TMP_DIR"; }
 trap cleanup EXIT
+private_tmp() { [ -n "$TMP_DIR" ] || { TMP_DIR="$(mktemp -d)"; chmod 700 "$TMP_DIR"; }; }
+
+# [item 196] Only the operator's own login (and superusers) may connect to the
+# scratch copy: not PUBLIC, not any application login. Checked, not assumed.
+quarantine_scratch() {
+  db_psql postgres -q <<SQL
+REVOKE CONNECT ON DATABASE "$SCRATCH" FROM PUBLIC;
+DO \$\$ DECLARE r record; BEGIN
+  FOR r IN SELECT rolname FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user LOOP
+    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', '$SCRATCH', r.rolname);
+  END LOOP;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolcanlogin AND NOT rolsuper AND rolname <> current_user
+             AND has_database_privilege(rolname, '$SCRATCH', 'CONNECT')) THEN
+    RAISE EXCEPTION 'the scratch database could not be closed to application logins';
+  END IF;
+END \$\$;
+SQL
+}
+
+# [item 196] Read the live erasure ledger and replay it onto the scratch copy,
+# in one transaction on the copy. Prints the replay's summary line.
+LEDGER_SQL="$HERE/restore-erasure-ledger.sql"
+REPLAY_SQL="$HERE/restore-replay-erasures.sql"
+replay_erasure_ledger() {
+  local has names=() selects=() name="" line i script summary
+  [ -f "$LEDGER_SQL" ] && [ -f "$REPLAY_SQL" ] ||
+    die "the erasure ledger files are missing next to restore.sh; scratch database retained (quarantined), not restored"
+  has="$(db_psql "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
+    die "could not read the erasure ledger of $LIVE_DB; scratch database retained (quarantined), not restored"
+  if [ "$has" != t ]; then
+    echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
+    return 0
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^--\ ledger:\ ([a-z_]+)$ ]]; then name="${BASH_REMATCH[1]}"; continue; fi
+    if [ -n "$name" ] && [[ "$line" == SELECT\ * ]]; then names+=("$name"); selects+=("$line"); name=""; fi
+  done < "$LEDGER_SQL"
+  [ "${#names[@]}" -gt 0 ] || die "the erasure ledger file names no entries; scratch database retained (quarantined), not restored"
+  private_tmp
+  script="$TMP_DIR/erasure-replay.sql"
+  # The live rows travel through this run's private directory only (ids,
+  # timestamps and already de-identified account columns).
+  ( umask 077
+    { echo 'BEGIN;'
+      for i in "${!names[@]}"; do
+        echo "CREATE TEMP TABLE restore_ledger_${names[$i]} ON COMMIT DROP AS ${selects[$i]} WITH NO DATA;"
+      done
+      for i in "${!names[@]}"; do
+        echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
+        db_psql "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+        printf '%s\n' '\.'
+      done
+      cat "$REPLAY_SQL"
+      echo 'COMMIT;'
+    } > "$script" ) || die "could not read the erasure ledger of $LIVE_DB; scratch database retained (quarantined), not restored"
+  summary="$(db_psql "$SCRATCH" -q -tA < "$script")" ||
+    die "the erasure ledger replay failed; scratch database retained (quarantined), not restored"
+  rm -f -- "$script"
+  printf '%s\n' "$summary" | grep -E '^erasure ledger replayed: ' ||
+    die "the erasure ledger replay reported nothing; scratch database retained (quarantined), not restored"
+}
 
 [ -n "$SOURCE" ] || die "usage: restore.sh [--compare-source] <dump-file|s3://backup-bucket/key|-> [new-scratch-db], or restore.sh --fetch-encrypted s3://backup-bucket/key.dump.gpg"
 if [ "$FETCH_ENCRYPTED" = 1 ]; then
@@ -157,11 +229,14 @@ echo "scratch : $SCRATCH"
 EXISTS="$(db_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$SCRATCH';")"
 [ -z "$EXISTS" ] || die "scratch database already exists; choose a new name"
 db_psql postgres -q -c "CREATE DATABASE \"$SCRATCH\";"
+quarantine_scratch || die "the scratch database could not be quarantined; it was created empty and is retained"
 
 STARTED="$(date +%s)"
 "${COMPOSE[@]}" exec -T postgres sh -c \
   'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
   sh "$SCRATCH" < "$DUMP"
+quarantine_scratch || die "the restored scratch database could not be kept quarantined; scratch database retained"
+replay_erasure_ledger
 
 FAILED=0
 check() {
@@ -296,6 +371,7 @@ else
 fi
 
 SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
+echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
 echo "RESTORE OK — ${SECONDS_TAKEN}s; scratch database retained for inspection"
 # A failed rehearsal heartbeat cannot turn a verified scratch restore into a
 # failure, but doctor.sh will keep warning until a successful record exists.
@@ -309,3 +385,4 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now();
 SQL
 echo "Inspect the scratch DB before dropping it with psql inside the Postgres container."
 echo "Document objects and MASTER_KEK require separate recovery proof."
+echo "Before anything from this copy is used, replay the erasure ledger again against the live database of that day."
