@@ -5,6 +5,7 @@ import OrderDetailSkeleton from './loading';
 import { OpenSwiftApp } from '@/components/open-swift-app';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import { cancellationReasonWords } from '@/lib/cancellation-words';
 import { orderStatusLabel, presentedVertical } from '@/lib/order-words';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
 import {
@@ -537,7 +538,7 @@ export default function OrderDetailPage() {
           <p className={styles.eyebrow}>{vendorName} · {order.orderNumber}</p>
           <h1 ref={statusHeadingRef} tabIndex={-1} id="order-status-heading" className={styles.title}>{statusHeading(order)}</h1>
           <p className={styles.updateNote}>
-            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? order.cancellationReason ?? 'This order is closed.' : 'This page checks Swift for updates every few seconds.'}
+            {stopped ? cancelResult ?? (order.cancellationNotice?.trim() ? order.cancellationNotice : null) ?? cancellationReasonWords(order.cancellationReason, 'customer') ?? (cancelled ? 'This order was cancelled.' : 'This order is closed.') : 'This page checks Swift for updates every few seconds.'}
           </p>
         </div>
         <span className={`${styles.statusPill} ${completed ? styles.statusComplete : refunded ? styles.statusRefunded : cancelled || failed ? styles.statusCancelled : ''}`}>

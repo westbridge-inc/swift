@@ -377,6 +377,21 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(notice)).toBeTruthy();
   });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] The customer never reads a raw code.
+  it('a cancellation code the server writes reads as words, never as the code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'FOOD_TOO_OLD', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Your order was ready but no rider could be found, so it was cancelled rather than delivered cold.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('FOOD_TOO_OLD');
+  });
+
+  it('a cancellation code this build does not know says only that the order was cancelled', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'SOME_NEW_CODE', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('This order was cancelled.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('SOME_NEW_CODE');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -147,12 +147,17 @@ it('search shows store-shaped placeholders during debounce and ignores a late an
 });
 
 it('orders cached for one person never appear while a different person’s list is loading', async () => {
-  vi.spyOn(ordersApi, 'getOrders').mockResolvedValueOnce([{ id: 'o1', vendorName: 'First order', status: 'PENDING' }])
+  // [UI-SWEEP U13] Both reads, live and history, are the person's own.
+  vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValueOnce({ items: [{ id: 'o1', vendorName: 'First order', status: 'PENDING' }], total: 1 })
+    .mockReturnValueOnce(new Promise(() => undefined));
+  vi.spyOn(ordersApi, 'getOrderHistoryPage').mockResolvedValueOnce({ items: [{ id: 'o2', vendorName: 'First history', status: 'DELIVERED' }], page: 1, totalPages: 1, total: 1 })
     .mockReturnValueOnce(new Promise(() => undefined));
   const view = mount(<OrdersPage />);
-  await screen.findByText('First order');
+  await screen.findByText('First history');
+  expect(screen.getAllByText(/First order/).length).toBeGreaterThan(0);
   person.scope = 'another-person'; person.epoch += 1;
   view.rerender(<OrdersPage />);
-  expect(screen.queryByText('First order')).toBeNull();
+  expect(screen.queryByText(/First order/)).toBeNull();
+  expect(screen.queryByText('First history')).toBeNull();
   expect(screen.getByLabelText('Loading your orders')).toBeTruthy();
 });
