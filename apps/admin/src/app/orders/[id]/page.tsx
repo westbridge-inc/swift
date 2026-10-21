@@ -14,6 +14,23 @@ import { useActionRunner } from '@/components/mc/useActionRunner';
 import { askReason } from '@/lib/ask-reason';
 
 const gyd = (n: unknown) => `$${Number(n || 0).toLocaleString()}`;
+const clock = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+
+/** [TAXI multi-stop 8/8] One stop of a ride, as the server reports it. */
+type RideStop = {
+  sequence: number; address: string; status: 'PENDING' | 'ARRIVED' | 'DEPARTED' | 'SKIPPED';
+  arrivedAt: string | null; departedAt: string | null; skippedAt: string | null; skipReason: string | null;
+  evidenceNote: string | null;
+};
+
+/** Where the ride stands at a stop, in plain words, with the server's times. */
+function stopProgress(stop: RideStop, next: number | null): string {
+  if (stop.status === 'ARRIVED') return `Waiting here since ${clock(stop.arrivedAt)}`;
+  if (stop.status === 'DEPARTED') return `Arrived ${clock(stop.arrivedAt)} · left ${clock(stop.departedAt)}`;
+  if (stop.status === 'SKIPPED') return `Skipped ${clock(stop.skippedAt)}${stop.skipReason ? ` — ${stop.skipReason}` : ''}`;
+  return stop.sequence === next ? 'Next stop' : 'Not reached yet';
+}
 const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -225,6 +242,18 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                   <span className="w-2.5 h-2.5 rounded-full border-2 border-[var(--muted)]" />
                   <span>{o.pickupAddress ?? '—'}</span>
                 </div>
+                {/* [TAXI multi-stop 8/8] The stops in the passenger's order, each with where the ride stands. */}
+                {Array.isArray(o.stops) &&
+                  (o.stops as RideStop[]).map((stop) => (
+                    <div key={stop.sequence} className="flex items-start gap-2" data-testid={`ride-stop-${stop.sequence}`}>
+                      <span className="mt-0.5 w-4 text-center text-xs font-semibold text-[var(--muted)]">{stop.sequence}</span>
+                      <div>
+                        <p>{stop.address}</p>
+                        <p className="text-xs text-[var(--muted)]">{stopProgress(stop, o.nextStopSequence ?? null)}</p>
+                        {stop.evidenceNote ? <p className="text-xs text-[var(--muted)]">{stop.evidenceNote}</p> : null}
+                      </div>
+                    </div>
+                  ))}
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-sm bg-[var(--accent)]" />
                   <span>{o.deliveryAddress ?? '—'}</span>

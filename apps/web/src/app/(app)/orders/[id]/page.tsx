@@ -16,7 +16,7 @@ import {
   Star,
   Truck,
 } from 'lucide-react';
-import { Suspense, lazy, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { money } from '@/lib/customer';
 import { activeRide, getRide, rideCapabilities } from '@/lib/customer-rides';
 import { validPoint } from '@/lib/live-tracking';
@@ -26,10 +26,11 @@ import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type Sw
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [Row 117] A taxi ride's code, driver position and SOS — only while the server
 // says web booking is on; its code (and the map's) loads only for such a ride.
-const TaxiTripSafety = lazy(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
+const TaxiTripSafety = lazyRetry(() => import('@/components/taxi-trip-safety').then((module) => ({ default: module.TaxiTripSafety })));
 
 const POLL_INTERVAL_MS = 8_000;
 
