@@ -12,6 +12,7 @@ import { RolePickerScreen } from '../screens/auth/RolePickerScreen';
 import { SelfieCaptureScreen } from '../screens/auth/SelfieCaptureScreen';
 import { SessionHoldScreen } from '../screens/auth/SessionHoldScreen';
 import { QrOutcomeScreen } from '../screens/QrOutcomeScreen';
+import { OwnedSafetyPanel } from '../modules/safety/OwnedSafetyPanel';
 import { AuthStack } from './AuthStack';
 import { CustomerStack } from './CustomerStack';
 import { MoverStack } from '../modules/mover/MoverStack';
@@ -153,6 +154,7 @@ export function RootNavigator() {
   }, [entryGate, isAuthenticated, sessionGeneration, wantsAuth]);
 
   return (
+    <>
     <NavigationContainer
       ref={navigationRef}
       onReady={() => {
@@ -196,5 +198,7 @@ export function RootNavigator() {
       {/* [R26 · research G2] a material change to the Terms is accepted with a fresh tick (build 12) */}
       <LegalAcceptanceModal />
     </NavigationContainer>
+    <OwnedSafetyPanel />
+    </>
   );
 }

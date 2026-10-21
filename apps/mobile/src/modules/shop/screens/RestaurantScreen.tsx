@@ -27,6 +27,7 @@ import {
   CircleChip,
   ErrorState,
   FoodCard,
+  Header,
   HeartBadge,
   IconChip,
   LoadingBlock,
@@ -294,7 +295,9 @@ export function RestaurantScreen() {
 
   if (vendor.isLoading) {
     return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <LoadingBlock />
       </View>
     );
@@ -302,6 +305,8 @@ export function RestaurantScreen() {
   if (vendor.isError || !v) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => vendor.refetch()} />
       </View>
     );

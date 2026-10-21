@@ -15,7 +15,10 @@
 //   - the payload is canonical JSON of exactly {country, expiresAt, issuedAt,
 //     numbers, v: 2}, with only police / fire / ambulance → {number, verified};
 //   - it is for the market that was asked for, issued no later than 15 minutes
-//     ahead of this phone's clock, lives at most 24 hours, and has not expired.
+//     ahead of this phone's clock, lives at most 24 hours, and has not expired;
+//   - if the pin has a `notAfter` (the staging pin), this phone's clock reads
+//     before it; the policy is then held no later than it (`expiresAt` is the
+//     earlier of the signed expiry and the pin's notAfter).
 // Any failure, or any exception on the way, is "no policy" — never a number.
 
 import { ed25519 } from '@noble/curves/ed25519';
@@ -39,6 +42,7 @@ export interface VerifiedEmergencyPayload {
   readonly kid: string;
   readonly country: string;
   readonly issuedAt: number;
+  /** Until when this policy is trusted: the signed expiry, or the pin's notAfter if that is earlier. */
   readonly expiresAt: number;
   readonly numbers: Readonly<Partial<Record<SignedService, Readonly<{ number: string; verified: boolean }>>>>;
 }
@@ -127,6 +131,10 @@ export function verifyEmergencyEnvelope(
     if (typeof signature !== 'string' || !HEX_64_BYTES.test(signature)) return null;
     const pin = opts.pins.find((p) => p.kid === kid);
     if (!pin || !HEX_32_BYTES.test(pin.ed25519)) return null;
+    // A pin's hard end of trust (the staging pin): at and after it, on this
+    // phone's clock, nothing that key signed is a policy. Malformed fails closed.
+    const notAfter = pin.notAfter;
+    if (notAfter !== undefined && (!Number.isSafeInteger(notAfter) || opts.now >= notAfter)) return null;
     // THE check: the bytes were signed by the holder of a key this app pins.
     if (!ed25519.verify(hexBytes(signature), emergencyEnvelopeMessage(kid, payload), hexBytes(pin.ed25519), { zip215: false })) return null;
     const facts = readPayload(payload);
@@ -134,7 +142,8 @@ export function verifyEmergencyEnvelope(
     if (facts.country !== opts.country) return null;
     if (!(facts.issuedAt < facts.expiresAt) || facts.expiresAt - facts.issuedAt > MAX_EMERGENCY_POLICY_LIFETIME_MS) return null;
     if (facts.issuedAt > opts.now + MAX_EMERGENCY_POLICY_CLOCK_AHEAD_MS || facts.expiresAt <= opts.now) return null;
-    return Object.freeze({ kid, ...facts });
+    // A policy from an expiring pin is held no later than the pin's notAfter.
+    return Object.freeze({ kid, ...facts, expiresAt: notAfter === undefined ? facts.expiresAt : Math.min(facts.expiresAt, notAfter) });
   } catch {
     return null;
   }
