@@ -182,11 +182,16 @@ describe('[A-01] refresh rotates from the cookie; logout clears and revokes', ()
     expect(await count('cookie_refreshed')).toBe(before + 1);
     const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } });
     expect(me.statusCode).toBe(200);
-    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request): the current cookies are re-issued, nothing rotates
+    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request) is not theft: the session
+    // lives on and the browser receives a FRESH pair — [Row 231] the row holds only digests, so the
+    // pair that answered the first call cannot be re-issued; the earlier pair is superseded, not revoked
+    const superseded = jar[REFRESH_COOKIE]!;
     const graced = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', headers: { ...BROWSER, cookie: `${REFRESH_COOKIE}=${encodeURIComponent(oldRefresh)}` } });
     expect(graced.statusCode).toBe(200);
-    const regraced: Jar = {}; applySetCookies(regraced, graced);
-    expect(regraced[REFRESH_COOKIE]).toBe(jar[REFRESH_COOKIE]);
+    applySetCookies(jar, graced);
+    expect(jar[REFRESH_COOKIE]).not.toBe(superseded);
+    expect(jar[REFRESH_COOKIE]).not.toBe(oldRefresh);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } })).statusCode).toBe(200);
     // ...and replayed OUTSIDE the grace: refused, and the whole family is revoked — the live cookies stop working too
     const restoreGrace = process.env['REFRESH_REUSE_GRACE_MS'];
     process.env['REFRESH_REUSE_GRACE_MS'] = '0';

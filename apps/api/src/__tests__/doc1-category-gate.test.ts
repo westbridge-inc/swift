@@ -27,8 +27,9 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { seedDocRegistry, registryCode, CATEGORY_GATES, EXTRA_DOC_TYPES } from '../modules/verification/doc-registry';
 import { assertOrderable, blockedCategoryIdsForVendors, submittableGateDocTypes } from '../modules/verification/category-gate';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const TENANT = 'swift-default';

@@ -623,10 +623,12 @@ describe('Auth Routes', () => {
       }
     });
 
-    it('concurrent double-fire within the grace window is idempotent, not theft', async () => {
+    it('concurrent double-fire within the grace window is not theft: a fresh pair, the session alive', async () => {
       // The mobile interceptor can legitimately re-send the same refresh token
-      // when two requests 401 at once — that must return the already-rotated
-      // pair, not kill the session.
+      // when two requests 401 at once — that must not kill the session.
+      // [Row 231] The row holds only digests, so the pair that answered
+      // the first call cannot be re-issued: the later transaction mints a
+      // FRESH pair and the earlier one is superseded (401), never revoked.
       const loginRes = await loginWithOtp(app, '+5926002000');
       const r1 = loginRes.json().data.tokens.refreshToken;
 
@@ -639,12 +641,19 @@ describe('Auth Routes', () => {
       ]);
       expect(first.statusCode).toBe(200);
       expect(retry.statusCode).toBe(200);
-      const pair = first.json().data;
-      expect(retry.json().data.refreshToken).toBe(pair.refreshToken);
-      expect(retry.json().data.accessToken).toBe(pair.accessToken);
+      const pairs = [first.json().data, retry.json().data] as Array<{ accessToken: string; refreshToken: string }>;
+      expect(pairs[0]!.refreshToken).not.toBe(pairs[1]!.refreshToken);
+      expect(pairs[0]!.accessToken).not.toBe(pairs[1]!.accessToken);
 
-      // Session is still alive: the current pair keeps working
-      const next = await inject('POST', '/api/v1/auth/refresh', { refreshToken: pair.refreshToken });
+      // Exactly one generation is current: its access token authenticates and
+      // its refresh token keeps rotating — the session is alive, not revoked.
+      const alive: Array<{ accessToken: string; refreshToken: string }> = [];
+      for (const pair of pairs) {
+        const me = await inject('GET', '/api/v1/auth/me', undefined, { authorization: `Bearer ${pair.accessToken}` });
+        if (me.statusCode === 200) alive.push(pair);
+      }
+      expect(alive).toHaveLength(1);
+      const next = await inject('POST', '/api/v1/auth/refresh', { refreshToken: alive[0]!.refreshToken });
       expect(next.statusCode).toBe(200);
     });
   });

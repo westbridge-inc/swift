@@ -1637,7 +1637,15 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     # the console and echoes any Authorization header that reaches it. Caddy
     # takes ONE global options block, first in the file, and the file opens
     # with its own (the log filter), so the options join that block.
-    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n"
+    # storage_clean_interval off: a fresh Caddy cleans its storage at start, AT
+    # THE SAME TIME as it issues the names' first certificates, and the cleaner
+    # can delete a site folder whose key is still being written ("deleting site
+    # folder because key is empty", then "job failed: caching certificate after
+    # obtaining it: ... .key: no such file or directory"). That name then has no
+    # certificate until Caddy's next maintenance pass (minutes), so the test
+    # Caddy never answered (run 39175786618). A test container's storage is new
+    # and thrown away, so there is nothing to clean.
+    LIVE_OPTIONS = "    local_certs\n    skip_install_trust\n    admin off\n    storage_clean_interval off\n"
     STAND_IN = '\nhttp://:3000 {\n    respond "authorization=[{http.request.header.Authorization}]" 200\n}\n'
 
     @classmethod
@@ -1677,6 +1685,19 @@ class AdminConsoleCaddyfileRenderedByCaddy(unittest.TestCase):
     def accounts(self, console) -> list:
         found = re.findall(r'"accounts": (\[.*?\])', json.dumps(console))
         return [account["username"] for listing in found for account in json.loads(listing)]
+
+    def test_the_live_caddy_never_cleans_its_storage_while_it_issues_the_first_certificates(self):
+        tmp = Path(tempfile.mkdtemp(prefix="swift-admin-caddy-test-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "Caddyfile").write_text(with_global_options((DEPLOY / "Caddyfile").read_text(), self.LIVE_OPTIONS))
+        adapted = subprocess.run(["docker", "run", "--rm", "--network", "none", "-e", f"API_HOST={API_HOST}",
+                                  "-v", f"{tmp / 'Caddyfile'}:/etc/caddy/Caddyfile:ro", "caddy:2.10",
+                                  "caddy", "adapt", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+                                 text=True, capture_output=True, timeout=60)
+        self.assertEqual(adapted.returncode, 0, adapted.stderr[-600:])
+        tls = json.loads(adapted.stdout)["apps"]["tls"]
+        self.assertIs(tls.get("disable_storage_clean"), True)
+        self.assertEqual(tls["automation"]["policies"][0]["issuers"], [{"module": "internal"}])
 
     def test_without_admin_host_it_validates_and_serves_exactly_what_it_did(self):
         for env in ({"API_HOST": API_HOST},

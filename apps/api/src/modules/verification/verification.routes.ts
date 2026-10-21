@@ -9,12 +9,38 @@ import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { decryptBuffer, encryptBuffer, generateDek, getKeyProvider, verifyRenderToken } from '../../providers/storage/envelope';
 import { documentReviewerRequired, isActiveDocumentReviewer } from '../admin/document-reviewer';
 import { createHash } from 'node:crypto';
-import { inspectImage, looksLikeDocument, sniffImageType } from '../../utils/images';
+import { cleanStoredPhoto, looksLikeDocument } from '../../utils/images';
 import { AppError } from '../../utils/errors';
 import { consentSurfaceOf } from '../legal/consent-surface';
 import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from './upload-consent';
 import { resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
 import { liveDuplicateHolders } from './duplicate-holders';
+
+/** How long an identical re-send counts as a retry of the same upload. */
+export const UPLOAD_RETRY_WINDOW_MS = 10 * 60_000;
+
+/**
+ * [#1449 S4-1] The same person's identical file (same bytes, same type), stored in the
+ * last few minutes and not yet claimed by anything, IS the upload a lost reply hid: its
+ * key is the answer. Anything already claimed (a document, a mover or recovery pointer)
+ * or erased is never reused: a deliberate re-submission gets its own upload.
+ */
+export async function retriedUpload(
+  db: FastifyInstance['prisma'], userId: string, sha256: string, mimeType: string, now = Date.now(),
+): Promise<string | null> {
+  const recent = await db.encryptedObject.findMany({
+    where: { createdBy: userId, sha256, mimeType, shreddedAt: null, wrappedDek: { not: null }, createdAt: { gte: new Date(now - UPLOAD_RETRY_WINDOW_MS) } },
+    orderBy: { createdAt: 'desc' }, select: { fileKey: true }, take: 5,
+  });
+  for (const { fileKey } of recent) {
+    const claimed = await db.verificationDocument.count({ where: { fileUrl: fileKey } })
+      + await db.rider.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.driver.count({ where: { OR: [{ nationalIdUrl: fileKey }, { driverLicenseUrl: fileKey }, { vehicleInsuranceUrl: fileKey }, { vehicleInspectionUrl: fileKey }, { profilePhotoUrl: fileKey }, { vehiclePhotoUrl: fileKey }] } })
+      + await db.accountRecovery.count({ where: { OR: [{ idDocumentUrl: fileKey }, { selfieUrl: fileKey }] } });
+    if (claimed === 0) return fileKey;
+  }
+  return null;
+}
 
 const checklistRoleSchema = z.enum(['MOVER', 'RESTAURANT', 'SUPERMARKET', 'STORE', 'SERVICE', 'SERVICE_PROVIDER']);
 
@@ -146,13 +172,14 @@ export async function verificationRoutes(app: FastifyInstance) {
     if (!looksLikeDocument(buffer, file.mimetype)) {
       throw new AppError(400, 'BAD_CONTENT', 'File content does not match its declared format');
     }
-    // [Row 108] Read by the real decoder here, because the storage seam only ever sees this file encrypted.
-    // What the bytes ARE decides it (a PDF passed the sniff above as a PDF).
-    if (file.mimetype !== 'application/pdf') {
-      const sniffed = sniffImageType(buffer);
-      if (!sniffed) throw new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
-      await inspectImage(buffer, sniffed);
-    }
+    // [Row 108 · Row 238 · GUARDRAILS §2] The storage seam only ever sees this file ENCRYPTED, so the
+    // photo is cleaned here, before it is sealed, by the seam's own helper: the metadata a phone camera
+    // writes (GPS, capture time, device, serial) removed failing closed, then the clean bytes read by the
+    // real decoder. What the bytes ARE decides it (a PDF passed the sniff above as a PDF: not a photo).
+    const photo = await cleanStoredPhoto(buffer, file.mimetype);
+    const sealedBytes = photo?.buffer ?? buffer;
+    // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
+    const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
     await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
@@ -163,7 +190,13 @@ export async function verificationRoutes(app: FastifyInstance) {
     // proved at submission, so refuse instead of handing back an unusable file.
     const keys = getKeyProvider();
     if (keys) {
+      // The fingerprint of the file AS SUBMITTED: the duplicate-document and retry identity, comparable
+      // with every row stored before [Row 238]. A one-way digest keeps nothing of the removed metadata.
       const sha256 = createHash('sha256').update(buffer).digest('hex');
+      // [#1449 S4-1] A retry after a lost reply sends the same file again: answer with the
+      // upload already stored, so no second copy of an ID document is kept (and no second review signal).
+      const retried = await retriedUpload(app.prisma, request.user.userId, sha256, sealedType);
+      if (retried) return { success: true, data: { url: retried } };
       // SWIFT-078: the SAME physical document already on ANOTHER account is a
       // fraud signal — one person opening several accounts, or a reused/forged
       // ID. Flag it to the reviewers; it must never quietly auto-progress.
@@ -171,7 +204,7 @@ export async function verificationRoutes(app: FastifyInstance) {
       const dup = (await liveDuplicateHolders(app.prisma, sha256, request.user.userId)).length > 0;
 
       const dek = generateDek();
-      const { ciphertext, iv, authTag } = encryptBuffer(buffer, dek);
+      const { ciphertext, iv, authTag } = encryptBuffer(sealedBytes, dek);
       const { url } = await storage.upload({
         buffer: ciphertext,
         // Multipart normalizes empty/path-only names to ''. Appending .enc
@@ -187,8 +220,8 @@ export async function verificationRoutes(app: FastifyInstance) {
           iv: new Uint8Array(iv),
           authTag: new Uint8Array(authTag),
           wrappedDek: new Uint8Array(await keys.wrapDek(dek)),
-          mimeType: file.mimetype,
-          sizeBytes: buffer.length,
+          mimeType: sealedType,
+          sizeBytes: sealedBytes.length, // what is stored (and what a deletion receipt destroys)
           sha256,
           createdBy: request.user.userId,
         },

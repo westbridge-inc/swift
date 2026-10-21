@@ -91,7 +91,8 @@ async function createLegacySession(userId: string, role: string) {
     },
   });
   expect(session.authMethod).toBe('LEGACY');
-  return session;
+  // [Row 231] the row holds the digest; the credential a client presents is the plaintext
+  return { ...session, token };
 }
 
 function genericPasswordFailure(response: Awaited<ReturnType<typeof passwordLogin>>) {

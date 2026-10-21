@@ -75,6 +75,20 @@ export function testPhone(): string {
 }
 
 const tagAlphabet = customAlphabet('0123456789abcdefghijklmnopqrstuvwxyz');
+const digitAlphabet = customAlphabet('0123456789');
+/**
+ * CLASS 4 — a random tag that spells a prohibited word. The prohibited-items
+ * checker judges an item's, a store's or a category's own words (look-alike
+ * digits included: "GxhAl3" reads as "ale"), so a store or item name built
+ * from `nanoid()` or `fixtureTag()` is hidden or refused about once in a few
+ * thousand draws ("Sub rumVg5", "Sub XN4-Rx") and the suite reds with
+ * SUBSTITUTE_UNAVAILABLE or PROHIBITED_ITEM it never meant to test.
+ * `wordFreeTag()` draws only digits: still random (unique across runs) but it
+ * can never spell a word. checked-names.test.ts keeps every checked name to it.
+ */
+export function wordFreeTag(length = 8): string {
+  return digitAlphabet(length);
+}
 
 /** A random tag of `0-9a-z` (default 8 characters): valid in every id, slug and upper-cased reference pattern. */
 export function fixtureTag(length = 8): string {

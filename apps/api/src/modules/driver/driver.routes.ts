@@ -1,4 +1,5 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
+import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
@@ -37,7 +38,7 @@ import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { goOnlineRefusal } from '../subscription/go-online-refusals';
-import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { handoverAttemptState, handoverCodeMatches, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { CashRulesService } from '../cash/cash-rules.service';
 import { withIdempotency } from '../../utils/idempotency';
 import { throwForMissingProfile } from '../../utils/role-gate';
@@ -196,7 +197,8 @@ export async function driverRoutes(app: FastifyInstance) {
     if (!driver) await throwForMissingProfile(app, request.user.userId, 'MOVER', 'Driver');
     return {
       success: true,
-      data: driver ? { ...driver, subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver) } : driver,
+      // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+      data: driver ? { ...driver, ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)), subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, driver.userId)))?.subscription ?? null, ...driverLinkView(driver) } : driver,
     };
   });
 
@@ -296,7 +298,7 @@ export async function driverRoutes(app: FastifyInstance) {
       : await app.prisma.driver.findUniqueOrThrow({ where: { id: me.id }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true } });
     return {
       success: true,
-      data: { ...driver, ...driverLinkView(link) },
+      data: { ...driver, ...driverLinkView(link), ...(await shownRatingTotals(app.prisma, 'DRIVER', request.user.userId)) },
     };
   });
 
@@ -341,7 +343,7 @@ export async function driverRoutes(app: FastifyInstance) {
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   // ─── Online / Offline ──────────────────────────────────────────────────
@@ -481,7 +483,7 @@ export async function driverRoutes(app: FastifyInstance) {
         .catch((error) => request.log.warn({ err: error, riderId: retiredRiderId }, 'driver GO sibling online-hours close failed'));
     }
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   app.post('/go-offline', { preHandler: [app.authenticate] }, async (request) => {
@@ -512,7 +514,7 @@ export async function driverRoutes(app: FastifyInstance) {
       .releaseHeldOffer(driver.id)
       .catch((error) => request.log.warn({ err: error, driverId: driver.id }, 'driver go-offline offer cleanup failed'));
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'DRIVER', request.user.userId) };
   });
 
   // ─── Location ──────────────────────────────────────────────────────────
@@ -924,7 +926,7 @@ export async function driverRoutes(app: FastifyInstance) {
           vehicleColor: driver.vehicleColor,
           licensePlate: driver.licensePlate,
           vehiclePhotoUrl: driver.vehiclePhotoUrl,
-          rating: driver.averageRating,
+          rating: (await shownRatingFor(app.prisma, 'DRIVER', driver.userId)).average,
           currentLat: driver.currentLat,
           currentLng: driver.currentLng,
         },
@@ -1242,7 +1244,8 @@ export async function driverRoutes(app: FastifyInstance) {
       if (locked) {
         throw new AppError(400, 'MAX_ATTEMPTS', 'Maximum PIN verification attempts exceeded. Please contact support.');
       }
-      if (current.ridePin !== pin) {
+      // [Row 207] Constant time, through the one handover-code comparison.
+      if (!handoverCodeMatches(current.ridePin, pin)) {
         await tx.order.update({
           where: { id },
           data: { ridePinAttempts: { increment: 1 } },
@@ -1746,7 +1749,7 @@ export async function driverRoutes(app: FastifyInstance) {
         pendingPayout: Number(pendingPayout._sum.amount ?? 0),
         todayRides,
         totalRides,
-        averageRating: driver.averageRating,
+        averageRating: (await shownRatingFor(app.prisma, 'DRIVER', request.user.userId)).average,
         acceptanceRate: driver.acceptanceRate,
         cancellationRate: driver.cancellationRate,
       },

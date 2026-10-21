@@ -314,21 +314,21 @@ describe('[TAXI waiting charge] a ride charged for waiting', () => {
     paymentStatus: 'CAPTURED',
     vendor: null,
     taxiFareTotal: 2800,
-    totalAmount: 3300,
+    totalAmount: 3100,
     deliveryFee: 0,
   };
 
   it('shows the frozen line read-only: trip fare, waiting with its minutes, and the total they make', async () => {
     mockApi(orderHandler(() => {
       throw new Error('no mutation expected');
-    }, { ...ride, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 500, total: 3300, currencyCode: 'GYD' } }));
+    }, { ...ride, fareBreakdown: { routeFare: 2800, waitingMinutes: 13, waitingCharge: 300, total: 3100, currencyCode: 'GYD' } }));
 
     renderWithQuery(<OrderDetailPage params={fulfilledParams({ id: 'order-1' })} />);
 
     const waiting = await screen.findByText('Waiting (13 min)');
-    expect(waiting.nextElementSibling?.textContent).toBe('$500');
+    expect(waiting.nextElementSibling?.textContent).toBe('$300');
     expect(screen.getByText('Trip fare').nextElementSibling?.textContent).toBe('$2,800');
-    expect(screen.getByText('Total').nextElementSibling?.textContent).toBe('$3,300');
+    expect(screen.getByText('Total').nextElementSibling?.textContent).toBe('$3,100');
   });
 
   it('a ride without a breakdown keeps today\'s money section: the route fare as its total, no waiting line', async () => {
