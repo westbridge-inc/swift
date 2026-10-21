@@ -27,7 +27,7 @@ interface ParcelView {
 }
 
 /** The recipient's words for the courier state machine — a sentence, not an
- *  enum. Unknown states fall through to the raw value rather than lying. */
+ *  enum. A state with no words here reads "In progress", never the raw code. */
 const STATUS_LABEL: Record<string, string> = {
   // [BUG-GUARDS C5] A parcel just booked (or a status this page has no words
   // for) used to print the raw code, e.g. "PENDING".

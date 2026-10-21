@@ -29,16 +29,20 @@ const SRC = join(process.cwd(), 'src');
 /** web + phone: a raw code never shows, not even as "Code: X". */
 const ALLOW_SECONDARY_CODE = false;
 
+// >>> C5 shared scanner: byte-identical in apps/web, apps/admin and the phone (checked once all are on main); the per-app rule
+// (ALLOW_SECONDARY_CODE) sits above. Fix it once, copy it to both.
 /** Field names that carry a machine value the server sends (PENDING_REVIEW, RIDER_EN_ROUTE_PICKUP, OWNER). */
-const RAW_NAME = /^(status|state|kind|type|reason|role|outcome|decision|resolution|tier|errorCode|reasonCode|refusalCode|failureCode)$|[a-z](Status|State|Kind|Type|Reason|Role|Outcome|Decision|Resolution)$/;
+const RAW_NAME = /^(status|state|kind|type|reason|role|outcome|decision|resolution|tier|method|errorCode|reasonCode|refusalCode|failureCode)$|[a-z](Status|State|Kind|Type|Reason|Role|Outcome|Decision|Resolution|Class|Method)$/;
 /** `code` is a machine value only on an error or refusal (err.code = ORDER_NOT_FOUND); a promo code,
  *  a start code or a currency code is text the person is meant to read. */
 const ERRORISH = /^e$|err|fail|refus|problem|result|response|outcome/i;
 /** Props whose value is read as text. key, className, href, value, data-* … are not shown. */
-const TEXT_PROP = /^(title|aria-label|aria-description|alt|placeholder|label|description|subtitle|message|text|heading|caption|hint|empty|tooltip|badge)$/;
+const TEXT_PROP = /^(title|aria-label|accessibilityLabel|accessibilityHint|aria-description|alt|placeholder|label|description|subtitle|message|text|heading|caption|hint|empty|tooltip|badge)$/;
 const PASS_THROUGH = new Set(['toLowerCase', 'toUpperCase', 'toLocaleLowerCase', 'toLocaleUpperCase', 'trim', 'toString']);
 
-type Kind = 'raw' | 'dressed';
+type Kind = 'raw' | 'dressed' | 'code-only';
+/** Fields shown right after "Code:" (the console's secondary detail); they still need plain words next to them. */
+const secondary = new WeakSet<ts.Node>();
 interface Hit { file: string; line: number; kind: Kind; text: string }
 let examined = 0;
 
@@ -92,6 +96,22 @@ function isRawField(e: ts.Expression, seen = new Set<ts.Node>()): boolean {
   return false;
 }
 
+/** #1948 review S3-1: props a component in this file shows as text (`function Chip({ status }) { return
+ *  <span>{status}</span>; }` -> `Chip.status`). Its call sites are judged instead: `<Chip status={d.status} />`. */
+const textProps = new Set<string>();
+function noteTextProp(id: ts.Identifier): void {
+  for (let at: ts.Node | undefined = id.parent; at; at = at.parent) {
+    if (!isFn(at)) continue;
+    const first = at.parameters[0];
+    if (!first || !ts.isObjectBindingPattern(first.name)) return;
+    const el = first.name.elements.find((b) => ts.isIdentifier(b.name) && b.name.text === id.text);
+    if (!el) return;
+    const named = ts.isFunctionDeclaration(at) ? at.name : ts.isVariableDeclaration(at.parent) ? at.parent.name : undefined;
+    if (named && ts.isIdentifier(named) && /^[A-Z]/.test(named.text)) textProps.add(`${named.text}.${(el.propertyName ?? el.name).getText()}`);
+    return;
+  }
+}
+
 /** The parts of a shown expression that end up as text, with the raw ones kept. `afterCodeLabel`: the
  *  text right before this part reads "Code:" (the console's secondary detail). */
 function rawLeaves(e0: ts.Expression, afterCodeLabel: boolean, seen = new Set<ts.Node>()): ts.Expression[] {
@@ -119,7 +139,11 @@ function rawLeaves(e0: ts.Expression, afterCodeLabel: boolean, seen = new Set<ts
     if (ts.isIdentifier(callee) && callee.text === 'String' && e.arguments.length === 1) return rawLeaves(e.arguments[0]!, afterCodeLabel, seen);
     return [];
   }
-  if (isRawField(e, seen)) return ALLOW_SECONDARY_CODE && afterCodeLabel ? [] : [e];
+  if (ts.isIdentifier(e)) noteTextProp(e);
+  if (isRawField(e, seen)) {
+    if (ALLOW_SECONDARY_CODE && afterCodeLabel) secondary.add(e);
+    return [e];
+  }
   return [];
 }
 
@@ -128,10 +152,14 @@ function isDressing(call: ts.CallExpression): boolean {
   const callee = call.expression;
   if (!ts.isPropertyAccessExpression(callee)) return false;
   const [what, by] = call.arguments;
-  const underscore = what && ((ts.isRegularExpressionLiteral(what) && /^\/_\+?\/g?$/.test(what.text)) || (ts.isStringLiteralLike(what) && what.text === '_'));
+  // `/_/g`, `/_+/g`, and a class or alternation that takes the underscore too (`/[_-]/g`, `/[\s_]+/g`, `/_|-/g`).
+  const pattern = what && ts.isRegularExpressionLiteral(what) ? /^\/(.*)\/[a-z]*$/.exec(what.text)?.[1] ?? '' : '';
+  const underscore = what && ((pattern.includes('_') && /^[[\]_\-|+\\s]+$/.test(pattern)) || (ts.isStringLiteralLike(what) && what.text === '_'));
   if ((callee.name.text === 'replace' || callee.name.text === 'replaceAll') && underscore) return !!by && ts.isStringLiteralLike(by) && /^\s+$/.test(by.text);
   if (callee.name.text === 'join' && by === undefined && what && ts.isStringLiteralLike(what) && /^\s+$/.test(what.text)) {
-    const inner = callee.expression;
+    // `.split('_').join(' ')`, also through `.map(…)` / `.filter(…)` (`.split('_').map(capitalise).join(' ')`).
+    let inner = callee.expression;
+    while (ts.isCallExpression(inner) && ts.isPropertyAccessExpression(inner.expression) && /^(map|filter|slice)$/.test(inner.expression.name.text)) inner = inner.expression.expression;
     return ts.isCallExpression(inner) && ts.isPropertyAccessExpression(inner.expression) && inner.expression.name.text === 'split'
       && !!inner.arguments[0] && ts.isStringLiteralLike(inner.arguments[0]) && inner.arguments[0].text === '_';
   }
@@ -155,6 +183,38 @@ function codeLabelBefore(child: ts.JsxExpression): boolean {
   return false;
 }
 
+/** Inside a prop that is not read as text (className={TONE[x.status]}, key, href): not words. */
+function inHiddenProp(n: ts.Node): boolean {
+  for (let at = n.parent; at && !ts.isJsxElement(at) && !ts.isJsxFragment(at) && !isFn(at); at = at.parent) {
+    if (ts.isJsxAttribute(at)) return !TEXT_PROP.test(at.name.getText());
+  }
+  return false;
+}
+
+/** The plain words for the same field next to its secondary "Code: X": a label map (LABEL[x.status]), a
+ *  label function (statusLabel(x.status)) or a ternary on it that gives text, shown within the element
+ *  around the code or up to two elements further out. Without them the code is the only label. */
+function plainWordsNear(shown: ts.Node, leaf: ts.Expression): boolean {
+  const field = leaf.getText();
+  let scope: ts.Node = shown;
+  let levels = 0;
+  for (let at = shown.parent; at && levels < 3 && !isFn(at); at = at.parent) {
+    if (ts.isJsxElement(at) || ts.isJsxFragment(at)) { scope = at; levels++; }
+  }
+  let found = false;
+  const look = (n: ts.Node) => {
+    if (found || n === leaf) return;
+    const words = (ts.isElementAccessExpression(n) && n.argumentExpression.getText() === field)
+      || (ts.isCallExpression(n) && !(ts.isPropertyAccessExpression(n.expression) && PASS_THROUGH.has(n.expression.name.text))
+        && !(ts.isIdentifier(n.expression) && n.expression.text === 'String') && n.arguments.some((a) => a.getText() === field))
+      || (ts.isConditionalExpression(n) && n.condition.getText().includes(field) && ts.isStringLiteralLike(strip(n.whenTrue)));
+    if (words && !inHiddenProp(n)) { found = true; return; }
+    ts.forEachChild(n, look);
+  };
+  look(scope);
+  return found;
+}
+
 function scan(file: string, src: string): Hit[] {
   const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
   const hits: Hit[] = [];
@@ -166,15 +226,34 @@ function scan(file: string, src: string): Hit[] {
       const shownProp = ts.isJsxAttribute(p) && TEXT_PROP.test(p.name.getText());
       if (shownChild || shownProp) {
         examined++;
-        for (const leaf of rawLeaves(node.expression, shownChild && codeLabelBefore(node))) hits.push({ file, line: at(leaf), kind: 'raw', text: snippet(leaf) });
+        for (const leaf of rawLeaves(node.expression, shownChild && codeLabelBefore(node))) {
+          if (secondary.has(leaf) && plainWordsNear(node, leaf)) continue;
+          hits.push({ file, line: at(leaf), kind: secondary.has(leaf) ? 'code-only' : 'raw', text: snippet(leaf) });
+        }
       }
     }
     if (ts.isCallExpression(node) && isDressing(node)) hits.push({ file, line: at(node), kind: 'dressed', text: snippet(node) });
     ts.forEachChild(node, visit);
   };
+  textProps.clear();
   visit(sf);
+  // The call sites of a component that shows a prop as text: that prop's value is shown.
+  const callSites = (node: ts.Node) => {
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node))) {
+      for (const a of node.attributes.properties) {
+        if (!ts.isJsxAttribute(a) || TEXT_PROP.test(a.name.getText()) || !textProps.has(`${node.tagName.getText()}.${a.name.getText()}`)) continue;
+        if (!a.initializer || !ts.isJsxExpression(a.initializer) || !a.initializer.expression) continue;
+        examined++;
+        for (const leaf of rawLeaves(a.initializer.expression, false)) hits.push({ file, line: at(leaf), kind: 'raw', text: snippet(leaf) });
+      }
+    }
+    ts.forEachChild(node, callSites);
+  };
+  callSites(sf);
   return hits;
 }
+
+// <<< C5 shared scanner
 
 function sources(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -241,6 +320,10 @@ describe('[BUG-GUARDS C5] a raw status code is never shown', () => {
     expect(verdict(`function P({ o }){ return <span>{o.status.replaceAll('_', ' ').toLowerCase()}</span>; }`)).toEqual(["dressed:o.status.replaceAll('_', ' ')"]);
     expect(verdict(`const words = (s: string) => s.toLowerCase().replace(/_/g, ' ');`)).toEqual(["dressed:s.toLowerCase().replace(/_/g, ' ')"]);
     expect(verdict(`const words = (s: string) => s.split('_').join(' ');`)).toEqual(["dressed:s.split('_').join(' ')"]);
+    // A character class or alternation that takes the underscore is the same dressing; a dash alone is not.
+    expect(verdict(`const words = (s: string) => s.replace(/[_-]/g, ' ');`)).toEqual(["dressed:s.replace(/[_-]/g, ' ')"]);
+    expect(verdict(`const words = (s: string) => s.replace(/[\\s_]+/g, ' ');`)).toEqual(["dressed:s.replace(/[\\s_]+/g, ' ')"]);
+    expect(verdict(`const words = (s: string) => s.replace(/-/g, ' ');`)).toEqual([]);
     // Through fallbacks, ternaries, templates, text props and case changes.
     expect(verdict(`function P({ c }){ return <p>{LABEL[c.status] ?? c.status}</p>; }`)).toEqual(['raw:c.status']);
     expect(verdict(`function P({ c }){ return <p>{c ? c.memberRole.toUpperCase() : 'None'}</p>; }`)).toEqual(['raw:c.memberRole']);
@@ -248,6 +331,13 @@ describe('[BUG-GUARDS C5] a raw status code is never shown', () => {
     expect(verdict(`function P({ e }){ return <p>{e && 'Failed: ' + e.code}</p>; }`)).toEqual(['raw:e.code']);
     // The rule for web: not even as a secondary "Code: X".
     expect(verdict(`function P({ r }){ return <p>{label(r.status)} <small>Code: {r.status}</small></p>; }`)).toEqual(['raw:r.status']);
+    // [#1948 review S3-1] Payment method and ride class are codes too; a dressing through map/filter is still dressing.
+    expect(verdict(`function P({ o }){ return <p>Payment: {o.paymentMethod} · Class: {o.rideClass} · {METHOD[o.method] ?? o.method}</p>; }`)).toEqual(['raw:o.paymentMethod', 'raw:o.rideClass', 'raw:o.method']);
+    expect(verdict(`const words = (c: string) => c.split('_').filter(Boolean).map((w) => w[0] + w.slice(1).toLowerCase()).join(' ');`)).toEqual(["dressed:c.split('_').filter(Boolean).map((w) => w[0] + w.slice(1).to"]);
+    // [#1948 review S3-1] A component that shows a prop as text is judged at its call sites.
+    expect(verdict(`function Chip({ status }: { status: string }) { return <span className={status}>{status}</span>; }
+      function P({ d }){ return <div><Chip status={d.status} /><Chip status={label(d.status)} /></div>; }`)).toEqual(['raw:d.status']);
+    expect(verdict(`function Chip({ status }: { status: string }) { return <span>{label(status)}</span>; } function P({ d }){ return <Chip status={d.status} />; }`)).toEqual([]);
     // Honest shapes: label maps, comparisons, keys/classes, a promo code, a component that maps.
     expect(verdict(`function P({ s }){ return <b className={s.status === 'ACTIVE' ? 'g' : 'r'}>{STATUS_LABEL[s.status]}</b>; }`)).toEqual([]);
     expect(verdict(`function P({ s }){ return <b>{statusLabel(s.status)}</b>; }`)).toEqual([]);
