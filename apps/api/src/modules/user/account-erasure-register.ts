@@ -22,7 +22,6 @@ export const ERASURE_CLEARED: Readonly<Record<string, string>> = {
   'DeviceToken.userId': 'erasure transaction: access revoked with the authority cut-off',
   'VerificationDecisionOutbox.userId': 'erasure transaction: work an approval still owed (no trial for a closed account)',
   'Notification.userId': 'erasure transaction: in-app notices (titles and bodies can name orders and people)',
-  'MoneySurfaceCommand.userId': 'erasure transaction: staged payout and payment-setting commands with their notices (a command queue, not a money record)',
   'MoverRevocationOutbox.userId': 'erasure transaction: finished rows; a row still owed to other people (their re-dispatch and notices) stays until it is done, then the standing re-sweep deletes it',
   'GuardianCheckinDelivery.userId': 'erasure transaction: safety check-in deliveries, unless a safety deletion hold is open (kept until it ends; the standing re-sweep deletes them)',
   'CardSession.userId': 'card sessions that moved no money; kept because it is payment evidence (Privacy Policy §6 settlement history): one a payment, provider transaction, provider action, confirmation hold or observation names, or one still in flight',
@@ -55,7 +54,8 @@ export const ERASURE_DEIDENTIFIED: Readonly<Record<string, string>> = {
   'Strike.userId': 'G1: the strike stays on the de-identified account (reason code, order link, date); its phone and address key are dropped',
   'EnforcementAction.accountId': 'G1: the decision stays (level, reason code, dates); the signals fired and the appeal note are dropped',
   // G2 case and request free text.
-  'SupportTicket.userId': 'G2: the ticket stays (category, status, dates, order link); subject, message and staff note are replaced. Kept because server-written: the confirmed closure request (the support queue completes by its subject and text)',
+  'MoneySurfaceCommand.userId': "REVIEW-G S4-1: the person's own surface (their driver profile) goes in the erasure transaction; a command they staged on a store or partner account that still exists stays in that entity's generation chain (an audit record) with the person replaced by the erased marker and its notice to them withdrawn",
+  'SupportTicket.userId': "G2: the ticket stays (category, status, dates, order link); subject and message read \"[text removed at the customer's request]\" and the staff note goes. Kept because server-written: the confirmed closure request (the support queue completes by its subject and text)",
   'ComplianceViolation.userId': 'G2: the check stays (reason code, action, dates); its evidence is dropped',
   'ComplianceReviewCase.userId': 'G2: the case stays (status, dates, decider); its note is dropped',
   'RectificationRequest.userId': 'G2: the rights request stays (field code, dates, resolution); its note is replaced',

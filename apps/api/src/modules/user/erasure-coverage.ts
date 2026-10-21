@@ -12,6 +12,9 @@ import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-clos
 
 /** What replaces a required text column the erasure empties. */
 export const ERASED_TEXT = '[deleted with the account]';
+/** [REVIEW-G S4-2] What a support ticket's subject and message read after the erasure, so support sees why
+ *  (owner G2: the text goes, even on an open ticket). */
+export const TICKET_TEXT_REMOVED = "[text removed at the customer's request]";
 /** The checkout replay record keeps its order ids and date; this replaces its frozen response and request hash. */
 export const ERASED_CHECKOUT_RESULT = { erased: true } as const;
 
@@ -29,9 +32,16 @@ async function lockPerson(tx: Prisma.TransactionClient, userId: string): Promise
 export async function eraseOwedRowsInTransaction(tx: Prisma.TransactionClient, userId: string): Promise<void> {
   await bindTenantTransaction(tx);
   await tx.notification.deleteMany({ where: { userId } });
-  // A staged payout or payment-setting change dies with the account (the apply worker re-reads its command
-  // under the entity lock and applies nothing once it is gone); the queued owner notice goes with it.
-  await tx.moneySurfaceCommand.deleteMany({ where: { userId } });
+  // [REVIEW-G S4-1 · COORD] Money-surface commands are an entity's audit chain (one generation per store or
+  // partner, the writer takes max + 1). Only the person's OWN surface goes: their driver profile, closed with them.
+  // A command they staged on a store or partner account that still exists stays where it is in that chain, with
+  // the person replaced by the erased marker and its notice to them withdrawn, so no generation is ever reused.
+  const ownDriver = await tx.driver.findUnique({ where: { userId }, select: { id: true } });
+  if (ownDriver) await tx.moneySurfaceCommand.deleteMany({ where: { userId, actor: 'DRIVER', entityId: ownDriver.id } });
+  await tx.moneySurfaceCommand.updateMany({
+    where: { userId },
+    data: { userId: `deleted:${userId}`, noticeKind: null, noticePayload: Prisma.DbNull, noticeDedupeKey: null },
+  });
   // A row still unprocessed is owed to OTHER people (their orders re-dispatched, their notices): it stays until
   // its drain finishes, and the standing re-sweep deletes it then.
   await tx.moverRevocationOutbox.deleteMany({ where: { userId, processedAt: { not: null } } });
@@ -140,8 +150,8 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
     });
     // The closure request's subject and message are server-written (the support queue completes by them), and
     // so is its completion note: they stay. Every other ticket's text goes.
-    await tx.supportTicket.updateMany({ where: { userId, subject: { notIn: [ERASED_TEXT, ACCOUNT_CLOSURE_SUBJECT] } }, data: { subject: ERASED_TEXT } });
-    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [ERASED_TEXT, ACCOUNT_CLOSURE_MESSAGE] } }, data: { message: ERASED_TEXT } });
+    await tx.supportTicket.updateMany({ where: { userId, subject: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_SUBJECT] } }, data: { subject: TICKET_TEXT_REMOVED } });
+    await tx.supportTicket.updateMany({ where: { userId, message: { notIn: [TICKET_TEXT_REMOVED, ACCOUNT_CLOSURE_MESSAGE] } }, data: { message: TICKET_TEXT_REMOVED } });
     await tx.supportTicket.updateMany({ where: { userId, adminNote: { not: null }, subject: { not: ACCOUNT_CLOSURE_SUBJECT } }, data: { adminNote: null } });
     await tx.complianceViolation.updateMany({ where: { userId, NOT: { evidence: { equals: {} } } }, data: { evidence: {} } });
     await tx.complianceReviewCase.updateMany({ where: { userId, note: { not: null } }, data: { note: null } });
@@ -157,6 +167,15 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
     await tx.ratingReport.updateMany({ where: { reporterId: userId, status: { not: 'PENDING' }, note: { not: null } }, data: { note: null } });
   });
 }
+
+/**
+ * [REVIEW-M S3-1] The ONE keep-whole test for an incident case `c`: open, or any hold covers it (its legal-hold flag,
+ * its legal_holds row, an unreleased document legal hold raised from it). Every keep-whole decision below (the case,
+ * the SOS it covers, a trip session escalated into that SOS, and so the SOS bundle) uses it.
+ */
+export const CASE_KEPT_WHOLE = Prisma.sql`(c."status"::text <> 'CLOSED' OR c."legalHold"
+  OR EXISTS (SELECT 1 FROM "legal_holds" l WHERE l."caseId" = c."id")
+  OR EXISTS (SELECT 1 FROM "doc_legal_hold" d WHERE d."incidentCaseId" = c."id" AND d."releasedAt" IS NULL))`;
 
 /**
  * Owner 19 Oct (G3): a safety record stays whole while its case is open or a hold covers it; otherwise its
@@ -179,12 +198,9 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
       WHERE (c."subjectUserId" = ${userId} OR c."reporterUserId" = ${userId})
       ORDER BY c."id" FOR UPDATE /* erasure-safety-cases */
     `;
-    const caseRows = cases.length ? await tx.incidentCase.findMany({
-      where: { id: { in: cases.map((c) => c.id) } },
-      select: { id: true, status: true, legalHold: true, sosAlertId: true, legalHoldRecord: { select: { id: true } }, docLegalHolds: { where: { releasedAt: null }, select: { id: true } } },
-    }) : [];
-    const keptCase = (c: typeof caseRows[number]) => c.status !== 'CLOSED' || c.legalHold || !!c.legalHoldRecord || c.docLegalHolds.length > 0;
-    const closedCases = caseRows.filter((c) => !keptCase(c)).map((c) => c.id);
+    const closedCases = cases.length ? (await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT c."id" FROM "IncidentCase" c WHERE c."id" = ANY(${cases.map((c) => c.id)}::text[]) AND NOT ${CASE_KEPT_WHOLE}
+    `).map((c) => c.id) : [];
     if (closedCases.length) {
       await tx.incidentCase.updateMany({ where: { id: { in: closedCases } }, data: { summary: ERASED_TEXT, details: Prisma.DbNull, decisionNotes: null } });
     }
@@ -193,8 +209,7 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
     const alerts = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT a."id" FROM "SosAlert" a
       WHERE a."actorUserId" = ${userId} AND a."status"::text IN ('RESOLVED', 'CANCELLED')
-        AND NOT EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND (c."status"::text <> 'CLOSED' OR c."legalHold"
-          OR EXISTS (SELECT 1 FROM "legal_holds" l WHERE l."caseId" = c."id")))
+        AND NOT EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND ${CASE_KEPT_WHOLE})
         AND NOT EXISTS (SELECT 1 FROM "EvidenceBundle" b WHERE b."sosAlertId" = a."id" AND b."legalHold")
       ORDER BY a."id" FOR UPDATE OF a /* erasure-safety-sos */
     `;
@@ -217,8 +232,7 @@ export async function deidentifySafetyRecords(db: PrismaClient, userId: string):
     const escalated = sessions.flatMap((s) => s.escalatedToSosId ? [s.escalatedToSosId] : []);
     const wholeSos = new Set(escalated.length ? (await tx.$queryRaw<Array<{ id: string }>>`
       SELECT a."id" FROM "SosAlert" a WHERE a."id" = ANY(${escalated}::text[]) AND (a."status"::text NOT IN ('RESOLVED', 'CANCELLED')
-        OR EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND (c."status"::text <> 'CLOSED' OR c."legalHold"
-          OR EXISTS (SELECT 1 FROM "legal_holds" l WHERE l."caseId" = c."id")))
+        OR EXISTS (SELECT 1 FROM "IncidentCase" c WHERE c."sosAlertId" = a."id" AND ${CASE_KEPT_WHOLE})
         OR EXISTS (SELECT 1 FROM "EvidenceBundle" b WHERE b."sosAlertId" = a."id" AND b."legalHold"))
     `).map((a) => a.id) : []);
     const sessionIds = sessions.filter((s) => !s.escalatedToSosId || !wholeSos.has(s.escalatedToSosId)).map((s) => s.id);
