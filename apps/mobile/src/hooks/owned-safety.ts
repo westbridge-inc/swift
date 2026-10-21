@@ -79,8 +79,16 @@ export function useOwnedSosAlert(id: string) {
       const res = await safetyApi.getSos(id, requireAuthSessionForPrincipal(owner));
       requireAuthSessionForPrincipal(owner);
       return ownedSosResult(res.data?.data, owner, id);
-    }, refetchInterval: 5_000,
+    },
+    // [#1955 S4-1] Watched while live (or not read yet); a resolved or cancelled alert stops polling.
+    refetchInterval: (query) => (CLOSED_STATUSES.has(query.state.data?.status ?? '') ? false : 5_000),
   });
+}
+const CLOSED_STATUSES = new Set(['RESOLVED', 'CANCELLED']);
+/** [#1955 S4-2] A recovery answer counts only if it was fetched AFTER the last local change: a poll
+ *  that started before a Cancel or "send now" landed must never put the old status back. */
+export function recoveryIsNewer(dataUpdatedAt: number | undefined, lastLocalChangeAt: number): boolean {
+  return typeof dataUpdatedAt === 'number' && dataUpdatedAt > lastLocalChangeAt;
 }
 export function useMarkSafeSos() {
   const { owner } = useSafetyOwner();

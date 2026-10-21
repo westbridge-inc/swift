@@ -1,5 +1,5 @@
 import { OwnedSosActions } from './OwnedSosActions';
-import { useOwnedSosAlert } from '../../hooks/owned-safety';
+import { recoveryIsNewer, useOwnedSosAlert } from '../../hooks/owned-safety';
 import { useAuthStore, requireAuthSessionForPrincipal } from '../../stores/authStore';
 import { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, View } from 'react-native';
@@ -128,10 +128,14 @@ function SosCeremonyBody({
   const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
   const owner = { userId: user?.id ?? '', generation: sessionGeneration };
   const [alert, setAlert] = useState<SosRaised | null>(null);
+  // [#1955 S4-2] When the alert last changed HERE (raise, confirm, cancel): a recovery poll that
+  // started before that change carries the old status and must not put it back.
+  const localChangeAt = useRef(0);
+  const changeAlert = (next: SosRaised | null) => { localChangeAt.current = Date.now(); setAlert(next); };
   const recovery = useOwnedSosAlert(resumeAlertId ?? alert?.id ?? '');
   const [tooLateToCancel, setTooLateToCancel] = useState(false);
   useEffect(() => { setAlert(null); }, [owner.userId, owner.generation, resumeAlertId]);
-  useEffect(() => { if (recovery.data && !recovery.isError) setAlert(recovery.data); }, [resumeAlertId, recovery.data, recovery.isError]);
+  useEffect(() => { if (recovery.data && !recovery.isError && recoveryIsNewer(recovery.dataUpdatedAt, localChangeAt.current)) setAlert(recovery.data); }, [resumeAlertId, recovery.data, recovery.isError, recovery.dataUpdatedAt]);
   const [graceLeft, setGraceLeft] = useState<number | null>(null);
   // [MOB-018] What the server did NOT say: an unreadable/failed confirm or
   // cancel is UNKNOWN, an unreachable server is OFFLINE. Never inferred ACTIVE.
@@ -215,7 +219,7 @@ function SosCeremonyBody({
     const onError = (err: unknown) => { if (isOffline(err)) setOutcome('offline'); };
     const onSuccess = (raised: SosRaised) => {
       try { requireAuthSessionForPrincipal(owner); } catch { return; }
-      setAlert(raised);
+      changeAlert(raised);
       announce(
         raised.status === 'ACTIVE'
           ? "Swift's safety team has been paged."
@@ -259,7 +263,7 @@ function SosCeremonyBody({
           return;
         }
         if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED') recordSosTransition('ACTIVE', status);
-        setAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
+        changeAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
         if (status === 'ACTIVE' || status === 'ACKNOWLEDGED') announce("Swift's safety team has been paged.");
       },
       onError: (err) => {
@@ -276,9 +280,9 @@ function SosCeremonyBody({
       onSuccess: (data) => {
         try { requireAuthSessionForPrincipal(owner); } catch { return; }
         const status = serverStatus(data);
-        if (status === 'CANCELLED') { setAlert({ ...alert, status: 'CANCELLED' }); return; }
+        if (status === 'CANCELLED') { changeAlert({ ...alert, status: 'CANCELLED' }); return; }
         recordSosTransition('CANCELLED', status ?? 'UNKNOWN');
-        if (status) setAlert({ ...alert, status });
+        if (status) changeAlert({ ...alert, status });
         else setOutcome('cancel-unknown');
       },
       onError: (err) => {
@@ -286,7 +290,7 @@ function SosCeremonyBody({
         // clock — help is being reached. Anything else is not that.
         if (isSosNotCancellable(err)) {
           setTooLateToCancel(true);
-          setAlert({ ...alert, status: 'ACTIVE' });
+          changeAlert({ ...alert, status: 'ACTIVE' });
           return;
         }
         recordSosTransition('CANCELLED', isOffline(err) ? 'OFFLINE' : 'ERROR');

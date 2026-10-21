@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AppState, ScrollView, View } from 'react-native';
 import { PillButton, PopupCard, PopupTitle, T } from '../../kit';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useOwnedSosAlerts } from '../../hooks/owned-safety';
 import { useAuthStore } from '../../stores/authStore';
 import { OwnedSosActions } from './OwnedSosActions';
@@ -8,6 +9,7 @@ import { SosCeremony } from './SosCeremony';
 
 function SignedInSafetyPanel() {
   const query = useOwnedSosAlerts();
+  const insets = useSafeAreaInsets();
   const { refetch } = query;
   const [visible, setVisible] = useState(false);
   const [resumedId, setResumedId] = useState<string | null>(null);
@@ -21,7 +23,8 @@ function SignedInSafetyPanel() {
   if (!rows.length && !visible && !resumedId) return null;
   return <>
     {rows.length ? (
-      <View style={{ position: 'absolute', right: 16, top: 56 }}>
+      // [#1955 S4-3] Below the safe area and the header, centred: never over a header's side buttons.
+      <View pointerEvents="box-none" style={{ position: 'absolute', top: insets.top + 56, left: 0, right: 0, alignItems: 'center' }}>
         <PillButton label={rows.length === 1 ? 'My safety alert' : `My safety alerts (${rows.length})`} variant="soft" onPress={() => { setVisible(true); void query.refetch(); }} />
       </View>
     ) : null}
@@ -32,8 +35,8 @@ function SignedInSafetyPanel() {
         {query.isError ? <T variant="body" accessibilityRole="alert">Your active alerts could not be refreshed. Try again when you have signal.</T> : null}
         {!query.isPending && !query.isError && !rows.length ? <T variant="body">Swift reports no active alerts for your account.</T> : null}
         {rows.map((row) => <View key={row.id}>
-          <T variant="label">Your alert: {row.status === 'TRIGGER_PENDING' ? 'Grace window' : row.status === 'ACKNOWLEDGED' ? 'Acknowledged by the safety team' : 'Active'}</T>
-          {row.status === 'TRIGGER_PENDING' ? <PillButton label="Open grace controls" onPress={() => setResumedId(row.id)} /> : <OwnedSosActions key={row.id} id={row.id} />}
+          <T variant="label">Your alert: {row.status === 'TRIGGER_PENDING' ? 'not sent yet' : row.status === 'ACKNOWLEDGED' ? 'Acknowledged by the safety team' : 'Active'}</T>
+          {row.status === 'TRIGGER_PENDING' ? <PillButton label="Cancel or send now" onPress={() => setResumedId(row.id)} /> : <OwnedSosActions key={row.id} id={row.id} />}
         </View>)}
         {query.hasNextPage ? <PillButton label="More of my alerts" disabled={query.isFetchingNextPage} onPress={() => { void query.fetchNextPage(); }} /> : null}
         <PillButton label="Refresh my safety alerts" disabled={query.isFetching} onPress={() => { void query.refetch(); }} />

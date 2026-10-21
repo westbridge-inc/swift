@@ -164,13 +164,13 @@ describe('real safety control result presentation', () => {
     expect(toggleOf(saved).props['disabled']).toBe(false);
     expect(says(saved, 'Saved and checked with Swift')).toBe(true);
   });
-  it('a failed save puts the switch back to the saved value and says the change was not saved', async () => {
+  it('a failed save puts the switch back to the saved value and says the change could not be confirmed', async () => {
     host.monitoringWrite.mockRejectedValue(new Error('offline'));
     flip(renderControl(MonitoringControl), true);
     await Promise.all(host.tasks);
     const failed = renderControl(MonitoringControl);
     expect(toggleOf(failed).props['value']).toBe(false);
-    expect(says(failed, 'Your change was not saved. Try again.')).toBe(true);
+    expect(says(failed, 'Your change could not be confirmed. Try again.')).toBe(true);
     expect(says(failed, 'Saved and checked with Swift')).toBe(false);
     expect(says(failed, 'draft')).toBe(false);
   });
