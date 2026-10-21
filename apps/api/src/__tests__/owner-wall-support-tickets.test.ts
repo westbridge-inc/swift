@@ -229,6 +229,17 @@ describe('[item 20] support tickets for someone else', () => {
     });
   });
 
+  it('the account erasure clears the text of the person\'s tickets from inside an admin\'s request', async () => {
+    // #1905's de-identification (deidentifyCaseRecords) runs in the erasure of whoever closes the account.
+    const { deidentifyCaseRecords, TICKET_TEXT_REMOVED } = await import('../modules/user/erasure-coverage');
+    const erased = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    const ticket = (await owner.supportTicket.create({ data: { userId: erased, category: 'OTHER', subject: `Erase ${RUN}`, message: 'my words', adminNote: 'staff words' } })).id;
+    await asPerson(ids.admin, () => deidentifyCaseRecords(app.prisma, erased));
+    expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: ticket } }))
+      .toMatchObject({ subject: TICKET_TEXT_REMOVED, message: TICKET_TEXT_REMOVED, adminNote: null });
+    expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: ids.elsewhereTicket } })).toMatchObject({ message: 'another tenant' });
+  });
+
   it('the admin queue lists and resolves another person\'s ticket', async () => {
     const list = await call('GET', '/api/v1/admin/support?status=OPEN', tokens.admin);
     expect(list.statusCode, list.body).toBe(200);
@@ -360,6 +371,9 @@ describe('[item 20] support tickets: the census', () => {
       'modules/admin/admin.routes.ts findFirst': 1,
       'modules/admin/admin.routes.ts findUnique': 1,
       'modules/admin/admin.routes.ts updateMany': 2,
+      // The account erasure's de-identification (#1905): the person's own tickets, keyed by userId, in a
+      // transaction on the system login (runAsSystem 'account:erasure-case-records'), whoever closes the account.
+      'modules/user/erasure-coverage.ts updateMany': 3,
       // Wall-OFF branches of the narrow actions.
       'jobs/queue.ts findFirst': 1,
       'modules/order/mmg-accept-expiry.ts updateMany': 1,
