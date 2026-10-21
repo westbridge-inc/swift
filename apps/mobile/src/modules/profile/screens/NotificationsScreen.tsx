@@ -27,6 +27,7 @@ const EARNER_KINDS = new Set([
   'verification_rejected',
   'verification_expired',
   'verification_expiry_reminder',
+  'verification_application_abandoned',
   'verification_forced_offline',
 ]);
 
