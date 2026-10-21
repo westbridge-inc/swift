@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
 import { Pictogram } from '@/components/glyphs';
@@ -10,6 +10,7 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
+import { instantSwitch } from '@/lib/instant-toggle';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -104,10 +105,22 @@ export default function InventoryPage() {
   const categories = useQuery({ queryKey: storeKey(storeId, 'categories'), queryFn: getCategories });
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'items') });
+  // [PERF row 562] An item's in-stock switch moves at the tap and goes back if the server refuses.
+  // Only that item's switch waits for its answer: the others stay usable (they used to lock together).
+  const availKey = ['item-availability', storeId];
   const availMut = useMutation({
+    mutationKey: availKey,
     mutationFn: (v: { id: string; isAvailable: boolean }) => setItemAvailability(v.id, v.isAvailable),
-    onSettled: refresh,
+    ...instantSwitch<{ id: string; isAvailable: boolean }, CatalogItem[]>(
+      queryClient, storeKey(storeId, 'items', 'all'),
+      (rows, v, undo) => rows.map((row) => (row.id === v.id ? { ...row, isAvailable: undo ? !v.isAvailable : v.isAvailable } : row)),
+      refresh,
+    ),
   });
+  const availPending = new Set(useMutationState({
+    filters: { mutationKey: availKey, status: 'pending' },
+    select: (mutation) => (mutation.state.variables as { id: string } | undefined)?.id,
+  }));
 
   const soldOutCount = (items.data ?? []).filter((i) => i.isAvailable === false).length;
   const activeCount = Math.max(0, (items.data ?? []).length - soldOutCount);
@@ -174,8 +187,8 @@ export default function InventoryPage() {
               {i.catalogueCheck && <CatalogueCheckNote check={i.catalogueCheck} />}
               {editingPrice === i.id ? <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} /> : <button onClick={() => setEditingPrice(i.id)} className="min-h-8 font-semibold hover:underline">{money(i.basePrice)}</button>}
             </div>
-            <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })} disabled={availMut.isPending}
-              className="grid h-11 w-16 flex-none place-items-center" title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}>
+            <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })} disabled={availPending.has(i.id)}
+              className="grid h-11 w-16 flex-none place-items-center disabled:opacity-60" title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}>
               <span className={`sw-stock-switch ${i.isAvailable ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${i.isAvailable ? 'translate-x-5' : ''}`} /></span>
             </button>
           </div>

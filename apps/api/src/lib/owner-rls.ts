@@ -1,5 +1,6 @@
 import { runtimeMode } from '../utils/runtime-mode';
 import { normalizePolicyExpression } from './rls-attestation';
+import { runAsSystem } from '../plugins/tenant-context';
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -27,7 +28,7 @@ type EnvLike = Record<string, string | undefined>;
 export const OWNER_WALL_ROLE = 'swift_owner_wall';
 export const OWNER_POLICY_NAME = 'owner_isolation';
 /** The owner-walled tables, each keyed by its owner column. */
-export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId' };
+export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId' };
 
 /** The USING and WITH CHECK every owner policy carries (the migration writes
  *  exactly this; the boot attestation compares the stored policy with it). */
@@ -115,4 +116,44 @@ export function ownerWallLine(facts: OwnerWallFacts, env: EnvLike = process.env)
   return ownerRlsBindEnabled(env) && facts.walledLogin
     ? `owner wall: enforced tables=${Object.keys(OWNER_WALLED_TABLES).join(',')}`
     : 'owner wall: inert (OWNER_RLS_BIND off, login not walled)';
+}
+
+/**
+ * [item 20 · device_tokens] Work that acts for SOMEONE ELSE on an owner-walled
+ * table, outside a transaction (a push to a store, a dead-token cleanup, a
+ * token moving to the account now signed in on its device): with the wall ON
+ * it runs as the named system capability (the system login, never walled);
+ * off, exactly as before on the caller's own connection. Never inside a
+ * transaction: a transaction's queries never change connection — use the
+ * SECURITY DEFINER actions below there.
+ */
+export function ownerWallSystem<T>(capability: string, fn: () => PromiseLike<T>): Promise<T> {
+  return ownerRlsBindEnabled() ? runAsSystem(capability, async () => await fn()) : Promise.resolve(fn());
+}
+
+type TxRaw = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
+
+/** [item 20] The narrow actions a transaction takes on SOMEONE ELSE'S push
+ *  registrations (migration 20261018221000): one SECURITY DEFINER function
+ *  each, keyed by the user id it acts on, so the owner wall cannot make them
+ *  silently touch nothing. Authorization is the caller's (an admin's ban, a
+ *  session revocation, the erasure); a census test pins the callers. */
+export const OWNER_WALL_DEVICE_ACTIONS = ['swift_owner_wall_revoke_devices', 'swift_owner_wall_revoke_device', 'swift_owner_wall_erase_devices'] as const;
+
+/** Silence every active registration of `userId`. Returns how many. */
+export async function revokeUserDevices(tx: TxRaw, userId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_revoke_devices(${userId}) AS n`;
+  return row?.n ?? 0;
+}
+
+/** Silence one registration (`token`) of `userId`. Returns how many (0 or 1). */
+export async function revokeUserDevice(tx: TxRaw, userId: string, token: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_revoke_device(${userId}, ${token}) AS n`;
+  return row?.n ?? 0;
+}
+
+/** Delete every registration of `userId` (the account erasure). Returns how many. */
+export async function eraseUserDevices(tx: TxRaw, userId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_erase_devices(${userId}) AS n`;
+  return row?.n ?? 0;
 }
