@@ -89,7 +89,7 @@ export function pickupNudgeKey(orderId: string, assignmentVersion: number): stri
   return `pickup-overdue:rider:${orderId}:${assignmentVersion}`;
 }
 /** One release notice per person per released assignment, ever. */
-export function pickupReleaseKey(who: 'customer' | 'store' | 'ops', orderId: string, assignmentVersion: number): string {
+export function pickupReleaseKey(who: 'customer' | 'store' | 'ops' | 'store-waiting' | 'ops-waiting', orderId: string, assignmentVersion: number): string {
   return `pickup-overdue:${who}:${orderId}:${assignmentVersion}`;
 }
 
@@ -102,6 +102,11 @@ const select = {
   vendor: { select: { owner: { select: { userId: true } } } },
 } as const;
 type Leg = Prisma.OrderGetPayload<{ select: typeof select }>;
+
+/** The rider is at the counter and the store has not marked the order ready. */
+function riderWaitingOnStore(o: { status: string; readyAt: Date | null }): boolean {
+  return o.status === 'RIDER_ARRIVED_PICKUP' && o.readyAt == null;
+}
 
 /** A cash order whose money a rider already took is goods-in-hand (OF-07). */
 function cashInHand(o: { paymentMethod: string; paymentStatus: string }): boolean {
@@ -117,7 +122,7 @@ async function riderAcceptedAt(prisma: PrismaClient | Prisma.TransactionClient, 
   return row?.createdAt ?? null;
 }
 
-export type PickupOutcome = 'NOT_DUE' | 'NUDGED' | 'WAITING' | 'RELEASED' | 'IGNORED';
+export type PickupOutcome = 'NOT_DUE' | 'NUDGED' | 'WAITING' | 'RELEASED' | 'STORE_PAGED' | 'IGNORED';
 
 export async function sweepPickupOverdue(
   deps: PickupOverdueDeps,
@@ -161,6 +166,17 @@ export async function settlePickupLeg(
   const clock = pickupClock(leg, acceptedAt, await pickupMinutes(deps.prisma, leg.tenantId));
   if (now < clock.nudgeAt) return 'NOT_DUE';
   const version = leg.riderAssignmentVersion;
+  // [COORD ruling 21 Oct · REVIEW-G S2-1] A rider AT the counter whose order the
+  // store has not marked ready is waiting on the store, not failing to come:
+  // never released, never a no-show, never "didn't come" to the customer. At the
+  // release time ops is paged once and the store is told once. Once the store
+  // marks it ready, the ordinary clock runs from readyAt (waitClock reads it
+  // first), so an arrived rider is never released before readyAt + the release
+  // window.
+  if (riderWaitingOnStore(leg)) {
+    if (now < clock.releaseAt) return 'WAITING';
+    return pageWaitingOnStore(deps, leg, version);
+  }
   if (now < clock.releaseAt) {
     const nudgeKey = pickupNudgeKey(leg.id, version);
     const told = await deps.prisma.notification.findUnique({
@@ -182,8 +198,34 @@ export async function settlePickupLeg(
   return releaseOverdueLeg(deps, enqueue, leg.id, leg.riderId, version);
 }
 
-/** The release, decided on the order lock every custody decision takes. */
-async function releaseOverdueLeg(
+/** [COORD ruling 21 Oct] The rider waits at an unready store: ops paged once and
+ *  the store told once, per assignment. No release, no no-show, nothing to the customer. */
+async function pageWaitingOnStore(deps: PickupOverdueDeps, leg: Leg, version: number): Promise<PickupOutcome> {
+  const storeUserId = leg.vendor?.owner.userId;
+  if (storeUserId) {
+    await deps.notifications.send({
+      userId: storeUserId,
+      type: 'ORDER_UPDATE',
+      title: 'Your rider is waiting',
+      body: `The rider for order ${leg.orderNumber} is at your counter. Please mark the order ready and hand it over.`,
+      audience: 'business',
+      data: { orderId: leg.id, orderNumber: leg.orderNumber, kind: 'rider_waiting' },
+      dedupeKey: pickupReleaseKey('store-waiting', leg.id, version),
+    }).catch(() => {});
+  }
+  await notifyAdmins(deps.prisma, deps.notifications, {
+    tenantId: leg.tenantId ?? null,
+    title: 'Rider waiting at a store that is not ready',
+    body: `Order ${leg.orderNumber}: the rider is at the store past the pickup time and the store has not marked the order ready. The rider is not released; check the store.`,
+    data: { kind: 'ops_rider_waiting', orderId: leg.id, riderId: leg.riderId },
+    dedupeKey: pickupReleaseKey('ops-waiting', leg.id, version),
+  }).catch(() => {});
+  return 'STORE_PAGED';
+}
+
+/** The release, decided on the order lock every custody decision takes.
+ *  Exported for the race cases: it re-checks everything under the lock. */
+export async function releaseOverdueLeg(
   deps: PickupOverdueDeps,
   enqueue: (orderId: string) => Promise<void>,
   orderId: string,
@@ -197,6 +239,9 @@ async function releaseOverdueLeg(
     // reassigned (a new version), cancelled, or the cash was taken.
     if (!order || order.riderId !== riderId || order.riderAssignmentVersion !== version) return null;
     if (!RIDER_PRE_CUSTODY_STATUSES.includes(order.status as OrderStatus) || cashInHand(order)) return null;
+    // Arrived at the counter since the page was read, and the store has not
+    // marked it ready: the store is late, not the rider (next tick pages the store).
+    if (riderWaitingOnStore(order)) return null;
     const reopenStatus = await reopenPreCustodyLeg(
       tx, order, 'system:pickup-overdue',
       'Rider no-show: not picked up by the pickup deadline — released back to dispatch',

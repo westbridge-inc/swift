@@ -4,6 +4,8 @@ import {
 } from './helpers/order-walk-world';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { dispatchDeclinedKey } from '../modules/dispatch/dispatch-generation-keys';
+import { releaseOverdueLeg } from '../modules/dispatch/pickup-overdue';
+import { NotificationService } from '../modules/notification/notification.service';
 
 // ---------------------------------------------------------------------------
 // [OF-33 · COORD ruling 21 Oct 2026] A rider who accepts and then never picks
@@ -36,6 +38,8 @@ const NUDGE_TITLE = 'Pick up now or release the order';
 const CUSTOMER_TITLE = 'Finding you a new rider';
 const STORE_TITLE = 'A new rider is coming';
 const OPS_TITLE = 'Rider no-show before pickup';
+const STORE_WAITING_TITLE = 'Your rider is waiting';
+const OPS_WAITING_TITLE = 'Rider waiting at a store that is not ready';
 
 let w: WalkWorld;
 
@@ -246,5 +250,111 @@ describe('[OF-33] a rider who accepts and never picks up: one nudge, then back t
       expect({ status: rowB!.status, riderId: rowB!.riderId }).toEqual({ status: 'RIDER_ASSIGNED', riderId: r.riderId });
       expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).currentOrderId).toBe(b);
     });
+  }, 300_000);
+});
+
+/** Real ms since the store marked the order ready (aged with the world). */
+async function sinceReady(orderId: string): Promise<number> {
+  const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { readyAt: true } });
+  return Date.now() - row.readyAt!.getTime();
+}
+
+/** Rider en route, then at the counter, through the real doors. */
+async function riderArrives(cast: Cast, orderId: string, r = cast.riders[0]!) {
+  for (const step of ['en-route-pickup', 'arrived-pickup']) {
+    expect((await call(w, 'PUT', `/api/v1/rider/orders/${orderId}/${step}`, r.token)).statusCode).toBe(200);
+  }
+}
+
+const deps = () => ({ prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: new NotificationService(w.app.prisma, w.app.io) });
+const noEnqueue = async () => {};
+
+describe('[OF-33 · COORD ruling 21 Oct] a rider AT the counter of a store that has not marked the order ready is waiting on the store', () => {
+  it('is never released or marked a no-show: the store is told once and ops paged once; from the store’s ready the ordinary clock runs', async () => {
+    const cast = await castWalk(w, 1);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    await riderTakes(cast, id);
+    await riderArrives(cast, id);
+    const r = cast.riders[0]!;
+
+    // Past the release time (prep promise + 20) and well beyond: still the rider's, nobody blamed.
+    await tickAt(cast, id, prep + RELEASE_MIN + 1);
+    await tickAt(cast, id, prep + RELEASE_MIN + 15);
+    let row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', riderId: r.riderId });
+    expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).completionRate).toBe(100);
+    expect(count(await noticesOf(id, r.userId), NUDGE_TITLE)).toBe(0);
+    expect(count(await noticesOf(id, cast.customer.userId), CUSTOMER_TITLE)).toBe(0);
+    expect(count(await noticesOf(id, cast.vendorOwner.userId), STORE_WAITING_TITLE)).toBe(1);
+    expect(count(await noticesOf(id, w.admin.userId), OPS_WAITING_TITLE)).toBe(1);
+    expect(count(await noticesOf(id, w.admin.userId), OPS_TITLE)).toBe(0);
+
+    // The store marks it ready: now the rider has the ordinary window from readyAt.
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/ready`, cast.vendorOwner.token)).statusCode).toBe(200);
+    const tickFromReady = async (atMin: number) => {
+      await ageWorld(w, atMin * MIN - await sinceReady(id) + 1_000);
+      await runSweeps(w);
+      await drainDue(w);
+    };
+    await tickFromReady(RELEASE_MIN - 1);
+    row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', riderId: r.riderId });
+    await tickFromReady(RELEASE_MIN);
+    row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).completionRate).toBeCloseTo(80, 5);
+    expect(count(await noticesOf(id, cast.customer.userId), CUSTOMER_TITLE)).toBe(1);
+  }, 300_000);
+});
+
+describe('[OF-33 · REVIEW-G S3-1] the release re-checks everything under the lock (state changed after the sweep read it)', () => {
+  it('a new assignment of the same rider since the read is not released (the version guard)', async () => {
+    const cast = await castWalk(w, 1);
+    const id = await readyOrder(cast);
+    await riderTakes(cast, id);
+    const r = cast.riders[0]!;
+    const seen = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).riderAssignmentVersion;
+    expect((await call(w, 'POST', `/api/v1/rider/orders/${id}/handback`, r.token, { reason: 'flat tyre, cannot ride' })).statusCode).toBe(200);
+    // The handback keeps this rider off the re-cascade; clear that so the SAME
+    // rider can take it again (a new assignment, a new version).
+    const fmv = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).fulfillmentModeVersion;
+    await w.app.redis.del(dispatchDeclinedKey(id, fmv));
+    await riderTakes(cast, id);
+    const now = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect(now.riderAssignmentVersion).not.toBe(seen);
+    expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, seen)).toBe('IGNORED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
+    // Control: the current assignment, unchanged since read, IS released.
+    expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, now.riderAssignmentVersion)).toBe('RELEASED');
+  }, 300_000);
+
+  it('cash taken since the read is never released (the cash-in-hand guard, OF-07)', async () => {
+    const cast = await castWalk(w, 1);
+    const id = await readyOrder(cast);
+    await riderTakes(cast, id);
+    const r = cast.riders[0]!;
+    const version = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).riderAssignmentVersion;
+    await w.app.prisma.order.update({ where: { id }, data: { paymentStatus: 'CAPTURED' } });
+    expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, version)).toBe('IGNORED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
+    await w.app.prisma.order.update({ where: { id }, data: { paymentStatus: 'PENDING' } });
+    expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, version)).toBe('RELEASED');
+  }, 300_000);
+
+  it('a rider who reached the counter of an unready store since the read is not released', async () => {
+    const cast = await castWalk(w, 1);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+    await riderTakes(cast, id);
+    await riderArrives(cast, id);
+    const r = cast.riders[0]!;
+    const version = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).riderAssignmentVersion;
+    expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, version)).toBe('IGNORED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ARRIVED_PICKUP');
   }, 300_000);
 });
