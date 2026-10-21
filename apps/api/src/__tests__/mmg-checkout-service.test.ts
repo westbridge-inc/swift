@@ -1398,6 +1398,26 @@ describe('[F5] only MMG’s answer for THIS checkout says a payment failed', () 
     expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(0);
   });
 
+  it('[#1552 S4-1] a tied success still waiting for MMG\'s history outranks a bound decline of another transaction: never NOT_PAID', async () => {
+    const s = await makeSub();
+    const row = await intentOf((await start(s)).checkout.ref);
+    // T1: the lookup approves it and ties it to THIS checkout (an echo), but
+    // MMG's history does not show it yet (a retry, decisive only when late).
+    approved(row, tx('TIEDWAITTX1'), 2100, echoOf(row), {}, null);
+    expect(await reply(row, tx('TIEDWAITTX1'))).toBe('CONFIRMING');
+    // T2: a second transaction whose lookup ties a DECLINE to this checkout.
+    approved(row, tx('BOUNDDECLINETX2'), 2100, { status: 'declined', ...echoOf(row) });
+    expect(await reply(row, tx('BOUNDDECLINETX2'), 'error')).toBe('CONFIRMING');
+    expect(await intentOf(row.id)).toMatchObject({ status: 'CONFIRMING' });
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(0);
+    // It keeps confirming; once the confirming window is over it is HELD for a
+    // person (the money MMG may hold), never NOT_PAID.
+    await service.pollIntents(new Date(Date.now() + 25 * 3_600_000));
+    expect(await intentOf(row.id)).toMatchObject({ status: 'HELD' });
+    expect(await toldOf(s.userId, 'NOT_PAID')).toHaveLength(0);
+    expect(await topups(s.subId)).toHaveLength(0);
+  });
+
   it('MMG’s answer for THIS checkout that the payment failed is NOT_PAID, and the partner hears it once', async () => {
     const s = await makeSub();
     const row = await intentOf((await start(s)).checkout.ref);

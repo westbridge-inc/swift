@@ -1,4 +1,5 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
@@ -133,6 +134,9 @@ function driverLinkView(link: { mmgPayUrl: string | null; mmgPayUrlPending: stri
 }
 
 export async function driverRoutes(app: FastifyInstance) {
+  // [PERF item 3] Job-step taps answer without waiting for the customer's push (lib/push-after-response);
+  // shutdown waits for those pushes under the same cleanup deadline as in-flight requests.
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-29] The cash rail — the same one the rider's handover at the door uses.
@@ -861,7 +865,7 @@ export async function driverRoutes(app: FastifyInstance) {
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
 
   // 1. Accept ride
-  app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/rides/:id/accept', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A driver never sets the
     // price: base fee plus km, as booked. An older app's `fare` is read (never
@@ -1117,7 +1121,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 2. En route to pickup
-  app.put('/rides/:id/en-route', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/en-route', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
@@ -1148,7 +1152,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 3. Arrived at pickup
-  app.put('/rides/:id/arrived', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/arrived', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
@@ -1276,7 +1280,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 5. Start ride
-  app.put('/rides/:id/start', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/start', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     await getDriverRide(driver.id, id); // fast ownership check; lock below is authoritative
@@ -1383,7 +1387,7 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
-  app.post('/rides/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/rides/:id/handover', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id); // ownership before validation
@@ -1427,7 +1431,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 7. Complete ride
-  app.put('/rides/:id/complete', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/complete', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);

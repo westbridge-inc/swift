@@ -61,6 +61,8 @@ beforeEach(() => {
   vi.spyOn(rides, 'rideEstimate').mockResolvedValue(ESTIMATE as never);
   vi.spyOn(rides, 'rideAvailability').mockResolvedValue({ level: 'GOOD', gate: false });
   vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+  // Web booking is off (the server's default): estimates only.
+  vi.spyOn(rides, 'rideCapabilities').mockResolvedValue({ maxStops: 0 });
   vi.stubGlobal('fetch', vi.fn());
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
