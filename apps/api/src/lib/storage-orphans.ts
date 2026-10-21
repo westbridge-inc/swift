@@ -97,6 +97,44 @@ export async function openAvatarErasureObligationIds(
   }));
 }
 
+/** [IMAGES-E2E · REVIEW-G S3-1 / DUP-AUDIT B-4 on #1918] This person's open public-photo
+ *  deletion obligations (store and portfolio photos), read the way the avatar census is: its
+ *  own transaction under runAsSystem (so under the wall it begins on the system login), on a
+ *  connection storageOrphanCensusSeesEveryRow PROVES sees every tenant's rows. Null when that
+ *  cannot be proven: the caller reports the erasure pending, never a blind "nothing owed". */
+export async function openPublicPhotoObligationIds(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+): Promise<string[] | null> {
+  return runAsSystem('account:erasure-public-photo-census', () => db.$transaction(async (tx) => {
+    if (!(await storageOrphanCensusSeesEveryRow(tx))) return null;
+    const rows = await tx.$queryRaw<Array<{ id: string; reason: string }>>`
+      SELECT "id", "reason"
+      FROM "storage_orphans"
+      WHERE "userId" = ${userId} AND "purgedAt" IS NULL
+      ORDER BY "createdAt" ASC, "id" ASC
+      /* public-photo-obligation-global-census */
+    `;
+    return rows.filter((row) => reasons.includes(row.reason)).map((row) => row.id);
+  }));
+}
+
+/** How many of this person's public-photo deletions are still owed after one retry pass
+ *  (at most 100, oldest first). Unproven (null census) counts as owed: never a false "deleted". */
+export async function owedPublicPhotoCount(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+  retry: (orphanId: string) => Promise<unknown>,
+): Promise<number> {
+  const owed = await openPublicPhotoObligationIds(db, userId, reasons);
+  if (owed === null) return 1;
+  for (const id of owed.slice(0, 100)) await retry(id);
+  const still = await openPublicPhotoObligationIds(db, userId, reasons);
+  return still === null ? 1 : still.length;
+}
+
 type RawTx = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
 
 /** Does THIS connection see every row of storage_orphans? Either row security

@@ -10,6 +10,7 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
+  owedPublicPhotoCount,
   queueStorageOrphan,
   recordStorageOrphan,
   retryStorageOrphan,
@@ -452,12 +453,14 @@ export class AccountService {
     // keeps the receipt pending, and this sweep's retry (or the standing one) finishes it.
     // Read as the named system capability: the census sees this person's rows whatever tenant
     // the request runs in (an admin-run erasure included), so "nothing owed" is never a blind spot.
-    const photoOwed = { userId, purgedAt: null, reason: { in: [...PUBLIC_PHOTO_DELETE_REASONS] } };
-    pendingUploads += await runAsSystem('account-erasure-public-photos', async () => {
-      const owedPhotos = await prisma.storageOrphan.findMany({ where: photoOwed, select: { id: true }, orderBy: { createdAt: 'asc' }, take: 100 });
-      for (const { id } of owedPhotos) await retryStorageOrphan(prisma, storage, this.app.log, id);
-      return prisma.storageOrphan.count({ where: photoOwed });
-    }).catch(() => 1);
+    // [REVIEW-G S3-1 / DUP-AUDIT B-4] The census is a proven system-login read (#1953's proof):
+    // unproven (no system login under the wall, a narrowed policy) = still pending, never "deleted".
+    pendingUploads += await owedPublicPhotoCount(prisma, userId, [...PUBLIC_PHOTO_DELETE_REASONS], (id) =>
+      runAsSystem('account-erasure-public-photos', () => retryStorageOrphan(prisma, storage, this.app.log, id)),
+    ).catch((err: unknown) => {
+      this.app.log.error({ err, userId }, 'account public-photo erasure census failed');
+      return 1;
+    });
 
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
@@ -527,7 +530,16 @@ export class AccountService {
     // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
     //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
     //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
-    await deidentifyProfiles(prisma, userId);
+    // [IMAGES-E2E · DUP-AUDIT B-2] A portfolio photo still listed here (normally none: the cut-off
+    // cleared them) got its deletion row before its pointer went; deleted now, or it stays owed.
+    const lateProfilePhotos = await deidentifyProfiles(prisma, userId);
+    if (lateProfilePhotos.length > 0) {
+      pendingUploads += await runAsSystem('account-erasure-public-photos', async () => {
+        let open = 0;
+        for (const id of lateProfilePhotos) if (!(await retryStorageOrphan(prisma, storage, this.app.log, id))) open += 1;
+        return open;
+      }).catch(() => lateProfilePhotos.length);
+    }
     await deidentifyCaseRecords(prisma, userId);
     await deidentifySafetyRecords(prisma, userId);
 
