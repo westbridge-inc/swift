@@ -3149,32 +3149,35 @@ export async function vendorRoutes(app: FastifyInstance) {
     return keepPublicPhoto(request, storage, `items/${vendorId}`, 'store-media');
   }
 
-  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers). */
-  for (const [slot, field] of [['logo', 'logoUrl'], ['cover', 'coverImageUrl']] as const) {
-    app.post(`/profile/${slot}`, auth, async (request) => {
-      const { vendorId } = await requireVendor(app, request, 'MANAGER');
-      const url = await storeOwnPhoto(request, vendorId);
-      const vendor = await app.prisma.vendor.update({
-        where: { id: vendorId },
-        data: { [field]: url },
-        select: { id: true, logoUrl: true, coverImageUrl: true },
-      });
-      scheduleVendorSearchSync(app, vendorId);
-      return { success: true, data: vendor };
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers).
+   *  [#1964 retry census] Registered with literal paths, so the census can read every route. */
+  const uploadStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const url = await storeOwnPhoto(request, vendorId);
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: url },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
     });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.post('/profile/logo', auth, uploadStorePhoto('logoUrl'));
+  app.post('/profile/cover', auth, uploadStorePhoto('coverImageUrl'));
 
-    /** DELETE /profile/logo, /profile/cover — take it down (the public door stops serving it once its 30-second decision window passes). */
-    app.delete(`/profile/${slot}`, auth, async (request) => {
-      const { vendorId } = await requireVendor(app, request, 'MANAGER');
-      const vendor = await app.prisma.vendor.update({
-        where: { id: vendorId },
-        data: { [field]: null },
-        select: { id: true, logoUrl: true, coverImageUrl: true },
-      });
-      scheduleVendorSearchSync(app, vendorId);
-      return { success: true, data: vendor };
+  /** DELETE /profile/logo, /profile/cover — take it down (the public door stops serving it once its 30-second decision window passes). */
+  const removeStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: null },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
     });
-  }
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.delete('/profile/logo', auth, removeStorePhoto('logoUrl'));
+  app.delete('/profile/cover', auth, removeStorePhoto('coverImageUrl'));
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {

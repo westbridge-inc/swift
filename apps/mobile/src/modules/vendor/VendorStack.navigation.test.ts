@@ -97,7 +97,7 @@ vi.mock('../../kit/controls', () => ({ BrandSwitch: () => null }));
 vi.mock('../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), success: vi.fn() } }));
 vi.mock('../../lib/clipboard', () => ({ copyText: vi.fn() }));
 vi.mock('../../lib/analytics', () => ({ track: vi.fn() }));
-vi.mock('../../lib/images', () => ({ mediaUrl: () => null }));
+vi.mock('../../lib/images', () => ({ mediaUrl: () => null, storePhotoUrl: () => null }));
 vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: () => null }));
 vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({}), WentLivePopup: () => null }));
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: () => null }));
@@ -106,6 +106,7 @@ vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }))
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
 vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
+vi.mock('../../components/StorePhotosCard', () => ({ StorePhotosCard: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));
 vi.mock('../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));
 vi.mock('../../hooks/verification', () => ({ useVerificationStatus: () => ({}) }));
