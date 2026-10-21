@@ -12,23 +12,56 @@ import ts from 'typescript';
 // sibling branch). This census reads every .tsx file with the TypeScript
 // parser and finds each empty-state message ("No ...", "Nothing ...",
 // "Nobody ...", "... is empty"). A message that sits behind a data check
-// (rows.length === 0, !data, an `empty=` prop) must ALSO sit behind a
+// (rows.length === 0, !data, an `empty=` prop, plain or as a ternary:
+// empty={f ? 'No x matches.' : 'No x yet.'}) must ALSO sit behind a
 // failure check: an ancestor condition that names the error/success
 // (q.isError ? <QueryFailed/> : rows.length === 0 ? 'No ...' : ...), an
-// early `if (q.isError) return`, a gate that needs the data to exist
-// (q.data && q.data.rows.length === 0), or an element that receives the
-// error itself (<DataTable error={q.error} empty="..."/>).
+// early `if (q.isError) return` (or throw), a gate that needs the data to
+// exist (q.data && q.data.rows.length === 0, or `if (!c) return` where c is
+// taken from the data), or an element that receives the error itself
+// (<DataTable error={q.error} empty="..."/>).
 // It also refuses `.catch(() => setRows([]))`: a failure turned into empty.
 // A new hit fails the suite; fix it, or list it below with the reason.
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
 const EMPTY = /^(No |Nothing\b|Nobody\b|None\b|You (owe|have) nothing|All caught up|Your [a-z ]+ is empty|Empty\b)/i;
-const FAILURE_AWARE = /error|Error|failed|Failed|unavailable|Unavailable|fetchStatus|isSuccess|status\s*===\s*['"](error|success)['"]/;
+const FAILURE_AWARE = /error|Error|failed|Failed|unavailable|Unavailable|fetchStatus|isSuccess|status\s*===\s*['"](error|success)['"]|===\s*null\b/;
 const DATA_GATE = /\.length\b|\bdata\b|rows|items|list|=== 0|isEmpty|empty|count|total/i;
-/** A conjunct that only tests that the read's data exists (`q.data`, `data`, `vendorData`): the read succeeded. */
-const dataPresent = (cond: string) => cond.split('&&').some((part) => /^\(?\s*[\w.?]*\b\w*(data|Data)\s*\)?$/.test(part.trim()));
+/** A conjunct that only tests that the read's data exists (`q.data`, `data`, `vendorData`, or a name
+ *  taken from the data with no empty default, `const c = q.data?.find(...)`): the read succeeded. */
+function dataPresent(cond: string, at: ts.Node, sf: ts.SourceFile): boolean {
+  return cond.split('&&').some((raw) => {
+    const part = raw.trim().replace(/^\(|\)$/g, '').trim();
+    if (/^[\w.?]*\b\w*(data|Data)$/.test(part)) return true;
+    if (!/^[A-Za-z_$][\w$]*$/.test(part)) return false;
+    let scope: ts.Node | undefined = at;
+    while (scope && !isFn(scope)) scope = scope.parent;
+    let derived = false;
+    const visit = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.name.text === part && n.initializer) {
+        const init = n.initializer.getText(sf);
+        derived = /\.data\b/.test(init) && !/(\?\?|\|\|)\s*(\[\]|\{\s*\}|0|''|"")\s*$/.test(init);
+      }
+      ts.forEachChild(n, visit);
+    };
+    if (scope) visit(scope);
+    return derived;
+  });
+}
 const EMPTY_PROPS = /^(empty|emptyText|emptyLabel|emptyTitle|emptyMessage)$/;
+/** The JSX attribute a literal is the value of, through `{...}`, `(...)` and either branch of `? :`
+ *  (`empty={filter ? 'No stores match.' : 'No stores yet.'}` is an empty prop too). */
+function attributeOf(n: ts.Node): ts.JsxAttribute | null {
+  let cur: ts.Node = n;
+  while (cur.parent) {
+    const p: ts.Node = cur.parent;
+    if (ts.isJsxAttribute(p)) return p;
+    if (!(ts.isJsxExpression(p) || ts.isParenthesizedExpression(p) || (ts.isConditionalExpression(p) && cur !== p.condition))) return null;
+    cur = p;
+  }
+  return null;
+}
 
 let examined = 0;
 
@@ -36,9 +69,10 @@ export interface Hit { file: string; line: number; kind: 'empty' | 'swallow'; te
 interface Cond { text: string; negated: boolean }
 
 const isFn = (n: ts.Node) => ts.isFunctionDeclaration(n) || ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isMethodDeclaration(n);
+/** The branch leaves the function (`return` or `throw`): what follows runs only when its condition was false. */
 function returns(st: ts.Node): boolean {
   let found = false;
-  const visit = (n: ts.Node) => { if (ts.isReturnStatement(n)) found = true; else if (!isFn(n)) ts.forEachChild(n, visit); };
+  const visit = (n: ts.Node) => { if (ts.isReturnStatement(n) || ts.isThrowStatement(n)) found = true; else if (!isFn(n)) ts.forEachChild(n, visit); };
   visit(st);
   return found;
 }
@@ -114,17 +148,22 @@ export function scan(file: string, source: string): Hit[] {
     else if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) text = n.text.trim();
     if (text && text.length >= 4 && EMPTY.test(text)) {
       const p = n.parent;
+      const attr = attributeOf(n);
       const notShown = ts.isImportDeclaration(p) || ts.isExportDeclaration(p)
         || (ts.isBinaryExpression(p) && /^(===|!==|==|!=)$/.test(p.operatorToken.getText(sf)))
         || (ts.isCallExpression(p) && /toast|Error|console|throw|track|log/.test(p.expression.getText(sf)))
-        || (ts.isJsxAttribute(p) && /^(key|id|aria-|placeholder|testID)/.test(p.name.getText(sf)));
+        || (attr !== null && /^(key|id|aria-|placeholder|testID)/.test(attr.name.getText(sf)));
       if (!notShown) {
         const { conds, inRow, errorProp, component } = governing(n, sf);
-        const asEmptyProp = ts.isJsxAttribute(p) && EMPTY_PROPS.test(p.name.getText(sf));
+        const asEmptyProp = attr !== null && EMPTY_PROPS.test(attr.name.getText(sf));
         const dataGated = asEmptyProp || conds.some((c) => DATA_GATE.test(c.text));
         const failureAware = errorProp || conds.some((c) => FAILURE_AWARE.test(c.text))
-          || conds.some((c) => !c.negated && dataPresent(c.text))
-          || conds.some((c) => c.negated && c.text.split('||').some((part) => /^!\s*[\w.?]*\b\w*(data|Data)$/.test(part.trim())));
+          || conds.some((c) => !c.negated && dataPresent(c.text, n, sf))
+          || conds.some((c) => c.negated && c.text.split('||').some((part) => {
+            // `if (!q.data) return …` / `!campaign ? … :` (campaign taken from the data): past it, the read answered.
+            const m = /^!\s*\(?\s*([\w.?$]+)\s*\)?$/.exec(part.trim());
+            return m !== null && dataPresent(m[1], n, sf);
+          }));
         examined += 1;
         if (dataGated && !inRow && !failureAware && !(component && /^[A-Z]/.test(component) && parentGuards(component, sf))) hits.push({ file, line: lineOf(n), kind: 'empty', text });
       }
@@ -197,6 +236,9 @@ describe('[BUG-GUARDS C3] a failed read is never shown as empty', () => {
       return q.isLoading ? <p>Loading</p> : rows.length === 0 ? <p>Nobody in this list.</p> : <ul/>; }`)).toEqual(['empty']);
     // The empty prop on a table that never hears about the failure.
     expect(verdict(`function P(){ const q = useQuery({}); return <DataTable rows={q.data ?? []} empty="No stores yet." />; }`)).toEqual(['empty']);
+    // The same prop as a ternary (the form every list page uses), with no data-ish name anywhere to lean on.
+    expect(verdict(`function P(){ const q = useQuery({}); const [f] = useState(''); return <DataTable rows={q.data ?? []} empty={f ? 'No stores match.' : 'No stores yet.'} />; }`)).toEqual(['empty', 'empty']);
+    expect(verdict(`function P(){ const q = useQuery({}); return <DataTable rows={q.data ?? []} empty={('No stores yet.')} />; }`)).toEqual(['empty']);
     // A failure swallowed into an empty list.
     expect(verdict(`function P(){ useEffect(() => { load().then(setRows).catch(() => setRows([])); }, []); return null; }`)).toEqual(['swallow']);
     // Honest shapes.
@@ -205,12 +247,24 @@ describe('[BUG-GUARDS C3] a failed read is never shown as empty', () => {
     expect(verdict(`function P(){ const q = useQuery({}); if (q.isError) return <QueryFailed/>; const rows = q.data ?? [];
       if (rows.length === 0) return <p>No stores yet.</p>; return <ul/>; }`)).toEqual([]);
     expect(verdict(`function P(){ const q = useQuery({}); return <DataTable rows={q.data ?? []} error={q.error} empty="No stores yet." />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const q = useQuery({}); const [f] = useState(''); return <DataTable rows={q.data ?? []} error={q.error} empty={f ? 'No stores match.' : 'No stores yet.'} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const { data } = useQuery({}); return data && data.claims.length === 0 ? <p>No claims</p> : null; }`)).toEqual([]);
     expect(verdict(`function P(){ useEffect(() => { load().then(setRows).catch(() => { setRows([]); setLoadFailed(true); }); }, []); return null; }`)).toEqual([]);
     // A child table: honest only when the parent renders it behind the failure check.
     const child = `function T({ rows }){ return rows.length === 0 ? <p>No zones yet.</p> : <ul/>; }`;
     expect(verdict(`${child} function P(){ const q = useQuery({}); return <div>{q.error ? <p>failed</p> : null}<T rows={q.data ?? []} /></div>; }`)).toEqual(['empty']);
     expect(verdict(`${child} function P(){ const q = useQuery({}); return q.error ? <QueryFailed/> : <T rows={q.data ?? []} />; }`)).toEqual([]);
+    // A name taken from the data with no empty default proves the read answered; a null sentinel branch is the failure.
+    expect(verdict(`function P(){ const q = useQuery({}); const c = q.data?.find((r) => r.id === 'x'); return c && <p>{c.items.length ? 'x' : 'No invoices yet.'}</p>; }`)).toEqual([]);
+    expect(verdict(`function P(){ const q = useQuery({}); const c = q.data ?? []; return c && <p>{c.length ? 'x' : 'No invoices yet.'}</p>; }`)).toEqual(['empty']);
+    expect(verdict(`function P({ stores }){ return stores === null ? <p role="alert">Could not load</p> : stores.length === 0 ? <p>No stores yet.</p> : <ul/>; }`)).toEqual([]);
+    // Past `if (!c) return` / `!c ? … :` the read answered, when c is taken from the data with no empty default.
+    expect(verdict(`function P(){ const q = useQuery({}); const c = (q.data ?? []).find((r) => r.id === 'x'); if (!c) return <Gone/>; return c.items.length === 0 ? <p>No invoices yet.</p> : <ul/>; }`)).toEqual([]);
+    expect(verdict(`function P(){ const q = useQuery({}); const c = q.data?.counts; return !c ? null : c.online === 0 ? <p>No drivers online</p> : <ul/>; }`)).toEqual([]);
+    expect(verdict(`function P(){ const q = useQuery({}); const c = q.data?.items ?? []; if (!c) return <Gone/>; return c.length === 0 ? <p>No invoices yet.</p> : <ul/>; }`)).toEqual(['empty']);
+    // An unreadable figure thrown away before the message: past `if (total === null) throw`, the figure was read.
+    expect(verdict(`async function P(){ const total = read(await load()); if (total === null) throw new Error('x'); alert(total > 0 ? 'Refund' : 'No refund is due.'); }`)).toEqual([]);
+    expect(verdict(`async function P(){ const total = (await load())?.total ?? 0; alert(total > 0 ? 'Refund' : 'No refund is due.'); }`)).toEqual(['empty']);
     // A row-level fallback inside a list is about that row, not the read.
     expect(verdict(`function P({ rows }){ return <ul>{rows.map((r) => <li>{r.items.length === 0 ? 'No items' : r.items.length}</li>)}</ul>; }`)).toEqual([]);
   });
