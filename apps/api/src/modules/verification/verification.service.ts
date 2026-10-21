@@ -120,6 +120,31 @@ export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClien
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
 }
 
+/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+ *  last chose (while they still hold that role), else the Rider-first fallback of legacy
+ *  profiles. The one rule for getMoverVehicleType and getStatus. */
+function moverVehicleFrom(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: { vehicleType: VehicleType } | null,
+  driver: { vehicleType: VehicleType } | null,
+): VehicleType | null {
+  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+}
+
+/** A read started before it is known to be needed: marked handled at once, so a failure while an
+ *  earlier step throws never becomes an unhandled rejection. Awaiting it still throws. */
+function startedEarly<T>(read: Promise<T>): Promise<T> {
+  read.catch(() => undefined);
+  return read;
+}
+
 /** The KYC engines whose identity check compares the document's face with the
  *  selfie (Didit's face-match; ID Analyzer's biometric scan). The on-shore
  *  manual review and the sandbox compare none, and an engine missing here is
@@ -1779,14 +1804,7 @@ export class VerificationService {
       db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
-    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-    }
-    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-    return rider?.vehicleType ?? driver?.vehicleType ?? null;
+    return moverVehicleFrom(user, rider, driver);
   }
 
   /**
@@ -1853,16 +1871,57 @@ export class VerificationService {
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
+    // [PERF C2] A mover's app shows a spinner until this answers (MoverRoot gates Home on it), so
+    // the reads that do not depend on each other run together: the account first (an unknown
+    // account is refused before anything else is read), then the mover's rows once (vehicle and
+    // trial role), then both lists beside the trial preview, then the documents. A mover's police
+    // clearance starts beside the mover's rows. About ten round trips in a row became four.
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { countryCode: true, trustLevel: true },
+      select: { countryCode: true, trustLevel: true, activeRole: true, lastMoverRole: true, roles: true },
     });
     if (!user) throw new NotFoundError('User', userId);
 
+    const { previewTrial } = await import('../integrity/enforcement');
+    // The mover's saved vehicle (null until they provision one) — lets the
+    // onboarding screen initialise its selector and know whether to re-prompt.
+    let vehicleType: VehicleType | null = null;
+    // Trial-integrity Part 4: told BEFORE they commit — what activation will
+    // do for this human (copy #2/#3). Read-only preview: no side effects; the
+    // apps render `trial.message` verbatim when present. Vendor checklists are
+    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
+    let trialRole = 'VENDOR';
+    // [VERIFY-DOCS] Police clearance is on every mover's optional list; it is used below only
+    // when this person's lists name it, exactly as before.
+    let policeClearedEarly: Promise<boolean> | undefined;
+    if (roleKey === 'MOVER') {
+      policeClearedEarly = startedEarly(isPoliceCleared(this.prisma, userId));
+      const [rider, driver] = await Promise.all([
+        this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+        this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      ]);
+      vehicleType = moverVehicleFrom(user, rider, driver);
+      trialRole = driver ? 'DRIVER' : 'RIDER';
+    }
+    const trialRead = previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+
     // `gate`: what this role must hold to go live — roleVerified reads it alone.
-    const gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
-    // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
-    let optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    // [VERIFY-DOCS] `optional`: what the person MAY add. Older apps read only `checklist` and ignore it.
+    // A mover's two lists use the same vehicle rule as the gates (the preview's hint, else the saved
+    // vehicle, else a motorcycle), and a mover's optional list does not read `gate`, so the two are
+    // read together. Every other role's optional list is cut from its checklist, so it waits for it.
+    let gate: string[];
+    let optional: string[];
+    if (roleKey === 'MOVER') {
+      const listVehicle = vehicleHint ?? vehicleType ?? 'MOTORCYCLE';
+      [gate, optional] = await Promise.all([
+        this.checklistFor(userId, user.countryCode, roleKey, listVehicle),
+        this.optionalFor(userId, user.countryCode, roleKey, [], listVehicle),
+      ]);
+    } else {
+      gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+      optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    }
     // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
     // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
     // store's gate is unchanged: only its home-visit bookings wait for the clearance.
@@ -1870,7 +1929,8 @@ export class VerificationService {
     let homeVisits: { offered: boolean; cleared: boolean } | undefined;
     if (roleKey === 'SERVICE') {
       const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
-      homeVisits = { offered: await ownerOffersHomeVisits(this.prisma, userId), cleared: await homeVisitsCleared(this.prisma, userId) };
+      const [offered, cleared] = await Promise.all([ownerOffersHomeVisits(this.prisma, userId), homeVisitsCleared(this.prisma, userId)]);
+      homeVisits = { offered, cleared };
       if (homeVisits.offered && !checklist.includes(POLICE_CLEARANCE_DOC_TYPE)) {
         checklist = [...checklist, POLICE_CLEARANCE_DOC_TYPE];
         optional = optional.filter((docType) => docType !== POLICE_CLEARANCE_DOC_TYPE);
@@ -1880,10 +1940,17 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const rows = await this.prisma.verificationDocument.findMany({
-      where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
-      orderBy: { createdAt: 'desc' },
-    });
+    // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
+    // the one evidence rule, so the flag survives the image being deleted after review.
+    // Only asked where this person's lists name the document at all. Read beside the documents.
+    const namesPoliceClearance = [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE);
+    const [rows, policeCleared] = await Promise.all([
+      this.prisma.verificationDocument.findMany({
+        where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      namesPoliceClearance ? (policeClearedEarly ?? isPoliceCleared(this.prisma, userId)) : false,
+    ]);
     // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
     // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
@@ -1907,21 +1974,7 @@ export class VerificationService {
     // done: a driver without them sees each one still to upload (`missing`).
     const missing = checklist.filter((docType) => !approved.has(docType));
     const gateMissing = gate.filter((docType) => !approved.has(docType));
-
-    // The mover's saved vehicle (null until they provision one) — lets the
-    // onboarding screen initialise its selector and know whether to re-prompt.
-    const vehicleType = roleKey === 'MOVER' ? await this.getMoverVehicleType(userId) : null;
-
-    // Trial-integrity Part 4: told BEFORE they commit — what activation will
-    // do for this human (copy #2/#3). Read-only preview: no side effects; the
-    // apps render `trial.message` verbatim when present. Vendor checklists are
-    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
-    const { previewTrial } = await import('../integrity/enforcement');
-    const trialRole =
-      roleKey === 'MOVER'
-        ? (await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } })) ? 'DRIVER' : 'RIDER'
-        : 'VENDOR';
-    const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+    const trial = await trialRead;
 
     // [Owner, 1 Oct · truth] The checklist documents this server compares with
     // the profile selfie right now: the submit path's face-match leg, run by an
@@ -1945,10 +1998,8 @@ export class VerificationService {
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && gate.length === 0,
       trial,
       faceMatchDocTypes,
-      // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
-      // the one evidence rule, so the flag survives the image being deleted after review.
-      // Only asked where this person's lists name the document at all.
-      policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      // [VERIFY-DOCS · rulings 1–2] Police-cleared (read beside the documents, above).
+      policeCleared,
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
