@@ -48,8 +48,12 @@ KEEP_FAILED=0
 # [#1977 · copy run #5c] The Compose project that holds the target Postgres, named explicitly: the
 # base file says `name: swift`, so without it a restore on a rehearsal host lands in LIVE's stack.
 PROJECT=""
+# [Off-site erasure ledger] The shipped entries, decrypted by the owner on his own computer: a plain
+# JSONL file only this login can read. They join the live ledger, or stand alone in a DR restore.
+LEDGER_FROM=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --ledger-from) [ $# -ge 2 ] || die "--ledger-from needs the decrypted off-site ledger file"; LEDGER_FROM="$2"; shift ;;
     --project) [ $# -ge 2 ] || die "--project needs the Compose project name"; PROJECT="$2"; shift ;;
     --compare-source) COMPARE_SOURCE=1 ;;
     --fetch-encrypted) FETCH_ENCRYPTED=1 ;;
@@ -167,22 +171,70 @@ SQL
 # in one transaction on the copy. Prints the replay's summary line.
 LEDGER_SQL="$HERE/restore-erasure-ledger.sql"
 REPLAY_SQL="$HERE/restore-replay-erasures.sql"
+OFFSITE_SQL="$HERE/restore-offsite-ledger.sql"
+OFFSITE_CSV=""
+OFFSITE_NEWEST=""
+# [Off-site erasure ledger] Check the file before anything is created: readable by this login only,
+# every line one entry {id (uuid), kind (a known kind), entry (an object), createdAt}. Converted to CSV
+# (one JSON value per row) in this run's private directory; prints the newest entry's time.
+read_offsite_ledger() {
+  [ -f "$LEDGER_FROM" ] || die "--ledger-from: $LEDGER_FROM is not a file"
+  private_tmp
+  OFFSITE_CSV="$TMP_DIR/offsite-ledger.csv"
+  OFFSITE_NEWEST="$(umask 077; python3 -I - "$LEDGER_FROM" "$OFFSITE_CSV" <<'PY'
+import csv, json, os, re, stat, sys
+src, dst = sys.argv[1], sys.argv[2]
+if os.stat(src).st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+    sys.exit("--ledger-from: the ledger file is readable by others; chmod 600 it")
+kinds = {"receipts", "destroyed_keys", "retired_documents", "shredded_runs", "shredded_fields",
+         "closed_accounts", "deleted_rows", "erased_rating_text", "erased_outbox_text"}
+uuid = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+stamp = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?")
+newest, n = "", 0
+with open(src) as f, open(dst, "w", newline="") as out:
+    w = csv.writer(out, lineterminator="\n")
+    for no, line in enumerate(f, 1):
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            sys.exit(f"--ledger-from: line {no} is not JSON")
+        if not (isinstance(e, dict) and isinstance(e.get("id"), str) and uuid.fullmatch(e["id"]) and e.get("kind") in kinds
+                and isinstance(e.get("entry"), dict) and isinstance(e.get("createdAt"), str) and stamp.fullmatch(e["createdAt"])):
+            sys.exit(f"--ledger-from: line {no} is not an erasure ledger entry")
+        w.writerow([json.dumps(e)])
+        newest = max(newest, e["createdAt"])
+        n += 1
+if n == 0:
+    sys.exit("--ledger-from: the ledger file holds no entry")
+print(newest)
+PY
+)" || die "--ledger-from: the off-site ledger was refused (above); nothing was created"
+  [ -f "$OFFSITE_SQL" ] || die "--ledger-from: restore-offsite-ledger.sql is missing next to restore.sh"
+  echo "off-site ledger : $(grep -c . "$OFFSITE_CSV") entr(ies), newest $OFFSITE_NEWEST"
+}
 replay_erasure_ledger() {
-  local has names=() selects=() name="" line i script summary live_id copy_id
+  local has=f names=() selects=() name="" line i script summary live_id copy_id
   [ -f "$LEDGER_SQL" ] && [ -f "$REPLAY_SQL" ] ||
     die_copy "the erasure ledger files are missing next to restore.sh; not restored"
-  live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
   copy_id="$(deployment_identity_of "$SCRATCH" db_psql)" || die_copy "could not read the deployment identity of the restored copy; not restored"
-  echo "live database identity : $live_id"
-  echo "restored copy identity : $copy_id"
-  if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
-    die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
-  fi
-  has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
-    die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
-  if [ "$has" != t ]; then
-    echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
-    return 0
+  if [ "$NO_LIVE_LEDGER" = 1 ]; then
+    echo "live database identity : gone (disaster recovery: the off-site ledger only)"
+    echo "restored copy identity : $copy_id"
+  else
+    live_id="$(deployment_identity_of "$LIVE_DB" db_psql_ro)" || die_copy "could not read the deployment identity of $LIVE_DB; not restored"
+    echo "live database identity : $live_id"
+    echo "restored copy identity : $copy_id"
+    if [ "${live_id%%/*}" != none ] && [ "${copy_id%%/*}" != none ] && [ "${live_id%%/*}" != "${copy_id%%/*}" ]; then
+      die_copy "the live database ($live_id) and the restored copy ($copy_id) belong to different environments: the live ledger does not describe this copy; not restored"
+    fi
+    has="$(db_psql_ro "$LIVE_DB" -tAc "SELECT to_regclass('public.deletion_receipt') IS NOT NULL;" | tr -d '[:space:]')" ||
+      die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
+    if [ "$has" != t ] && [ -z "$LEDGER_FROM" ]; then
+      echo "erasure ledger: $LIVE_DB keeps none (no deletion_receipt table); nothing to replay"
+      return 0
+    fi
   fi
   while IFS= read -r line; do
     if [[ "$line" =~ ^--\ ledger:\ ([a-z_]+)$ ]]; then name="${BASH_REMATCH[1]}"; continue; fi
@@ -198,11 +250,20 @@ replay_erasure_ledger() {
       for i in "${!names[@]}"; do
         echo "CREATE TEMP TABLE restore_ledger_${names[$i]} ON COMMIT DROP AS ${selects[$i]} WITH NO DATA;"
       done
-      for i in "${!names[@]}"; do
-        echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
-        db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+      if [ "$has" = t ]; then
+        for i in "${!names[@]}"; do
+          echo "COPY restore_ledger_${names[$i]} FROM STDIN WITH (FORMAT csv);"
+          db_psql_ro "$LIVE_DB" -q -c "COPY (${selects[$i]}) TO STDOUT WITH (FORMAT csv);" || exit 1
+          printf '%s\n' '\.'
+        done
+      fi
+      if [ -n "$LEDGER_FROM" ]; then
+        echo "CREATE TEMP TABLE restore_offsite (line jsonb NOT NULL) ON COMMIT DROP;"
+        echo "COPY restore_offsite (line) FROM STDIN WITH (FORMAT csv);"
+        cat "$OFFSITE_CSV"
         printf '%s\n' '\.'
-      done
+        cat "$OFFSITE_SQL"
+      fi
       cat "$REPLAY_SQL"
       echo 'COMMIT;'
     } > "$script" ) || die_copy "could not read the erasure ledger of $LIVE_DB; not restored"
@@ -282,6 +343,7 @@ fi
 [ -f "$DUMP" ] || die "dump file does not exist"
 pg_restore --list "$DUMP" >/dev/null 2>&1 || die "pg_restore cannot read this archive"
 
+[ -z "$LEDGER_FROM" ] || read_offsite_ledger
 [ -n "$PROJECT" ] ||
   die "name the Compose project that holds the target Postgres: --project <name> (live is 'swift', a rehearsal copy e.g. 'swift-rehearsal'); restore.sh never guesses"
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || die "--project must be a Compose project name (lowercase letters, digits, - and _)"
@@ -304,8 +366,11 @@ ROWS_IN=1
   'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec pg_restore -h 127.0.0.1 -U "$POSTGRES_USER" --exit-on-error --no-owner --dbname="$1"' \
   sh "$SCRATCH" < "$DUMP" || die_copy "pg_restore failed; not restored"
 quarantine_scratch || die_copy "the restored scratch database could not be kept quarantined"
-if [ "$NO_LIVE_LEDGER" = 1 ]; then
+if [ "$NO_LIVE_LEDGER" = 1 ] && [ -z "$LEDGER_FROM" ]; then
   echo "DISASTER-RECOVERY MODE: no live erasure ledger was replayed (--no-live-ledger --i-know-live-is-gone)"
+elif [ "$NO_LIVE_LEDGER" = 1 ]; then
+  echo "DISASTER-RECOVERY MODE: replaying the off-site erasure ledger only (the live database is gone)"
+  replay_erasure_ledger
 else
   replay_erasure_ledger
 fi
@@ -446,8 +511,13 @@ SECONDS_TAKEN=$(( $(date +%s) - STARTED ))
 if [ "$NO_LIVE_LEDGER" = 1 ]; then
   # [#1977 COORD ruling] Never "RESTORE OK", never a rehearsal heartbeat, a distinct exit code.
   echo "quarantine: only the operator's login (and superusers) can connect to $SCRATCH; no application login can"
-  echo "NOT erasure-complete: replay the off-site ledger before use" | tee /dev/stderr
-  echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
+  if [ -n "$LEDGER_FROM" ]; then
+    echo "erasure-complete up to $OFFSITE_NEWEST (the newest entry of the off-site ledger)" | tee /dev/stderr
+    echo "Anything erased after $OFFSITE_NEWEST never reached the off-site ledger and is still whole in this copy: check the erasure receipts and the ops pages for an unshipped ledger before anything from it is used. Keep it quarantined until then."
+  else
+    echo "NOT erasure-complete: replay the off-site ledger before use" | tee /dev/stderr
+    echo "This copy is the backup's state: anyone erased after the backup is still whole in it. Re-apply those erasures (the off-site erasure ledger, or by hand from the erasure receipts) before anything from it is used. Keep it quarantined until then."
+  fi
   echo "DR restore of $SCRATCH finished in ${SECONDS_TAKEN}s; scratch database retained, quarantined, NOT for use"
   exit 3
 fi

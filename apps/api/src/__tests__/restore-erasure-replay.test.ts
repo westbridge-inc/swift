@@ -53,7 +53,7 @@ function restore(dump: string, opts: { args?: string[]; replaySuffix?: string } 
   created.push(scratch);
   const here = join(tmp, `deploy-${scratch}`);
   mkdirSync(here, { recursive: true });
-  for (const f of ['restore.sh', 'restore-erasure-ledger.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-offsite-ledger.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, 'restore-replay-erasures.sql'), readFileSync(join(DEPLOY, 'restore-replay-erasures.sql'), 'utf8') + (opts.replaySuffix ?? ''));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${LIVE}\n`);
   const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? []), dump, scratch], {
