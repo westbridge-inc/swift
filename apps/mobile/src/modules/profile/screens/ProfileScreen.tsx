@@ -378,7 +378,9 @@ export function ProfileScreen() {
               label="Your rating"
               sub={myRating.data?.displayRating != null
                 ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
-                : 'No rating yet'}
+                : myRating.isError && myRating.data === undefined
+                ? "Couldn't load your rating" // [BUG-GUARDS C3] an unread rating is not "No rating yet"
+                : myRating.isLoading ? 'Loading…' : 'No rating yet'}
               onPress={() => setRatingInfo(true)}
             />
           </RowGroup>
@@ -468,7 +470,7 @@ export function ProfileScreen() {
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
+          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : myRating.isError && myRating.data === undefined ? "Couldn't load your rating" : myRating.isLoading ? 'Loading…' : 'No rating yet'}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
