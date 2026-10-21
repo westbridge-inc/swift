@@ -89,13 +89,13 @@ function textOf(node: any): string {
 }
 
 describe('CartBar — the one pinned door to the Cart tab', () => {
-  it('navigates straight to the Cart tab', () => {
+  it('goes back to the Cart tab ({ pop: true }: never a second tab bar, UI-SWEEP U09)', () => {
     mocks.cart.data = { items: [{ itemId: 'i1', quantity: 2 }], subtotalCustomer: 1500, vendorId: 'vendor-1' };
     mocks.navigate.mockClear();
 
     bar().props['onPress']();
 
-    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith('Tabs', { screen: 'Cart' });
+    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith('Tabs', { screen: 'Cart' }, { pop: true });
   });
 
   it('shows the live count and subtotal from the cart query', () => {
