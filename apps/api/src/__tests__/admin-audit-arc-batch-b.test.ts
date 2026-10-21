@@ -16,7 +16,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { OrderService } from '../modules/order/order.service';
 import { issueSyntheticHandoverPhoto, syntheticMoverSession } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH B — the settlement digest, the top-up command, the three
@@ -27,7 +27,7 @@ import { testPhone } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REFUSAL = refusalName('arcb');
 const userIds: string[] = [];
 const vendorIds: string[] = [];
@@ -63,7 +63,7 @@ async function freshVendor() {
   const ownerUser = await person('VENDOR_OWNER', 'Own');
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `B Kitchen ${RUN} ${nanoid(3)}`, slug: `arcb-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `B Kitchen ${RUN} ${wordFreeTag(8)}`, slug: `arcb-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: testPhone(), addressLine1: '2 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id); return vendor;

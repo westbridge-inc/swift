@@ -23,12 +23,13 @@ import {
 } from '../utils/socket-revocation';
 import { guardRedisCommandPromises } from '../utils/redis-command-guard';
 import { warRoomsForSocket } from '../modules/safety/war-room';
-import { isProduction } from '../utils/runtime-mode';
+import { isProduction, usesSocketRedisAdapter } from '../utils/runtime-mode';
 import { assertRoomAccess } from '../modules/chat/chat-authority';
 import { vendorVisibleFilter } from '../modules/order/hold-visibility';
 import { STORE_TEAM_SELECT, teamOf } from '../modules/notification/store-team';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { bindTenantTransaction, runWithTenant } from './prisma';
+import { sessionCredentialDigest } from '../lib/session-credential';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -59,6 +60,7 @@ declare module 'fastify' {
 
 interface SocketAuthorityRow {
   sessionId: string;
+  /** [Row 231] the row's digest of the access token, never the token */
   token: string;
   expiresAt: Date;
   authMethod: SessionAuthMethod;
@@ -128,7 +130,8 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     tenantId: string;
     role: string;
     sessionId: string;
-    token: string;
+    /** [Row 231] the digest of the connect-time access token — compared to the row, which holds only digests */
+    tokenDigest: string;
   }>();
   let authorityRecheckClosing = false;
   let authorityRecheckPromise: Promise<void> | undefined;
@@ -192,6 +195,10 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   }
 
   async function readAuthorityByToken(token: string): Promise<SocketAuthorityRow | undefined> {
+    // [Row 231] raw SQL bypasses the prisma digest extension: the row holds
+    // the digest of the access token, so the presented token is looked up as
+    // its digest. A plaintext comparison here would match nothing.
+    const tokenDigest = sessionCredentialDigest(token);
     const rows = await runBoundedAuthorityRead('Socket post-connect authority read', (tx) =>
       tx.$queryRaw<SocketAuthorityRow[]>`
         SELECT
@@ -206,7 +213,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           u."activeRole"
         FROM "sessions" s
         INNER JOIN "users" u ON u."id" = s."userId"
-        WHERE s."token" = ${token}
+        WHERE s."token" = ${tokenDigest}
         LIMIT 1
       `,
     );
@@ -250,7 +257,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
               : false;
             if (
               !session
-              || session.token !== authority.token
+              || session.token !== authority.tokenDigest
               || session.expiresAt.getTime() <= now
               || session.userId !== authority.userId
               || session.tenantId !== authority.tenantId
@@ -328,11 +335,14 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   // SWIFT-AUD-D6-01: fan emits out across ALL API instances in production. Without
   // a Redis adapter, io.to(room).emit() reaches only sockets on the EMITTING
   // instance — a rider connected to instance B never receives the dispatch offer
-  // a worker emits on instance A, and customers miss order-status updates. Dev/
-  // test run a single process (the default in-memory adapter is correct there);
-  // gating on production also keeps vitest's per-file socket servers from
-  // cross-talking through a shared Redis pub/sub channel.
-  if (isProduction()) {
+  // a worker emits on instance A, and customers miss order-status updates. The
+  // same holds for the separate worker process outside production: staging runs
+  // loadtest, and its worker's order:new (a held order released) reached no store
+  // board. So the adapter runs in production, loadtest and development
+  // (usesSocketRedisAdapter); test keeps the in-memory adapter so vitest's
+  // per-file socket servers never cross-talk through a shared Redis channel.
+  // Readiness still depends on the adapter in production only (unchanged).
+  if (usesSocketRedisAdapter()) {
     const { createAdapter } = await import('@socket.io/redis-adapter');
     const pubClient = app.redis.duplicate();
     const subClient = app.redis.duplicate();
@@ -381,7 +391,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
       // subscription acknowledgement. No phase may silently extend boot.
       await withTimeout(
         (async () => {
-          // Fail boot rather than silently run a single-node adapter in production.
+          // Fail boot rather than silently run a single-node adapter (any mode that uses it).
           await Promise.all([pubClient.ping(), subClient.ping()]);
           io.adapter(createAdapter(pubClient, subClient));
           // Redis adapter 8.3.0 does not await its ioredis subscriptions. Verify
@@ -758,7 +768,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
           tenantId,
           role: authority.role,
           sessionId: authSessionId,
-          token,
+          tokenDigest: sessionCredentialDigest(token),
         });
         for (const next of pendingPackets.splice(0)) next();
         socket.emit('auth:ready', {

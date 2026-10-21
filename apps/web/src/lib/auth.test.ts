@@ -233,7 +233,24 @@ describe('[W-01] the gate is the server’s word, not a token’s presence', () 
 
     const auth3 = await loadAuth();
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    expect(await auth3.sessionProbe()).toEqual({ ok: false });
+    // [UI-SWEEP U23] Not signed in, and also not known to be signed out: the console says Swift can't be reached.
+    expect(await auth3.sessionProbe()).toEqual({ ok: false, unreachable: true });
+  });
+
+  it('[UI-SWEEP U23] a server failure while checking is "unreachable", never a sign-out, and keeps the person', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    // [REVIEW-F2 #1968 S4-2 / REVIEW-M S4-1] A timeout (408) or a rate limit (429) says nothing about the session either.
+    for (const status of [500, 502, 503, 408, 429]) {
+      mockApi(() => ({ status, body: { success: false } }));
+      expect(await auth.sessionProbe(), String(status)).toEqual({ ok: false, unreachable: true });
+      expect(auth.getSessionPrincipal(), String(status)).toBe('u1');
+    }
+    // A real "no session" still forgets.
+    mockApi(() => ({ status: 401, body: { success: false } }));
+    expect(await auth.sessionProbe()).toEqual({ ok: false });
+    expect(auth.getSessionPrincipal()).toBeNull();
   });
 
   it('a 200 that names nobody is not a session — a shape change must not read as signed in', async () => {
@@ -408,6 +425,73 @@ describe('[W-01] the account-change guards survive the move off tokens', () => {
     auth.clearSession();
     expect(auth.getSessionPrincipal()).toBeNull();
     expect(auth.getSelectedStore()).toBeNull();
+  });
+});
+
+describe('[Row 225] the server holds a write to the account this tab is showing', () => {
+  const expectedOf = (init?: RequestInit) => (init?.headers as Record<string, string> | undefined)?.['X-Swift-Expected-Principal'];
+
+  it('once the server has named the person, every request names them — a write the shared cookie no longer matches is refused there', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: JSON.stringify({ firstName: 'A' }) });
+    await auth.apiFetch('/api/v1/customer/orders');
+    expect(seen).toEqual(['u1', 'u1']);
+  });
+
+  it('a request sent before anyone is known names nobody — the first paint is not refused for it', async () => {
+    const auth = await loadAuth();
+    const seen: Array<string | undefined> = [];
+    mockApi(({ init }) => { seen.push(expectedOf(init)); return { body: { success: true, data: { ok: true } } }; });
+    await auth.apiFetch('/api/v1/customer/home');
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('when the server answers SESSION_CHANGED, the write fails as a session change AND the tab learns who the cookie names now', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const heard = vi.fn();
+    auth.subscribeSession(heard);
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'The signed-in account changed in another tab.' } } }));
+    await expect(auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }))
+      .rejects.toMatchObject({ status: 409, code: 'SESSION_CHANGED' });
+    await vi.waitFor(() => expect(auth.getSessionPrincipal()).toBe('u2'));
+    expect(heard).toHaveBeenCalled();
+  });
+
+  it('the refusal says what happened — nothing was saved and the page now shows who is signed in — and never asks for a reload the tab does by itself', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    mockApi(({ url }) => (url.pathname.endsWith('/auth/me')
+      ? signedInAs('u2')
+      : { status: 409, body: { success: false, error: { code: 'SESSION_CHANGED', message: 'Nothing was saved — reload to continue as the account now signed in.' } } }));
+    const refused = await auth.apiFetch('/api/v1/customer/profile', { method: 'PUT', body: '{}' }).catch((e: Error) => e);
+    expect(refused.message).toContain('Nothing was saved');
+    expect(refused.message).toContain('now shows');
+    expect(refused.message.toLowerCase()).not.toContain('reload');
+  });
+
+  it('Sign out in a stale tab signs this browser out, whoever the shared cookie names now: it declares no expectation, and the tab stays signed out', async () => {
+    const auth = await loadAuth();
+    mockApi(() => signedInAs('u1'));
+    await auth.sessionProbe();
+    const calls: Array<{ path: string; expected: string | undefined }> = [];
+    mockApi(({ url, init }) => {
+      calls.push({ path: url.pathname, expected: expectedOf(init) });
+      return url.pathname.endsWith('/auth/me') ? signedInAs('u2') : { body: { success: true, data: { ok: true } } };
+    });
+    await auth.logout();
+    expect(calls.find((c) => c.path.endsWith('/auth/logout'))).toEqual({ path: '/api/v1/auth/logout', expected: undefined });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(auth.getSessionPrincipal()).toBeNull();
+    expect(calls.some((c) => c.path.endsWith('/auth/me'))).toBe(false);
   });
 });
 

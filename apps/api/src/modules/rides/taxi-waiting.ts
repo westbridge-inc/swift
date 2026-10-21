@@ -6,7 +6,7 @@ import type { TaxiStopProgress } from './taxi-stops-read';
 // [TAXI waiting charge · owner ruling 1 Oct 2026] THE one place the waiting
 // charge is decided (CONTRACT.md Rev 2 §8).
 //
-// The rule: a charge per FULL block of waiting (500 GYD per 10 minutes by
+// The rule: a charge per FULL block of waiting (300 GYD per 10 minutes by
 // default; TAXI_RATES.waitingChargePerBlock / waitingBlockMinutes). The waits
 // are the pickup (the driver's arrival → the trip start) and each intermediate
 // stop (its arrival → its departure, or its skip: the car waited either way).
@@ -28,7 +28,7 @@ import type { TaxiStopProgress } from './taxi-stops-read';
 // ---------------------------------------------------------------------------
 
 /** The declared defaults: a market whose TAXI_RATES names no waiting terms waits on these. */
-export const TAXI_WAITING_DEFAULTS = { chargePerBlock: 500, blockMinutes: 10 } as const;
+export const TAXI_WAITING_DEFAULTS = { chargePerBlock: 300, blockMinutes: 10 } as const;
 
 /** TAXI_WAITING_CHARGE: on only when exactly "1" (surrounding blanks ignored). */
 export function taxiWaitingEnabled(env: Record<string, string | undefined> = process.env): boolean {
@@ -56,7 +56,7 @@ export function waitingTermsFromRates(
 
 const wholeUnits = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
 
-/** The sentence shown beside the fare: "Waiting: 500 per 10 minutes after your driver arrives". */
+/** The sentence shown beside the fare: "Waiting: 300 per 10 minutes after your driver arrives". */
 export function waitingTermsText(terms: TaxiWaitingTerms): string {
   const block = terms.blockMinutes === 1 ? 'minute' : `${terms.blockMinutes} minutes`;
   return `Waiting: ${wholeUnits.format(terms.chargePerBlock)} per ${block} after your driver arrives`;

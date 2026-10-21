@@ -1,5 +1,6 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -8,6 +9,7 @@ import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
@@ -1660,7 +1662,9 @@ export async function customerRoutes(app: FastifyInstance) {
     if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
-    const activePromos = await app.prisma.promoCode.findMany({
+    // [Row 272] A code that has reached its usage limit is not advertised: it
+    // could only be refused at checkout. The counters never leave the server.
+    const activePromos = (await app.prisma.promoCode.findMany({
       where: {
         vendorId: id,
         isActive: true,
@@ -1670,10 +1674,18 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
+        maxUses: true, currentUses: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+      take: 20,
+    }))
+      .filter((p) => p.maxUses == null || p.currentUses < p.maxUses)
+      .slice(0, 5)
+      .map((p) => ({
+        code: p.code, description: p.description, discountType: p.discountType,
+        discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null,
+        validUntil: p.validUntil,
+      }));
 
     // Check if favorited (guests have none)
     const isFavorite = request.user?.userId
@@ -1770,7 +1782,10 @@ export async function customerRoutes(app: FastifyInstance) {
         distanceKm,
         deliveryFee,
         etaMin,
-        promos: activePromos.map((p) => ({ ...p, discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null })),
+        promos: activePromos,
+        // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
+        // "N promos available" row). Same list as `promos`, kept for older readers.
+        activePromos,
       },
     };
   });
@@ -2652,12 +2667,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
     const { readFareBreakdown } = await import('../rides/taxi-waiting');
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops names them, in order.
+    const { readReceiptStops } = await import('../rides/taxi-stops-read');
+    const stops = order.orderType === 'TAXI' ? await readReceiptStops(app.prisma, order) : null;
     // [Triage row 248 · R3] The receipt names who sold, from the ONE seller block the store page shows.
     const { publicStorefrontSeller } = await import('../verification/storefront-seller');
     const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
     const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}) } as never);
+    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
@@ -3570,11 +3588,13 @@ export async function customerRoutes(app: FastifyInstance) {
    *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
     const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
-    await app.prisma.deviceToken.upsert({
+    // [item 20] The token may still belong to the account last signed in on
+    // this device: moving it is a write on someone else's row (owner wall).
+    await ownerWallSystem('device:register', () => app.prisma.deviceToken.upsert({
       where: { token },
       create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
       update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
-    });
+    }));
     return { success: true, data: { message: 'Device registered' } };
   });
 
@@ -3698,9 +3718,8 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     // Check user-specific usage
-    const userUsage = await app.prisma.order.count({
-      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+    const userUsage = await app.prisma.order.count({ where: promoUsesByPersonWhere(authority.memberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');
     }

@@ -50,9 +50,9 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 import { grantStepUp } from './helpers/step-up';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-seal-${RUN}`;
 const PRODUCTION = 'swift-default';
 const DAY = 86_400_000;

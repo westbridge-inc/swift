@@ -11,6 +11,7 @@ import { authRoutes } from '../modules/auth/auth.routes';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { loginWithOtp } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // DASH-06 — THE ADMIN REVENUE DAY IS A GUYANA DAY.
@@ -96,7 +97,7 @@ beforeAll(async () => {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Day ${nanoid(5)}`, slug: `day-${nanoid(6)}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Day ${wordFreeTag(8)}`, slug: `day-${nanoid(6)}`, vendorType: 'RESTAURANT',
       phone: '+5920063002', addressLine1: '1 Day St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE',
     },

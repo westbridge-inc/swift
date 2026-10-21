@@ -18,7 +18,7 @@ import { toast } from '../../../kit/toast';
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
 import type { OrderVerticalFacts } from '@swift/types';
 import {
-  Photo,
+  CircleChip, Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
   Pictogram, PillButton, Screen, T,
 } from '../../../kit';
@@ -238,7 +238,9 @@ export function OrdersHistoryScreen() {
   // THE PAPER HEADER — ink on the page ground, no slab, no white pill.
   const header = (
     <View style={{ paddingTop: space.lg, paddingBottom: space.lg }}>
-      <T variant="micro" tone="muted">ORDERS & RIDES</T>
+      {/* [UI-SWEEP U11] A pushed screen since Activity left the tab bar: its own back chip. */}
+      <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
+      <T variant="micro" tone="muted" style={{ marginTop: space.lg }}>ORDERS & RIDES</T>
       <T variant="title" style={{ marginTop: 2 }}>Your activity</T>
     </View>
   );
@@ -464,7 +466,7 @@ export function OrdersHistoryScreen() {
                         // again) are named before the cart opens.
                         const notice = reorderNotice(result);
                         if (notice) toast.show(notice.title, notice.description);
-                        navigation.navigate('Tabs', { screen: 'Cart' });
+                        navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true });
                       },
                     })
                   }

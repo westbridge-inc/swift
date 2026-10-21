@@ -11,6 +11,7 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { moderationRoutes } from '../modules/moderation/moderation.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Review responses (master plan §4.1): operators reply publicly; the reviewer
@@ -89,7 +90,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id,
-      name: `Reply Cafe ${nanoid(4)}`,
+      name: `Reply Cafe ${wordFreeTag(8)}`,
       slug: `reply-cafe-${nanoid(6)}`,
       vendorType: 'RESTAURANT',
       phone: '+5920032900',
@@ -178,7 +179,7 @@ describe('Operator replies to a review', () => {
     await app.prisma.vendor.create({
       data: {
         ownerId: svo.id,
-        name: `Stranger Shop ${nanoid(4)}`,
+        name: `Stranger Shop ${wordFreeTag(8)}`,
         slug: `stranger-shop-${nanoid(6)}`,
         vendorType: 'STORE',
         phone: '+5920032901',

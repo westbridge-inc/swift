@@ -13,7 +13,7 @@ import { ensureSan } from '../modules/billing/san.service';
 import { settlementFileHash } from '../modules/billing/settlement-import';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH C — agent cash (record, attach), the manual refund
@@ -23,7 +23,7 @@ import { testPhone } from './helpers/fixture-ids';
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REFUSAL = refusalName('arcc');
 const userIds: string[] = []; const vendorIds: string[] = []; const ownerIds: string[] = []; const subIds: string[] = [];
 const receipts: string[] = []; const fileHashes: string[] = [];
@@ -50,7 +50,7 @@ async function sanSubscription() {
   const ownerUser = await person('VENDOR_OWNER', 'Own');
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `C Kitchen ${RUN} ${nanoid(3)}`, slug: `arcc-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    ownerId: owner.id, name: `C Kitchen ${RUN} ${wordFreeTag(8)}`, slug: `arcc-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
     phone: testPhone(), addressLine1: '3 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id);

@@ -120,7 +120,10 @@ function harness() {
     },
     encryptedObject: {
       findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
-      findMany: vi.fn(async (query: any) => referencePage([...objects.values()], query, 'fileKey')),
+      // [#1449 follow-up] The upload route first asks for the uploader's own identical recent upload (a lost-reply retry).
+      findMany: vi.fn(async (query: any) => query?.where?.sha256
+        ? [...objects.values()].filter((o: any) => o.sha256 === query.where.sha256 && o.createdBy === query.where.createdBy && o.shreddedAt === null)
+        : referencePage([...objects.values()], query, 'fileKey')),
       findFirst: vi.fn(async () => null), updateMany: vi.fn(async ({ where }: any) => {
         const object = objects.get(where.fileKey);
         if (object) { (object as any).wrappedDek = null; object.shreddedAt = new Date(); }
@@ -166,7 +169,7 @@ function harness() {
       }),
     },
     auditLog: { create: vi.fn() }, deletionReceipt: { create: vi.fn(), findFirst: vi.fn() },
-    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
+    vendor: { count: vi.fn(async () => 0), updateMany: vi.fn(async () => ({ count: 0 })), findMany: vi.fn(async () => []) }, rider: { findUnique: vi.fn(async () => null) }, driver: { findUnique: vi.fn(async () => null) },
     serviceProvider: { findUnique: vi.fn(async () => null) }, vendorOwner: { findUnique: vi.fn(async () => null) },
     docType: { findUnique: vi.fn(async () => null) },
     advertiserMember: { findMany: vi.fn(async () => []), deleteMany: vi.fn() }, vendorStaff: { deleteMany: vi.fn() },
@@ -184,13 +187,29 @@ function harness() {
   };
   // Account erasure also drops the browser-basket upload receipts that ride
   // with the cart (POST /customer/cart/merge replay records).
-  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) {
+  for (const name of ['faceTemplate', 'identityKey', 'identityClusterMember', 'session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox']) {
     db[name] = { deleteMany: vi.fn() };
   }
   // [Row 331] Erasure reads the shift selfie rows before deleting them (no rows in this harness),
   // and an unclaimed upload is kept while the person is under a legal hold (none here).
   db.livenessCheck.findMany = vi.fn(async () => []);
-  db.docLegalHold = { count: vi.fn(async () => 0) };
+  db.docLegalHold = { count: vi.fn(async () => 0), findFirst: vi.fn(async () => null) };
+  // [erasure covers every person table] The owed rows, cards, profiles, case text and safety records the
+  // erasure now covers (erasure-coverage.ts): none exist for these subjects.
+  for (const name of ['notification', 'moneySurfaceCommand', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin', 'cardSession', 'sosRetrigger', 'evidenceItem']) {
+    db[name] = { deleteMany: vi.fn(async () => ({ count: 0 })) };
+  }
+  // [REVIEW-G S4-1] A money-surface command on a store or partner account that still exists is kept, de-identified.
+  db.moneySurfaceCommand.updateMany = vi.fn(async () => ({ count: 0 }));
+  for (const name of ['checkoutReceipt', 'strike', 'enforcementAction', 'supportTicket', 'complianceViolation', 'complianceReviewCase', 'rectificationRequest',
+    'contentReport', 'ratingReport', 'sosAlert', 'tripSafetySession', 'fraudCase', 'custodyRecoveryCase']) {
+    db[name] = { updateMany: vi.fn(async () => ({ count: 0 })) };
+  }
+  for (const name of ['rider', 'driver', 'serviceProvider']) db[name].updateMany = vi.fn(async () => ({ count: 0 }));
+  db.customer = { findUnique: vi.fn(async () => null) };
+  db.paymentInstrument = { findMany: vi.fn(async () => []) };
+  db.safetyDeletionHold = { findFirst: vi.fn(async () => null) };
+  db.incidentCase = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
   // The synthetic route session is not a fresh code sign-in, so deletion
   // falls through to the step-up grant the route harness holds in Redis.
   db.session.findUnique = vi.fn(async () => null);
@@ -823,7 +842,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     });
     h.db.serviceProvider.updateMany = vi.fn(async () => ({ count: 0 }));
     for (const name of ['order', 'serviceJob']) h.db[name] = { count: vi.fn(async () => 0) };
-    for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []) };
+    for (const name of ['sosAlert', 'incidentCase', 'evidenceBundle']) h.db[name] = { findMany: vi.fn(async () => []), updateMany: vi.fn(async () => ({ count: 0 })) };
     h.db.platformConfig = { upsert: vi.fn() };
     const matches = (doc: any, where: any): boolean => Object.entries(where ?? {}).every(([field, value]: [string, any]) => {
       if (field === 'OR') return value.some((clause: any) => matches(doc, clause));
@@ -1183,6 +1202,8 @@ describe('review corrections: deletion obligations and retry progress', () => {
     h.db.safetyDeletionHold = {
       findUnique: vi.fn(async () => null),
       create: vi.fn(async ({ data }: any) => ({ id: 'synthetic-hold', ...data })),
+      // The erasure's later passes read the hold it just opened (safety check-in deliveries and safety records stay).
+      findFirst: vi.fn(async () => (h.db.safetyDeletionHold.create.mock.calls.length ? { id: 'synthetic-hold' } : null)),
     };
     await expect(h.account.deleteAccount(A)).resolves.toMatchObject({ deleted: true, status: 'PENDING_SAFETY_HOLD', holdId: 'synthetic-hold' });
     const sealed = h.db.safetyDeletionHold.create.mock.calls[0][0].data;
@@ -1243,7 +1264,14 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'deviceToken', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox', 'notification', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    // [REVIEW-G S4-1] No driver profile, so no own money surface to delete: every command the person staged is
+    // kept in its entity's chain and de-identified, exactly once.
+    expect(h.db.moneySurfaceCommand.deleteMany).not.toHaveBeenCalled();
+    expect(h.db.moneySurfaceCommand.updateMany).toHaveBeenCalledOnce();
+    // [item 20] Push registrations go through the owner wall's one narrow erase action, for this account, once.
+    const erases = (h.db.$queryRaw.mock.calls as unknown[][]).filter(([q, ...v]) => Array.isArray(q) && (q as string[]).join('?').includes('swift_owner_wall_erase_devices') && v[0] === A);
+    expect(erases).toHaveLength(1);
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

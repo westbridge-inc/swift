@@ -14,7 +14,7 @@ import { inTenantOf } from '../jobs/queue';
 import { algoConfig, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
-import { testPhone } from './helpers/fixture-ids';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('unscoped-mutation');
 
@@ -75,7 +75,7 @@ beforeAll(async () => {
     userIds.push(owner.id);
     const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
     vendorId = (await app.prisma.vendor.create({ data: {
-      ownerId: vo.id, name: `Job V ${nanoid(4)}`, slug: `job-v-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `${PHONE}999`,
+      ownerId: vo.id, name: `Job V ${wordFreeTag(8)}`, slug: `job-v-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `${PHONE}999`,
       addressLine1: '1 Job St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: SPOT.lat, longitude: SPOT.lng,
     } })).id;
     seq += 1;

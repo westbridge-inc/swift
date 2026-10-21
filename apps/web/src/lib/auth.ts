@@ -121,7 +121,8 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
     const known = sessionPrincipal !== null;
@@ -137,6 +138,10 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       await endClosedDemo({ redirect: false });
       return forget();
     }
+    // [UI-SWEEP U23] A server failure says nothing about the session: it is
+    // "unreachable", never "signed out", and the principal is kept.
+    // [REVIEW-F2 #1968 S4-2] A timeout (408) or a rate limit (429) is the same: not an answer about the session.
+    if (res.status >= 500 || res.status === 408 || res.status === 429) return { ok: false, unreachable: true };
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
@@ -158,7 +163,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
-    return { ok: false };
+    return { ok: false, unreachable: true };
   }
 }
 
@@ -186,7 +191,7 @@ export function adoptSession(principal: string | null) {
  * every page load. The shell calls this only when a signed-in answer is
  * actually needed — a private page, or an action like adding to the cart.
  */
-export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   if (!(await tryRefresh())) return { ok: false };
   return sessionProbe();
@@ -207,7 +212,12 @@ export async function logout(): Promise<void> {
     // 401s clears NOTHING, leaving the month-long refresh cookie alive to sign
     // the person straight back in. The refresh-and-retry makes the sign-out
     // land. `redirectOnExpired: false` because we are already leaving.
-    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false });
+    //
+    // [Row 225] Sign out names no expected account: on a shared browser it signs
+    // THIS BROWSER out, whoever the cookie names now. A person who presses Sign
+    // out in a tab left open from earlier must never leave the browser signed in
+    // to the account another tab signed in since.
+    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false, expectPrincipal: false });
   } catch {
     // Offline, or a session already gone: nothing here can reach the cookies,
     // and the local clear below still takes the person to /login.
@@ -296,10 +306,13 @@ async function tryRefresh(): Promise<boolean> {
   return refreshFlight;
 }
 
+/** The server refused a write because the shared cookie now names another account (row 225). */
+export const SERVER_SESSION_CHANGED = 'This browser is now signed in to another Swift account. Nothing was saved — this page now shows that account.';
+
 export async function apiFetch(
   path: string,
   options?: RequestInit,
-  policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
+  policy: { redirectOnExpired?: boolean; storeId?: string | null; expectPrincipal?: boolean } = {},
 ) {
   const requestSession = authSnapshot();
   const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
@@ -319,6 +332,9 @@ export async function apiFetch(
         ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
+        // [Row 225] The account this page is acting as: the API refuses a write
+        // whose cookie (shared by every tab) now names someone else.
+        ...(policy.expectPrincipal !== false && requestSession.principal && { 'X-Swift-Expected-Principal': requestSession.principal }),
       },
     });
   };
@@ -345,6 +361,12 @@ export async function apiFetch(
   const json = await res.json().catch(() => ({}));
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
+  }
+  // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
+  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') {
+    void sessionProbe();
+    // The page re-renders as that account by itself (the probe above): say what happened, ask for nothing.
+    throw new ApiRequestError(SERVER_SESSION_CHANGED, 409, 'SESSION_CHANGED');
   }
   if (isClosedDemoAnswer(res.status, json)) {
     await endClosedDemo({ redirect: policy.redirectOnExpired !== false });
