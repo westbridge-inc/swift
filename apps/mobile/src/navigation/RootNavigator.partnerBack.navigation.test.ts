@@ -241,6 +241,8 @@ vi.mock('../modules/mover/screens/MoverDocumentsScreen', () => ({ MoverDocuments
 vi.mock('../modules/mover/screens/MoverVehicleScreen', () => ({ MoverVehicleScreen: () => null }));
 vi.mock('../modules/chat/screens/ConversationScreen', () => ({ ConversationScreen: () => null }));
 vi.mock('../modules/safety/screens/LivenessCheckScreen', () => ({ LivenessCheckScreen: () => null }));
+// The signed-in safety control (an owner's live SOS) has its own tests; it renders nothing when calm.
+vi.mock('../modules/safety/OwnedSafetyPanel', () => ({ OwnedSafetyPanel: () => null }));
 vi.mock('../modules/safety/screens/GuardianDriverConfirmScreen', () => ({ GuardianDriverConfirmScreen: () => null }));
 
 import { BackHandler } from 'react-native';
