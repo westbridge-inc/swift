@@ -106,6 +106,13 @@ function Taxi() {
   const navigation = useNavigation<any>();
   return h('button', { type: 'button', onClick: () => navigation.navigate('DestinationSearch', { onSelect: fx.onSelect, title: 'Where to?' }) }, 'Where to?');
 }
+// Stand-in for the map pin screen, with the real one's hand-back order:
+// onSelect(place), then its own goBack (PinConfirmScreen.tsx confirm()).
+function PinConfirm({ navigation, route }: any) {
+  return h('div', null,
+    h('button', { type: 'button', onClick: () => { route.params.onSelect({ lat: 6.8, lng: -58.17, label: 'Pinned spot' }); navigation.goBack(); } }, 'Confirm location'),
+    h('button', { type: 'button', onClick: () => navigation.goBack() }, 'Back from map'));
+}
 const LAMAHA = { placeId: 'place-lamaha', primary: 'Lamaha Street', secondary: 'Georgetown' };
 
 let host: HTMLDivElement;
@@ -133,6 +140,11 @@ function deferred<T>() {
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
 }
+async function type(typed: string) {
+  const input = host.querySelector<HTMLInputElement>('input[aria-label="Search a place or address"]')!;
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')!.set!;
+  await act(async () => { setter.call(input, typed); input.dispatchEvent(new window.Event('input', { bubbles: true })); });
+}
 async function openSearch(typed = 'Lam') {
   await act(async () => root.render(h(NavigationContainer as any, { ref: nav, linking: { enabled: false, prefixes: [] } },
     h(Stack.Navigator, {
@@ -140,6 +152,7 @@ async function openSearch(typed = 'Lam') {
       children: [
         h(Stack.Screen, { key: 'Taxi', name: 'Taxi', component: Taxi }),
         h(Stack.Screen, { key: 'DestinationSearch', name: 'DestinationSearch', component: DestinationSearchScreen }),
+        h(Stack.Screen, { key: 'PinConfirm', name: 'PinConfirm', component: PinConfirm }),
       ],
     }))));
   await tap('Where to?');
@@ -222,5 +235,99 @@ describe('[UI-SWEEP U70] "No matches" means the search ran and found nothing', (
     fx.auto = { data: [], isFetching: false, isError: false };
     await openSearch();
     expect(text()).toContain('No matches');
+  });
+});
+
+describe('[#1940 review S3-1] a place that opens after the rider moved on is dropped', () => {
+  const lamahaDetail = { lat: 6.82, lng: -58.15, label: 'Lamaha Street', placeId: 'place-lamaha' };
+
+  it('a lookup that lands while the map is open neither chooses nor throws the rider off the map; the map still confirms', async () => {
+    const pending = deferred<unknown>();
+    fx.details.mockReturnValue(pending.promise);
+    await openSearch();
+    await tap('Lamaha Street');
+    await tap('Set location on map');
+    await settle();
+    expect(stack()).toEqual(['Taxi', 'DestinationSearch', 'PinConfirm']);
+    await act(async () => { pending.resolve(lamahaDetail); });
+    await settle();
+    expect(fx.onSelect, 'the late suggestion is not handed to Taxi').not.toHaveBeenCalled();
+    expect(stack(), 'the rider stays on the map').toEqual(['Taxi', 'DestinationSearch', 'PinConfirm']);
+    await tap('Confirm location');
+    await settle();
+    expect(fx.onSelect).toHaveBeenCalledTimes(1);
+    expect(fx.onSelect).toHaveBeenCalledWith({ lat: 6.8, lng: -58.17, label: 'Pinned spot' });
+    expect(stack()).toEqual(['Taxi']);
+  });
+
+  it('back from the map after a dropped lookup, the search still works', async () => {
+    const pending = deferred<unknown>();
+    fx.details.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(lamahaDetail);
+    await openSearch();
+    await tap('Lamaha Street');
+    await tap('Set location on map');
+    await act(async () => { pending.resolve(lamahaDetail); });
+    await settle();
+    await tap('Back from map');
+    await settle();
+    expect(stack()).toEqual(['Taxi', 'DestinationSearch']);
+    await tap('Lamaha Street');
+    await settle();
+    expect(fx.onSelect).toHaveBeenCalledTimes(1);
+    expect(stack()).toEqual(['Taxi']);
+  });
+
+  it('a lookup that lands after the rider went Back to Taxi chooses nothing and leaves Taxi open', async () => {
+    const pending = deferred<unknown>();
+    fx.details.mockReturnValue(pending.promise);
+    await openSearch();
+    await tap('Lamaha Street');
+    await act(async () => { nav.goBack(); });
+    await settle();
+    expect(stack()).toEqual(['Taxi']);
+    await act(async () => { pending.resolve(lamahaDetail); });
+    await settle();
+    expect(fx.onSelect).not.toHaveBeenCalled();
+    expect(stack()).toEqual(['Taxi']);
+  });
+});
+
+describe('[#1940 review S4-1] the rider can see the search and the place lookup working', () => {
+  it('while a place opens, its name shows as opening; the line goes when it fails', async () => {
+    const pending = deferred<unknown>();
+    fx.details.mockReturnValue(pending.promise);
+    await openSearch();
+    await tap('Lamaha Street');
+    expect(text()).toContain('Opening Lamaha Street…');
+    await act(async () => { pending.reject(new Error('offline')); });
+    await settle();
+    expect(text()).not.toContain('Opening Lamaha Street…');
+    expect(text()).toContain('That place could not be opened.');
+  });
+
+  it('a search that has not answered says "Searching…"', async () => {
+    fx.auto = { data: undefined, isFetching: true, isError: false };
+    await openSearch();
+    expect(text()).toContain('Searching…');
+    expect(text()).not.toContain('No matches');
+  });
+
+  it('Try again after a failed search shows "Searching…" while it runs, not the failure again', async () => {
+    fx.auto = { data: undefined, isFetching: true, isError: true };
+    await openSearch();
+    expect(text()).toContain('Searching…');
+    expect(text()).not.toContain('Search is not working right now');
+  });
+});
+
+describe('[#1940 review S4-2] a new search clears the old place error', () => {
+  it('typing again removes "That place could not be opened"', async () => {
+    fx.details.mockResolvedValue(null);
+    await openSearch();
+    await tap('Lamaha Street');
+    await settle();
+    expect(text()).toContain('That place could not be opened.');
+    await type('Lamah');
+    expect(text()).not.toContain('That place could not be opened.');
   });
 });
