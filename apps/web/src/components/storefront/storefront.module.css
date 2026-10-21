@@ -298,6 +298,17 @@
   line-height: var(--swift-leading-micro);
 }
 
+/* [IMAGES-E2E PR5] A menu section's own photo, above its heading (as on the phone). */
+.sectionPhoto {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  block-size: 120px;
+  margin: 0 0 var(--swift-space-md);
+  border-radius: var(--swift-radius-lg);
+  background: var(--swift-card);
+}
+
 .sectionTitle {
   margin: 0 0 var(--swift-space-md);
   font-family: var(--swift-font-display-semibold), system-ui, sans-serif;

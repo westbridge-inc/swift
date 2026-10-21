@@ -46,6 +46,8 @@ import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { guestCart } from '@/lib/basket-projection';
 import { useGuestBasket } from '@/lib/basket-state';
 import { Photo } from '@/components/order-ui';
+import Image from 'next/image';
+import { photo } from '@/lib/media';
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
 import { SellerInfo } from './seller-info';
@@ -132,6 +134,7 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
     categories: store.categories.map((category) => ({
       id: category.id,
       name: category.name,
+      imageUrl: category.imageUrl ?? null,
       items: category.items.map((item) => ({
         ...item,
         description: item.description ?? undefined,
@@ -214,6 +217,23 @@ function useActiveSection(ids: string[]): [string | null, (_id: string) => void]
  * tile as an item without one; keyed by its address, it tries again when the
  * live menu sends a new one.
  */
+/**
+ * [IMAGES-E2E PR5 · COORD GO 21 Oct, owner rule "business pictures must reach customers"]
+ * A menu section's own photo above its heading, as on the phone. Only a photo Swift keeps is
+ * drawn (photo() picks the bounded /media route and its ladder loader for those alone); no
+ * photo, an outside address or a photo that fails to load draws nothing: today's heading.
+ */
+function SectionPhoto({ imageUrl }: { imageUrl?: string | null }) {
+  const [failed, setFailed] = useState(false);
+  const media = failed ? null : photo(imageUrl);
+  if (!media?.loader) return null;
+  return (
+    <span className={styles.sectionPhoto}>
+      <Image {...media} alt="" fill sizes="(min-width: 760px) 640px, 100vw" loading="lazy" className="object-cover" onError={() => setFailed(true)} />
+    </span>
+  );
+}
+
 function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string | null | undefined }) {
   const [failed, setFailed] = useState(false);
   return (
@@ -854,6 +874,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
             ) : null}
             {sections.map((category) => (
               <section key={category.id} id={`section-${category.id}`} className={styles.section}>
+                <SectionPhoto imageUrl={category.imageUrl} />
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {

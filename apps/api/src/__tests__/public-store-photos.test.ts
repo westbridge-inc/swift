@@ -947,3 +947,31 @@ describe('a store photo that goes is deleted from storage, not just unlinked', (
     expect((await app.prisma.category.findUniqueOrThrow({ where: { id: item.categoryId } })).imageUrl).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [IMAGES-E2E PR5 · COORD GO 21 Oct, owner rule "business pictures must reach customers"]
+// A menu section's photo shows on the store's own page, in the app AND on the website:
+// the website's store page now carries each section's kept photo, never an outside one.
+// ---------------------------------------------------------------------------
+
+describe('a menu section\'s photo reaches the store\'s own page on the website', () => {
+  it('the public store page hands out each section\'s kept photo and never an outside one', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const outsideItem = await makeItem(s.id, null);
+    const keptItem = await makeItem(s.id, null);
+    const bareItem = await makeItem(s.id, null);
+    const key = (await uploadTo(`/api/v1/vendor/categories/${keptItem.categoryId}/image`, o.token, await cameraJpeg())).json().data.imageUrl as string;
+    await app.prisma.category.update({ where: { id: outsideItem.categoryId }, data: { imageUrl: 'https://elsewhere.example/section.jpg' } });
+
+    const web = await get(`/api/v1/public/storefronts/${s.slug}`);
+    expect(web.statusCode).toBe(200);
+    const sections = web.json().data.categories as Array<{ id: string; imageUrl?: string | null }>;
+    expect(sections.find((c) => c.id === keptItem.categoryId)?.imageUrl).toBe(key);
+    expect(sections.find((c) => c.id === outsideItem.categoryId)?.imageUrl).toBeNull();
+    expect(sections.find((c) => c.id === bareItem.categoryId)?.imageUrl).toBeNull();
+    expect(web.body).not.toContain('elsewhere.example');
+    // The door serves the section's photo for that page (a live section of a visible store).
+    expect((await get(`/${key}?w=640`)).statusCode).toBe(200);
+  });
+});
