@@ -21,6 +21,7 @@ import {
   useSetCartTip,
   useUpdateCartItem,
 } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore } from '../../../stores/bookingStore';
@@ -148,6 +149,8 @@ export function CartScreen() {
 
   const updateItem = useUpdateCartItem();
   const removeItem = useRemoveCartItem();
+  // [BUG-GUARDS C2] One remove per line at a time; another line's trash still goes while it sends.
+  const removeLine = useRowHold();
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
   const removePromo = useRemoveCartPromo();
@@ -338,7 +341,8 @@ export function CartScreen() {
   // the new one loads) and not being refreshed after a cart change — including
   // while a promo apply/remove is in flight, so the code in the body is the
   // code the quote on screen was priced with.
-  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removePromo.isPending && !applyPromo.isPending;
+  // removeLine.busy: with two lines removing, removeItem.isPending follows only the latest call.
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -876,7 +880,7 @@ export function CartScreen() {
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}
                         <Pressable
-                          onPress={() => !removeItem.isPending && removeItem.mutate(it.id)}
+                          onPress={() => removeLine(it.id, () => removeItem.mutateAsync(it.id))}
                           hitSlop={14}
                           accessibilityRole="button"
                           accessibilityLabel={`Remove ${it.name}`}

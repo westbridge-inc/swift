@@ -4,6 +4,7 @@ import { Dimensions, FlatList } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { useHome, useToggleFavorite } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { useAuthStore } from '../../../stores/authStore';
 import { useLocationStore } from '../../../stores/locationStore';
 import { grantedLocationFix } from '../../../lib/deviceLocation';
@@ -24,6 +25,7 @@ export function RecommendedScreen() {
   const locationFix = grantedLocationFix(latitude, longitude, status);
   const home = useHome<any>(locationFix?.latitude, locationFix?.longitude);
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold(); // [BUG-GUARDS C2] one request per store's heart; another store's heart still goes
 
   const featured: any[] = home.data?.featured ?? [];
   const open: any[] = home.data?.openVendors ?? [];
@@ -57,7 +59,7 @@ export function RecommendedScreen() {
               meta={v.etaMin ? `${v.etaMin} min` : undefined}
               favorite={v.isFavorite}
               onToggleFavorite={() =>
-                isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId: v.id, isFavorite: !!v.isFavorite }) : promptLogin()
+                isAuthenticated ? holdRow(v.id, () => toggleFav.mutateAsync({ vendorId: v.id, isFavorite: !!v.isFavorite })) : promptLogin()
               }
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
             />

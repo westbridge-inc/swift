@@ -4,6 +4,7 @@ import { Dimensions, FlatList } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { space } from '@swift/ui';
 import { useFavorites, useToggleFavorite } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { useAuthStore } from '../../../stores/authStore';
 import { vendorPhoto } from '../../../lib/images';
 import { CartBar, useCartBarClearance, EmptyState, ErrorState, FoodCard, Header, LoadingBlock, Screen } from '../../../kit';
@@ -17,6 +18,7 @@ export function FavoritesScreen() {
   const { isAuthenticated, promptLogin } = useAuthStore();
   const favorites = useFavorites<any>();
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold(); // [BUG-GUARDS C2] one request per store's heart; another store's heart still goes
   // [E09] While the cart bar floats over the list, the last row must scroll clear of it.
   const cartClearance = useCartBarClearance();
 
@@ -62,7 +64,7 @@ export function FavoritesScreen() {
               ratingBucket={v.ratingBucket}
               topRated={v.topRated}
               favorite
-              onToggleFavorite={() => !toggleFav.isPending && toggleFav.mutate({ vendorId: v.id, isFavorite: true })}
+              onToggleFavorite={() => holdRow(v.id, () => toggleFav.mutateAsync({ vendorId: v.id, isFavorite: true }))}
               onPress={() => navigation.navigate('Restaurant', { vendorId: v.id })}
             />
           )}

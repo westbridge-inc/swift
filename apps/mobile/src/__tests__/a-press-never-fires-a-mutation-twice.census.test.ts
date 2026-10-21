@@ -24,24 +24,37 @@ import ts from 'typescript';
 //    a busy flag the handler sets to true), or a handler that returns early
 //    / short-circuits on it (`if (x.isPending) return`, `!x.isPending &&
 //    x.mutate()`, a ref lock `if (inFlight.current) return`).
+//    In a list, `holdRow(key, () => x.mutateAsync(…))` (lib/useRowHold) holds
+//    only the SAME row: one shared isPending silently dropped a tap on a
+//    DIFFERENT row (#1952 review S3-2).
 // A button inside Alert.alert(…) is the system dialog (it closes on the
-// first tap), so it is left out; an effect or a callback with no `on…` prop
-// behind it is not a press and is not judged.
-// A new hit fails the suite; fix it, or list it below with the reason.
+// first tap), so it is left out; an effect is not a press. A handler handed
+// to a call (`guardAuth(() => s.mutate())`) is followed to that call, and a
+// ternary branch of an `on…` prop is that prop's handler.
+// A new hit fails the suite; fix it, or list it below with the reason. A call
+// the scanner cannot trace to a press (an object `onPress:`, a handler kept in
+// a ref) fails too, unless UNTRACED lists it with the reason it is safe.
 // ---------------------------------------------------------------------------
 
 const SRC = join(process.cwd(), 'src');
 // >>> C2 shared scanner: byte-identical in apps/mobile and apps/web (the census checks it). Fix it once, copy it to both.
-const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending)$/;
+const GUARD_PROP = /^(disabled|loading|busy|isLoading|pending|isPending|submitting|saving|working|inFlight|sending|cancelling|deleting|removing|adding)$|[a-z](Loading|Busy|Pending|Saving|Submitting|Disabled|InFlight|Sending|Cancelling|Deleting|Removing|Adding)$/;
 const PENDING = /\.isPending\b|\bisPending\b|\.isLoading\b|\.status\s*===\s*['"]pending['"]|\bisMutating\(|\buseIsMutating\(/;
 const MAX_HOPS = 4;
+/** A function handed to one of these runs on its own (not a press). */
+const EFFECT = /^(useEffect|useLayoutEffect|useInsertionEffect|useFocusEffect)$/;
+/** The per-row hold (`const holdRow = useRowHold(); holdRow(key, () => x.mutateAsync(…))`): only the SAME row waits. */
+const ROW_HOLD = 'useRowHold';
 
 type Fn = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction | ts.MethodDeclaration;
 const isFn = (n: ts.Node): n is Fn => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n);
-const calleeName = (c: ts.CallExpression) => (ts.isIdentifier(c.expression) ? c.expression.text : null);
+/** `useX(…)`, or `React.useX(…)` (MenuItemScreen's React.useCallback / React.useEffect). */
+const calleeName = (c: ts.CallExpression) => (ts.isIdentifier(c.expression) ? c.expression.text
+  : ts.isPropertyAccessExpression(c.expression) && c.expression.expression.getText() === 'React' ? c.expression.name.text : null);
 
 interface Hit { file: string; line: number; text: string }
-interface Census { hits: Hit[]; calls: number; pressed: number; unresolved: string[] }
+/** unresolved: calls the scanner could not trace to a press, an effect or a mutation hook's own body (never judged). */
+interface Census { hits: Hit[]; calls: number; pressed: number; unresolved: Hit[] }
 
 /** `use…` functions that hand back a mutation: `=> useMutation(…)`, or a top-level `return useMutation(…)`. */
 function mutationHooks(sfs: ts.SourceFile[]): Set<string> {
@@ -85,9 +98,11 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
   const callNames = new Map<string, string>();
   const pendingNames = new Set<string>();
   const busyStates = new Map<string, string>(); // busy flag -> its setter
+  const rowHolds = new Set<string>();
   const visit = (n: ts.Node) => {
     if (ts.isVariableDeclaration(n) && n.initializer && ts.isCallExpression(n.initializer)) {
       const hook = calleeName(n.initializer);
+      if (hook === ROW_HOLD && ts.isIdentifier(n.name)) rowHolds.add(n.name.text);
       if (hook && hooks.has(hook)) {
         if (ts.isIdentifier(n.name)) handles.add(n.name.text);
         else if (ts.isObjectBindingPattern(n.name)) {
@@ -107,6 +122,13 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
     ts.forEachChild(n, visit);
   };
   visit(sf);
+  // An alias (`const mutateCart = addToCart.mutate`, MarketScreen): its calls are the mutation's calls.
+  const aliases = (n: ts.Node) => {
+    if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && ts.isPropertyAccessExpression(n.initializer)
+      && ts.isIdentifier(n.initializer.expression) && handles.has(n.initializer.expression.text) && /^(mutate|mutateAsync)$/.test(n.initializer.name.text)) callNames.set(n.name.text, n.initializer.getText());
+    ts.forEachChild(n, aliases);
+  };
+  aliases(sf);
   if (!handles.size && !callNames.size) return;
 
   /** A busy flag counts only when something sets it to a truthy value (`setBusy(true)`, `setPicking(kind)`). */
@@ -190,10 +212,27 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
     }
     return false;
   };
-  const pressAttr = (n: ts.Node): ts.JsxAttribute | null => {
-    const p = n.parent;
-    if (p && ts.isJsxExpression(p) && p.parent && ts.isJsxAttribute(p.parent) && /^on[A-Z]/.test(p.parent.name.getText())) return p.parent;
+  /** The `on…` prop a handler sits in, through parentheses and ternary branches (`onX={ok ? () => s.mutate() : undefined}`);
+   *  held when such a ternary's condition names the pending state (`onRate={rate.isPending ? undefined : (n) => …}`). */
+  const pressAttr = (n: ts.Node): { attr: ts.JsxAttribute; held: boolean } | null => {
+    let at: ts.Node = n;
+    let held = false;
+    for (let p = at.parent; p && (ts.isParenthesizedExpression(p) || (ts.isConditionalExpression(p) && p.condition !== at)); p = at.parent) {
+      if (ts.isConditionalExpression(p) && namesPending(p.condition, false)) held = true;
+      at = p;
+    }
+    const p = at.parent;
+    if (p && ts.isJsxExpression(p) && p.parent && ts.isJsxAttribute(p.parent) && /^on[A-Z]/.test(p.parent.name.getText())) return { attr: p.parent, held };
     return null;
+  };
+  /** The call a function is handed to (through useCallback): `guardAuth(() => …)`, `holdRow(key, () => …)`, `useEffect(() => …)`. */
+  const hostCall = (fn: Fn): { call: ts.CallExpression; arg: number } | null => {
+    let at: ts.Node = fn;
+    if (ts.isCallExpression(at.parent) && calleeName(at.parent) === 'useCallback' && at.parent.arguments[0] === at) at = at.parent;
+    const p = at.parent;
+    if (!ts.isCallExpression(p)) return null;
+    const arg = p.arguments.indexOf(at as ts.Expression);
+    return arg >= 0 ? { call: p, arg } : null;
   };
   const elementGuarded = (attr: ts.JsxAttribute): boolean => {
     const props = attr.parent.properties;
@@ -209,26 +248,52 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
     if (!fn || seen.has(fn)) return;
     seen.add(fn);
     if (guardedWithin(node, fn)) return;
-    const attr = pressAttr(fn);
-    if (attr) {
+    const host = hostCall(fn);
+    if (host && host.arg === 1 && rowHolds.has(calleeName(host.call) ?? '')) return; // held per row
+    const slot = pressAttr(fn);
+    if (slot) {
       out.pressed++;
-      if (!elementGuarded(attr)) out.hits.push({ file, line: at(node), text: `${label} <- <${attr.parent.parent.tagName.getText()} ${attr.name.getText()}>` });
+      if (!slot.held && !elementGuarded(slot.attr)) out.hits.push({ file, line: at(node), text: `${label} <- <${slot.attr.parent.parent.tagName.getText()} ${slot.attr.name.getText()}>` });
       return;
     }
     const named = nameOf(fn);
-    if (!named || hops >= MAX_HOPS) { out.unresolved.push(`${file}:${at(node)} ${label}`); return; }
+    if (named && hooks.has(named.name)) return; // inside a mutation hook's own body: each caller's call is judged as a call
+    if (!named && host && EFFECT.test(calleeName(host.call) ?? '')) return; // an effect, not a press
+    if (!named && host) { follow(host.call, label, hops, seen); return; } // `guardAuth(() => s.mutate())`: follow the call that runs it (outward only, so no hop)
+    if (!named || hops >= MAX_HOPS) { out.unresolved.push({ file, line: at(node), text: label }); return; }
     const refs: ts.Identifier[] = [];
+    /** Only refs to THIS binding: not a name (`<X onAdd=…>`, `{ onAdd: … }`, a type's member), not another
+     *  binding of the same name (MarketCard's own `onAdd` prop; ServiceJobsScreen's two `confirm`s). */
+    const scope = named.decl.parent;
+    const binds = (b: ts.BindingName): boolean => (ts.isIdentifier(b) ? b.text === named.name : b.elements.some((e) => !ts.isOmittedExpression(e) && binds(e.name)));
+    const declares = (st: ts.Statement): boolean => (ts.isVariableStatement(st) && st.declarationList.declarations.some((d) => d !== named.decl && binds(d.name)))
+      || (ts.isFunctionDeclaration(st) && st !== named.decl && st.name?.text === named.name);
+    const isName = (n: ts.Identifier): boolean => {
+      const p = n.parent;
+      return (ts.isJsxAttribute(p) && p.name === n) || ((ts.isPropertyAssignment(p) || ts.isPropertySignature(p) || ts.isMethodDeclaration(p) || ts.isPropertyDeclaration(p)) && p.name === n)
+        || (ts.isBindingElement(p) && p.propertyName === n) || (ts.isPropertyAccessExpression(p) && p.name === n);
+    };
+    const shadowed = (n: ts.Node): boolean => {
+      for (let at = n.parent; at && !ts.isSourceFile(at); at = at.parent) {
+        if (at === scope || (at.pos <= named.decl.pos && named.decl.end <= at.end)) return false;
+        if (isFn(at) && at.parameters.some((pr) => binds(pr.name))) return true;
+        if (ts.isBlock(at) && at.statements.some(declares)) return true;
+      }
+      return false;
+    };
     const findRefs = (n: ts.Node) => {
-      if (ts.isIdentifier(n) && n.text === named.name && n.parent !== named.decl && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) refs.push(n);
+      // A hook's deps array (`useEffect(…, [onAdd])`) names the handler without running it.
+      const inDeps = ts.isIdentifier(n) && ts.isArrayLiteralExpression(n.parent) && ts.isCallExpression(n.parent.parent) && /^use[A-Z]/.test(calleeName(n.parent.parent) ?? '');
+      if (ts.isIdentifier(n) && n.text === named.name && n.parent !== named.decl && !inDeps && !isName(n) && !shadowed(n)) refs.push(n);
       ts.forEachChild(n, findRefs);
     };
     findRefs(sf);
-    if (!refs.length) { out.unresolved.push(`${file}:${at(node)} ${label}`); return; }
+    if (!refs.length) { out.unresolved.push({ file, line: at(node), text: label }); return; }
     for (const ref of refs) {
       const direct = pressAttr(ref);
       if (direct) {
         out.pressed++;
-        if (!elementGuarded(direct)) out.hits.push({ file, line: at(node), text: `${label} <- <${direct.parent.parent.tagName.getText()} ${direct.name.getText()}>` });
+        if (!direct.held && !elementGuarded(direct.attr)) out.hits.push({ file, line: at(node), text: `${label} <- <${direct.attr.parent.parent.tagName.getText()} ${direct.attr.name.getText()}>` });
       } else {
         follow(ref, label, hops + 1, seen);
       }
@@ -244,6 +309,17 @@ function scanFile(file: string, sf: ts.SourceFile, hooks: Set<string>, out: Cens
       if (label) {
         out.calls++;
         follow(n, label, 0, new Set());
+      }
+    } else if (ts.isPropertyAccessExpression(n) && ts.isIdentifier(n.expression) && handles.has(n.expression.text) && /^(mutate|mutateAsync)$/.test(n.name.text)
+      && !(ts.isCallExpression(n.parent) && n.parent.expression === n) && !(ts.isVariableDeclaration(n.parent) && n.parent.initializer === n)) {
+      // A method reference (`onPress={s.mutate}`): the prop's own element is the only place a hold can be.
+      const label = `${n.expression.text}.${n.name.text}`;
+      out.calls++;
+      const slot = pressAttr(n);
+      if (!slot) out.unresolved.push({ file, line: at(n), text: label });
+      else {
+        out.pressed++;
+        if (!slot.held && !elementGuarded(slot.attr)) out.hits.push({ file, line: at(n), text: `${label} <- <${slot.attr.parent.parent.tagName.getText()} ${slot.attr.name.getText()}>` });
       }
     }
     ts.forEachChild(n, calls);
@@ -279,6 +355,13 @@ const KNOWN: Record<string, string> = {
   'modules/cart/screens/CartScreen.tsx | setTip.mutate <- <Pressable onPress>': 'Choosing Pickup sets the tip to 0 (a value, not a toggle): a second identical request leaves the same state, and checkout submits zero itself.',
 };
 
+/** Calls the scanner cannot trace to a press, checked by hand. Every entry must still match an untraced call. */
+const UNTRACED: Record<string, string> = {
+  'modules/cart/screens/CartScreen.tsx | placeOrder.mutate': 'onOrder is also kept in a ref (onOrderLatest) for the pickup-confirm Alert button (the system dialog fires once); its own Place order press is judged, and usePlaceOrder refuses a second order while one is in flight (its inFlight ref).',
+  'modules/chat/screens/ConversationScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): kit/action-sheet runs onClose() before the item, so the sheet and its buttons are gone after the first tap.',
+  'modules/shop/screens/RestaurantScreen.tsx | reportContent.mutate': 'An ActionSheet item (object onPress): the item closes the sheet first (setReportOpen(false)) and kit/action-sheet runs onClose() before it.',
+};
+
 const RESULT = census(Object.fromEntries(sources(SRC).map((p) => [relative(SRC, p), readFileSync(p, 'utf8')])));
 
 describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
@@ -291,6 +374,16 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     const offenders = RESULT.hits.filter((h) => !KNOWN[keyOf(h)] && !PENDING_ELSEWHERE[keyOf(h)])
       .map((h) => `${h.file}:${h.line} ${h.text} — a second tap fires it again. Hold the press while it runs (disabled/loading={x.isPending}) or return early when it is pending.`);
     expect(offenders).toEqual([]);
+  });
+
+  it('every call the scanner cannot trace to a press is listed with the reason it is safe', () => {
+    const untraced = RESULT.unresolved.filter((u) => !UNTRACED[keyOf(u)])
+      .map((u) => `${u.file}:${u.line} ${u.text} — the census cannot see the press behind it. Make the press traceable (an on… prop, a named handler) or list it in UNTRACED with the reason.`);
+    expect(untraced).toEqual([]);
+    for (const [key, reason] of Object.entries(UNTRACED)) {
+      expect(reason.trim().length, key).toBeGreaterThanOrEqual(20);
+      expect(RESULT.unresolved.some((u) => keyOf(u) === key), `stale entry ${key}: the call is traced now (or gone), drop it`).toBe(true);
+    }
   });
 
   it('every KNOWN entry names a real hit and says why', () => {
@@ -341,5 +434,29 @@ describe('[BUG-GUARDS C2] a press never fires the same mutation twice', () => {
     expect(verdict(`function P(){ const s = useSave(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: () => s.mutate() }])} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); const cancel = () => s.mutate(); return <B onPress={() => Alert.alert('Sure?', '', [{ text: 'Yes', onPress: cancel }])} />; }`)).toEqual([]);
     expect(verdict(`function P(){ const s = useSave(); useEffect(() => { s.mutate(); }, []); return null; }`)).toEqual([]);
+    // [#1952 S3-2] A list: one shared isPending is not a per-row hold; holdRow(key, …) is.
+    expect(verdict(`function P({ rows }){ const s = useSave(); const holdRow = useRowHold(); return rows.map((r) => <B onPress={() => holdRow(r.id, () => s.mutateAsync(r.id))} />); }`)).toEqual([]);
+    expect(verdict(`function P({ rows }){ const s = useSave(); const other = useOther(); return rows.map((r) => <B onPress={() => other(r.id, () => s.mutateAsync(r.id))} />); }`)).toEqual(['s.mutateAsync <- <B onPress>']);
+    // [#1952 S3-1] Followed now: a ternary branch of an on… prop, a handler handed to a call, React.useCallback.
+    expect(verdict(`function P({ ok }){ const s = useSave(); return <B onX={ok ? () => s.mutate() : undefined} />; }`)).toEqual(['s.mutate <- <B onX>']);
+    expect(verdict(`function P(){ const s = useSave(); return <B onRate={s.isPending ? undefined : () => s.mutate()} />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const s = useSave(); return <B onAdd={() => guardAuth(() => s.mutate())} />; }`)).toEqual(['s.mutate <- <B onAdd>']);
+    expect(verdict(`function P(){ const s = useSave(); return <B busy={s.isPending} onAdd={() => guardAuth(() => s.mutate())} />; }`)).toEqual([]);
+    expect(verdict(`function P(){ const s = useSave(); const add = React.useCallback(() => s.mutate(), [s]); React.useEffect(() => { if (later) add(); }, [add]); return <B onPress={add} />; }`)).toEqual(['s.mutate <- <B onPress>']);
+    expect(verdict(`function P(){ const s = useSave(); return <B cancelling={s.isPending} onCancel={() => s.mutate()} />; }`)).toEqual([]);
+    // A method reference is judged at its prop.
+    expect(verdict(`function P(){ const s = useSave(); return <B onPress={s.mutate} />; }`)).toEqual(['s.mutate <- <B onPress>']);
+    expect(verdict(`function P(){ const s = useSave(); return <B disabled={s.isPending} onPress={s.mutate} />; }`)).toEqual([]);
+    // An alias of mutate is the mutation (MarketScreen's `const mutateCart = addToCart.mutate`).
+    // [#1952 S4-3] Refs are scope-aware: a child's own `onAdd` prop is not the parent's handler.
+    expect(verdict(`function Card({ onAdd, adding }){ return <B onPress={() => onAdd(1)} />; }\nfunction P(){ const s = useSave(); const onAdd = (i) => s.mutate(i); return <Card onAdd={onAdd} adding={s.isPending} />; }`)).toEqual([]);
+    expect(verdict(`function Card({ onAdd }){ return <B onPress={() => onAdd(1)} />; }\nfunction P(){ const s = useSave(); const onAdd = (i) => s.mutate(i); return <Card onAdd={onAdd} />; }`)).toEqual(['s.mutate <- <Card onAdd>']);
+    expect(verdict(`function P(){ const s = useSave(); const send = s.mutate; return <B onPress={() => send()} />; }`)).toEqual(['send() <- <B onPress>']);
+    // [#1952 S3-1] Not traceable: an object onPress, a handler kept in a ref, are untraced (listed or failing), never silently passed.
+    const untraced = (src: string) => census({ ...hook, 'x.tsx': src }).unresolved.map((u) => u.text);
+    expect(untraced(`function P(){ const s = useSave(); return <Sheet actions={[{ label: 'Go', onPress: () => s.mutate() }]} />; }`)).toEqual(['s.mutate']);
+    expect(untraced(`function P(){ const s = useSave(); const keep = useRef(() => s.mutate()); return null; }`)).toEqual(['s.mutate']);
+    // A mutation hook's own body is not a press (its callers are judged).
+    expect(census(hook).unresolved).toEqual([]);
   });
 });

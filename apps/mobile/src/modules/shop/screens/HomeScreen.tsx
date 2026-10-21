@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
 import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
@@ -348,6 +349,7 @@ export function HomeScreen() {
     [refreshForAttention],
   ));
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
@@ -373,9 +375,9 @@ export function HomeScreen() {
       promptLogin();
       return;
     }
-    // [BUG-GUARDS C2] A double tap on the heart sent two add/remove requests.
-    if (toggleFav.isPending) return;
-    toggleFav.mutate({ vendorId, isFavorite });
+    // [BUG-GUARDS C2] A double tap on the heart sent two add/remove requests: one per store at a time
+    // (another store's heart still goes while this one sends).
+    holdRow(vendorId, () => toggleFav.mutateAsync({ vendorId, isFavorite }));
   };
 
   const feed = home.data;
