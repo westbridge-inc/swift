@@ -10,6 +10,7 @@ import { socketPlugin } from '../plugins/socket';
 import { safetyRoutes } from '../modules/safety/safety.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { GuardianService } from '../modules/safety/guardian.service';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // Trip Guardian M4d — §5.4 completion sanity (a ride "completed" far from its
 // destination is a post-trip review item), the §5.1 enhanced-monitoring
@@ -127,7 +128,7 @@ describe('§5.4 completion sanity', () => {
     const far = await makeRide(driver.id, passenger.userId);
     await putFix(driver.id, new Date(t0), { lat: 6.81, lng: -58.14 });
     await sweep(new Date(t0));
-    await app.prisma.order.update({ where: { id: far.id }, data: { status: 'COMPLETED' } });
+    await walkOrderStatus(app.prisma, far.id, 'COMPLETED');
     await sweep(new Date(t0 + 30_000));
 
     const sFar = await session(far.id);
@@ -150,7 +151,7 @@ describe('§5.4 completion sanity', () => {
     const near = await makeRide(driver.id, passenger.userId);
     await putFix(driver.id, new Date(t0 + 60_000), { lat: 6.8201, lng: -58.1302 });
     await sweep(new Date(t0 + 60_000));
-    await app.prisma.order.update({ where: { id: near.id }, data: { status: 'COMPLETED' } });
+    await walkOrderStatus(app.prisma, near.id, 'COMPLETED');
     await sweep(new Date(t0 + 90_000));
 
     const sNear = await session(near.id);

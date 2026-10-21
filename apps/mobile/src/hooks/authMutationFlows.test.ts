@@ -29,6 +29,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../lib/uploadImage', () => ({ prepareUploadImage: mocks.prepareImage }));
+// The courier hook keeps each parcel's Idempotency-Key in device storage
+// (lib/courierRequestAttemptStore); this suite runs without the native MMKV.
+vi.mock('../lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem() {}, removeItem() {} } }));
 
 const accountA: AuthSessionSnapshot = {
   generation: 1,

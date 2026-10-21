@@ -831,7 +831,11 @@ export const courierApi = {
     /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
      *  the job only at it (409 PRICE_CHANGED otherwise). */
     expectedFee?: number;
-  }) => api.post('/courier/order', data),
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    // [UI-SWEEP U01] The parcel intent's key (lib/courierRequestAttemptStore):
+    // the same on every retry of this parcel, so the server replays the parcel
+    // it already made instead of booking a second one.
+    api.post('/courier/order', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),

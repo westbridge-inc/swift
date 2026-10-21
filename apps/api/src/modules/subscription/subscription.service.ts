@@ -1,6 +1,7 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
@@ -231,13 +232,23 @@ export class SubscriptionService {
         const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
         const priced = partnerRateFor(tiers, tariff.subject);
         // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A fee the
-        // mover has already paid a week at is never raised at once: a higher taxi card rate waits
-        // for the 14-day fee-change notice (F2), as the weekly re-tier does. Before any paid week
-        // (a trial) the role they activate prices the first fee, in either activation order.
+        // mover has already paid a week at is never raised at once: a higher taxi card rate is HELD
+        // for the 14-day fee-change notice (F2, billing/fee-rise-notice.ts), told and applied only
+        // from the weekly fee it was told for. Before any paid week (a trial) the role they activate
+        // prices the first fee, in either activation order.
         const from = Number(sub.weeklyRate);
         const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
           where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
+        // [REVIEW-M #1844 S4-1] A paid weekly rate of 0 or less is legacy or hand-made data: never kept
+        // as the floor, nor raised at once to the taxi rate. The activation is refused (loudly: the approval
+        // outbox retries it with backoff, then dead-letters it to the admin page) until finance corrects it.
+        if (paidAtRate && !(from > 0)) {
+          throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'This mover\'s weekly fee on record is 0 or less; finance must correct it before the taxi role is added.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+        }
         const nextRate = paidAtRate ? from : priced.rate;
+        if (paidAtRate) {
+          await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: priced.rate, currencyCode: sub.currencyCode, source: 'TAXI_ACTIVATION', now: new Date() });
+        }
         if (nextRate !== from) {
           sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: nextRate } });
           const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
