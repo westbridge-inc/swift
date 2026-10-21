@@ -1,8 +1,10 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { swiftDesignVariables } from '@/lib/design-tokens';
+import { VERTICAL_TINT } from '../../../mobile/src/kit/vertical-tint';
+import { DataUnavailable } from './data-unavailable';
 import { TabBar } from './customer-shell';
 import { OrderingContextBar } from './ordering-context-bar';
 
@@ -37,10 +39,50 @@ describe('[F2] grey text on the soft-pink panel reads at 4.5:1 or more', () => {
     expect(luminance(token('--swift-muted-on-subtle'))).toBeGreaterThan(luminance(token('--swift-ink')));
   });
 
-  it('every soft-pink panel turns its grey text into the panel grey, so no page has to remember', () => {
+  // [REVIEW-F2 #1962 S3-1] The same pink is also painted as --swift-red-50 (the
+  // "Couldn't load" panel, selected options, notices), and the storefront tints
+  // (--swift-vertical-bg) are as light. Every tinted panel gets the panel grey.
+  const TINTS = ['red-50', 'subtle', 'vertical-bg'];
+  const escaped = (t: string) => `.bg-\\[var\\(--swift-${t}\\)\\]`;
+
+  it('the panel grey meets 4.5:1 on every tint a panel can be painted', () => {
+    const tints = [token('--swift-red-50'), token('--swift-subtle'), ...Object.values(VERTICAL_TINT).map((t) => t!.bg)];
+    for (const bg of tints) expect(contrast(token('--swift-muted-on-subtle'), bg), bg).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('every tint utility class turns grey text into the panel grey', () => {
     const css = readFileSync(join(process.cwd(), 'src/app/globals.css'), 'utf8');
-    const rule = css.match(/\.bg-\\\[var\\\(--swift-subtle\\\)\\\]\s*\{([^}]*)\}/)?.[1] ?? '';
-    expect(rule).toMatch(/--swift-muted:\s*var\(--swift-muted-on-subtle\);/);
+    const rule = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(([sel, , body]) => sel!.includes('.bg-\\[var') && /--swift-muted:\s*var\(--swift-muted-on-subtle\)/.test(body!));
+    const selectors = (rule?.[1] ?? '').replace(/\/\*[\s\S]*?\*\//g, '').split(',').map((x) => x.trim());
+    for (const t of TINTS) expect(selectors, t).toContain(escaped(t).replace(/\\\\/g, '\\'));
+  });
+
+  it('every stylesheet block that paints a tint (not just on hover) turns its grey text into the panel grey', () => {
+    const files = (dir: string): string[] => readdirSync(dir).flatMap((n) => (statSync(join(dir, n)).isDirectory() ? files(join(dir, n)) : n.endsWith('.css') ? [join(dir, n)] : []));
+    const missing: string[] = [];
+    for (const file of files(join(process.cwd(), 'src'))) {
+      for (const [, selector, body] of readFileSync(file, 'utf8').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (!/(^|;|\s)background(-color)?:\s*var\(--swift-(red-50|subtle|vertical-bg)\)/.test(body!) || /:(hover|active|focus)/.test(selector!)) continue;
+        if (!/--swift-muted:\s*var\(--swift-muted-on-subtle\)/.test(body!)) missing.push(`${file.split('/src/')[1]} ${selector!.replace(/\/\*[\s\S]*?\*\//g, '').trim()}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it('the "Couldn\'t load" panel paints a covered tint, so its grey error detail reads at 4.5:1', () => {
+    render(<DataUnavailable what="your orders" error={new Error('Network request failed')} />);
+    const detail = screen.getByText('Network request failed');
+    expect(detail.className).toContain('text-[var(--swift-muted)]');
+    const panel = detail.closest('[role="status"]')!;
+    expect(TINTS.some((t) => panel.className.split(/\s+/).includes(`bg-[var(--swift-${t})]`)), panel.className).toBe(true);
+  });
+
+  it('the neutral status pill (grey on the line colour) reads at 4.5:1', () => {
+    const css = readFileSync(join(process.cwd(), 'src/app/globals.css'), 'utf8');
+    const body = css.match(/\.sw-status-neutral\s*\{([^}]*)\}/)?.[1] ?? '';
+    expect(body).toMatch(/background:\s*var\(--swift-border\)/);
+    const fg = body.match(/(?:^|;)\s*color:\s*var\((--swift-[a-z-]+)\)/)?.[1] ?? '';
+    expect(contrast(token(fg), token('--swift-border')), fg).toBeGreaterThanOrEqual(4.5);
   });
 
   it('the plain grey still meets 4.5:1 on the white card and the page', () => {
