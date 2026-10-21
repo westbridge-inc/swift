@@ -946,4 +946,19 @@ describe('a store photo that goes is deleted from storage, not just unlinked', (
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).imageUrl).toBeNull();
     expect((await app.prisma.category.findUniqueOrThrow({ where: { id: item.categoryId } })).imageUrl).toBeNull();
   });
+
+  it('a store photo that lands after the erasure is deleted when the erasure runs again (the re-sweep) [REVIEW-G S4-1 on #1965]', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const io = { in: () => ({ disconnectSockets: () => undefined }) };
+    const erase = () => new AccountService({ prisma: app.prisma, log: app.log, io: io as never }).deleteAccount(o.userId);
+    await erase();
+    // A late write after the erasure marker: a kept logo in the store's own folder.
+    const late = stash(`items/${s.id}/${photoName()}`, await cameraJpeg());
+    await app.prisma.vendor.update({ where: { id: s.id }, data: { logoUrl: late } });
+    await erase();
+    expect(kept(late)).toBe(false);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).logoUrl).toBeNull();
+    expect((await app.prisma.storageOrphan.findUnique({ where: { key: late } }))?.purgedAt).toBeInstanceOf(Date);
+  });
 });
