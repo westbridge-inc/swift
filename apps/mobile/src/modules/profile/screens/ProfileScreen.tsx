@@ -15,10 +15,12 @@ import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
 import { API_URL, customerApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { MonitoringControl } from '../../safety/MonitoringControl';
 import { BrandSwitch } from '../../../kit/controls';
 import { toast } from '../../../kit/toast';
 import { retryRead } from '../../../lib/appQueryPolicy';
 import { profileIdRowSub } from '../../../lib/customerIdCopy';
+import { myRatingWords } from '../../../lib/myRatingWords';
 
 const GUTTER = space['2xl'];
 
@@ -403,14 +405,16 @@ export function ProfileScreen() {
               // A fact about you, not a place — the value IS the row.
               plain
               label="Your rating"
-              sub={myRating.data?.displayRating != null
-                ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
-                : 'No rating yet'}
+              sub={myRatingWords(myRating, ' · ')}
               onPress={() => setRatingInfo(true)}
             />
           </RowGroup>
 
           {/* PRIVACY — reference and legal, so the whole section reads plain. */}
+          {/* [73] SAFETY — the monitoring opt-in the server has always honoured, now reachable. */}
+          <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>SAFETY</T>
+          <MonitoringControl />
+
           <T variant="micro" tone="muted" style={{ marginTop: space.xl, marginBottom: space.sm }}>PRIVACY</T>
           <RowGroup>
             <MarketingConsentRow />
@@ -495,7 +499,7 @@ export function ProfileScreen() {
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : 'No rating yet'}
+          {myRatingWords(myRating, ' ')}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.

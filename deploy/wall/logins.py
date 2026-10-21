@@ -14,6 +14,10 @@ TARGET_FIELDS = ('cluster', 'database', 'migration', 'migrationOwner', 'ownershi
 ZERO_FIELDS = ('disabledTables', 'unforcedTables', 'qrUnsafeGrants', 'obsoleteExecutable',
                'parentUpdateMissing', 'appendOnlyUnsafeGrants', 'defaultGrantCount',
                'groupUnsafeAttributes', 'groupUnexpectedParents', 'groupOwnedObjects')
+# [item 20] The owner wall is a separate, later switch: Phase C grants no role
+# swift_owner_wall (a walled login without OWNER_RLS_BIND=1 would see no row of
+# an owner-walled table), so the census must count no member at all.
+OWNER_WALL_ROLE = 'swift_owner_wall'
 ROLE_FLAGS = {'login': True, 'inherit': True, 'superuser': False, 'bypassrls': False,
               'createdb': False, 'createrole': False, 'replication': False}
 
@@ -45,6 +49,8 @@ def _role(name, facts):
     for field, expected in ROLE_FLAGS.items():
         require(facts.get(field) is expected, 'ROLE_ATTRIBUTE_UNEXPECTED')
     parents = ['swift_app'] + (['swift_bypass_rls'] if name == LOGINS[1] else [])
+    reachable = facts.get('reachable')
+    require(not (type(reachable) is list and OWNER_WALL_ROLE in reachable), 'OWNER_WALL_MEMBER_PRESENT')
     for field in ('parents', 'reachable'):
         actual = facts.get(field)
         require(type(actual) is list and all(type(item) is str for item in actual),
@@ -69,6 +75,9 @@ def plan(catalogue, approved):
     for field in ZERO_FIELDS:
         value = catalogue.get(field)
         require(_count(value) and value == 0, 'CATALOGUE_CONTRACT_FAILED')
+    members = catalogue.get('ownerWallMembers')
+    require(_count(members), 'CATALOGUE_CONTRACT_FAILED')
+    require(members == 0, 'OWNER_WALL_MEMBER_PRESENT')
     roles = catalogue.get('roles')
     require(type(roles) is dict and set(roles).issubset(LOGINS), 'ROLE_CENSUS_UNKNOWN')
     for name, facts in roles.items():

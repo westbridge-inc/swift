@@ -122,7 +122,7 @@ def catalogue():
             'unforcedTables': 0, 'qrSchemaPresent': True, 'qrUnsafeGrants': 0, 'obsoleteExecutable': 0,
             'parentUpdateMissing': 0, 'appendOnlyUnsafeGrants': 0, 'defaultGrantCount': 0,
             'groupUnsafeAttributes': 0, 'groupUnexpectedParents': 0, 'groupOwnedObjects': 0,
-            'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64}
+            'ownerWallMembers': 0, 'ownershipDigest': 'a' * 64, 'aclDigest': 'b' * 64}
 
 
 class Host:
@@ -389,7 +389,7 @@ class OperatorEndToEnd(unittest.TestCase):
         # swift_app) moves only the ownership digest, which roles does not pin:
         # the count of objects the groups own is what holds it.
         for field, value in (('unforcedTables', 1), ('qrUnsafeGrants', 1), ('migration', 'incomplete'),
-                             ('groupOwnedObjects', 1)):
+                             ('groupOwnedObjects', 1), ('ownerWallMembers', 1)):
             with self.subTest(field=field):
                 broken = json.loads(self.host.state.read_text())
                 broken['catalogue'][field] = value
@@ -589,7 +589,7 @@ class OperatorUnits(unittest.TestCase):
         census = (DEPLOY / 'wall' / 'census.sql').read_text()
         built = census[census.index('SELECT json_build_object('):]
         for field in (*operator.logins.TARGET_FIELDS, *operator.logins.ZERO_FIELDS,
-                      'ownerIsPrivileged', 'qrSchemaPresent', 'tenantTables', 'roles'):
+                      'ownerIsPrivileged', 'qrSchemaPresent', 'tenantTables', 'ownerWallMembers', 'roles'):
             with self.subTest(field=field):
                 self.assertIn(f"'{field}', ", built)
         self.assertIn('groupOwnedObjects', operator.logins.ZERO_FIELDS)
