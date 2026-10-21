@@ -5,7 +5,7 @@
  * erasure does with it. A CLEARED entry must be a real delete in the erasure code; the UNDECIDED backlog may
  * only shrink.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ERASURE_CLEARED, ERASURE_DEIDENTIFIED, ERASURE_KEPT, ERASURE_UNDECIDED } from '../modules/user/account-erasure-register';
@@ -20,6 +20,31 @@ const UNDECIDED_CEILING = 0;
 /** Every `Model.column` that holds a person's id, less the columns the export register proved are not a person. */
 function personIdColumns(): string[] {
   return personLinks().filter((l) => !NOT_A_PERSON[l]);
+}
+
+/**
+ * [#1877 owner wall] A CLEARED table behind the owner wall (FORCE RLS: the app role cannot delete another
+ * person's rows) is deleted through its narrow SECURITY DEFINER eraser. It is still a real delete by that
+ * person column, pinned end to end: the erasure calls the helper with the person's id, the helper calls the
+ * function, and the function's newest definition deletes from that table by that column.
+ */
+const WALL_ERASERS: Record<string, { helper: string; fn: string; table: string }> = {
+  'DeviceToken.userId': { helper: 'eraseUserDevices', fn: 'swift_owner_wall_erase_devices', table: 'device_tokens' },
+};
+function wallEraserDeletes(link: string): boolean {
+  const { helper, fn, table } = WALL_ERASERS[link]!;
+  const column = link.split('.')[1]!;
+  if (!new RegExp(`\\b${helper}\\(tx, userId\\)`).test(ERASURE_SOURCES)) return false;
+  const lib = readFileSync(join(__dirname, '..', 'lib', 'owner-rls.ts'), 'utf8');
+  const body = lib.split(`export async function ${helper}(`)[1]?.split('\n}\n')[0] ?? '';
+  if (!body.includes(`public.${fn}(`)) return false;
+  const dir = join(__dirname, '..', '..', 'prisma', 'migrations');
+  const create = `CREATE OR REPLACE FUNCTION public.${fn}(`;
+  const newest = readdirSync(dir).sort().reverse()
+    .map((m) => { try { return readFileSync(join(dir, m, 'migration.sql'), 'utf8'); } catch { return ''; } })
+    .find((sql) => sql.includes(create));
+  const definition = newest?.split(create)[1]?.split('$$;')[0] ?? '';
+  return definition.includes(`DELETE FROM public.${table} WHERE "${column}" = p_user_id`);
 }
 
 describe('the erasure register', () => {
@@ -37,6 +62,7 @@ describe('the erasure register', () => {
 
   it('every CLEARED table is deleted by the erasure code, by that person column', () => {
     const missing = Object.keys(ERASURE_CLEARED).filter((link) => {
+      if (WALL_ERASERS[link]) return !wallEraserDeletes(link);
       const [model, column] = link.split('.') as [string, string];
       const client = model[0]!.toLowerCase() + model.slice(1);
       const where = column === 'userId' ? '(userId[ ,}]|userId: userId)' : `${column}: userId`;
