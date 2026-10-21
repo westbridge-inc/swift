@@ -137,7 +137,7 @@ describe('[ORDER-FLOW] random walks over the order state machine', () => {
     }
     lines.push(`known findings seen: ${[...findings].map(([f, n]) => `${f}×${n}`).join(', ') || 'none'}`);
     lines.push(`log edges seen (${edges.size}): ${[...edges].sort().join(' ')}`);
-    lines.push(`frozen tables (not aged): ${[...w.frozenTables].join(', ') || 'none'} · jobs without a walk handler: ${[...w.sched.unhandled].map(([n, c]) => `${n}×${c}`).join(', ') || 'none'}`);
+    lines.push(`jobs without a walk handler: ${[...w.sched.unhandled].map(([n, c]) => `${n}×${c}`).join(', ') || 'none'}`);
     lines.push('coverage (status --action--> status [http]):');
     for (const [k, n] of [...coverage].sort()) lines.push(`   ${String(n).padStart(3)}  ${k}`);
     report(lines);

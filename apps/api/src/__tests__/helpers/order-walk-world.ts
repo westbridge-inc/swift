@@ -24,9 +24,14 @@
  *     Redis TTL in the walk's database shrinks by Δ (a key whose TTL is under Δ
  *     is gone), and every recorded job comes Δ closer to due. People stay
  *     alive: an online rider's location is re-pinged after every step, and
- *     sessions, stores and documents are not aged. Tables whose rows the
- *     database freezes (evidence, stock movements) refuse the update and are
- *     skipped; the skip list is reported so it is never silent.
+ *     sessions, stores and documents are not aged. Aging is the clock, not a
+ *     change to the record: it runs in ONE transaction with
+ *     `session_replication_role = replica` (test DB, superuser), so the
+ *     append-only and immutability triggers (order_status_logs, evidence,
+ *     stock movements) let the timestamps move with everything else. A table
+ *     that still refuses FAILS the walk with the database's error: a world
+ *     whose clocks disagree (aged notices, unaged status logs) is not the
+ *     world production runs in.
  */
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -132,8 +137,8 @@ export interface WalkWorld {
   userIds: Set<string>;
   orderIds: Set<string>;
   vendorIds: Set<string>;
-  /** Tables the database refused to age (immutability triggers). */
-  frozenTables: Set<string>;
+  /** Runs after every tick of the walk clock (the walk stamps new notices with the live status). */
+  onTick: (() => Promise<void>) | null;
   /** Total Δ the walk clock has advanced, ms. */
   clockMs: number;
   /** Errors a sweep or job threw (they never stop the walk; invariants read them). */
@@ -177,7 +182,7 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
   const world: WalkWorld = {
     app, sched,
     admin: { userId: adminUser.id, token: adminToken, phone: adminPhone },
-    userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), frozenTables: new Set(),
+    userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), onTick: null,
     clockMs: 0, jobErrors: [],
   };
   return world;
@@ -295,8 +300,7 @@ function ageTargets(): Array<[string, string, 'orders' | 'users']> {
 async function ageRows(w: WalkWorld, ms: number): Promise<void> {
   const orders = [...w.orderIds];
   const users = [...w.userIds];
-  const live = ageTargets().filter(([t]) => !w.frozenTables.has(t));
-  const parts = live
+  const parts = ageTargets()
     .map(([t, k, set], i) => {
       const stmt = ageStatement(t, k, set === 'orders' ? '$2' : '$3');
       return stmt ? `a${i} AS (${stmt} RETURNING 1)` : null;
@@ -304,21 +308,15 @@ async function ageRows(w: WalkWorld, ms: number): Promise<void> {
     .filter((x): x is string => x !== null);
   if (parts.length === 0) return;
   try {
-    // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
-    await w.app.prisma.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
-  } catch {
-    // An immutability trigger (evidence rows, stock movements) refuses ANY
-    // update and fails the whole statement: find the table(s) one by one,
-    // name them frozen (reported by the run), and age the rest.
-    for (const [t, k, set] of live) {
-      const stmt = ageStatement(t, k, '$2');
-      if (!stmt) continue;
-      try {
-        await w.app.prisma.$executeRawUnsafe(stmt, ms / 1000, set === 'orders' ? orders : users);
-      } catch {
-        w.frozenTables.add(t);
-      }
-    }
+    await w.app.prisma.$transaction(async (tx) => {
+      // Replica mode skips ordinary triggers for this transaction only, so the
+      // append-only guards on status logs and evidence do not refuse the clock.
+      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+      // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
+      await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
+    });
+  } catch (err) {
+    throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${err instanceof Error ? err.message : String(err)})`);
   }
 }
 
@@ -470,5 +468,6 @@ export async function advance(w: WalkWorld, cast: Cast, ms: number, sweepEveryMs
       await drainDue(w);
       sinceSweep.ms = 0;
     }
+    if (w.onTick) await w.onTick();
   }
 }
