@@ -20,9 +20,15 @@ vi.mock('../modules/subscription/mover-fee-authority', async (importOriginal) =>
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 
 function fixture() {
-  const state = { review: false, banned: false, active: false, subs: [] as any[], grants: [] as any[], actions: [] as any[], trace: [] as string[] };
+  const state = { review: false, banned: false, erased: false, active: false, subs: [] as any[], grants: [] as any[], actions: [] as any[], trace: [] as string[] };
   const tx: any = {
-    $queryRaw: async () => { state.trace.push('lock'); return []; },
+    // [#1879 S3-3] The activation's deletion barrier reads the person under the lock: an erased account (the
+    // erasure's deleted:<id> marker) is refused; an open one is read as it is.
+    $queryRaw: async (strings: TemplateStringsArray) => {
+      state.trace.push('lock');
+      return strings.join('').includes('activation-deletion-barrier')
+        ? [{ status: state.erased ? 'DEACTIVATED' : 'ACTIVE', phone: state.erased ? 'deleted:synthetic-account' : '+5920000000' }] : [];
+    },
     rider: { findUnique: async () => ({ riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', user: { countryCode: 'GY' }, subscription: state.subs[0] }), findUniqueOrThrow: async () => ({ userId: 'synthetic-account', user: { id: 'synthetic-account', tenantId: 'swift-default' } }) },
     identityClusterMember: { findUnique: async () => ({ clusterId: 'synthetic-cluster' }), findMany: async () => [{ accountId: 'synthetic-account' }] },
     identityCluster: { findUnique: async () => ({ mergedIntoId: null, authorityReviewRequired: state.review }) },
@@ -57,6 +63,11 @@ describe('identity authority and activation share one transaction', () => {
     const h = fixture(); h.state.banned = true;
     await expect(h.service.withActivation({ riderId: 'synthetic-rider' }, async () => { throw new Error('synthetic projection failure'); })).rejects.toThrow('synthetic projection failure');
     expect(h.state.subs).toEqual([]); expect(h.state.grants).toEqual([]); expect(h.state.actions).toEqual([]);
+  });
+  it('[#1879 S3-3] an erased account: the activation is refused under the lock, with no subscription, grant, punishment or activation', async () => {
+    const h = fixture(); h.state.erased = true;
+    await expect(h.service.withActivation({ riderId: 'synthetic-rider' }, async () => { h.state.active = true; })).rejects.toMatchObject({ code: 'ACCOUNT_CLOSED' });
+    expect(h.state.subs).toEqual([]); expect(h.state.grants).toEqual([]); expect(h.state.actions).toEqual([]); expect(h.state.active).toBe(false);
   });
   it('existing legitimate subscription survives review without a new grant or charge', async () => {
     const h = fixture(); h.state.review = true; h.state.subs.push({ id: 'existing-sub', status: 'TRIAL' });
