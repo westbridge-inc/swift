@@ -180,9 +180,10 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
   // consent: true, privacyNoticeVersion: 'v1' } after POST /verification/upload; the build reads only
   // success. That payload must keep working (the build under review talks to staging).
   // [ROLE-DOCS · owner ruling 21 Oct 2026 — a DELIBERATE change] The selfie they send is now DROPPED by the
-  // route, unread: never resolved, compared, stored or linked to the ID (a customer never gives a photo). So a
-  // foreign key in that field is no longer refused — it is simply never touched, and the payload keeps working.
-  it('store builds 9 and 10 still send a selfie: it is dropped unread (their own or anyone else’s), and the ID goes on file', async () => {
+  // route before the intake: never compared, stored or linked to the ID (a customer never gives a photo). [REVIEW-F
+  // #2001 S3-1] The upload it names is then ERASED when it is the caller's own (crypto-shred + delete + receipt);
+  // anyone else's is never touched. Either way the payload keeps working.
+  it('store builds 9 and 10 still send a selfie: their own is erased after the intake, anyone else’s is untouched, and the ID goes on file', async () => {
     for (const whose of ['own', 'foreign'] as const) {
       const c = await customer();
       const other = await customer();
@@ -193,6 +194,13 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
       expect(res.json().data.fileUrl).not.toBe(selfieUrl);
       // nothing anywhere points at the selfie: no document, record or review case was made from it
       expect(await app.prisma.verificationDocument.count({ where: { fileUrl: selfieUrl } })).toBe(0);
+      const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: selfieUrl } });
+      if (whose === 'own') {
+        expect([envelope.wrappedDek, envelope.shreddedAt instanceof Date]).toEqual([null, true]);
+        expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(1);
+      } else {
+        expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+      }
     }
   });
 

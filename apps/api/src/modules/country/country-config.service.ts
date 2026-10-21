@@ -357,16 +357,31 @@ export class CountryConfigService {
    */
   async getMoverChecklist(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    return moverRequiredFrom(config.documentChecklists as Record<string, string[]>, vehicleType);
+    return moverRequiredFrom(moverListsFrom(config.documentChecklists), vehicleType);
   }
 
   /** The documents a mover on this vehicle MAY add (the `_OPTIONAL` lists of the base and
    *  of each profile), minus what the vehicle requires. Display and upload only. [VERIFY-DOCS] */
   async getMoverOptionalDocuments(code: string, vehicleType: VehicleType, db: Db = this.prisma): Promise<string[]> {
     const config = await this.getByCode(code, db);
-    const lists = config.documentChecklists as Record<string, string[]>;
+    const lists = moverListsFrom(config.documentChecklists);
     return optionalFrom(lists, ['MOVER', ...docProfilesFor(vehicleType)], moverRequiredFrom(lists, vehicleType));
   }
+}
+
+/**
+ * [ROLE-DOCS · owner ruling 21 Oct 2026] Lists the owner retired. A stored copy written by an older seed (production
+ * holds the 2026-10-14.5 seed) never brings them back: no optional document for EVERY mover (the optional national ID
+ * and the riders' police clearance are gone) and no customer ID + selfie list.
+ */
+export const RETIRED_LIST_KEYS: ReadonlySet<string> = new Set(['MOVER_OPTIONAL', 'CUSTOMER_L2']);
+
+/** The mover lists: the code's lists UNDER the stored ones (a key added in code, such as MOVER_TAXI_EXTRA_OPTIONAL,
+ *  exists without a re-seed; an edited stored list still wins), minus the retired keys. */
+export function moverListsFrom(stored: unknown): Record<string, string[]> {
+  const lists: Record<string, string[]> = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((stored ?? {}) as Record<string, string[]>) };
+  for (const key of RETIRED_LIST_KEYS) delete lists[key];
+  return lists;
 }
 
 /** The REQUIRED mover list from a checklist map: the MOVER base plus the vehicle's profiles. */
