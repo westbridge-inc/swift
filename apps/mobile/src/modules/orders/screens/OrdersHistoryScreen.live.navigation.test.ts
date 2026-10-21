@@ -19,6 +19,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 type Row = { id: string; status: string; orderType: string; orderNumber: string; placedAt: string; totalAmount: number; vendor: { name: string } };
 const fx = vi.hoisted(() => ({
+  goBack: vi.fn(),
   live: [] as Row[],
   history: [] as Row[],
   calls: { live: 0, history: 0 },
@@ -52,7 +53,7 @@ vi.mock('react-native-reanimated', async () => {
   const chain: any = { duration: () => chain, delay: () => chain, reduceMotion: () => chain };
   return { __esModule: true, default: { View: (p: any) => h('div', null, p.children) }, FadeInDown: chain, ReduceMotion: { System: 'system' } };
 });
-vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn() }), useIsFocused: () => fx.focused }));
+vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn(), goBack: fx.goBack }), useIsFocused: () => fx.focused }));
 vi.mock('../../../services/api', () => ({
   API_URL: 'https://api.test',
   customerApi: {
@@ -89,6 +90,7 @@ vi.mock('../../../kit', async () => {
     Screen: Box, T: (p: any) => h('span', null, p.children),
     Photo: () => null, Pictogram: () => null, Money: (p: any) => h('span', null, p.amount),
     PillButton: (p: any) => h('button', { onClick: p.onPress }, p.label),
+    CircleChip: (p: any) => h('button', { 'aria-label': p.label, onClick: p.onPress }),
     EmptyState: (p: any) => h('section', null, p.title), ErrorState: () => h('div', null, 'Error'), LoadingBlock: () => h('div', null, 'Loading'),
   };
 });
@@ -127,6 +129,21 @@ afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   host?.remove(); root = undefined; client.clear();
   vi.useRealTimers();
+});
+
+describe('[UI-SWEEP U11] Your activity is a pushed screen with its own way back', () => {
+  it.each([
+    ['with orders', true],
+    ['with nothing yet', false],
+  ] as const)('%s, the Back chip is on screen and goes back', async (_case, withRows) => {
+    if (withRows) fx.history = [{ id: 'o-1', status: 'DELIVERED', orderType: 'FOOD_DELIVERY', vendor: { name: 'Store' }, placedAt: new Date().toISOString(), totalAmount: 1000, items: [] } as any];
+    await render();
+    const back = host.querySelector<HTMLButtonElement>('button[aria-label="Back"]');
+    expect(back, 'a back control on Your activity').not.toBeNull();
+    await act(async () => back!.click());
+    expect(fx.goBack).toHaveBeenCalledTimes(1);
+    fx.goBack.mockClear();
+  });
 });
 
 describe('the activity list follows orders in progress while it is on screen', () => {

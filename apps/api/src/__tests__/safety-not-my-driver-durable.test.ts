@@ -68,14 +68,14 @@ async function makeDriver() {
 const PICKUP = { lat: 6.8, lng: -58.15 };
 const DEST = { lat: 6.82, lng: -58.13 };
 
-async function makeRide(driverId: string, customerId: string, pickedUpAt: Date) {
+async function makeRide(driverId: string, customerId: string, pickedUpAt: Date | null, status: 'RIDE_IN_PROGRESS' | 'DRIVER_EN_ROUTE' = 'RIDE_IN_PROGRESS') {
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `LDR-${nanoid(8)}`,
       orderType: 'TAXI',
       customerId,
       driverId,
-      status: 'RIDE_IN_PROGRESS',
+      status,
       fulfillment: 'DELIVERY',
       pickupAddress: 'A', pickupLat: PICKUP.lat, pickupLng: PICKUP.lng,
       deliveryAddress: 'B', deliveryLat: DEST.lat, deliveryLng: DEST.lng,
@@ -149,8 +149,9 @@ const brokenNotifications = (svc: LivenessService) => { (svc as unknown as { not
 async function enRouteRide() {
   const passenger = await makeUser(['CUSTOMER']);
   const driverUser = await makeDriver();
-  const ride = await makeRide(driverUser.driver.id, passenger.userId, new Date());
-  await app.prisma.order.update({ where: { id: ride.id }, data: { status: 'DRIVER_EN_ROUTE', pickedUpAt: null, ridePinVerified: false } });
+  // [row 264] Born en route: a ride in progress never goes back to DRIVER_EN_ROUTE (the database refuses it).
+  const ride = await makeRide(driverUser.driver.id, passenger.userId, null, 'DRIVER_EN_ROUTE');
+  await app.prisma.order.update({ where: { id: ride.id }, data: { ridePinVerified: false } });
   return { passenger, driverUser, ride };
 }
 

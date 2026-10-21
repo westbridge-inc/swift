@@ -4,6 +4,8 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
 import { resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
 import { deleteStorageObjectAndConfirmAbsent } from '../../lib/storage-orphans';
+import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-visibility';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
 
 /**
@@ -65,13 +67,27 @@ function sameObject(a: string, b: string): boolean {
   try { return resolveLocalStorageKey(a) === resolveLocalStorageKey(b); } catch { return false; }
 }
 
-/** The census reads every tenant's rows; a database that filters them cannot prove an object is unshared. */
+/** The census reads every tenant's rows; a database that filters them cannot prove an object is unshared.
+ * [Phase C] Proven per table on THIS connection (lib/census-visibility): no row security applied (the
+ * wall-off posture), or the system login under the tenant contract alone. Every pass of this module
+ * runs its transaction on the system login (runAsSystem below), so a walled erasure can prove it. */
 async function censusVisible(tx: Prisma.TransactionClient, tables: string[]): Promise<boolean> {
-  const rows = await tx.$queryRaw<Array<{ active: boolean }>>`
-    SELECT bool_or(row_security_active(t::regclass)) AS active FROM unnest(${tables}::text[]) AS t
-    /* upload-erasure-global-visibility */
-  `;
-  return rows.length === 1 && rows[0]?.active === false;
+  for (const table of tables) {
+    const rows = await tx.$queryRaw<CensusVisibilityRow[]>`
+      SELECT row_security_active(${table}::regclass) AS "active",
+             COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+             COALESCE((SELECT json_agg(json_build_object(
+                         'permissive', p.polpermissive,
+                         'cmd', p.polcmd::text,
+                         'applies', p.polroles = '{0}'::oid[]
+                                    OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                         'qual', pg_get_expr(p.polqual, p.polrelid)))
+                         FROM pg_policy p WHERE p.polrelid = ${table}::regclass), '[]'::json) AS "policies"
+      /* upload-erasure-global-visibility */
+    `;
+    if (!censusSeesEveryRow(rows)) return false;
+  }
+  return true;
 }
 
 /** The subject's row lock, taken before anything is read (the same lock order as the mover pass). */
@@ -104,7 +120,7 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
  * a receipt written. Claimed objects belong to the document and mover passes.
  */
 export async function eraseUnclaimedUploads(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return owed(log, userId, 'unclaimed upload', { pending: 1, held: 0, erased: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'unclaimed upload', { pending: 1, held: 0, erased: 0 }, () => runAsSystem('account:erasure-unclaimed-uploads', () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const own = (await tx.encryptedObject.findMany({ where: { createdBy: userId, shreddedAt: null }, orderBy: { fileKey: 'asc' } }))
       .filter((c) => c.createdBy === userId && c.shreddedAt === null);
@@ -178,7 +194,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
       erased += 1;
     }
     return { pending, held: 0, erased };
-  }, { timeout: 60_000 }));
+  }, { timeout: 60_000 })));
 }
 
 /**
@@ -186,7 +202,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
  * its photo is confirmed gone: until then the row is the obligation.
  */
 export async function eraseLivenessSelfies(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return owed(log, userId, 'liveness selfie', { pending: 1, held: 0, erased: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'liveness selfie', { pending: 1, held: 0, erased: 0 }, () => runAsSystem('account:erasure-liveness-selfies', () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const rows = await tx.livenessCheck.findMany({ where: { userId }, select: { selfieUrl: true } });
     // A hold keeps the photos AND their rows (the rows say where the photos are).
@@ -217,7 +233,7 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
     // Every row goes except those whose photo is still owed: they are the obligation.
     await tx.livenessCheck.deleteMany({ where: { userId, ...(kept.length ? { selfieUrl: { notIn: kept } } : {}) } });
     return { pending: kept.length, held: 0, erased };
-  }, { timeout: 60_000 }));
+  }, { timeout: 60_000 })));
 }
 
 /**
@@ -228,7 +244,7 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
  * receipts keep theirs (append-only legal evidence that no matcher reads).
  */
 export async function forgetErasedFingerprints(db: PrismaClient, userId: string, log?: Log): Promise<{ forgotten: number; pending: number; held: number }> {
-  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1, held: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1, held: 0 }, () => runAsSystem('account:erasure-fingerprints', () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { phone: true } });
     // Never for a live account: its purged documents still answer the duplicate check.
@@ -253,5 +269,5 @@ export async function forgetErasedFingerprints(db: PrismaClient, userId: string,
       /* upload-erasure-forget-fingerprints */
     `;
     return { forgotten, pending: 0, held: 0 };
-  }));
+  })));
 }

@@ -10,6 +10,7 @@ import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
+import { boardPaused, recentBoard } from '../../../lib/moverBoard';
 import {
   useMoverKind,
   useMoverStats,
@@ -445,7 +446,8 @@ export function MoverHomeScreen({ navigation }: any) {
   // [B6] The run strip: server-computed, rendered as-is. Null unless stacked.
   const run = useActiveJobs(kind).run;
   const online = !!profile?.isOnline;
-  const available = useAvailableJobs(kind, online);
+  // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
+  const available = useAvailableJobs(kind, online, !!active.data);
   const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
@@ -502,7 +504,9 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
-  const jobs: any[] = available.data ?? [];
+  // While the board rests, its last answer is not shown (no stale pins on the map).
+  // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
+  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
   // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
   // 428 wants a selfie check (there's a screen for that now); 423 means only

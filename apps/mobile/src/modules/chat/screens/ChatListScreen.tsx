@@ -7,7 +7,7 @@ import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useOrders } from '../../../hooks/customer';
 import { useAuthStore } from '../../../stores/authStore';
-import { Card, EmptyState, ErrorState, LoadingBlock, Screen, T } from '../../../kit';
+import { Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
 
 const ACTIVE = new Set(['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED', 'RETURNING']);
 const RECENT = new Set(['DELIVERED', 'COMPLETED']);
@@ -31,9 +31,8 @@ export function ChatListScreen() {
   if (!isAuthenticated) {
     return (
       <Screen>
-        <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-          <T variant="heading">Chat</T>
-        </View>
+        {/* [UI-SWEEP U11] A pushed screen: the kit header's back chip, not a title alone. */}
+        <Header title="Chat" />
         <EmptyState
           icon="message-circle"
           title="Sign in to chat"
@@ -47,9 +46,7 @@ export function ChatListScreen() {
 
   return (
     <Screen>
-      <View style={{ height: 56, alignItems: 'center', justifyContent: 'center' }}>
-        <T variant="heading">Chat</T>
-      </View>
+      <Header title="Chat" />
       {orders.isLoading ? (
         <LoadingBlock />
       ) : orders.isError ? (

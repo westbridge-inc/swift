@@ -59,7 +59,8 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { AccountService } from '../modules/user/account.service';
 import { queueStorageOrphan, retryStorageOrphan, retryStorageOrphans } from '../lib/storage-orphans';
-import { PUBLIC_PHOTO_REMOVED } from '../utils/public-photo-deletion';
+import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_REMOVED } from '../utils/public-photo-deletion';
+import { deidentifyProfiles } from '../modules/user/erasure-coverage';
 import { registerPublicStorePhotos, resetStorePhotoCachesForTests } from '../utils/public-store-photos';
 import { testPhone } from './helpers/fixture-ids';
 
@@ -386,6 +387,37 @@ describe('a portfolio photo that goes is deleted from storage, not just unlinked
     expect((await orphanOf(a))?.purgedAt).toBeInstanceOf(Date);
     expect((await orphanOf(b))?.purgedAt).toBeInstanceOf(Date);
     expect((again as { pendingUploads?: number }).pendingUploads ?? 0).toBe(0);
+  });
+});
+
+describe('account erasure: every portfolio photo gets its deletion row before its pointer goes [DUP-AUDIT B-2]', () => {
+  const account = () => new AccountService({ prisma: app.prisma, log: app.log, io: io as never });
+
+  it('erasing a provider with N portfolio photos leaves exactly N storage_orphans rows', async () => {
+    const p = await makeProvider(false);
+    const keys: string[] = [];
+    for (let i = 0; i < 3; i += 1) keys.push((await uploadPortfolio(p.token, await cameraJpeg())).json().data.portfolioPhotos.at(-1) as string);
+    await runWithoutTenant(() => app.prisma.user.update({ where: { id: p.userId }, data: { avatar: null } }));
+    fake.stats.failDeletes = true;
+    try {
+      expect(await account().deleteAccount(p.userId)).toMatchObject({ deleted: false, status: 'PENDING_DOCUMENT_ERASURE' });
+    } finally {
+      fake.stats.failDeletes = false;
+    }
+    const rows = await runWithoutTenant(() => app.prisma.storageOrphan.findMany({ where: { userId: p.userId, key: { startsWith: `portfolio/${p.providerId}/` } } }));
+    expect(rows.map((r) => r.key).sort()).toEqual([...keys].sort());
+    expect(await portfolioOf(p.providerId)).toEqual([]);
+  });
+
+  it('the profile de-identification queues, then clears: N photos still listed -> N rows (an outside address has none)', async () => {
+    const p = await makeProvider(false);
+    const keys = Array.from({ length: 3 }, (_, i) => `portfolio/${p.providerId}/${String(i).padStart(16, 'd')}.jpg`);
+    await runWithoutTenant(() => app.prisma.serviceProvider.update({ where: { id: p.providerId }, data: { portfolioPhotos: [...keys, 'https://elsewhere.example/p.jpg'] } }));
+    const queued = await runWithoutTenant(() => deidentifyProfiles(app.prisma, p.userId));
+    expect(queued).toHaveLength(3);
+    const rows = await runWithoutTenant(() => app.prisma.storageOrphan.findMany({ where: { key: { in: keys } } }));
+    expect(rows.map((r) => [r.key, r.reason, r.userId, r.purgedAt]).sort()).toEqual(keys.map((k) => [k, PUBLIC_PHOTO_ACCOUNT_DELETION, p.userId, null]).sort());
+    expect(await portfolioOf(p.providerId)).toEqual([]);
   });
 });
 

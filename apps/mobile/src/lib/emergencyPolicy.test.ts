@@ -97,6 +97,21 @@ describe('[AUD-G7-023] the served policy is trusted only through its verified si
   });
 });
 
+describe('[AUD-G7-023] a pin with notAfter (the staging pin) stops being trusted on its own', () => {
+  it('its policy is in force until notAfter, then the market falls back to the bundle; a pin without notAfter is untouched', () => {
+    const END = 1_000_000 + 1_800_000;
+    const expiring = [{ ...PINS[0]!, notAfter: END }];
+    const held = parseServedPolicy(served(), 'TT', 1_000_000, expiring);
+    expect(Date.parse(held!.expiresAt!), 'held no later than notAfter').toBe(END);
+    expect(policyFor('TT', held, END - 1)?.source).toBe('server');
+    expect(policyFor('TT', held, END)).toEqual(bundledPolicyFor('TT'));
+    expect(parseServedPolicy(served(), 'TT', END, expiring), 'refused at notAfter').toBeNull();
+    // The same envelope under a pin without notAfter (production) keeps its signed hour.
+    const production = parseServedPolicy(served(), 'TT', 1_000_000, PINS);
+    expect(policyFor('TT', production, END)?.source).toBe('server');
+  });
+});
+
 describe('precedence: the server’s policy for THIS market wins; then the bundle; then nothing', () => {
   it('uses the served policy only for its own market and only while unexpired', () => {
     const tt = parseServedPolicy(served(), 'TT', 1_000_000, PINS)!;

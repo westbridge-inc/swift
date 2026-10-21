@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { useQuery } from '@tanstack/react-query';
@@ -17,6 +17,7 @@ import { OfflineNotice } from '@/components/offline-notice';
 import { useGuestBasket } from '@/lib/basket-state';
 import { framesOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [PERF #4] The cart's and an order's own loading shapes are drawn here only
 // while one of those private pages waits for the session answer on its first
@@ -27,10 +28,10 @@ const CartSkeleton = dynamic(() => import('./cart/loading'), { loading: () => <C
 const OrderDetailSkeleton = dynamic(() => import('./orders/[id]/loading'), { loading: () => <ContentSkeleton /> });
 
 // Upload code is needed only after sign-in with a browser basket.
-const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
-const GuestBasketSync = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
+const OrderingContextBar = lazyRetry(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const GuestBasketSync = lazyRetry(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
 // [R26 · perf-budget] The fresh-acceptance gate is its own chunk, fetched after the page: the pages stay inside their budgets.
-const LegalAcceptanceGate = lazy(() => import('@/components/legal-acceptance-gate').then(module => ({ default: module.LegalAcceptanceGate })));
+const LegalAcceptanceGate = lazyRetry(() => import('@/components/legal-acceptance-gate').then(module => ({ default: module.LegalAcceptanceGate })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
