@@ -848,10 +848,12 @@ export class MmgCheckoutService {
   /** Every two minutes (the poll-mmg-billing job): first make sure every
    *  earlier credit carries its provider identity [F2], then expire the
    *  checkouts no reply ever came for, and look again at every one that is due. */
-  async pollIntents(now: Date = new Date()): Promise<{ expired: number; checked: number }> {
-    // [REVIEW-M #1832 S3-1] Each checkout is expired, verified and credited at the poll's clock moved on
-    // by the real time the poll has taken (utils/batch-clock.ts), never at its start instant.
-    const clock = batchClock(now);
+  async pollIntents(at?: Date): Promise<{ expired: number; checked: number }> {
+    // [REVIEW-M #1832 S3-1] Each checkout is expired, verified and credited at the time it is
+    // really processed (utils/batch-clock.ts), never at the poll's start instant; a chosen
+    // `at` (a test, a replay) stays exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     return runAsSystem('mmg-checkout-poll', async () => {
       const out = { expired: 0, checked: 0 };
       try {

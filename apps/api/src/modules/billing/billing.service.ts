@@ -395,10 +395,12 @@ export class BillingService {
   }
 
   /** Bill everything due. One subscription's failure never kills the batch. */
-  async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
-    // [REVIEW-M #1832 S3-1] Each subscription is billed at the run's clock moved on by the real time
-    // the run has taken (utils/batch-clock.ts), never at its start instant.
-    const clock = batchClock(now);
+  async runBillingCycle(at?: Date): Promise<BillingCycleResult> {
+    // [REVIEW-M #1832 S3-1] Each subscription is billed at the time it is really billed
+    // (utils/batch-clock.ts), never at the run's start instant; a caller standing at a
+    // chosen instant (`at`: a test, a replay) gets exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
@@ -3316,8 +3318,9 @@ export class BillingService {
    * jittered), stamped BEFORE the provider call so a crash can't hot-loop.
    */
   async pollPendingMmgCharges(
-    now = new Date(),
+    at?: Date,
   ): Promise<{ settled: number; banked: number; adopted: number; failed: number; stillPending: number }> {
+    const now = at ?? new Date();
     const candidates = await this.prisma.subscriptionPayment.findMany({
       where: { status: { in: ['PENDING', 'UNKNOWN'] }, paymentMethod: 'MOBILE_MONEY' },
       orderBy: { lastPolledAt: { sort: 'asc', nulls: 'first' } },
@@ -3339,8 +3342,8 @@ export class BillingService {
 
     const mmg = getMmgProvider();
     // [REVIEW-M #1832 S3-1] Up to 200 network-bound items: each is looked up, expired and settled at
-    // the run's clock moved on by the real time the run has taken, never at its start instant.
-    const clock = batchClock(now);
+    // the time it is really processed, never at the run's start instant (a chosen `at` stays exact).
+    const clock = batchClock(at);
     for (const payment of pending) {
       const itemNow = clock();
       const sub = await this.prisma.subscription.findUnique({
