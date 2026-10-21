@@ -26,6 +26,7 @@ import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
+import { subscriptionWords } from '@/lib/weekly-fee';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
@@ -40,6 +41,12 @@ export function useHubStore() {
   const q = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile, refetchInterval: 20_000 });
   return { ...q, data: pickProfileStore(q.data, storeId) };
 }
+
+/** [BUG-GUARDS C5] The store QR's state in words (QrStatus: ACTIVE, SUPERSEDED,
+ *  DEACTIVATED), never the code; an unknown state says so. */
+const QR_STATUS_WORDS: Record<string, string> = { ACTIVE: 'Active', SUPERSEDED: 'Replaced by a newer QR', DEACTIVATED: 'Turned off' };
+export const qrStatusWords = (status: string): string => QR_STATUS_WORDS[status] ?? 'Status unavailable';
+
 function useOverview(enabled: boolean) {
   const storeId = useStoreId();
   return useQuery({ queryKey: storeKey(storeId, 'overview'), queryFn: getOverview, refetchInterval: 30_000, enabled });
@@ -314,13 +321,13 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
           badgeLabel={revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined} />
         <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href="/dashboard/settings" />
         <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/settings'} external={!!qrQ.data?.shortUrl}
-          badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatus.replace(/_/g, ' ')}</Pill> : undefined}
-          badgeLabel={qrStatus ? `QR ${qrStatus.replace(/_/g, ' ').toLowerCase()}` : undefined} />
+          badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatusWords(qrStatus)}</Pill> : undefined}
+          badgeLabel={qrStatus ? `QR: ${qrStatusWords(qrStatus)}` : undefined} />
         <Tile icon={History} label="Order history" detail={rollingOrders == null ? 'Past orders' : `${rollingOrders} recent orders`} href="#other-orders" onClick={onOrderHistory} />
         {owner ? (
           <Tile icon={Receipt} label="Billing" detail={subQ.isError && !sub ? 'Billing unavailable' : billingSummary(sub)} href="/dashboard/weekly-fee"
-            badge={sub ? <Pill tone={subscriptionTone(sub)}>{String(sub.status ?? 'Subscription').replace(/_/g, ' ')}</Pill> : undefined}
-            badgeLabel={sub ? `Subscription ${String(sub.status ?? '').replace(/_/g, ' ').toLowerCase()}` : undefined} />
+            badge={sub ? <Pill tone={subscriptionTone(sub)}>{subscriptionWords(String(sub.status ?? ''))}</Pill> : undefined}
+            badgeLabel={sub ? `Subscription: ${subscriptionWords(String(sub.status ?? ''))}` : undefined} />
         ) : (
           <Tile icon={UserCog} label="Account" detail="Store settings & hours" href="/dashboard/settings" />
         )}

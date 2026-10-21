@@ -157,10 +157,14 @@ describe('the Orders home copies the app', () => {
     expect(tile('Insights').getAttribute('href')).toBe('/dashboard/insights');
     await waitFor(() => expect(tile('Hours & schedule').textContent).toContain('Daily · 8:00 AM–10:00 PM'));
     await waitFor(() => expect(tile('My QR & number').textContent).toContain('https://swift.test/s/SAMPLE'));
-    expect(tile('My QR & number').textContent).toContain('ACTIVE');
+    // [BUG-GUARDS C5] The QR and subscription states read as words, never the code.
+    expect(tile('My QR & number').textContent).toContain('Active');
+    expect(tile('My QR & number').textContent).not.toContain('ACTIVE');
     await waitFor(() => expect(tile('Order history').textContent).toContain('31 recent orders'));
     await waitFor(() => expect(tile('Billing').textContent).toMatch(/Next bill \d+ Oct/));
     expect(tile('Billing').getAttribute('href')).toBe('/dashboard/weekly-fee');
+    expect(tile('Billing').textContent).toContain('Active');
+    expect(tile('Billing').textContent).not.toContain('ACTIVE');
   });
 
   it('a staff login gets item availability instead of the Manage tiles', async () => {
