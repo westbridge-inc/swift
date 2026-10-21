@@ -31,7 +31,7 @@ export function LiveOrderFeed() {
   // left a blank panel. Four states, each said once: loading, failed, none, rows.
   const orders: any[] | undefined = Array.isArray(data?.data) ? data.data : undefined;
   // A failed read, or an answer that is not a list, is never shown as "none".
-  const feedUnavailable = !orders && (isError || !isLoading);
+  const blind = !orders && (isError || !isLoading);
 
   return (
     <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
@@ -39,14 +39,14 @@ export function LiveOrderFeed() {
       <div className="space-y-2 max-h-80 overflow-auto">
         {isLoading ? (
           <p className="text-[var(--muted)] text-sm" role="status">Loading recent orders…</p>
-        ) : feedUnavailable ? (
+        ) : blind ? (
           <DataUnavailable
             what="The order feed"
             notAnAllClear="This is not an empty queue — orders may be flowing that this list cannot see."
             lastSuccessAt={dataUpdatedAt || undefined}
             onRetry={() => void refetch()}
           />
-        ) : orders!.length === 0 ? (
+        ) : orders && orders.length === 0 ? (
           <p className="text-[var(--muted)] text-sm">No recent orders</p>
         ) : (
           orders!.map((order: any) => (
