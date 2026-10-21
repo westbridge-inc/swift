@@ -2666,12 +2666,15 @@ export async function customerRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
     const { readFareBreakdown } = await import('../rides/taxi-waiting');
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops names them, in order.
+    const { readReceiptStops } = await import('../rides/taxi-stops-read');
+    const stops = order.orderType === 'TAXI' ? await readReceiptStops(app.prisma, order) : null;
     // [Triage row 248 · R3] The receipt names who sold, from the ONE seller block the store page shows.
     const { publicStorefrontSeller } = await import('../verification/storefront-seller');
     const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
     const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}) } as never);
+    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
