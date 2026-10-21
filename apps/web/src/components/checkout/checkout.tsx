@@ -6,7 +6,7 @@ import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { todayHours } from '@/lib/store-hours';
 import { useGuestBasket } from '@/lib/basket-state';
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Image from 'next/image';
@@ -50,12 +50,13 @@ import {
   type CartPaymentSelection,
 } from '@/lib/app-rules';
 import styles from '@/app/(app)/cart/cart.module.css';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 const TIPS = [0, 200, 500, 1000];
-const GuestCart = lazy(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
+const GuestCart = lazyRetry(() => import('@/components/guest-basket').then(module => ({ default: module.GuestCart })));
 // [WEB-PIN] Only a customer adding an address opens this form (a pin on the
 // map), so it loads on demand and the map's code never weighs on the checkout.
-const NewAddressForm = lazy(() => import('@/components/checkout/new-address-form').then(module => ({ default: module.NewAddressForm })));
+const NewAddressForm = lazyRetry(() => import('@/components/checkout/new-address-form').then(module => ({ default: module.NewAddressForm })));
 
 /** The checkout page for whoever is here: a guest sees their browser basket
  *  and signs in at Place order; a signed-in customer gets the one checkout. */

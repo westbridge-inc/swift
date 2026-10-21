@@ -490,8 +490,28 @@ export function useOrderAction() {
       if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    // [PERF row 562] The server's confirmed answer lands at once: its status and clocks go into the
+    // order and the board right away, and the re-read runs on its own. The tap used to stay busy
+    // until that re-read came back (one more round trip). Nothing shows before the answer: dispatch
+    // and money never show success early.
+    onSuccess: (answer, vars) => {
+      applyConfirmedOrder(qc, vars.id, answer);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
   });
+}
+
+/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt'] as const;
+
+/** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
+export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {
+  const row = answer as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== 'object' || row['id'] !== id || typeof row['status'] !== 'string') return false;
+  const confirmed = Object.fromEntries(CONFIRMED_ORDER_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]));
+  qc.setQueryData(['vendor', 'orders', 'detail', id], (order: any) => (order ? { ...order, ...confirmed } : order));
+  qc.setQueryData(['vendor', 'orders'], (orders: any) => (Array.isArray(orders) ? orders.map((o) => (o?.id === id ? { ...o, ...confirmed } : o)) : orders));
+  return true;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the

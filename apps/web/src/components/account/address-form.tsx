@@ -1,16 +1,17 @@
 'use client';
 
-import { lazy, Suspense, useRef, useState, type FormEvent } from 'react';
+import { Suspense, useRef, useState, type FormEvent } from 'react';
 import { accountApi, type Address, type AddressInput } from './account-api';
 import { buttonClass, fieldClass, secondaryClass } from './account-frame';
 import type { ChosenPin, PinPoint } from '@/components/pin-picker/pin-picker';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [PINS · row 107] The website's one "add or edit a saved address" form, on the
 // account's Saved addresses and on the Delivery addresses page that "Change
 // delivery address" opens. The pin is the one customer pin picker (checkout and
 // Send a parcel use it too), loaded on demand: a person who only renames an
 // address or changes a gate code never downloads the map.
-const PinPicker = lazy(() => import('@/components/pin-picker/pin-picker').then((module) => ({ default: module.PinPicker })));
+const PinPicker = lazyRetry(() => import('@/components/pin-picker/pin-picker').then((module) => ({ default: module.PinPicker })));
 
 /** A saved address's stored point, when it is a usable one. */
 function storedPin(address?: Address): PinPoint | null {
