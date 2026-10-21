@@ -60,6 +60,8 @@ export function useBecomePartner() {
         addressLine1: string;
         city: string;
         region?: string;
+        /** [ROLE-DOCS · owner 21 Oct 2026] the store trades under its owner's own name (checked by the server) */
+        nameBasis?: 'OWN_NAME' | 'REGISTERED';
         latitude: number;
         longitude: number;
       };

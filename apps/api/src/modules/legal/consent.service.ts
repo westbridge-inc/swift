@@ -26,6 +26,8 @@ export type ConsentDocumentType =
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
   | 'unregistered_trader_declaration'
+  /** [ROLE-DOCS · owner 21 Oct 2026] "I trade under my own name" (vendor/own-name.ts; Business Names Act s.3) */
+  | 'own_name_declaration'
   /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
   | 'document_processing_consent'
   | 'customer_id_consent'

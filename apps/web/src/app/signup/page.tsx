@@ -6,7 +6,8 @@ import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
-import { verifyOtp, registerAccount, becomePartner } from '@/lib/customer-account';
+import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
+import { OWN_NAME_DECLARATION_WEB, ownNameStoreType } from '@/lib/own-name-copy';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
@@ -85,6 +86,9 @@ export default function SignupPage() {
   const [first, setFirst] = useState('');
   const [last, setLast] = useState('');
   const [biz, setBiz] = useState({ name: '', vendorType: 'RESTAURANT', addressLine1: '', city: '', region: '' });
+  // [ROLE-DOCS · owner 21 Oct 2026] own name (no business registration, BNA s.3) or a business name; the declaration tick
+  const [nameBasis, setNameBasis] = useState<'REGISTERED' | 'OWN_NAME'>('REGISTERED');
+  const [ownNameTick, setOwnNameTick] = useState(false);
   const [storePin, setStorePin] = useState<StorePin | null>(null);
   const [placingStore, setPlacingStore] = useState(false);
   const storePinButton = useRef<HTMLButtonElement>(null);
@@ -204,8 +208,12 @@ export default function SignupPage() {
   const doBusiness = () => wrap(async () => {
     if (!storePin || placingStore) throw new Error('Place your store on the map');
     if (!storePinInMarket(storePin)) throw new Error(STORE_PIN_OUTSIDE);
+    const ownName = nameBasis === 'OWN_NAME' && ownNameStoreType(biz.vendorType);
+    if (ownName && !ownNameTick) throw new Error('Sign the own-name declaration to continue');
     if (!agree) throw new Error('Tick the Vendor Partner Agreement to continue');
-    await becomePartner({ role: 'VENDOR', acceptAgreement: true, business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude } });
+    await becomePartner({ role: 'VENDOR', acceptAgreement: true, business: { name: biz.name.trim(), vendorType: biz.vendorType, phone: phone.trim(), addressLine1: biz.addressLine1.trim(), city: biz.city.trim(), region: biz.region.trim(), latitude: storePin.latitude, longitude: storePin.longitude, ...(ownName ? { nameBasis: 'OWN_NAME' } : {}) } });
+    // The store exists: the ticked declaration is signed now (the app's Documents offers it again if this fails).
+    if (ownName) await signOwnName().catch(() => undefined);
     router.replace('/dashboard');
   });
   const editBusinessAddress = (patch: Partial<typeof biz>) => {
@@ -334,6 +342,20 @@ export default function SignupPage() {
             <div className={styles.field}><label htmlFor="business-type" className={styles.label}>Business type</label><select id="business-type" value={biz.vendorType} onChange={(e) => setBiz({ ...biz, vendorType: e.target.value })} className={styles.input}>
               <option value="RESTAURANT">Restaurant / food</option><option value="SUPERMARKET">Supermarket / grocery</option><option value="STORE">Shop / goods</option><option value="SERVICE">Services</option>
             </select></div>
+            {ownNameStoreType(biz.vendorType) ? (
+              <fieldset className={styles.field}>
+                <legend className={styles.label}>What name does your store use?</legend>
+                <label><input type="radio" name="name-basis" checked={nameBasis === 'OWN_NAME'} onChange={() => { setNameBasis('OWN_NAME'); setOwnNameTick(false); }} /> My own name — just my surname, with or without my first names or initials (for example “Persaud” or “R. Persaud”)</label>
+                <label><input type="radio" name="name-basis" checked={nameBasis === 'REGISTERED'} onChange={() => { setNameBasis('REGISTERED'); setOwnNameTick(false); }} /> A business name, or a company</label>
+                {nameBasis === 'OWN_NAME' ? (
+                  <>
+                    <p className={styles.bodyCopy}>The law does not ask you to register your own name as a business name, so you sign a short declaration instead of uploading a business registration. A person on our team checks it against your ID.</p>
+                    <pre className={styles.bodyCopy} style={{ whiteSpace: 'pre-wrap' }}>{OWN_NAME_DECLARATION_WEB}</pre>
+                    <label><input type="checkbox" checked={ownNameTick} onChange={(e) => setOwnNameTick(e.target.checked)} /> I have read the declaration above and I sign it.</label>
+                  </>
+                ) : null}
+              </fieldset>
+            ) : null}
             <div className={styles.field}><label htmlFor="business-street" className={styles.label}>Street address</label><input id="business-street" autoComplete="street-address" disabled={busy || placingStore} value={biz.addressLine1} onChange={(e) => editBusinessAddress({ addressLine1: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-city" className={styles.label}>City or town</label><input id="business-city" autoComplete="address-level2" disabled={busy || placingStore} value={biz.city} onChange={(e) => editBusinessAddress({ city: e.target.value })} className={styles.input} /></div>
             <div className={styles.field}><label htmlFor="business-region" className={styles.label}>Region</label><input id="business-region" autoComplete="address-level1" disabled={busy || placingStore} value={biz.region} onChange={(e) => editBusinessAddress({ region: e.target.value })} className={styles.input} /></div>

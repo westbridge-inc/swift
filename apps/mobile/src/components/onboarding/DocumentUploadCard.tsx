@@ -41,6 +41,8 @@ const DOC_LABELS: Record<string, string> = {
   gra_restaurant_licence: 'GRA Restaurant Licence',
   food_handler_cert: "Food Handler's Certificate",
   storefront_photo: 'Storefront Photo',
+  // [ROLE-DOCS · owner 21 Oct 2026] signed in the app in place of a business registration (own name, BNA s.3)
+  own_name_declaration: 'Own-name declaration',
   selfie: 'Selfie',
   // [TRADES · 13 Oct 2026; R15 · 15 Oct] service-trade documents of the opened trades, in plain words
   gei_electrical_licence: 'GEI Electrical Licence',

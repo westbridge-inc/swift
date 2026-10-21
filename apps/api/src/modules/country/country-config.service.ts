@@ -1,5 +1,5 @@
 import type { PrismaClient, CountryConfig, VehicleType, Prisma } from '@prisma/client';
-import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, registryChecklist, UNREGISTERED_LIST_SUFFIX, UNREGISTERED_TIER, OWN_NAME_LIST_SUFFIX, OWN_NAME_TIER } from '../verification/doc-registry';
 import { COMPLETE_CARD, DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
 import { AppError, NotFoundError } from '../../utils/errors';
 import type { DeliveryRates } from '../../utils/markup';
@@ -316,12 +316,16 @@ export class CountryConfigService {
     // [DOC-1 §3.6 · P3-2] At the UNREGISTERED tier the same role reads its
     // <ROLE>_UNREGISTERED list (the registry set at that tier, else the JSON key);
     // a role with no such list is not offered the tier and keeps its standard set.
+    // [ROLE-DOCS · owner 21 Oct 2026] At the OWN_NAME tier (a store trading under its owner's own name) the role
+    // reads its <ROLE>_OWN_NAME list the same way; a role with no such list keeps its standard set.
     const unregistered = tier === UNREGISTERED_TIER;
-    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : undefined);
+    const ownName = tier === OWN_NAME_TIER;
+    const fromRegistry = await registryChecklist(db, code, roleKey, new Date(), unregistered ? UNREGISTERED_TIER : ownName ? OWN_NAME_TIER : undefined);
     if (fromRegistry) return fromRegistry.filter((docType) => !isNeverAcceptedDocType(docType));
     const config = await this.getByCode(code, db);
     const lists = { ...DEFAULT_DOCUMENT_CHECKLISTS, ...((config.documentChecklists ?? {}) as Record<string, string[]>) };
     if (unregistered && lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]) return lists[`${roleKey}${UNREGISTERED_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
+    if (ownName && lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]) return lists[`${roleKey}${OWN_NAME_LIST_SUFFIX}`]!.filter((docType) => !isNeverAcceptedDocType(docType));
     return (lists[roleKey] ?? []).filter((docType) => !isNeverAcceptedDocType(docType));
   }
 
