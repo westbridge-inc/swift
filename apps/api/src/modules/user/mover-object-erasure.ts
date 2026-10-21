@@ -4,6 +4,8 @@ import type { StorageProvider } from '../../providers/storage/storage-provider';
 import type { FastifyBaseLogger } from 'fastify';
 import { resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
 import { deleteStorageObjectAndConfirmAbsent } from '../../lib/storage-orphans';
+import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-visibility';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
 
 // Every mover row field that points at a stored object. A rider row has no
@@ -11,6 +13,7 @@ import { writeDeletionReceipt } from '../verification/purge-receipt';
 const FIELDS = ['nationalIdUrl', 'driverLicenseUrl', 'vehicleInsuranceUrl', 'vehicleInspectionUrl', 'profilePhotoUrl', 'vehiclePhotoUrl'] as const;
 type Field = typeof FIELDS[number];
 type Pointer = { role: 'rider' | 'driver'; id: string; field: Field; key: string };
+const CENSUS_TABLES = ['users', 'riders', 'drivers', 'verification_documents', 'encrypted_objects'] as const;
 const AUTHORITY_REASONS = new Set(['Unproven mover object', 'Filtered mover object census', 'Shared or held mover object', 'Unproven mover envelope']);
 
 /** Legacy mover pointers are obligations, not deletion capabilities. Verify the
@@ -30,12 +33,23 @@ async function authority(tx: Prisma.TransactionClient, userId: string, pointers:
   if (!owned || !(encrypted ? /^[A-Za-z0-9_-]{1,200}\.enc$/ : /^[A-Za-z0-9_-]{16}\.[A-Za-z0-9]+$/).test(parts[2] ?? '')) {
     throw new Error('Unproven mover object');
   }
-  const visibility = await tx.$queryRaw<Array<{ active: boolean }>>`
-    SELECT bool_or(row_security_active(t::regclass)) AS active
-    FROM unnest(ARRAY['users','riders','drivers','verification_documents','encrypted_objects']) AS t
-    /* mover-erasure-global-visibility */
-  `;
-  if (visibility.length !== 1 || visibility[0]?.active !== false) throw new Error('Filtered mover object census');
+  // [Phase C] Proven per table on THIS connection (lib/census-visibility): no row security applied, or the
+  // system login under the tenant contract alone. eraseMoverObjects runs its transaction on the system login.
+  for (const table of CENSUS_TABLES) {
+    const visibility = await tx.$queryRaw<CensusVisibilityRow[]>`
+      SELECT row_security_active(${table}::regclass) AS "active",
+             COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+             COALESCE((SELECT json_agg(json_build_object(
+                         'permissive', p.polpermissive,
+                         'cmd', p.polcmd::text,
+                         'applies', p.polroles = '{0}'::oid[]
+                                    OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                         'qual', pg_get_expr(p.polqual, p.polrelid)))
+                         FROM pg_policy p WHERE p.polrelid = ${table}::regclass), '[]'::json) AS "policies"
+      /* mover-erasure-global-visibility */
+    `;
+    if (!censusSeesEveryRow(visibility)) throw new Error('Filtered mover object census');
+  }
   // Scope the census to references that could address THIS object. Every
   // spelling the local adapter resolves to the same file keeps the final path
   // segment verbatim (normalization only removes "", "." and ".." segments),
@@ -75,7 +89,9 @@ async function authority(tx: Prisma.TransactionClient, userId: string, pointers:
  * the account tombstone's standing retry sweep therefore cannot lose an object.
  */
 export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvider, userId: string, log?: Pick<FastifyBaseLogger, 'warn'>) {
-  return db.$transaction(async (tx) => {
+  // [Phase C] Global census + locks + writes on ONE system-login transaction: on the walled request login
+  // the census is tenant-filtered and refused, so a walled erasure answered pending for ever.
+  return runAsSystem('account:erasure-mover-objects', () => db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId} FOR UPDATE /* mover-erasure-authority */`;
     const [rider, driver] = await Promise.all([
       tx.rider.findUnique({ where: { userId } }), tx.driver.findUnique({ where: { userId } }),
@@ -140,5 +156,5 @@ export async function eraseMoverObjects(db: PrismaClient, storage: StorageProvid
       });
     }
     return { pending, held: 0 };
-  }, { timeout: 30_000 });
+  }, { timeout: 30_000 }));
 }

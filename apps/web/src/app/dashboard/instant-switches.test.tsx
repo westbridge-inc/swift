@@ -206,6 +206,32 @@ describe('an item\'s in-stock switch', () => {
     expect(sw('Beans').getAttribute('aria-checked')).toBe('false');
   });
 
+  it('two quick taps on different items: the first answer does not re-read over the second (#1936 S4-1)', async () => {
+    const server = { rice: true, beans: true };
+    const holds: Array<Hold & { id: string }> = [];
+    const fetchMock = inventoryApi(server, holds);
+    const itemReads = () => fetchMock.mock.calls.filter(([u]) => new URL(String(u)).pathname === '/api/v1/vendor/items').length;
+    renderWithQuery(<InventoryPage />);
+    await screen.findByText('Rice');
+    const before = itemReads();
+
+    fireEvent.click(sw('Rice'));
+    fireEvent.click(sw('Beans'));
+    await waitFor(() => expect(sw('Beans').getAttribute('aria-checked')).toBe('false'), TAP_BUDGET);
+
+    // Rice lands while Beans is still on its way: a re-read now would carry Beans' old value.
+    await act(async () => { holds.find((h) => h.id === 'rice')!.release(); await new Promise((resolve) => { setTimeout(resolve, 50); }); });
+    expect(itemReads()).toBe(before);
+    expect(sw('Beans').getAttribute('aria-checked')).toBe('false');
+
+    // The last answer re-reads, once.
+    await act(async () => { holds.find((h) => h.id === 'beans')!.release(); });
+    await waitFor(() => expect(itemReads()).toBe(before + 1));
+    await waitFor(() => expect(sw('Beans').hasAttribute('disabled')).toBe(false));
+    expect(sw('Rice').getAttribute('aria-checked')).toBe('false');
+    expect(sw('Beans').getAttribute('aria-checked')).toBe('false');
+  });
+
   it('a refusal puts that item back and says why', async () => {
     const server = { rice: false, beans: true };
     const holds: Array<Hold & { id: string }> = [];
