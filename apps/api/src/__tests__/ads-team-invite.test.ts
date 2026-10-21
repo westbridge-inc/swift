@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adsRoutes } from '../modules/ads/ads.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { ADS_TEAM_INVITES_PER_DAY } from '../modules/ads/advertiser.service';
+import { closesByRequest } from '../modules/user/account.service';
 
 // ---------------------------------------------------------------------------
 // [SWITCHES fact-check, ads security · built while ads are off] An advertiser OWNER used to "add" any
@@ -88,6 +89,9 @@ describe('an advertiser team grows by invitation and acceptance, never by a type
     expect((await get(`/api/v1/ads/advertiser/${a.id}/campaigns`, invitee.token)).statusCode).toBe(404);
     const mine = (await get('/api/v1/ads/advertiser/me', invitee.token)).json().data as Array<{ id: string }> | { advertisers?: Array<{ id: string }> };
     expect(JSON.stringify(mine)).not.toContain(a.id);
+    expect((await get('/api/v1/ads/placements/any/availability?city=*&from=2026-11-02&weeks=1', invitee.token)).statusCode).toBe(403);
+    // an open invitation does not turn the person's own account closure into a support request
+    expect(await closesByRequest(app.prisma, invitee.userId, ['CUSTOMER'])).toBe(false);
   });
 
   it("the team list names accepted members only; an open invitation shows its role, never the person's name, phone or id", async () => {
