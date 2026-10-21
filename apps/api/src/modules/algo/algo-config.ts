@@ -189,6 +189,14 @@ export const ALGO_DEFAULTS = {
   'rescue.pickupTravelMinutes': 20,
   'rescue.pickupNudgeMinutes': 10,
   'rescue.pickupReleaseMinutes': 20,
+  /**
+   * [OF-33 · COORD security ruling 21 Oct] A rider at the counter of a store
+   * that has not marked the order ready is exempt from the release only with
+   * a fresh GPS fix near the pickup point: at most `arrivedFixMaxAgeMinutes`
+   * old and within `arrivedFixMaxMetres`. A tap alone is never proof.
+   */
+  'rescue.arrivedFixMaxAgeMinutes': 2,
+  'rescue.arrivedFixMaxMetres': 150,
 } as const;
 
 export type AlgoConfigKey = keyof typeof ALGO_DEFAULTS;

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { nanoid } from 'nanoid';
 import {
   ageWorld, buildWalkWorld, call, castWalk, drainDue, placeCashOrder, releaseWorld, runSweeps, type Cast, type WalkWorld,
 } from './helpers/order-walk-world';
@@ -63,7 +64,8 @@ const count = (rows: Array<{ title: string }>, title: string) => rows.filter((r)
 /** Online, then the rider takes the order through the real board-grab door. */
 async function riderTakes(cast: Cast, orderId: string, r = cast.riders[0]!) {
   expect((await call(w, 'POST', '/api/v1/rider/go-online', r.token, { latitude: r.lat, longitude: r.lng })).statusCode).toBe(200);
-  expect((await call(w, 'POST', `/api/v1/rider/orders/${orderId}/accept`, r.token)).statusCode).toBe(200);
+  const res = await call(w, 'POST', `/api/v1/rider/orders/${orderId}/accept`, r.token);
+  expect(res.statusCode, res.body).toBe(200);
 }
 
 /** A ready order (the store's whole path), so pickup is due at accept + travel. */
@@ -356,5 +358,86 @@ describe('[OF-33 · REVIEW-G S3-1] the release re-checks everything under the lo
     const version = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).riderAssignmentVersion;
     expect(await releaseOverdueLeg(deps(), noEnqueue, id, r.riderId, version)).toBe('IGNORED');
     expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ARRIVED_PICKUP');
+  }, 300_000);
+});
+
+describe('[OF-33 · COORD security ruling 21 Oct] the at-the-counter exemption fails closed', () => {
+  /** Age to `atMin` after the accept, set the rider's fix, then one sweep tick (no default ping). */
+  async function tickWithFix(id: string, atMin: number, fix: () => Promise<void>) {
+    const ms = atMin * MIN - await sinceAccept(id) + 1_000;
+    if (ms > 0) await ageWorld(w, ms);
+    await fix();
+    await runSweeps(w);
+    await drainDue(w);
+  }
+  async function arrivedAtUnreadyStore(): Promise<{ cast: Cast; id: string; prep: number }> {
+    const cast = await castWalk(w, 1);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = order.estimatedPrepTime && order.estimatedPrepTime > 0 ? order.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    await riderTakes(cast, id);
+    await riderArrives(cast, id);
+    return { cast, id, prep };
+  }
+
+  it('(a) a courier leg never gets the store-not-ready exemption: an arrived rider who never collects is released', async () => {
+    const cast = await castWalk(w, 1);
+    const parcel = await w.app.prisma.order.create({
+      data: {
+        orderNumber: `WALKP-${nanoid(8)}`, orderType: 'COURIER', customerId: cast.customer.userId,
+        status: 'READY_FOR_PICKUP', fulfillment: 'DELIVERY',
+        pickupAddress: 'Sender', pickupLat: 6.8013, pickupLng: -58.1551, deliveryAddress: 'Receiver', deliveryLat: 6.81, deliveryLng: -58.16,
+        subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 800, totalAmount: 800, paymentMethod: 'CASH', paymentStatus: 'PENDING',
+      },
+    });
+    await w.app.prisma.orderStatusLog.create({ data: { orderId: parcel.id, status: 'READY_FOR_PICKUP', changedBy: cast.customer.userId, note: 'Parcel booked' } });
+    w.orderIds.add(parcel.id);
+    await riderTakes(cast, parcel.id);
+    await riderArrives(cast, parcel.id);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id: parcel.id } })).readyAt).toBeNull();
+    await tickAt(cast, parcel.id, TRAVEL_MIN + RELEASE_MIN);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id: parcel.id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+  }, 300_000);
+
+  it('(b) a tap is not proof: an arrived rider whose fix is far from the store is released as usual', async () => {
+    const { cast, id, prep } = await arrivedAtUnreadyStore();
+    const r = cast.riders[0]!;
+    // A fresh fix, 1.1 km from the store (set directly: the GPS door is not what this case is about).
+    await tickWithFix(id, prep + RELEASE_MIN, () => w.app.prisma.rider.update({ where: { id: r.riderId }, data: { currentLat: 6.8113, currentLng: -58.1551, lastLocationUpdate: new Date() } }).then(() => {}));
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'ACCEPTED', riderId: null });
+    expect(count(await noticesOf(id, cast.vendorOwner.userId), STORE_WAITING_TITLE)).toBe(0);
+  }, 300_000);
+
+  it('(b) a tap is not proof: an arrived rider whose last fix is older than 2 minutes is released as usual', async () => {
+    const { cast, id, prep } = await arrivedAtUnreadyStore();
+    const r = cast.riders[0]!;
+    // At the store, but the fix is 3 minutes old.
+    await tickWithFix(id, prep + RELEASE_MIN, () => w.app.prisma.rider.update({ where: { id: r.riderId }, data: { currentLat: r.lat, currentLng: r.lng, lastLocationUpdate: new Date(Date.now() - 3 * MIN) } }).then(() => {}));
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'ACCEPTED', riderId: null });
+  }, 300_000);
+
+  it('(c) after three release windows at the counter, ops gets ONE loud page that needs a decision — still no automatic no-show', async () => {
+    const { cast, id, prep } = await arrivedAtUnreadyStore();
+    const r = cast.riders[0]!;
+    const orderNumber = (await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).orderNumber;
+    const loudPages = () => w.app.prisma.opsAlert.count({ where: { kind: 'PLATFORM', body: { contains: orderNumber } } });
+    await tickAt(cast, id, prep + RELEASE_MIN + 1);
+    expect(await loudPages()).toBe(0);
+    // Arrival was at the accept (within seconds), so three windows is 3 x 20 min after it.
+    await tickAt(cast, id, 3 * RELEASE_MIN - 1);
+    expect(await loudPages()).toBe(0);
+    await tickAt(cast, id, 3 * RELEASE_MIN + 1);
+    expect(await loudPages()).toBe(1);
+    await tickAt(cast, id, 3 * RELEASE_MIN + 30);
+    expect(await loudPages()).toBe(1);
+    const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'RIDER_ARRIVED_PICKUP', riderId: r.riderId });
+    expect((await w.app.prisma.rider.findUniqueOrThrow({ where: { id: r.riderId } })).completionRate).toBe(100);
+    expect(count(await noticesOf(id, cast.customer.userId), CUSTOMER_TITLE)).toBe(0);
   }, 300_000);
 });

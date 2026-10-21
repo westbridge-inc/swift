@@ -9,6 +9,9 @@ import { lockTaxiOrderForCustodyDecision } from '../rides/passenger-custody';
 import { algoConfig } from '../algo/algo-config';
 import { sweepPage } from '../../lib/sweep-cursor';
 import { log } from '../../utils/logger';
+import { haversineDistance } from '../../utils/distance';
+import { recordDecision } from '../algo/decisions';
+import { openOpsAlert } from '../safety/ops-alert';
 import { reopenPreCustodyLeg } from './delivery-watchdog';
 import { settleRiderLegs } from './concurrency-policy';
 import { dispatchDeclinedKey } from './dispatch-generation-keys';
@@ -98,14 +101,47 @@ const select = {
   riderId: true, riderAssignmentVersion: true, paymentMethod: true, paymentStatus: true,
   subtotalBase: true, fulfillmentModeVersion: true,
   readyAt: true, preparingAt: true, acceptedAt: true, estimatedPrepTime: true, placedAt: true, holdExpiresAt: true, scheduledFor: true,
-  rider: { select: { userId: true } },
+  vendorId: true, pickupLat: true, pickupLng: true,
+  rider: { select: { userId: true, currentLat: true, currentLng: true, lastLocationUpdate: true } },
   vendor: { select: { owner: { select: { userId: true } } } },
 } as const;
 type Leg = Prisma.OrderGetPayload<{ select: typeof select }>;
 
-/** The rider is at the counter and the store has not marked the order ready. */
-function riderWaitingOnStore(o: { status: string; readyAt: Date | null }): boolean {
-  return o.status === 'RIDER_ARRIVED_PICKUP' && o.readyAt == null;
+export interface ArrivalProof { maxFixAgeMinutes: number; maxMetres: number }
+
+export async function arrivalProof(prisma: PrismaClient, tenantId: string): Promise<ArrivalProof> {
+  const [age, metres] = await Promise.all([
+    algoConfig(prisma, 'rescue.arrivedFixMaxAgeMinutes', tenantId),
+    algoConfig(prisma, 'rescue.arrivedFixMaxMetres', tenantId),
+  ]);
+  return { maxFixAgeMinutes: Number(age.value), maxMetres: Number(metres.value) };
+}
+
+/** Once exempt this many release windows since arrival, a person must decide. */
+export const ARRIVED_WAIT_ESCALATION_FACTOR = 3;
+
+/**
+ * The rider is at the counter of a STORE that has not marked the order ready —
+ * and their own GPS says so. [COORD security ruling 21 Oct] The exemption fails
+ * closed: (a) store orders only (a courier leg has no store "ready", so it would
+ * never release); (b) a tap is not proof — the rider's last fix must be fresh
+ * and near the pickup point, or the leg is treated as NOT arrived.
+ */
+function riderWaitingOnStore(
+  o: {
+    status: string; readyAt: Date | null; orderType: string; vendorId: string | null;
+    pickupLat: number | null; pickupLng: number | null;
+    rider: { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null } | null;
+  },
+  proof: ArrivalProof,
+  now: Date,
+): boolean {
+  if (o.status !== 'RIDER_ARRIVED_PICKUP' || o.readyAt != null) return false;
+  if (o.orderType === 'COURIER' || !o.vendorId) return false;
+  const fix = o.rider;
+  if (!fix?.lastLocationUpdate || fix.currentLat == null || fix.currentLng == null || o.pickupLat == null || o.pickupLng == null) return false;
+  if (now.getTime() - fix.lastLocationUpdate.getTime() > proof.maxFixAgeMinutes * 60_000) return false;
+  return haversineDistance(fix.currentLat, fix.currentLng, o.pickupLat, o.pickupLng) * 1000 <= proof.maxMetres;
 }
 
 /** A cash order whose money a rider already took is goods-in-hand (OF-07). */
@@ -113,9 +149,9 @@ function cashInHand(o: { paymentMethod: string; paymentStatus: string }): boolea
   return o.paymentMethod === 'CASH' && o.paymentStatus === 'CAPTURED';
 }
 
-async function riderAcceptedAt(prisma: PrismaClient | Prisma.TransactionClient, orderId: string): Promise<Date | null> {
+async function riderAcceptedAt(prisma: PrismaClient | Prisma.TransactionClient, orderId: string, status: 'RIDER_ASSIGNED' | 'RIDER_ARRIVED_PICKUP' = 'RIDER_ASSIGNED'): Promise<Date | null> {
   const row = await prisma.orderStatusLog.findFirst({
-    where: { orderId, status: 'RIDER_ASSIGNED' },
+    where: { orderId, status },
     orderBy: { createdAt: 'desc' },
     select: { createdAt: true },
   });
@@ -173,8 +209,16 @@ export async function settlePickupLeg(
   // marks it ready, the ordinary clock runs from readyAt (waitClock reads it
   // first), so an arrived rider is never released before readyAt + the release
   // window.
-  if (riderWaitingOnStore(leg)) {
+  if (riderWaitingOnStore(leg, await arrivalProof(deps.prisma, leg.tenantId), now)) {
     if (now < clock.releaseAt) return 'WAITING';
+    // (c) A hard bound: exempt for ARRIVED_WAIT_ESCALATION_FACTOR release windows
+    // since arrival, ops is paged loudly once more and must decide. Still no
+    // automatic no-show while the store has not marked the order ready.
+    const arrivedAt = await riderAcceptedAt(deps.prisma, leg.id, 'RIDER_ARRIVED_PICKUP');
+    const releaseMin = (clock.releaseAt.getTime() - clock.pickupDue.getTime()) / 60_000;
+    if (arrivedAt && now.getTime() - arrivedAt.getTime() >= ARRIVED_WAIT_ESCALATION_FACTOR * releaseMin * 60_000) {
+      await escalateLongStoreWait(deps, leg, version, arrivedAt, now);
+    }
     return pageWaitingOnStore(deps, leg, version);
   }
   if (now < clock.releaseAt) {
@@ -223,6 +267,35 @@ async function pageWaitingOnStore(deps: PickupOverdueDeps, leg: Leg, version: nu
   return 'STORE_PAGED';
 }
 
+/** The durable mark that a long store wait was put to a person (one per assignment). */
+export const RIDER_WAITING_ESCALATED_OUTCOME = 'RIDER_WAITING_ESCALATED';
+
+/** [COORD security ruling (c)] A LOUD page (the ops-alert obligation: every
+ *  admin pushed, the on-call list texted, escalating until a person
+ *  acknowledges it) for the order a person must now decide, once per assignment. */
+async function escalateLongStoreWait(deps: PickupOverdueDeps, leg: Leg, version: number, arrivedAt: Date, now: Date): Promise<void> {
+  const already = await deps.prisma.algoDecision.findFirst({
+    where: { algo: 'OF-33', subjectType: 'ORDER', subjectId: leg.id, outcome: RIDER_WAITING_ESCALATED_OUTCOME, inputs: { path: ['assignmentVersion'], equals: version } },
+    select: { id: true },
+  });
+  if (already) return;
+  const waited = Math.round((now.getTime() - arrivedAt.getTime()) / 60_000);
+  await openOpsAlert(deps.prisma, deps.notifications, {
+    kind: 'PLATFORM',
+    tenantId: leg.tenantId ?? null,
+    title: 'Rider stuck at a store that is not ready — decide now',
+    body: `Order ${leg.orderNumber}: the rider has been at the store for ${waited} min and the store has still not marked the order ready. Nothing is released automatically: decide whether to cancel, reassign or wait.`,
+    data: { kind: 'ops_rider_waiting_long', orderId: leg.id, riderId: leg.riderId, waitedMinutes: waited },
+    now,
+  });
+  await recordDecision(deps.prisma, {
+    algo: 'OF-33', subjectType: 'ORDER', subjectId: leg.id, tenantId: leg.tenantId,
+    outcome: RIDER_WAITING_ESCALATED_OUTCOME,
+    sentence: `The rider waited ${waited} min at a store that never marked the order ready: put to an operator to decide; no automatic no-show.`,
+    inputs: { assignmentVersion: version, waitedMinutes: waited },
+  });
+}
+
 /** The release, decided on the order lock every custody decision takes.
  *  Exported for the race cases: it re-checks everything under the lock. */
 export async function releaseOverdueLeg(
@@ -232,6 +305,8 @@ export async function releaseOverdueLeg(
   riderId: string,
   version: number,
 ): Promise<PickupOutcome> {
+  const tenant = await deps.prisma.order.findUnique({ where: { id: orderId }, select: { tenantId: true } });
+  const proof = await arrivalProof(deps.prisma, tenant?.tenantId ?? 'swift-default');
   const decision = await deps.prisma.$transaction(async (tx) => {
     await lockTaxiOrderForCustodyDecision(tx, orderId);
     const order = await tx.order.findUnique({ where: { id: orderId }, select });
@@ -241,7 +316,7 @@ export async function releaseOverdueLeg(
     if (!RIDER_PRE_CUSTODY_STATUSES.includes(order.status as OrderStatus) || cashInHand(order)) return null;
     // Arrived at the counter since the page was read, and the store has not
     // marked it ready: the store is late, not the rider (next tick pages the store).
-    if (riderWaitingOnStore(order)) return null;
+    if (riderWaitingOnStore(order, proof, new Date())) return null;
     const reopenStatus = await reopenPreCustodyLeg(
       tx, order, 'system:pickup-overdue',
       'Rider no-show: not picked up by the pickup deadline — released back to dispatch',
