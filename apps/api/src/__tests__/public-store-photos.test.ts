@@ -831,7 +831,7 @@ describe('an outside photo address already saved is never handed to customers [C
     const row = (imageUrl: string | null) => ({
       id: 'i1', name: 'Plate', description: '', basePrice: 1000, imageUrl, vendorId: 'v1', createdAt: new Date(),
       isAvailable: true, isPopular: false, dietaryTags: [], allergens: [], totalOrdered: 0,
-      vendor: { name: 'Store', isCurrentlyOpen: true }, category: { name: 'Mains' },
+      vendor: { name: 'Store', isCurrentlyOpen: true, tenantId: 'swift-default' }, category: { name: 'Mains' },
     });
     expect(toItemHit(row(OUTSIDE) as never).imageUrl).toBeNull();
     expect(toItemHit(row('items/v1/abcdefghijklmnop.jpg') as never).imageUrl).toBe('items/v1/abcdefghijklmnop.jpg');
