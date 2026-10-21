@@ -194,6 +194,17 @@ the host:
     APPROVED_SHA='<full-40-character-origin-main-commit>'
     ./deploy/pilot-up.sh "$APPROVED_SHA"
 
+[Row 324] pilot-up.sh refuses a deploy whose API and worker do not share one
+durable upload store (`verify_upload_storage`, before anything is pulled,
+built or stopped). The first time a host deploys a revision that has this
+check, run it read-only first, outside the deploy window, so a refusal is
+never met mid-window. It prints `UPLOAD-STORAGE-OK` or `UPLOAD-STORAGE-REFUSED`,
+never a value:
+
+    cd /opt/swift
+    git fetch origin && git show "origin/main:deploy/check-upload-storage.py" > /tmp/check-upload-storage.py
+    docker compose --project-directory deploy -f deploy/docker-compose.yml config --format json | python3 /tmp/check-upload-storage.py; rm -f /tmp/check-upload-storage.py
+
 pilot-up.sh fetches origin/main, refuses a dirty checkout or a SHA outside
 current origin/main, switches to that exact commit, refuses a deploy/.env that
 declares a secret or a wired NAME_FILE whose name is not in the store,

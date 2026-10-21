@@ -64,6 +64,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": routing}))
     else:
         services = {n: {} for n in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"}, {"published": "443", "target": 443, "protocol": "tcp"}]}
         for profile in ("web", "admin"):
             if "--profile" in argv and profile in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--profile"]:
@@ -153,7 +156,7 @@ function preparePilot() {
   const here = join(tmp, 'repo', 'deploy');
   mkdirSync(join(here, 'routing-data', 'osrm'), { recursive: true });
   writeFileSync(join(here, 'routing-data', 'osrm', 'guyana-latest.osrm'), '');
-  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
+  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'check-upload-storage.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
     copyFileSync(join(DEPLOY, f), join(here, f));
   }
   // backup.sh --check-key (the owner-key proof, run with real GnuPG in deploy/tests/test_backup_encryption.py)
