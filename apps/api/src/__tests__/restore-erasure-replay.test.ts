@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { AccountService } from '../modules/user/account.service';
 
@@ -31,6 +32,8 @@ const psql = (db: string, sql: string): string =>
   execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-qtA', '-d', db, '-c', sql], { env: pgEnv(), encoding: 'utf8' }).trim();
 const urlFor = (db: string) => { const u = new URL(PGURL.toString()); u.pathname = `/${db}`; return u.toString(); };
 
+/** Sessions store digests of their tokens (64 hex), never the tokens. */
+const digest = (v: string) => createHash('sha256').update(v).digest('hex');
 const ID = Math.random().toString(36).slice(2, 10);
 const LIVE = `swift_test_rlive_${ID}`;
 let tmp = '';
@@ -95,7 +98,7 @@ beforeAll(async () => {
   const closed = await mk('+15550000002', 'Closer');
   people.kept = kept.id; people.closed = closed.id;
   for (const u of [kept, closed]) {
-    await live.session.create({ data: { userId: u.id, token: `t-${u.id}`, refreshToken: `r-${u.id}`, deviceId: 'd', deviceType: 'ios', expiresAt: new Date(Date.now() + 86_400_000) } });
+    await live.session.create({ data: { userId: u.id, token: digest(`t-${u.id}`), refreshToken: digest(`r-${u.id}`), deviceId: 'd', deviceType: 'ios', expiresAt: new Date(Date.now() + 86_400_000) } });
     await live.address.create({ data: { userId: u.id, label: 'Home', addressLine1: 'Synthetic 1', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15 } });
   }
   // The closed person's identity document: an encrypted object with its key,
