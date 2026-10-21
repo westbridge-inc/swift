@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { hydrateRoot, type Root } from 'react-dom/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // [#1958 review S4-2] The checkout's basket mounts after the page has read the browser basket.
@@ -45,5 +46,26 @@ describe('the browser basket after the page has read it once', () => {
     const Later = probe(useGuestBasket, seen, 'later');
     render(<Later />);
     expect(seen.find((entry) => entry.startsWith('later:'))).toBe('later:loaded:1');
+  });
+
+  it('a part of the page that hydrates after the basket was read still matches the server HTML (#1976 review S3-1)', async () => {
+    const useGuestBasket = await freshHook();
+    const seen: string[] = [];
+    const Page = probe(useGuestBasket, seen, 'page');
+    render(<Page />);
+    await waitFor(() => expect(screen.getByTestId('page').textContent).toBe('Bake and saltfish'));
+
+    // The server sent this part empty; it hydrates now, after the shell already read the basket.
+    const Later = probe(useGuestBasket, seen, 'later');
+    const container = document.createElement('div');
+    container.innerHTML = '<p data-testid="later">empty</p>'; // what the server sends (it never has a basket)
+    document.body.appendChild(container);
+    const errors: unknown[] = [];
+    let root: Root | undefined;
+    await act(async () => { root = hydrateRoot(container, <Later />, { onRecoverableError: (error) => { errors.push(error); } }); });
+    expect(errors).toEqual([]);
+    await waitFor(() => expect(container.textContent).toBe('Bake and saltfish'));
+    act(() => root?.unmount());
+    container.remove();
   });
 });
