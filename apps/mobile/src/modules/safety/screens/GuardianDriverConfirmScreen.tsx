@@ -24,9 +24,18 @@ import {
  * it means for the person the check is about.
  */
 export function GuardianDriverConfirmScreen() {
-  const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const request = readConfirmRequest(route.params ?? {});
+  // [UI-SWEEP U10 S3-1] A tap to a screen already in the stack goes back to
+  // it (navigate + pop) and hands the SAME mounted screen the new push. The
+  // answer below belongs to ONE check (cycle + nonce): a new check is a new
+  // screen, so an earlier "Confirmed" can never hide the button for the next
+  // check, and a late reply to the old check can never land on the new one.
+  return <GuardianDriverConfirmCheck key={JSON.stringify([route.params?.cycleId, route.params?.nonce])} params={route.params ?? {}} />;
+}
+
+function GuardianDriverConfirmCheck({ params }: { params: Record<string, unknown> }) {
+  const navigation = useNavigation<any>();
+  const request = readConfirmRequest(params);
   const confirm = useGuardianDriverConfirm();
   const [outcome, setOutcome] = useState<ConfirmOutcome | null>(null);
 
