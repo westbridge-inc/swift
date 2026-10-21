@@ -34,12 +34,17 @@ const photosPermission =
  * declared here instead: `app.config.ts` is the only file that survives a
  * prebuild, because `ios/` is gitignored and regenerated.
  *
- * Everything below is `AppFunctionality` and nothing is tracking, which is the
- * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
+ * Everything below is `AppFunctionality` (the phone number and e-mail also
+ * `DeveloperAdvertising`: Swift's own opt-in marketing messages) and nothing
+ * is tracking, which is the honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
  * `src/lib/analytics.ts`, which is a deliberate no-op. The crash reporter
  * (L13 item 7, off unless a crash-report address is configured) is declared
  * below as CrashData, not linked to the person, in the same change that added
- * it.
+ * it. The app hangs it also reports are declared as PerformanceData, not linked.
+ *
+ * This list must match the App Privacy answers in App Store Connect, and it
+ * ships inside the binary: a correction needs a new build, never an update
+ * over the air. src/__tests__/ota-updates-config.test.ts holds the list.
  *
  * The accessed-API reasons stay as Expo generates them (FileTimestamp C617.1,
  * UserDefaults CA92.1, SystemBootTime 35F9.1). `DiskSpace` is deliberately NOT
@@ -57,6 +62,11 @@ const collected = (
   NSPrivacyCollectedDataTypePurposes: purposes,
 });
 
+const marketingToo = [
+  'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+  'NSPrivacyCollectedDataTypePurposeDeveloperAdvertising',
+];
+
 const privacyManifests = {
   NSPrivacyTracking: false,
   NSPrivacyTrackingDomains: [],
@@ -67,21 +77,47 @@ const privacyManifests = {
   ],
   NSPrivacyCollectedDataTypes: [
     collected('Name'), // account holder, shown to the courier/driver on a job
-    collected('PhoneNumber'), // the login identity itself
-    collected('EmailAddress'), // optional at registration
+    // The login identity itself (and optional at registration). Both also carry
+    // the marketing texts / e-mails a person opts in to (Account > Marketing
+    // messages; withdrawn = none sent), so they name that purpose too.
+    collected('PhoneNumber', marketingToo),
+    collected('EmailAddress', marketingToo),
     collected('PhysicalAddress'), // delivery + pickup addresses
     collected('PreciseLocation'), // pickup, dispatch, live tracking
     collected('PhotosorVideos'), // delivery proof, document scans, chat images
-    collected('SensitiveInfo'), // government ID documents + verification selfie
+    // Government ID photos (a partner's, or a customer's when an ID check is
+    // needed) and a partner's selfie: checked by a person at Swift only, with
+    // no outside identity company and no face matching.
+    collected('SensitiveInfo'),
     collected('OtherUserContent'), // chat messages, review comments
     collected('CustomerSupport'), // support conversations
     collected('UserID'),
     collected('DeviceID'), // push token
     collected('PurchaseHistory'), // order and trip history
+    // [BUILD-12] A store's own MMG number, its MMG pay link and the MMG
+    // transaction reference it records for a payment it received. No card or
+    // bank number is ever collected (cards go through a hosted page).
+    collected('OtherFinancialInfo'),
+    // [BUILD-12] The emergency contacts a person saves for SOS (name + phone),
+    // kept on Swift's servers so an alert can reach them.
+    collected('Contacts'),
+    // [BUILD-12] A driver's vehicle details (make, model, year, colour,
+    // licence plate) and the document types a partner files.
+    collected('OtherDataTypes'),
     // [L13 item 7] Crash reports: diagnostics only, scrubbed on the phone and
     // carrying no user, so NOT linked to the person (src/lib/crash-scrub.ts).
     {
       NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    },
+    // [BUILD-12] The same crash SDK also reports app hangs (iOS App Hang
+    // Tracking and Android ANR detection are on by default and
+    // crashSdkOptions does not turn them off). Apple counts a hang as
+    // performance data. Same scrubbing, no user: NOT linked to the person.
+    {
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePerformanceData',
       NSPrivacyCollectedDataTypeLinked: false,
       NSPrivacyCollectedDataTypeTracking: false,
       NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],

@@ -24,6 +24,10 @@
 --     swift_app and swift_bypass_rls stay NOLOGIN groups that belong to nothing
 --     and own nothing (pg_shdepend, the whole cluster): a login that inherits
 --     an owner's rights can switch the wall off;
+--   ownerWallMembers
+--     members of swift_owner_wall (the owner wall's switch, migrations
+--     20261018220000..223000): none until that separate, later switch-on —
+--     Phase C grants the business wall only;
 --   roles
 --     the two runtime logins, when they exist: attributes, memberships,
 --     ownership and grants (pg_shdepend, the whole cluster), settings by NAME.
@@ -198,6 +202,8 @@ SELECT json_build_object(
               + g.rolcreaterole::int + g.rolreplication::int) END), 0)::int FROM grp g),
   'groupUnexpectedParents', (
     SELECT count(*) FROM pg_auth_members m WHERE m.member IN (SELECT oid FROM grp WHERE oid IS NOT NULL)),
+  'ownerWallMembers', (
+    SELECT count(*) FROM pg_auth_members m JOIN pg_roles w ON w.oid = m.roleid AND w.rolname = 'swift_owner_wall'),
   'groupOwnedObjects', (
     SELECT count(*) FROM pg_shdepend d
      WHERE d.refclassid = 'pg_authid'::regclass AND d.deptype = 'o'

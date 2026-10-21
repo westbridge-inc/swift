@@ -18,7 +18,7 @@ import { testPhone } from './fixture-ids';
  * the gate would leave the gate untested everywhere it matters.
  */
 
-const seconds = new WeakMap<FastifyInstance, Map<string, Promise<string>>>();
+const seconds = new WeakMap<FastifyInstance, Map<string, Promise<{ userId: string; token: string; at: number }>>>();
 
 /**
  * A second capable admin for this app instance, IN THE APPROVAL'S OWN TENANT,
@@ -41,19 +41,32 @@ function secondAdminToken(app: FastifyInstance, tenantId: string): Promise<strin
           admin: { create: { permissions: ['*'] } },
         },
       }), 'test-second-approver');
-      const token = app.jwt.sign({ userId: user.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
-      await runWithoutTenant(() => app.prisma.session.create({
-        data: {
-          userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP',
-          deviceId: 'test-second-approver', deviceType: 'test',
-          expiresAt: new Date(Date.now() + 86_400_000),
-        },
-      }), 'test-second-approver');
-      return token;
+      return { userId: user.id, ...await signSecond(app, user.id) };
     })();
     byTenant.set(tenantId, existing);
   }
-  return existing;
+  return existing.then(async (second) => {
+    // The token lives 15 minutes of real time (plugins/auth.ts); a suite that
+    // runs longer (the order random walk under load) renews it first.
+    if (Date.now() - second.at <= SECOND_RENEW_MS) return second.token;
+    const renewed = { userId: second.userId, ...await signSecond(app, second.userId) };
+    byTenant!.set(tenantId, Promise.resolve(renewed));
+    return renewed.token;
+  });
+}
+
+const SECOND_RENEW_MS = 10 * 60_000;
+
+async function signSecond(app: FastifyInstance, userId: string): Promise<{ token: string; at: number }> {
+  const token = app.jwt.sign({ userId, role: 'SUPER_ADMIN', jti: nanoid(8) });
+  await runWithoutTenant(() => app.prisma.session.create({
+    data: {
+      userId, token, refreshToken: nanoid(48), authMethod: 'OTP',
+      deviceId: 'test-second-approver', deviceType: 'test',
+      expiresAt: new Date(Date.now() + 86_400_000),
+    },
+  }), 'test-second-approver');
+  return { token, at: Date.now() };
 }
 
 /** Is this the 202 the approval gate returns? */
@@ -103,11 +116,9 @@ export async function injectWithApproval(app: FastifyInstance, options: InjectOp
 export async function cleanupSecondApprovers(app: FastifyInstance): Promise<void> {
   const byTenant = seconds.get(app);
   if (!byTenant) return;
-  const tokens = await Promise.all([...byTenant.values()]);
+  const ids = (await Promise.all([...byTenant.values()])).map((second) => second.userId);
   seconds.delete(app);
   await runWithoutTenant(async () => {
-    const sessions = await app.prisma.session.findMany({ where: { token: { in: tokens } }, select: { userId: true } });
-    const ids = sessions.map((row) => row.userId);
     if (!ids.length) return;
     await app.prisma.privilegedApproval.deleteMany({ where: { approvedBy: { in: ids } } }).catch(() => {});
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
