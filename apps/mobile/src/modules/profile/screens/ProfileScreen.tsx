@@ -18,6 +18,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { BrandSwitch } from '../../../kit/controls';
 import { retryRead } from '../../../lib/appQueryPolicy';
 import { profileIdRowSub } from '../../../lib/customerIdCopy';
+import { myRatingWords } from '../../../lib/myRatingWords';
 
 const GUTTER = space['2xl'];
 
@@ -376,11 +377,7 @@ export function ProfileScreen() {
               // A fact about you, not a place — the value IS the row.
               plain
               label="Your rating"
-              sub={myRating.data?.displayRating != null
-                ? `${myRating.data.displayRating.toFixed(1)} · ${myRating.data.ratingBucket}`
-                : myRating.isError && myRating.data === undefined
-                ? "Couldn't load your rating" // [BUG-GUARDS C3] an unread rating is not "No rating yet"
-                : myRating.isLoading ? 'Loading…' : 'No rating yet'}
+              sub={myRatingWords(myRating, ' · ')}
               onPress={() => setRatingInfo(true)}
             />
           </RowGroup>
@@ -470,7 +467,7 @@ export function ProfileScreen() {
       <PopupCard visible={ratingInfo} onClose={() => setRatingInfo(false)}>
         <IconChip icon="star" size={56} />
         <PopupTitle variant="heading" center style={{ marginTop: space.md }}>
-          {myRating.data?.displayRating != null ? `${myRating.data.displayRating.toFixed(1)} ${myRating.data.ratingBucket}` : myRating.isError && myRating.data === undefined ? "Couldn't load your rating" : myRating.isLoading ? 'Loading…' : 'No rating yet'}
+          {myRatingWords(myRating, ' ')}
         </PopupTitle>
         <T variant="label" tone="muted" center style={{ marginTop: space.sm }}>
           Drivers and riders rate their trips with you, the same way you rate them — respect runs both ways.
