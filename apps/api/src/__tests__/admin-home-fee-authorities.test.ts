@@ -1,5 +1,6 @@
 import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { wordFreeTag } from './helpers/fixture-ids';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -52,7 +53,7 @@ async function vendorSub(status: 'ACTIVE' | 'TRIAL' = 'ACTIVE') {
   const userId = await person(['VENDOR_OWNER', 'CUSTOMER']);
   return sys(async () => {
     const owner = await app.prisma.vendorOwner.create({ data: { userId } });
-    const vendor = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Fee Store ${run}${users.length}`, slug: `fee-${run.toLowerCase()}-${users.length}`, vendorType: 'RESTAURANT',
+    const vendor = await app.prisma.vendor.create({ data: { ownerId: owner.id, name: `Fee Store ${wordFreeTag(8)}`, slug: `fee-${run.toLowerCase()}-${users.length}`, vendorType: 'RESTAURANT',
       phone: '+5920000561', addressLine1: '1 St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE' } });
     return (await app.prisma.subscription.create({ data: { vendorId: vendor.id, type: 'RESTAURANT', weeklyRate: 6000, ...week(status) } })).id;
   });
