@@ -609,6 +609,8 @@ describe('[PRICE-LOCK] a queued ride is booked only at the fare the passenger wa
       expect(await app.prisma.order.count({ where: { customerId: c.userId } })).toBe(0);
       const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId } });
       expect([entry.status, entry.matchedOrderId]).toEqual(['EXPIRED', null]);
+      // The row records that they were told, like every other ended entry.
+      expect(entry.expiredNotifiedAt).not.toBeNull();
       const note = await app.prisma.notification.findFirstOrThrow({
         where: { userId: c.userId, data: { path: ['kind'], equals: 'ride_queue_expired' } },
       });
