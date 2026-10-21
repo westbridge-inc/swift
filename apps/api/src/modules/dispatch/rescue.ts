@@ -829,37 +829,68 @@ export function riderlessCutoffNoticeKey(orderId: string): string {
  * not cancelled at once: the customer is told ONCE that they can cancel for
  * free (true at this moment — the cancel predicate reads the same cutoff, and
  * a parcel nobody took is always free), and the system cancels only when that
- * notice is RIDERLESS_GRACE_MIN old and still no rider has come. The notice row
- * itself is the durable "told at" (its key makes a second send collapse), so a
- * restart never re-tells and never skips the grace. A paid MMG order is never
+ * customer was told RIDERLESS_GRACE_MIN ago and still no rider has come. The
+ * durable "told at" is the cutoff's decision row, written before the notice
+ * (whose key makes a re-send collapse), so a restart never re-tells, never
+ * skips the grace, and a notice that cannot be written never stalls the exit
+ * (REVIEW-G S3-1). A paid MMG order is never
  * told "free" (the store holds the money): it goes straight to the paid hold.
  */
 async function settleAfterGrace(
   deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, basis: WaitBasis, now: Date,
 ): Promise<RetireOutcome | 'NOTIFIED' | 'WAITING'> {
   if (isCapturedMmg(order)) return settleTooOldOrder(deps, order, ageMinutes, limitMinutes, now, basis);
-  const dedupeKey = riderlessCutoffNoticeKey(order.id);
-  const told = await deps.prisma.notification.findUnique({
-    where: { userId_dedupeKey: { userId: order.customerId, dedupeKey } },
+  // [REVIEW-G S3-1] The grace runs from a DURABLE "told at": the cutoff's own
+  // decision row, written before the notice. The notice itself is best-effort
+  // (send() writes no row and answers '' when it fails), so it is re-sent,
+  // deduped, on every tick until it lands — but its failure can never hold the
+  // order past the grace, the 19-day class the cutoff exists to end.
+  const told = await deps.prisma.algoDecision.findFirst({
+    where: { algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, outcome: RIDERLESS_TOLD_OUTCOME },
+    orderBy: { createdAt: 'asc' },
     select: { createdAt: true },
   });
   if (!told) {
-    const money = order.paymentMethod === 'CASH' ? ' You won’t pay anything.' : order.paymentMethod === 'MOBILE_MONEY' ? '' : ' Nothing is charged for it.';
-    await deps.notifications.send({
-      userId: order.customerId,
-      type: 'ORDER_UPDATE',
-      title: basis === 'PARCEL' ? 'No rider yet — you can cancel for free' : 'Still no rider — you can cancel for free',
-      body: basis === 'PARCEL'
-        ? `No rider has taken your parcel ${order.orderNumber} yet. You can cancel it now for free. If no rider takes it in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`
-        : `We still haven’t found a rider for order ${order.orderNumber}. You can cancel it now for free. If no rider is found in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`,
-      audience: 'customer',
-      data: { orderId: order.id, orderNumber: order.orderNumber, kind: 'riderless_cutoff', canCancelFree: true, cancelsInMinutes: RIDERLESS_GRACE_MIN },
-      dedupeKey,
+    const recorded = await recordDecision(deps.prisma, {
+      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId,
+      outcome: RIDERLESS_TOLD_OUTCOME,
+      sentence: `No rider ${ageMinutes - limitMinutes} min past the cutoff: the customer is told they can cancel for free, and the system cancels ${RIDERLESS_GRACE_MIN} min from now if no rider comes.`,
+      inputs: { ageMinutes, limitMinutes, basis, graceMinutes: RIDERLESS_GRACE_MIN },
     });
+    // No durable "told at" means no grace has started: say nothing yet, try next tick.
+    if (!recorded) return 'WAITING';
+    await sendRiderlessCutoffNotice(deps, order, basis);
     return 'NOTIFIED';
   }
+  await sendRiderlessCutoffNotice(deps, order, basis); // a no-op once its row exists (deduped)
   if (now.getTime() - told.createdAt.getTime() < RIDERLESS_GRACE_MIN * 60_000) return 'WAITING';
   return settleTooOldOrder(deps, order, ageMinutes, limitMinutes, now, basis);
+}
+
+/** [OF-01/17] The decision row whose time starts the grace. */
+export const RIDERLESS_TOLD_OUTCOME = 'RIDERLESS_CUTOFF_TOLD';
+
+/** The ONE "you can cancel for free" notice (deduped per order, so a re-send of a
+ *  delivered notice collapses into it). */
+async function sendRiderlessCutoffNotice(deps: RescueDeps, order: RetireableOrder, basis: WaitBasis): Promise<void> {
+  const dedupeKey = riderlessCutoffNoticeKey(order.id);
+  const held = await deps.prisma.notification.findUnique({
+    where: { userId_dedupeKey: { userId: order.customerId, dedupeKey } },
+    select: { id: true },
+  });
+  if (held) return;
+  const money = order.paymentMethod === 'CASH' ? ' You won’t pay anything.' : order.paymentMethod === 'MOBILE_MONEY' ? '' : ' Nothing is charged for it.';
+  await deps.notifications.send({
+    userId: order.customerId,
+    type: 'ORDER_UPDATE',
+    title: basis === 'PARCEL' ? 'No rider yet — you can cancel for free' : 'Still no rider — you can cancel for free',
+    body: basis === 'PARCEL'
+      ? `No rider has taken your parcel ${order.orderNumber} yet. You can cancel it now for free. If no rider takes it in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`
+      : `We still haven’t found a rider for order ${order.orderNumber}. You can cancel it now for free. If no rider is found in the next ${RIDERLESS_GRACE_MIN} minutes, we’ll cancel it for you.${money}`,
+    audience: 'customer',
+    data: { orderId: order.id, orderNumber: order.orderNumber, kind: 'riderless_cutoff', canCancelFree: true, cancelsInMinutes: RIDERLESS_GRACE_MIN },
+    dedupeKey,
+  }).catch((err: unknown) => log().warn({ err, orderId: order.id }, 'rescue: the riderless cutoff notice was not delivered; it is re-sent next tick'));
 }
 
 export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<{ retired: string[]; held: string[]; notified: string[] }> {

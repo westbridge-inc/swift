@@ -367,6 +367,9 @@ function ageTargets(): Array<[string, string, 'orders' | 'users']> {
     ['orders', 'id', 'orders'],
     ...orderChildTables!.map((t): [string, string, 'orders'] => [t, 'orderId', 'orders']),
     ['dispatch_searches', 'subjectId', 'orders'],
+    // A decision about a walk order is part of its history: the riderless
+    // cutoff's grace runs from one (rescue.ts RIDERLESS_TOLD_OUTCOME).
+    ['algo_decisions', 'subjectId', 'orders'],
     ['notifications', 'userId', 'users'],
   ];
 }
@@ -381,16 +384,25 @@ async function ageRows(w: WalkWorld, ms: number): Promise<void> {
     })
     .filter((x): x is string => x !== null);
   if (parts.length === 0) return;
-  try {
-    await w.app.prisma.$transaction(async (tx) => {
-      // Replica mode skips ordinary triggers for this transaction only, so the
-      // append-only guards on status logs and evidence do not refuse the clock.
-      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
-      // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
-      await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
-    });
-  } catch (err) {
-    throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${err instanceof Error ? err.message : String(err)})`);
+  // [REVIEW-G S4-1] One statement touches many tables in no fixed order, so a
+  // product transaction holding some of the same rows can deadlock with it
+  // (40P01; seen once locally). Postgres aborts the clock's side and nothing
+  // was aged: retrying is exact. Any other error, or a third deadlock, fails.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await w.app.prisma.$transaction(async (tx) => {
+        // Replica mode skips ordinary triggers for this transaction only, so the
+        // append-only guards on status logs and evidence do not refuse the clock.
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
+        await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
+      });
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt < 3 && /40P01|deadlock detected/.test(message)) continue;
+      throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${message})`);
+    }
   }
 }
 
