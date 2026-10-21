@@ -32,13 +32,14 @@ import {
 
 /** Chosen by greedy coverage over seeds 1..40 (21 Oct, on a database with
  *  every migration, the status-log append-only trigger included, and walk
- *  tokens that outlive a slow run), with each known finding kept: together
- *  they reach two deliveries, a cancellation, a handback, both custody
- *  findings (OF-33, OF-12), the OF-01 notice repeat and 83 of the 163
- *  distinct (status, action, outcome) / log-edge / violation features the 40
- *  reached. A wider sweep is `WALK_SEED_COUNT=40` locally (8 to 100 minutes,
- *  by machine load; past 30 the test times out, so walk them in parts with
- *  `WALK_SEEDS`). */
+ *  tokens that outlive a slow run), with each known finding kept: 83 of the
+ *  163 distinct (status, action, outcome) / log-edge / violation features the
+ *  40 reached. That pick was made before the OF-01 and OF-33 fixes; with them,
+ *  seeds 10, 9 and 24 end CANCELLED through the riderless and no-show exits
+ *  instead of repeating notices or holding the order, 30 still delivers, and
+ *  13 still reaches OF-12 (custody with no age timer). A wider sweep is
+ *  `WALK_SEED_COUNT=40` locally (8 to 100 minutes, by machine load; past 30
+ *  the test times out, so walk them in parts with `WALK_SEEDS`). */
 const DEFAULT_SEEDS = [10, 9, 24, 30, 13];
 
 /** The smallest traces that produce each recorded finding (shrunk). */
