@@ -1,5 +1,6 @@
 import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
@@ -525,8 +526,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
     // The pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued URL
     // and the rider it was issued to. /pickup-proof exact-matches it, so pickup
     // proof is proof of an actual upload by this rider, not any string that
@@ -846,8 +848,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
 
-    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'courier-proof', fileKey: url, buffer, storage });
 
     const { order: updated } = await orderService.transitionOrderAtomically({
       orderId: id,

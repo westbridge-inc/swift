@@ -84,6 +84,7 @@ export const GRANDCHILD_OF: Record<string, string> = {
 
 /** Platform-wide by design — the reason a reviewer can check. */
 export const PLATFORM_WIDE: Record<string, string> = {
+  UploadScanDebt: 'the malware-rescan ledger of uploads stored unscanned (row 312): no person or tenant id, only an object key, a digest and the outcome; the scanner and its rescan job are platform infrastructure, like the scanner itself',
   ProviderPaymentAlias: 'immutable provider-reference reservations must remain visible when RLS hides the historical identity, so another tenant cannot create a second credit; the RESTRICT parent FK preserves the reservation, and no public API exposes it',
   DocType: 'the document registry (DOC-1 §4.2) — data keyed by country, like CountryConfig',
   DocField: 'fields of a registry document class',

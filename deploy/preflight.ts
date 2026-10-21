@@ -244,6 +244,24 @@ for (const v of WATCHED) {
 }
 console.log('');
 
+// ── UPLOAD MALWARE SCAN [Row 312 · COORD 21 Oct] ──────────────────────────
+// The emergency switch is loud: while MALWARE_SCAN_BYPASS=1, a mover's uploads are stored
+// WITHOUT a scan whenever the scanner is down (rescanned later). Not a boot refusal: it exists
+// for an outage. But nobody deploys with it on without reading this.
+console.log('UPLOAD MALWARE SCAN');
+console.log('─'.repeat(72));
+if (fileEnv['MALWARE_SCAN_BYPASS'] === '1') {
+  console.log('  ✗✗✗ MALWARE_SCAN_BYPASS=1 — THE EMERGENCY BYPASS IS ON ✗✗✗');
+  console.log('    While the scanner is down, liveness selfies, onboarding documents and photos,');
+  console.log('    and delivery and handover proof are stored WITHOUT a malware scan. Ops are paged');
+  console.log('    every hour it stays on. Remove the line once clamd answers again.');
+} else if (fileEnv['MALWARE_SCAN'] && fileEnv['MALWARE_SCAN'] !== 'clamd') {
+  console.log(`  ✗ MALWARE_SCAN=${fileEnv['MALWARE_SCAN']}: uploads are stored unscanned (production refuses this).`);
+} else {
+  console.log('  ✓ every upload is scanned by the private clamd service before it is stored');
+}
+console.log('');
+
 // ── BACKUP READINESS ───────────────────────────────────────────────────────
 // Deliberately separate from the boot guard: a server with no offsite backup
 // still starts, and should. But "it started" is not the question anyone asks

@@ -1,5 +1,6 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { createHash } from 'node:crypto';
 import type { Order, Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -58,8 +59,9 @@ export async function issueHandoverPhoto(
   const buffer = stripImageMetadata(input.buffer, input.mimeType);
   const bindingDigest = handoverBinding(order);
   const ext = input.mimeType === 'image/png' ? 'png' : input.mimeType === 'image/webp' ? 'webp' : 'jpg';
-  await scanUpload(buffer, { surface: 'handover-proof' });
+  const scan = await scanUpload(buffer, { surface: 'handover-proof' });
   const { url } = await storage.upload({ buffer, mimeType: input.mimeType, filename: `photo.${ext}`, folder: `handover-proof/${order.id}` });
+  await recordUnscannedUpload(db, scan, { surface: 'handover-proof', fileKey: url, buffer, storage });
   return db.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM orders WHERE id = ${order.id} FOR UPDATE`;

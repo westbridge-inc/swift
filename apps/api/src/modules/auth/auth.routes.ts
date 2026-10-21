@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
@@ -296,7 +297,7 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'avatar', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'avatar', log: request.log });
     const storage = getStorageProvider();
     const { url } = await storage.upload({
       buffer,
@@ -304,6 +305,7 @@ export async function authRoutes(app: FastifyInstance) {
       mimeType: file.mimetype,
       folder: `avatars/${request.user.userId}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'avatar', fileKey: url, buffer, storage });
 
     // [REPORT-022 F-022-21] conditional write: a deletion finishing between
     // auth and this point cannot re-personalize the tombstone with a fresh

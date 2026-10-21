@@ -33,7 +33,7 @@ const CROSS_TENANT = [
   'prep-shadow-grade', 'prep-stats-nightly', 'process-billing', 'process-settlements', 'promote-sos-grace',
   'qr-attribution-purge', 'rating-actor-fold', 'rating-reminder-sweep', 'rating-stats-recompute', 'reaper-lag',
   'reconcile-dispatch', 'reconcile-earnings', 'release-held-orders', 'retention-sweep', 'rlp-reserve-provision', 'rlp-sweep',
-  'scheduler-heartbeat', 'stale-movers', 'substitution-expiry', 'supply-watch-scan', 'tier-recalc', 'vat-threshold-watch',
+  'scheduler-heartbeat', 'stale-movers', 'substitution-expiry', 'supply-watch-scan', 'tier-recalc', 'upload-rescan', 'vat-threshold-watch',
   // [S2-29] The approval-tail drain sweeps every tenant's owed rows, like the other outbox drains.
   'verification-decision-outbox',
 ] as const;

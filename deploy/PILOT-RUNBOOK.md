@@ -210,14 +210,24 @@ and disk budget are reviewed. Their Compose file publishes no host ports.
 ### The upload malware scanner (row 312)
 
 Every upload is scanned by the `clamd` service (ClamAV, pinned by tag and
-digest in docker-compose.yml) on the private network before it is stored; the
-API and worker reach it as `clamd:3310` and it publishes no port. pilot-up.sh
+digest in docker-compose.yml) before it is stored. clamd sits on its own
+internal network (`swift_scanner`), shared only with the API and the worker,
+which reach it as `clamd:3310`; nothing else on the host can reach it, and it
+publishes no port (a second network of its own lets freshclam download). pilot-up.sh
 starts it before anything is stopped, waits until it is healthy (signatures
 loaded; a first start on a new volume can take a few minutes) and proves, from
-the new API image on the private network, that the EICAR test string is refused
+the new API image on the scanner network, that the EICAR test string is refused
 and ordinary bytes pass. While clamd does not answer, every upload is refused
-(503) -- the shift liveness selfie included -- and the worker pages ops after
-two failed checks (two minutes apart). `./deploy/doctor.sh` reports it.
+(503) and the worker pages ops after two failed checks (two minutes apart).
+`./deploy/doctor.sh` reports it. clamd is the container's main process, so a
+SHUTDOWN restarts the container. Two exceptions store an upload UNSCANNED and
+owe it a rescan (upload_scan_debts; the worker rescans every five minutes once
+clamd answers, and a positive or unscannable file is quarantined and paged):
+safety evidence is never refused, and the production emergency switch
+`MALWARE_SCAN_BYPASS=1` in deploy/.env (then recreate api and worker) covers the
+liveness selfie, onboarding documents and photos, and delivery and handover
+proof. While it is set, pilot-up, the doctor and the preflight shout and ops are
+paged every hour. Remove it as soon as clamd answers.
 
 Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
 a signature reload (freshclam checks 12 times a day); the service's ceiling is

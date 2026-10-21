@@ -3968,6 +3968,36 @@ model StorageOrphan {
   @@map("storage_orphans")
 }
 
+/// [Row 312 · COORD ruling 21 Oct] An upload stored WITHOUT a malware scan: safety evidence while the
+/// scanner was down, or a mover's upload under the MALWARE_SCAN_BYPASS=1 emergency switch
+/// (lib/upload-scan-debt.ts). The upload-rescan job scans it once clamd answers; a positive is moved to
+/// quarantine and paged. No person or tenant id and never the content: the object key (forgotten once
+/// closed clean), the file's sha256, and the outcome. Platform-wide, like the scanner itself.
+model UploadScanDebt {
+  id            String    @id @default(cuid())
+  /// The upload surface (lib/malware-scan.ts UploadSurface).
+  surface       String
+  /// 'evidence' (safety evidence, never refused) | 'bypass' (MALWARE_SCAN_BYPASS=1).
+  reason        String
+  /// The stored object; null once closed (a quarantined sealed one keeps it: its key row is found by it).
+  fileKey       String?
+  /// The stored bytes are envelope-encrypted (encrypted_objects row keyed by fileKey).
+  sealed        Boolean   @default(false)
+  sha256        String
+  attempts      Int       @default(0)
+  createdAt     DateTime  @default(now())
+  rescannedAt   DateTime?
+  /// CLEAN | FOUND | GONE (erased before the rescan) | SHREDDED (sealed, key already shredded)
+  result        String?
+  signature     String?
+  quarantinedAt DateTime?
+  quarantineKey String?
+
+  @@index([rescannedAt, createdAt])
+  @@index([reason, rescannedAt])
+  @@map("upload_scan_debts")
+}
+
 /// Prepaid path for cash payers: agents/bank-transfer top-ups recorded by
 /// admin; the weekly billing job deducts from here before suspending.
 /// Floor-at-zero CHECK lives in raw migration SQL [tollgate 3.1].

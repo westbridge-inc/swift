@@ -82,7 +82,7 @@ services:
   # [Row 312] The upload malware scanner (ClamAV clamd), reached by the API and
   # the worker as clamd:3310 (INSTREAM over TCP, apps/api/src/lib/malware-scan.ts).
   # The bytes it reads are the PLAINTEXT of ID documents and selfies, so it sits
-  # on the private network only: no published port, no Caddy route, and the
+  # on its own internal network only (below): no published port, no Caddy route, and the
   # app itself refuses a scanner name that resolves off loopback/private
   # addresses. It reads no secret and not deploy/.env.
   # - Pinned by exact tag AND digest (1.4 is ClamAV's long-term-support line;
@@ -104,6 +104,18 @@ services:
   clamd:
     image: clamav/clamav:1.4.6@sha256:3bba6dd5ac6663d55b80f86a3126e146612d93b593cc2617188d13f637d91260
     restart: unless-stopped
+    # clamd is the container's main process (the image's /init runs a given
+    # command after its setup): if anything on the private network sends it
+    # SHUTDOWN, the container exits and Docker restarts it, instead of a live
+    # container with a dead scanner. freshclam runs beside it (it reloads clamd
+    # after an update), unless CLAMAV_NO_FRESHCLAMD=true (the rehearsal copy).
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        if [ "$${CLAMAV_NO_FRESHCLAMD:-false}" != true ]; then
+        freshclam --checks="$${FRESHCLAM_CHECKS:-12}" --daemon --foreground --stdout --user=clamav & fi;
+        exec clamd --foreground
     environment:
       FRESHCLAM_CHECKS: "12"
     volumes:
@@ -118,8 +130,12 @@ services:
     mem_limit: 2560m
     security_opt:
       - no-new-privileges:true
-    # No published port: only members of the private Docker network reach it.
-    networks: [private]
+    # [COORD 21 Oct] Its own networks, NOT the private one: `scanner` is
+    # internal (no route out) and shared only with the api and the worker, so
+    # nothing else on the host (database, search, proxy, website, console)
+    # can reach clamd or send it commands; `scanner-egress` is clamd's alone,
+    # for freshclam's signature downloads. No published port on either.
+    networks: [scanner, scanner-egress]
 
   # One-shot: apply migrations before the API/worker boot. Compose waits on its
   # completion via service_completed_successfully.
@@ -212,10 +228,15 @@ services:
       MALWARE_SCAN: ${MALWARE_SCAN:-clamd}
       CLAMD_HOST: clamd
       CLAMD_PORT: "3310"
+      # [COORD 21 Oct] The production emergency switch: 1 stores a mover's uploads
+      # (liveness, onboarding, delivery/handover proof) UNSCANNED while the scanner
+      # is down, each rescanned once it answers. Pages ops hourly; doctor,
+      # preflight and pilot-up shout. Empty = off.
+      MALWARE_SCAN_BYPASS: ${MALWARE_SCAN_BYPASS:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
-    # No host port: Caddy is the only public entrance.
-    networks: [private]
+    # No host port: Caddy is the only public entrance. `scanner` reaches clamd.
+    networks: [private, scanner]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -270,6 +291,11 @@ services:
       MALWARE_SCAN: ${MALWARE_SCAN:-clamd}
       CLAMD_HOST: clamd
       CLAMD_PORT: "3310"
+      # [COORD 21 Oct] The production emergency switch: 1 stores a mover's uploads
+      # (liveness, onboarding, delivery/handover proof) UNSCANNED while the scanner
+      # is down, each rescanned once it answers. Pages ops hourly; doctor,
+      # preflight and pilot-up shout. Empty = off.
+      MALWARE_SCAN_BYPASS: ${MALWARE_SCAN_BYPASS:-}
     volumes:
       - /run/swift-secrets:/run/secrets:ro
     # The API image's HEALTHCHECK fetches its own HTTP readiness endpoint, but
@@ -298,7 +324,7 @@ services:
         condition: service_healthy
       clamd:
         condition: service_healthy
-    networks: [private]
+    networks: [private, scanner]
 
   caddy:
     image: caddy:2.10
@@ -435,3 +461,9 @@ networks:
   private:
     name: swift-pilot-private
     external: true
+  # [Row 312] The scanner's own networks (see clamd). Compose scopes both to
+  # the project (swift_scanner, swift_scanner-egress), so a rehearsal copy
+  # under its own project never shares them.
+  scanner:
+    internal: true
+  scanner-egress: {}

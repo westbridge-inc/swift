@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -181,7 +182,7 @@ export async function verificationRoutes(app: FastifyInstance) {
     // The envelope records what is sealed: a photo's type is what its bytes are, as at the storage seam.
     const sealedType = photo?.mimeType ?? file.mimetype;
     // [Row 312] Scanned as plaintext, before it is encrypted: the store only ever sees ciphertext.
-    await scanUpload(buffer, { surface: 'verification', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'verification', log: request.log });
     const storage = getStorageProvider();
 
     // Envelope encryption (onboarding spec §5): with a KEK configured the
@@ -226,6 +227,8 @@ export async function verificationRoutes(app: FastifyInstance) {
           createdBy: request.user.userId,
         },
       });
+      // [Row 312] Stored sealed: the rescan opens it with this key row (found by the same fileKey).
+      await recordUnscannedUpload(app.prisma, scan, { surface: 'verification', fileKey: url, buffer, sealed: true, storage });
 
       if (dup) {
         // Global correlation is a platform review signal. Tenant-local
