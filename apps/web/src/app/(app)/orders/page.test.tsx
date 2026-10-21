@@ -159,7 +159,7 @@ describe('[U17] reorder a finished store order', () => {
     expect(router.push).not.toHaveBeenCalled();
   });
 
-  it('a ride, a parcel, a booking or a cancelled order offers no Reorder', async () => {
+  it('a ride, a parcel or a booking offers no Reorder; a cancelled store order does, as on the phone', async () => {
     ordersApi({ pages: [[
       done(1, { orderType: 'TAXI' }),
       done(2, { orderType: 'COURIER' }),
@@ -168,6 +168,8 @@ describe('[U17] reorder a finished store order', () => {
     ]] });
     renderWithQuery(<OrdersPage />);
     await screen.findByText('Fixture Kitchen 4');
-    expect(screen.queryByRole('button', { name: /^Reorder/ })).toBeNull();
+    const offered = screen.getAllByRole('button', { name: /^Reorder/ });
+    expect(offered).toHaveLength(1);
+    expect(offered[0]!.getAttribute('aria-label')).toMatch(/^Reorder Fixture Kitchen 4\b/);
   });
 });

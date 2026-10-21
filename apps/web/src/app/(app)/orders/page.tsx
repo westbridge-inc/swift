@@ -16,11 +16,12 @@ import { Pictogram, verticalPictogram, type PictogramName } from '@/components/g
 const statusWords = (order: any): string => orderStatusLabel(order?.status, presentedVertical(order ?? {}));
 
 /** [UI-SWEEP U17] Only a store order can be put back in the cart: a ride has no
- *  storefront, a parcel has no store, and a booking is a time, not a basket. */
+ *  storefront, a parcel has no store, and a booking is a time, not a basket.
+ *  A cancelled store order can be ordered again, as on the phone (history rows
+ *  only, so every order asked about here is finished). */
 function canReorder(order: any): boolean {
   const vertical = presentedVertical(order ?? {});
-  return (vertical === 'FOOD_DELIVERY' || vertical === 'GROCERY_DELIVERY') && order?.fulfillment !== 'APPOINTMENT'
-    && (order?.status === 'DELIVERED' || order?.status === 'COMPLETED');
+  return (vertical === 'FOOD_DELIVERY' || vertical === 'GROCERY_DELIVERY') && order?.fulfillment !== 'APPOINTMENT';
 }
 
 /** The status pill's tone: done is green, stopped is grey, money trouble is red, the rest is live. */
