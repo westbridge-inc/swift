@@ -101,3 +101,15 @@ describe('the paged copy is honest about the evidence', () => {
     expect(raise).toContain("if (isOffline(err)) setOutcome('offline')");
   });
 });
+
+describe('[#1955 REVIEW-F S4-2] a slow recovery poll never undoes a local Cancel or send', () => {
+  it('the recovery answer is taken only when it was fetched after the last local change', () => {
+    expect(STRIPPED).toMatch(/if \(recovery\.data && !recovery\.isError && recoveryIsNewer\(recovery\.dataUpdatedAt, localChangeAt\.current\)\) setAlert\(recovery\.data\);/);
+  });
+  it('every local change of the alert is stamped (no bare setAlert of a new alert)', () => {
+    const bare = [...STRIPPED.matchAll(/setAlert\(([^)]*)/g)].map((m) => m[1]!.trim())
+      .filter((arg) => arg !== 'null' && arg !== 'recovery.data' && arg !== 'next');
+    expect(bare).toEqual([]);
+    expect(STRIPPED).toContain('const changeAlert = (next: SosRaised | null) => { localChangeAt.current = Date.now(); setAlert(next); };');
+  });
+});

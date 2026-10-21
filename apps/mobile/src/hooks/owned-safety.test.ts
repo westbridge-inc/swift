@@ -21,7 +21,7 @@ vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries: host.invalidate }),
 }));
 vi.mock('../services/api', () => ({ safetyApi: { getSos: host.get, markSafeSos: host.mark, ownedActiveSos: host.list, monitoringPreference: host.read, setMonitoringPreference: host.write } }));
-import { useMarkSafeSos, useMonitoringPreference, useOwnedSosAlert, useOwnedSosAlerts } from './owned-safety';
+import { recoveryIsNewer, useMarkSafeSos, useMonitoringPreference, useOwnedSosAlert, useOwnedSosAlerts } from './owned-safety';
 const alert = (extra = {}) => ({ id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: 'ACTIVE', userSafeFlaggedAt: null, graceEndsAt: null, ...extra });
 const envelope = (data: unknown) => ({ data: { data } });
 beforeEach(() => {
@@ -69,6 +69,20 @@ describe('current principal safety hook boundaries', () => {
     expect(interval({ state: { data: undefined } })).toBe(false);
     expect(interval({ state: { data: { pages: [{ rows: [], nextCursor: null }] } } })).toBe(false);
     expect(interval({ state: { data: { pages: [{ rows: [], nextCursor: 'more' }, { rows: [alert()], nextCursor: null }] } } })).toBe(15_000);
+  });
+  it('[#1955 S4-1] one alert is watched every 5 s only while it is live; a resolved or cancelled alert stops polling', () => {
+    useOwnedSosAlert('synthetic-alert'); const interval = host.queries[0]!['refetchInterval'];
+    expect(typeof interval).toBe('function');
+    for (const status of ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED']) expect(interval({ state: { data: alert({ status }) } }), status).toBe(5_000);
+    expect(interval({ state: { data: undefined } }), 'not read yet').toBe(5_000);
+    for (const status of ['RESOLVED', 'CANCELLED']) expect(interval({ state: { data: alert({ status }) } }), status).toBe(false);
+  });
+  it('[#1955 S4-2] a recovery answer counts only if it was fetched after the last local change', () => {
+    expect(recoveryIsNewer(2_000, 1_000)).toBe(true);
+    expect(recoveryIsNewer(1_000, 2_000), 'a poll that started before a Cancel landed never undoes it').toBe(false);
+    expect(recoveryIsNewer(1_000, 1_000)).toBe(false);
+    expect(recoveryIsNewer(undefined, 0)).toBe(false);
+    expect(recoveryIsNewer(5, 0), 'a resumed alert with no local change takes its first answer').toBe(true);
   });
   it('mark-safe reads current ownership, writes and returns the refreshed server truth', async () => {
     useMarkSafeSos(); const flagged = alert({ userSafeFlaggedAt: '2026-09-30T12:00:00.000Z' });

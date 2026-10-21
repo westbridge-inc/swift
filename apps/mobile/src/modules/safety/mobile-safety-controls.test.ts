@@ -23,7 +23,7 @@ vi.mock('react', async (original) => {
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries: vi.fn() }),
   useInfiniteQuery: () => ({ data: { pages: [{ rows: host.ownedRows, nextCursor: null }] }, isPending: false, isError: false, isFetching: false, hasNextPage: false, refetch: vi.fn() }),
-  useQuery: (options: { queryKey: string[] }) => ({ data: options.queryKey.includes('owned-alert') ? { id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: host.status, userSafeFlaggedAt: host.flagged } : options.queryKey.includes('monitoring') ? host.monitoringValue : undefined, isLoading: false, refetch: async () => ({ data: false }) }),
+  useQuery: (options: { queryKey: string[] }) => ({ data: options.queryKey.includes('owned-alert') ? { id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: host.status, userSafeFlaggedAt: host.flagged } : options.queryKey.includes('monitoring') ? host.monitoringValue : undefined, isLoading: false, refetch: async () => ({ data: options.queryKey.includes('monitoring') ? host.monitoringValue : false }) }),
   useMutation: (options: { mutationFn: (arg: unknown) => Promise<unknown>; onSuccess?: () => void; onSettled?: () => void }) => ({
     isPending: false, isError: false,
     mutate: (arg: unknown, callbacks?: { onSuccess?: (data: unknown) => void; onError?: (err: unknown) => void; onSettled?: () => void }) => {
@@ -57,7 +57,7 @@ vi.mock('expo-image', () => ({ Image: 'Image' }));
 vi.mock('../../lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem: () => undefined, removeItem: () => undefined } }));
 vi.mock('@expo/vector-icons', () => ({ Feather: 'Feather' }));
 vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn() }) }));
-vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) }));
+vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 20, bottom: 0 }) }));
 vi.mock('react-native-reanimated', () => {
   const animation = { duration: () => animation, reduceMotion: () => animation };
   return { default: { View: 'AnimatedView' }, FadeInDown: animation, ReduceMotion: { System: 'System' } };
@@ -125,23 +125,60 @@ describe('[73] the signed-in safety control floats only over a live alert', () =
     const labels = elements(OwnedSafetyPanel()).filter((el) => el.type === 'PillButton').map((el) => el.props['label']);
     expect(labels).toContain('My safety alert');
   });
+  it('[#1955 S4-3] the control sits below the safe area and the header, centred, never over a header button', () => {
+    host.ownedRows = [{ id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: 'ACTIVE', userSafeFlaggedAt: null }];
+    host.index = 0;
+    const holder = elements(OwnedSafetyPanel()).find((el) => el.type === 'View' && (el.props['style'] as { position?: string } | undefined)?.position === 'absolute')!;
+    expect(holder.props['style']).toMatchObject({ top: 20 + 56, left: 0, right: 0, alignItems: 'center' });
+    expect(holder.props['pointerEvents']).toBe('box-none');
+  });
+  it('[#1955 S4-4] an alert not sent yet is named plainly, with one plain action', () => {
+    host.ownedRows = [{ id: 'synthetic-alert', actorUserId: 'synthetic-owner', status: 'TRIGGER_PENDING', userSafeFlaggedAt: null }];
+    host.index = 0;
+    const rows = elements(OwnedSafetyPanel());
+    expect(rows.some((el) => Array.isArray(el.props['children']) && (el.props['children'] as unknown[]).join('') === 'Your alert: not sent yet')).toBe(true);
+    expect(rows.some((el) => el.type === 'PillButton' && el.props['label'] === 'Cancel or send now')).toBe(true);
+    expect(rows.some((el) => /grace/i.test(String(el.props['label'] ?? '')))).toBe(false);
+  });
 });
 
 function renderControl(component: () => ReactElement) { host.index = 0; return elements(component()); }
 describe('real safety control result presentation', () => {
-  it('failed preference write restores the confirmed switch and says the change is unverified', async () => {
+  // [#1955 REVIEW-F S3-1] For a SAFETY opt-in, "I turned it on" must mean it is on: the flip IS the save.
+  const toggleOf = (rows: ReactElement<Record<string, unknown>>[]) => rows.find((el) => el.type === 'BrandSwitch')!;
+  const flip = (rows: ReactElement<Record<string, unknown>>[], to: boolean) => (toggleOf(rows).props['onChange'] as (value: boolean) => void)(to);
+  const says = (rows: ReactElement<Record<string, unknown>>[], text: string) => rows.some((el) => typeof el.props['children'] === 'string' && el.props['children'].includes(text));
+  it('a flip saves at once and the switch then shows only what Swift read back; there is no separate Save', async () => {
+    host.monitoringWrite.mockImplementation(async (value: boolean) => { host.monitoringValue = value; return { data: { data: {} } }; });
     const first = renderControl(MonitoringControl);
-    const toggle = first.find((el) => el.type === 'BrandSwitch')!;
-    (toggle.props['onChange'] as (value: boolean) => void)(true);
-    const draft = renderControl(MonitoringControl);
-    expect(draft.find((el) => el.type === 'BrandSwitch')!.props['value']).toBe(true);
+    expect(first.some((el) => el.type === 'PillButton' && /save/i.test(String(el.props['label'])))).toBe(false);
+    flip(first, true);
+    expect(host.monitoringWrite).toHaveBeenCalledOnce();
+    expect(host.monitoringWrite.mock.calls[0]![0]).toBe(true);
+    const saving = renderControl(MonitoringControl);
+    expect(toggleOf(saving).props['value']).toBe(true);
+    expect(toggleOf(saving).props['disabled'], 'no second flip while the write and its read-back run').toBe(true);
+    await Promise.all(host.tasks);
+    const saved = renderControl(MonitoringControl);
+    expect(toggleOf(saved).props['value']).toBe(true);
+    expect(toggleOf(saved).props['disabled']).toBe(false);
+    expect(says(saved, 'Saved and checked with Swift')).toBe(true);
+  });
+  it('a failed save puts the switch back to the saved value and says the change was not saved', async () => {
     host.monitoringWrite.mockRejectedValue(new Error('offline'));
-    (draft.find((el) => el.type === 'PillButton' && el.props['label'] === 'Save safety preference')!.props['onPress'] as () => void)();
+    flip(renderControl(MonitoringControl), true);
     await Promise.all(host.tasks);
     const failed = renderControl(MonitoringControl);
-    expect(failed.find((el) => el.type === 'BrandSwitch')!.props['value']).toBe(false);
-    expect(failed.some((el) => typeof el.props['children'] === 'string' && el.props['children'].includes('Could not verify the change'))).toBe(true);
-    expect(failed.some((el) => el.props['children'] === 'Saved and checked with Swift.')).toBe(false);
+    expect(toggleOf(failed).props['value']).toBe(false);
+    expect(says(failed, 'Your change was not saved. Try again.')).toBe(true);
+    expect(says(failed, 'Saved and checked with Swift')).toBe(false);
+    expect(says(failed, 'draft')).toBe(false);
+  });
+  it('two flips before a re-render send one write', async () => {
+    const rows = renderControl(MonitoringControl);
+    flip(rows, true); flip(rows, true);
+    await Promise.all(host.tasks);
+    expect(host.monitoringWrite).toHaveBeenCalledOnce();
   });
   it('a lost mark-safe response shows unknown result and a refresh action', async () => {
     host.markSafe.mockRejectedValue(new Error('lost response'));
@@ -158,6 +195,13 @@ describe('real safety control result presentation', () => {
     const rows = renderControl(() => OwnedSosActions({ id: 'synthetic-alert' }));
     expect(rows.some((el) => el.props['children'] === 'Swift recorded that you marked yourself safe. The safety team must still verify and close the case.')).toBe(true);
     expect(rows.some((el) => el.props['label'] === "I'm safe now")).toBe(false);
+  });
+  it.each(['RESOLVED', 'CANCELLED'])('[#1955 S4-4] a %s alert says so plainly and offers no safe-flag write', (status) => {
+    host.status = status; host.flagged = '2026-09-30T12:00:00.000Z';
+    const rows = renderControl(() => OwnedSosActions({ id: 'synthetic-alert' }));
+    expect(rows.some((el) => el.props['children'] === (status === 'RESOLVED' ? 'Resolved by the safety team.' : 'Cancelled.'))).toBe(true);
+    expect(rows.some((el) => /server alert status/i.test(JSON.stringify(el.props['children'] ?? '')))).toBe(false);
+    expect(rows.some((el) => el.type === 'PillButton' && /safe/i.test(String(el.props['label'])))).toBe(false);
   });
   it('duplicate mark-safe taps before rerender issue only one write', async () => {
     const rows = renderControl(() => OwnedSosActions({ id: 'synthetic-alert' }));
