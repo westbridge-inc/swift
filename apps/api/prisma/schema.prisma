@@ -8224,3 +8224,28 @@ model IdentityReviewCase {
   @@index([tenantId, status])
   @@map("identity_review_cases")
 }
+
+/// [Off-site erasure ledger] One erasure's ledger entry (ids, timestamps, de-identified columns), written
+/// ONLY by database triggers in the erasure's own transaction. Append-only; the application reads it.
+model ErasureLedgerEntry {
+  id        String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind      String
+  entry     Json
+  createdAt DateTime               @default(now())
+  shipment  ErasureLedgerShipment?
+
+  @@index([createdAt])
+  @@map("erasure_ledger_entry")
+}
+
+/// [Off-site erasure ledger] An entry shipped off-site (encrypted to the owner's backup key) by the host
+/// unit deploy/erasure-ledger-ship.sh. Append-only.
+model ErasureLedgerShipment {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId     String             @unique @db.Uuid
+  ledgerEntry ErasureLedgerEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  objectKey   String
+  shippedAt   DateTime           @default(now())
+
+  @@map("erasure_ledger_shipment")
+}
