@@ -170,7 +170,14 @@ export function FeedbackScreen() {
     setter((cur) => (cur.includes(slug) ? cur.filter((t) => t !== slug) : cur.length < RATING_MAX_TAGS ? [...cur, slug] : cur));
 
   const o = order.data;
-  if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (order.isLoading) {
+    return (
+      <Screen>
+        <Header title="Feedback" />
+        <LoadingBlock />
+      </Screen>
+    );
+  }
   if (order.isError || !o) {
     return (
       <Screen>

@@ -418,6 +418,8 @@ function TaxiBooking({ navigation }: any) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
         <LoadingBlock />
+        {/* [BUG-GUARDS C4] A slow ride read is no trap: Back stays on screen while it loads. */}
+        <FloatingBack navigation={navigation} insets={insets} />
       </View>
     );
   }
