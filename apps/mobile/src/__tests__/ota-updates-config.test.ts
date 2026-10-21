@@ -94,3 +94,58 @@ describe('crash reports in the iOS privacy manifest (L13 item 7)', () => {
     expect(names.filter((n) => typeof n === 'string' && n.includes('sentry'))).toEqual([]);
   });
 });
+
+// [BUILD-12 · rows 352 + 477] The privacy manifest ships INSIDE the binary (ios/ is regenerated from
+// app.config.ts at each build), so it can only be corrected by a new build, never over the air. It must
+// name every kind of data the app keeps, matching the App Privacy answers in App Store Connect.
+describe('the iOS privacy manifest names every kind of data the app keeps (build 12)', () => {
+  const entryOf = (config: AppConfig, type: string) =>
+    config.ios.privacyManifests.NSPrivacyCollectedDataTypes.find(
+      (entry) => entry['NSPrivacyCollectedDataType'] === `NSPrivacyCollectedDataType${type}`,
+    );
+  const linkedForTheApp = (type: string) => ({
+    NSPrivacyCollectedDataType: `NSPrivacyCollectedDataType${type}`,
+    NSPrivacyCollectedDataTypeLinked: true,
+    NSPrivacyCollectedDataTypeTracking: false,
+    NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+  });
+
+  it('declares the MMG number, pay link and payment reference a store keeps (Other Financial Info, linked)', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    expect(entryOf(await loadConfig(), 'OtherFinancialInfo')).toEqual(linkedForTheApp('OtherFinancialInfo'));
+  });
+
+  it('declares the emergency contacts a person saves for SOS (Contacts, linked)', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    expect(entryOf(await loadConfig(), 'Contacts')).toEqual(linkedForTheApp('Contacts'));
+  });
+
+  it('declares the app-hang reports the crash SDK sends (Performance Data, not linked, not tracking)', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    expect(entryOf(await loadConfig(), 'PerformanceData')).toEqual({
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePerformanceData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    });
+  });
+
+  it('is exactly the reviewed list, nothing is tracking, and the app does not track', async () => {
+    vi.stubEnv('ANDROID_GOOGLE_MAPS_API_KEY', 'test-maps-key');
+    const config = await loadConfig();
+    const manifest = config.ios.privacyManifests as unknown as {
+      NSPrivacyTracking: boolean;
+      NSPrivacyCollectedDataTypes: Record<string, unknown>[];
+    };
+    expect(manifest.NSPrivacyTracking).toBe(false);
+    const types = manifest.NSPrivacyCollectedDataTypes.map((e) =>
+      String(e['NSPrivacyCollectedDataType']).replace('NSPrivacyCollectedDataType', ''),
+    );
+    expect([...types].sort()).toEqual([
+      'Contacts', 'CrashData', 'CustomerSupport', 'DeviceID', 'EmailAddress', 'Name', 'OtherFinancialInfo',
+      'OtherUserContent', 'PerformanceData', 'PhoneNumber', 'PhotosorVideos', 'PhysicalAddress', 'PreciseLocation',
+      'PurchaseHistory', 'SensitiveInfo', 'UserID',
+    ]);
+    expect(manifest.NSPrivacyCollectedDataTypes.every((e) => e['NSPrivacyCollectedDataTypeTracking'] === false)).toBe(true);
+  });
+});
