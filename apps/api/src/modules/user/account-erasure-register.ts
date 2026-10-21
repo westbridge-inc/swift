@@ -61,7 +61,7 @@ export const ERASURE_UNDECIDED: Readonly<Record<string, string>> = {
   'Customer.userId': 'order totals and referral code/referredBy - recommend: keep totals, clear the referral link',
   'Rider.userId': 'document pointers are cleared; the profile row (vehicle, plate, photos) stays - recommend: de-identify',
   'Driver.userId': 'document pointers are cleared; the profile row (vehicle, plate, photos) stays - recommend: de-identify',
-  'ServiceProvider.userId': 'unverified at erasure; the profile row (bio, portfolio photos) stays - recommend: de-identify',
+  'ServiceProvider.userId': 'unverified at erasure; portfolio photos are deleted (stored objects via storage_orphans, then the pointers cleared); the profile row (bio) stays - recommend: de-identify',
   'VendorOwner.userId': 'a business closes through Support - recommend: confirm what the owner row keeps after closure',
   'Admin.userId': 'staff permissions - recommend: delete when the staff member leaves',
   'OpsAlertRecipient.userId': 'staff alert routing - recommend: delete when the staff member leaves',

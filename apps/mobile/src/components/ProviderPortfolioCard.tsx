@@ -5,13 +5,18 @@ import * as ImagePicker from 'expo-image-picker';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { color, radius, space } from '@swift/ui';
 import { Feather } from '@expo/vector-icons';
-import { Card, LinkText, T } from '../kit';
+import { Card, LinkText, PillButton, PopupCard, PopupTitle, T } from '../kit';
 import { servicesApi } from '../services/api';
 import { storePhotoUrl } from '../lib/images';
 import { prepareUploadImage } from '../lib/uploadImage';
 
 /** The API's limit (services.routes PORTFOLIO_MAX). */
 const PORTFOLIO_MAX = 12;
+
+/** A photo Swift keeps in a portfolio folder, exactly as the upload saves it (the API's
+ *  utils/public-photo-deletion key shapes). */
+const KEPT_PORTFOLIO_PHOTO = /^(?:\/uploads\/)?portfolio\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9_-]{1,16})?$/;
+const isKeptPortfolioPhoto = (photo: string) => KEPT_PORTFOLIO_PHOTO.test(photo);
 
 /**
  * [IMAGES-E2E] Photos of a service provider's own work. Customers see them on the
@@ -22,6 +27,8 @@ const PORTFOLIO_MAX = 12;
 export function ProviderPortfolioCard({ photos }: { photos: string[] }) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
+  // [REVIEW-F S4-1 on #1918] Removing deletes the photo from Swift for good: it is confirmed first.
+  const [confirming, setConfirming] = useState<string | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ['services', 'provider-me'] });
   const serverWords = (e: unknown, fallback: string) =>
     (e as { response?: { data?: { error?: { message?: string } } } })?.response?.data?.error?.message ?? fallback;
@@ -66,16 +73,24 @@ export function ProviderPortfolioCard({ photos }: { photos: string[] }) {
       </T>
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm, marginTop: space.md }}>
         {photos.map((photo) => {
-          const uri = storePhotoUrl(photo, 320);
+          // [REVIEW-F S4-2 · REVIEW-G S3-1] Only a photo Swift keeps is shown (to customers too); an
+          // address saved before photos were uploaded is named, so the provider can replace it.
+          const uri = isKeptPortfolioPhoto(photo) ? storePhotoUrl(photo, 320) : null;
           return (
             <View key={photo} style={{ width: 88, height: 66, borderRadius: radius.md, overflow: 'hidden', backgroundColor: color.surface.subtle }}>
-              {uri ? <Image source={{ uri }} style={{ width: '100%', height: '100%' }} contentFit="cover" accessibilityLabel="Photo of your work" /> : null}
+              {uri ? (
+                <Image source={{ uri }} style={{ width: '100%', height: '100%' }} contentFit="cover" accessibilityLabel="Photo of your work" />
+              ) : (
+                <View style={{ flex: 1, justifyContent: 'center', padding: space.xs, paddingRight: 26 }}>
+                  <T variant="caption" tone="muted" numberOfLines={3}>Not shown. Upload it again.</T>
+                </View>
+              )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Remove this photo"
                 disabled={remove.isPending}
-                onPress={() => remove.mutate(photo)}
-                hitSlop={8}
+                onPress={() => setConfirming(photo)}
+                hitSlop={11}
                 style={{ position: 'absolute', top: 4, right: 4, width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: color.scrim }}
               >
                 <Feather name="x" size={14} color={color.white} />
@@ -92,6 +107,23 @@ export function ProviderPortfolioCard({ photos }: { photos: string[] }) {
         )}
       </View>
       {error ? <T variant="caption" tone="error" style={{ marginTop: space.sm }}>{error}</T> : null}
+      <PopupCard visible={confirming !== null} onClose={() => setConfirming(null)}>
+        <PopupTitle variant="title" center>Remove this photo?</PopupTitle>
+        <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
+          It is deleted from Swift and customers stop seeing it.
+        </T>
+        <PillButton
+          label="Remove photo"
+          style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
+          loading={remove.isPending}
+          onPress={() => {
+            const photo = confirming;
+            setConfirming(null);
+            if (photo) remove.mutate(photo);
+          }}
+        />
+        <PillButton label="Keep it" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setConfirming(null)} />
+      </PopupCard>
     </Card>
   );
 }
