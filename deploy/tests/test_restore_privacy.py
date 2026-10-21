@@ -23,8 +23,9 @@ rest = args[i + 6:]
 fed = '' if sys.stdin.isatty() else sys.stdin.read()
 sql = rest[rest.index('-c') + 1] if '-c' in rest else (rest[rest.index('-tAc') + 1] if '-tAc' in rest else fed)
 kind = 'pg_restore' if 'pg_restore' in script else 'psql'
+ro = ' [ro]' if 'default_transaction_read_only=on' in script else ''
 with open(os.environ['CALL_LOG'], 'a') as log:
-    log.write(f'{kind} db={target} :: {" ".join(sql.split())[:300]}\n')
+    log.write(f'{kind} db={target} :: {" ".join(sql.split())[:300]}{ro}\n')
 fail = os.environ.get('FAIL', '')
 if kind == 'pg_restore':
     sys.exit(0)
@@ -38,13 +39,17 @@ if 'restore_ledger_' in sql and 'BEGIN;' in sql:
     if fail == 'replay': sys.exit(9)
     print('erasure ledger replayed: 0 destroyed keys, 0 receipts, 0 retired documents, 0 closed accounts in the live ledger; changed in this copy: nothing (the copy already matched)')
     sys.exit(0)
+if "to_regclass('public.deployment_identity')" in sql:
+    print('t' if os.environ.get('IDENT_LIVE') or os.environ.get('IDENT_COPY') else 'f'); sys.exit(0)
+if 'FROM deployment_identity' in sql:
+    print(os.environ.get('IDENT_COPY' if target == 'swift_restore_privacy' else 'IDENT_LIVE', 'none/none')); sys.exit(0)
 if 'pg_database WHERE datname' in sql: sys.exit(0)
 if 'count(*)' in sql: print('1')
 '''
 
 
 class RestoreQuarantineAndReplay(unittest.TestCase):
-    def run_restore(self, fail='', extra_args=()):
+    def run_restore(self, fail='', extra_args=(), **env_extra):
         root = Path(tempfile.mkdtemp(prefix='swift-restore-privacy-'))
         self.addCleanup(shutil.rmtree, root, True)
         deploy = root / 'deploy'
@@ -62,7 +67,7 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         dump.write_bytes(b'PGDMP synthetic')
         log = root / 'calls'
         log.write_text('')
-        env = dict(os.environ, PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail)
+        env = dict(os.environ, PATH=f'{bins}:{os.environ["PATH"]}', CALL_LOG=str(log), FAIL=fail, **env_extra)
         r = subprocess.run(['bash', str(deploy / 'restore.sh'), *extra_args, str(dump), 'swift_restore_privacy'],
                            env=env, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
         return r, log.read_text().splitlines()
@@ -127,6 +132,84 @@ class RestoreQuarantineAndReplay(unittest.TestCase):
         self.assertIn('nothing to replay', r.stdout)
         self.assertFalse(any(':: COPY (' in l for l in calls))
         self.assertIn('RESTORE OK', r.stdout)
+
+
+    # [#1977 COORD ruling 10:55Z] F S4-1: a failed replay leaves erased people whole in the copy, so the
+    # copy is DROPPED unless the operator asks to keep it (--keep-failed).
+    def test_a_failed_replay_drops_the_copy_unless_kept(self):
+        for fail in ('replay', 'export'):
+            with self.subTest(fail=fail):
+                r, calls = self.run_restore(fail)
+                self.assertNotEqual(r.returncode, 0)
+                restore = self.first(calls, 'pg_restore db=swift_restore_privacy')
+                drop = self.first(calls, 'DROP DATABASE "swift_restore_privacy"')
+                self.assertLess(restore, drop)
+                self.assertIn('was dropped', r.stderr)
+                self.assertNotIn('RESTORE OK', r.stdout)
+        r, calls = self.run_restore('replay', ('--keep-failed',))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(any('DROP DATABASE' in l for l in calls))
+        self.assertIn('--keep-failed', r.stderr)
+        self.assertIn('quarantined', r.stderr)
+
+    # F S4-2 + G: both deployment identities are printed before the replay; two different
+    # environments are never mixed (the ledger would not describe the copy).
+    def test_both_identities_are_printed_before_the_replay(self):
+        r, calls = self.run_restore(IDENT_LIVE='production/dep-a', IDENT_COPY='production/dep-a')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('live database identity : production/dep-a', r.stdout)
+        self.assertIn('restored copy identity : production/dep-a', r.stdout)
+        self.assertLess(r.stdout.index('restored copy identity'), r.stdout.index('erasure ledger replayed:'))
+        r, calls = self.run_restore(IDENT_LIVE='staging/dep-s', IDENT_COPY='production/dep-a')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('different environments', r.stderr)
+        self.assertFalse(any('BEGIN; CREATE TEMP TABLE restore_ledger_' in l for l in calls))
+        self.assertTrue(any('DROP DATABASE "swift_restore_privacy"' in l for l in calls))
+
+    # G S4-1: the production path can never write the live database while it reads the ledger.
+    def test_every_ledger_read_of_the_live_database_is_read_only(self):
+        r, calls = self.run_restore(IDENT_LIVE='production/dep-a', IDENT_COPY='production/dep-a')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        reads = [l for l in calls if l.startswith('psql db=swift_live_fixture') and ('COPY (' in l or 'to_regclass' in l or 'deployment_identity' in l)]
+        self.assertGreaterEqual(len(reads), 12, reads)
+        self.assertEqual([l for l in reads if not l.endswith('[ro]')], [])
+
+    # G S4-2: the closing words say the quarantine covers today's logins only.
+    def test_the_report_says_to_requarantine_before_use_and_drop_after(self):
+        r, _ = self.run_restore()
+        self.assertIn('re-run the quarantine before use', r.stdout)
+        self.assertIn('drop the copy after use', r.stdout)
+
+
+class DisasterRecoveryWithoutTheLiveDatabase(unittest.TestCase):
+    """[#1977 COORD ruling, REVIEW-F S3-1] With the live database gone there is no live ledger. A loud
+    DR mode restores the copy and keeps it quarantined, but never calls it restored."""
+    run_restore = RestoreQuarantineAndReplay.run_restore
+    first = RestoreQuarantineAndReplay.first
+
+    def test_the_dr_mode_needs_both_flags_and_refuses_before_anything(self):
+        for args in (('--no-live-ledger',), ('--i-know-live-is-gone',), ('--no-live-ledger', '--i-know-live-is-gone', '--compare-source')):
+            with self.subTest(args=args):
+                r, calls = self.run_restore('', args)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('--i-know-live-is-gone', r.stderr)
+                self.assertFalse(any('CREATE DATABASE' in l for l in calls))
+                self.assertNotIn('RESTORE OK', r.stdout)
+
+    def test_the_dr_mode_restores_quarantined_and_never_says_restore_ok(self):
+        r, calls = self.run_restore('', ('--no-live-ledger', '--i-know-live-is-gone'))
+        self.assertEqual(r.returncode, 3, r.stderr)
+        create = self.first(calls, 'CREATE DATABASE')
+        revoke = self.first(calls, 'REVOKE ALL ON DATABASE "swift_restore_privacy" FROM PUBLIC')
+        restore = self.first(calls, 'pg_restore db=swift_restore_privacy')
+        self.assertLess(create, revoke)
+        self.assertLess(revoke, restore)
+        self.assertTrue(any('REVOKE CONNECT' in l for l in calls[restore + 1:]))
+        # nothing is read from or written to a live database that is gone
+        self.assertEqual([l for l in calls if 'db=swift_live_fixture' in l], [])
+        self.assertIn('NOT erasure-complete: replay the off-site ledger before use', r.stdout + r.stderr)
+        self.assertNotIn('RESTORE OK', r.stdout + r.stderr)
+        self.assertFalse(any('DROP DATABASE' in l for l in calls))
 
 
 if __name__ == '__main__':

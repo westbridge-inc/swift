@@ -176,14 +176,30 @@ describe('[item 196] a restore replays the live erasure ledger before it reports
     expect(r.stdout).toContain('RESTORE OK');
   });
 
-  it('a replay that fails reports no restore, and leaves the copy quarantined and unchanged', () => {
-    const r = restore(before, { replaySuffix: '\nSELECT 1 / 0;\n' });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain('erasure ledger replay failed');
-    expect(r.stdout).not.toContain('RESTORE OK');
+  it('a replay that fails reports no restore and DROPS the copy (erased people must not sit in it); --keep-failed keeps it quarantined and unchanged', () => {
+    const dropped = restore(before, { replaySuffix: '\nSELECT 1 / 0;\n' });
+    expect(dropped.status).not.toBe(0);
+    expect(dropped.stderr).toContain('erasure ledger replay failed');
+    expect(dropped.stderr).toContain('was dropped');
+    expect(dropped.stdout).not.toContain('RESTORE OK');
+    expect(one('postgres', `SELECT count(*) FROM pg_database WHERE datname = '${dropped.scratch}'`)).toBe('0');
+    const kept = restore(before, { args: ['--keep-failed'], replaySuffix: '\nSELECT 1 / 0;\n' });
+    expect(kept.status).not.toBe(0);
+    expect(kept.stdout).not.toContain('RESTORE OK');
     // One transaction: nothing was half-applied, and nobody but the operator can open the copy.
+    expect(one(kept.scratch, `SELECT phone FROM users WHERE id = '${people.closed}'`)).toBe('+15550000002');
+    expect(loginRolesThatCanConnect(kept.scratch)).toBe('0');
+  });
+
+  it('the disaster-recovery mode (no live ledger) restores the copy quarantined and never calls it restored', () => {
+    const r = restore(before, { args: ['--no-live-ledger', '--i-know-live-is-gone'] });
+    expect(r.status, r.stderr + r.stdout).toBe(3);
+    expect(r.stdout + r.stderr).toContain('NOT erasure-complete: replay the off-site ledger before use');
+    expect(r.stdout + r.stderr).not.toContain('RESTORE OK');
+    // The backup's state, not erasure-complete: the person closed after the backup is still whole here.
     expect(one(r.scratch, `SELECT phone FROM users WHERE id = '${people.closed}'`)).toBe('+15550000002');
     expect(loginRolesThatCanConnect(r.scratch)).toBe('0');
+    expect(one('postgres', `SELECT coalesce(datacl::text, '') FROM pg_database WHERE datname = '${r.scratch}'`)).not.toMatch(/(^|[{,])=/);
   });
 
   it('every ledger entry reads tables and columns that exist in the Swift schema', () => {
