@@ -60,8 +60,8 @@ import { OPERATOR, OPERATOR_ADDRESS } from './operator';
 // Safety says partners' photos; [owner 17 Oct] a business's MMG payment details are shown to its own customer on
 // the order; [COORD 17 Oct] a business or mover handling an order sees the customer's first name and phone, never
 // the last name, and what a customer sees of the mover is listed in full. Material: re-accepted with a fresh tick (reaccept.ts MATERIAL_CHANGES).
-export const LEGAL_VERSION = '2026-10-18';
-const LAST_UPDATED = '18 October 2026'; // human form of LEGAL_VERSION
+export const LEGAL_VERSION = '2026-10-21';
+const LAST_UPDATED = '21 October 2026'; // human form of LEGAL_VERSION
 
 function page(title: string, body: string): string {
   return `<!doctype html>
@@ -191,7 +191,7 @@ export const PRIVACY = page(
 <li><b>To meet legal obligations:</b> keeping tax and accounting records, and responding to lawful demands from authorities.</li>
 <li><b>For legitimate interests, balanced against your rights:</b> preventing fraud and abuse (strikes, collusion checks, GPS-plausibility and account-security signals), keeping the platform safe and available, and producing aggregated, de-identified statistics (e.g. orders per day) that carry no personal data. You may object — see section 9.</li>
 <li><b>With your consent, separately asked and freely refusable:</b> marketing messages; background location for movers; the optional email on your profile. Consent can be withdrawn at any time without affecting the service.</li>
-<li><b>With your explicit consent:</b> police clearance certificates (optional for drivers and riders; required for service providers who visit homes).</li>
+<li><b>With your explicit consent:</b> police clearance certificates (optional for taxi drivers; required for service providers who visit homes).</li>
 </ul>
 
 <h2>4. Automated systems and human review</h2>
@@ -237,7 +237,7 @@ export const DRIVER_AGREEMENT = page(
 <p>You pay Swift a flat weekly subscription for the software, shown to you before you start and payable in the Swift app through MMG's checkout, or by card where the app offers it. Swift takes <b>no commission</b>: 100% of every fare, delivery fee and tip is yours, collected by you directly from the customer in cash — or, where you offer it, into your own MMG account under MMG's terms. A free trial, where offered, is shown with its end date. If the weekly fee is still unpaid 48 hours after it falls due, your ability to take new jobs pauses until the fee is settled. If you pay twice or pay too much, Swift may return the whole payment through MMG instead of a manual refund. You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you. A weekly fee paid before its week starts is Swift's own fee paid early: it is used only for that weekly fee and cannot be withdrawn or sent to anyone. If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded. Swift may change the weekly fee. We will tell you in the app at least 14 days before the change. The new fee applies from your first weekly fee due after that date. If you do not accept it, stop your plan before then; you will not pay the new fee.</p>
 
 <h2>3. Verification and documents</h2>
-<p>Before operating — and continuously afterwards — you must hold and keep current the documents the app lists for your vehicle class (for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A police clearance is optional: if you upload one and Swift approves it, your account is recorded as police-cleared; it is never needed to go online. You upload your documents in the app; they are verified before you can go online and re-verified as they expire, with renewal windows shown in advance. An expired required document takes you offline automatically until it is renewed. Handling of these documents is governed by the Privacy Policy.</p>
+<p>Before operating — and continuously afterwards — you must hold and keep current the documents the app lists for your vehicle class (for example: your driver's licence — or, if you ride a bicycle, your national ID or Digital ID card — vehicle registration, and insurance appropriate to carrying passengers where you drive passengers). A taxi driver may add a police clearance: if Swift approves it, your account is recorded as police-cleared; it is never needed to go online. You upload your documents in the app; they are verified before you can go online and re-verified as they expire, with renewal windows shown in advance. An expired required document takes you offline automatically until it is renewed. Handling of these documents is governed by the Privacy Policy.</p>
 
 <h2>4. Your vehicle and your conduct</h2>
 <p>You must operate legally and safely: a roadworthy, insured vehicle of the class you registered; compliance with Guyana's traffic laws; no operating under the influence; carrying only what your class allows (weight and bulk limits the app shows are binding); on courier jobs, carrying goods only — never letters, documents or mail, which in Guyana only the Post Office may carry; and treating customers, businesses and Swift staff with respect. You may not let anyone else work under your account; Swift may ask for a selfie, reviewed by a person, to confirm it is you.</p>

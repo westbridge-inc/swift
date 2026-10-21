@@ -191,9 +191,9 @@ describe('GET/POST /auth/legal-acceptance', () => {
     expect(await rows(person.id)).toHaveLength(0);
   });
 
-  it('[2026-10-18 non-material] a person who accepted 2026-10-17 is not asked again after the bump', async () => {
+  it('[2026-10-18 and 2026-10-21 non-material] a person who accepted 2026-10-17 is not asked again after either bump', async () => {
     const person = await mkUser(['CUSTOMER'] as UserRole[], '2026-10-17');
-    expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-18', acceptedVersion: '2026-10-17', needsAcceptance: false, summary: [] });
+    expect((await call('GET', person.token)).json().data).toMatchObject({ currentVersion: '2026-10-21', acceptedVersion: '2026-10-17', needsAcceptance: false, summary: [] });
   });
 
   it('a person already at the served version is not asked', async () => {

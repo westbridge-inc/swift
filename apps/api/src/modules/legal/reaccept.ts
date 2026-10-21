@@ -46,6 +46,11 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     version: '2026-10-18',
     why: 'Privacy section 6 now says a customer\u2019s own ID is kept while the account is open and deleted with the account, which is what already happens; it takes nothing from anyone.',
   },
+  {
+    // [ROLE-DOCS · owner 21 Oct 2026; classed non-material by the builder, COORD to confirm; pre-launch]
+    version: '2026-10-21',
+    why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
+  },
 ];
 
 /** The newest material version that is already being served, or null. */

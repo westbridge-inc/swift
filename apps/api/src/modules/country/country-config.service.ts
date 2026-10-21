@@ -349,8 +349,9 @@ export class CountryConfigService {
    *   CAR (taxi) → the above + MOVER_TAXI_EXTRA (hire permit, the car photo with
    *                the plate showing, fitness — master plan §3.1)
    * [VERIFY-DOCS · owner rulings 6 Oct 2026] the base itself is empty: police
-   * clearance is optional for every mover, and a licence holder's national ID
-   * is optional (getMoverOptionalDocuments).
+   * clearance is never required of a mover. [ROLE-DOCS · owner 21 Oct 2026] Only a
+   * taxi driver may add one, and a licence holder is not asked for a national ID
+   * (getMoverOptionalDocuments).
    * An unseeded profile key resolves to no extra documents. Used both to display
    * the checklist and to gate live operation.
    */

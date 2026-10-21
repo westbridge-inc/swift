@@ -68,11 +68,12 @@ const submitDocumentSchema = z.object({
   ...consentFields,
 });
 
-// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match: the selfie is optional. Store build 9
-// still sends one (it must be the caller's own upload); a newer app sends the ID alone.
+// [Owner ruling 8 Oct 2026 — CUSTOMER ID] No face match. [ROLE-DOCS · owner 21 Oct 2026] No selfie
+// either: store build 9 still sends `selfieUrl`; the schema no longer names it, so zod's default
+// (strip) DROPS it here and the old app keeps working — it never reaches the service and is never
+// resolved, read or stored. A newer app sends the ID alone.
 const submitIdentitySchema = z.object({
   idDocumentUrl: z.string().min(5).max(2048),
-  selfieUrl: z.string().min(5).max(2048).optional(),
   ...consentFields,
 });
 
@@ -309,7 +310,6 @@ export async function verificationRoutes(app: FastifyInstance) {
     const doc = await verification.submitIdentity(
       request.user.userId,
       body.idDocumentUrl,
-      body.selfieUrl,
       body.privacyNoticeVersion,
     );
     // [R17 · in-app ¶15] the customer's tick to keep the ID photo

@@ -75,8 +75,12 @@ import { DEFAULT_TAXI_RATES } from '../country/pricing-config';
  *  photographer and tutor keep theirs.
  *  2026-10-16.1 [owner 16 Oct]: 2026-10-15.2 with the heavy-equipment operator
  *  HELD again (licence rules unconfirmed): its list is gone; pest control,
- *  chef, caterer, photographer and tutor keep theirs. */
-export const PLATFORM_CONFIG_VERSION = '2026-10-16.1';
+ *  chef, caterer, photographer and tutor keep theirs.
+ *  2026-10-21.1 [ROLE-DOCS · owner 21 Oct]: 2026-10-16.1 with the optional
+ *  national ID gone for every mover, the optional police clearance kept for
+ *  taxi drivers only (MOVER_TAXI_EXTRA_OPTIONAL; MOVER_OPTIONAL removed), and
+ *  the unused CUSTOMER_L2 list removed. */
+export const PLATFORM_CONFIG_VERSION = '2026-10-21.1';
 
 /**
  * The declaration a tier map carries to say it is the COMPLETE partner card:
@@ -150,15 +154,19 @@ const peggedTaxiAnchor = { base: 1000, perKm: 300, perMin: 25, minimum: 1500 };
 export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // Movers: the base list holds what EVERY vehicle needs — nothing on its own since the
     // owner's rulings of 6 Oct 2026; each vehicle adds its profiles (config/vehicle-classes).
-    //  - Police clearance is OPTIONAL for every mover (rulings 1, 2): no Guyana law found
-    //    requires it of drivers or riders; an approved one is the "Police-cleared" flag.
-    //  - A driver's licence is photo ID, so a motorised mover's national ID is OPTIONAL;
-    //    a bicycle rider holds no licence and keeps the national ID (ruling 4).
+    //  - Police clearance is never REQUIRED of a mover (rulings 1, 2): no Guyana law found
+    //    requires it of drivers or riders. [owner 21 Oct] Only a taxi driver may add one.
+    //  - A driver's licence is photo ID, so a motorised mover is not asked for a national ID
+    //    at all [owner 21 Oct; was optional]; a bicycle rider holds no licence and keeps the
+    //    national ID (ruling 4).
     //  - The taxi's separate plate photo is merged into the car photo, which shows the
     //    plate (ruling 5). Nothing read the plate photo; the plate cross-check is the
     //    insurance review's, unchanged.
     MOVER: [],
-    MOVER_OPTIONAL: ['national_id', 'police_clearance'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No mover is offered a second ID: a driver's licence is photo ID, so
+    // the optional national ID is gone for every vehicle partner (a bicycle rider keeps it REQUIRED, below).
+    // The optional police clearance stays for TAXI drivers only (MOVER_TAXI_EXTRA_OPTIONAL); delivery riders
+    // are not offered it (no Guyana law asks it of them, and it is criminal-record data, DPA 2023 s.2).
     MOVER_NO_LICENCE: ['national_id'],
     MOVER_MOTOR: ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'],
     // [VERIFY-DOCS · ruling 8] A taxi's seven: the licence, registration and insurance above, plus the
@@ -166,6 +174,9 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     // with the plate showing, and the certificate of fitness. The two licences replace the single
     // hire-car permit; [owner 15 Oct 2026] the permit never counts as either (no grace: verification/hire-permit-grace).
     MOVER_TAXI_EXTRA: ['hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'],
+    // [ROLE-DOCS · owner 21 Oct 2026] A taxi driver MAY add a police clearance (an approved, current one is
+    // the "Police-cleared" flag); it never gates. Not offered to delivery riders.
+    MOVER_TAXI_EXTRA_OPTIONAL: ['police_clearance'],
     MOVER_COMMERCIAL: ['road_service_licence', 'fitness_cert'],
     // [VERIFY-DOCS · ruling 7] No TIN certificate: no law found requires Swift to hold it, and the image
     // pairs a person's name and address with their tax-account login. A VAT-registered store may type its
@@ -207,7 +218,9 @@ export const DEFAULT_DOCUMENT_CHECKLISTS: Record<string, string[]> = {
     SERVICE_PROVIDER_TRADE_PHOTOGRAPHER: ['police_clearance'],
     // Works with children, often in their homes: the police clearance is required, never optional.
     SERVICE_PROVIDER_TRADE_TUTOR: ['police_clearance'],
-    CUSTOMER_L2: ['national_id', 'selfie'],
+    // [ROLE-DOCS · owner 21 Oct 2026] No CUSTOMER_L2 list: a customer's ID is `identity_l2` on its own
+    // (verification.service submitIdentity) and a customer never gives a photo (owner 16 Oct). The list
+    // was read by nothing but the registry seed, which minted a selfie requirement from it.
 };
 
 /**

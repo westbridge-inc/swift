@@ -179,7 +179,7 @@ export function useUploadFile() {
 export function useSubmitIdentity() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
+    mutationFn: async (data: { idDocumentUrl: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
         // [R17 · in-app ¶15] the screen's tick (build 12) is recorded in the consent ledger
