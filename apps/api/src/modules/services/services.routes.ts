@@ -380,13 +380,19 @@ export async function servicesRoutes(app: FastifyInstance) {
     const body = jobRequestSchema.parse(request.body);
     const customerId = request.user.userId;
     const tenantId = authenticatedTenant();
-    const job = await createServiceJobWithLiveAuthority(app.prisma, {
+    const { job, created } = await createServiceJobWithLiveAuthority(app.prisma, {
       customerId,
       tenantId,
       providerId: body.providerId,
       description: body.description,
       photos: body.photos ?? [],
     });
+    // A retry of a request that already landed gets the first job back with
+    // the same answer, and the provider is not told twice.
+    if (!created) {
+      reply.code(201);
+      return { success: true, data: job };
+    }
 
     // THE FIRST STEP WAS THE ONE THAT DIDN'T RING.
     //
