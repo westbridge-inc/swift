@@ -38,6 +38,7 @@ import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
+import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 import {
   OWNER_WALL_NOTICE_ACTIONS, insertNoticeFor, noticeId, pendingStaffInvitesOf, publicPhoneAsked, staffInviteesOf, upsertNoticeFor,
 } from '../lib/owner-wall-notices';
@@ -310,6 +311,20 @@ describe('[item 20] notifications written for someone else', () => {
     expect(await asked()).toBe(1);
   });
 
+  it('a store that goes live under billing\'s hold tells its owner to pay the weekly fee, from inside an admin\'s transaction (#1906)', async () => {
+    const { VerificationService } = await import('../modules/verification/verification.service');
+    const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+    const svc = new VerificationService(app.prisma, await notices(), getKycProvider());
+    // The projection's own step (private), on the hold's edge: an admin's approve or a job runs the projection.
+    const tell = (svc as unknown as { tellOwnerFeeHoldsGoLive(db: Prisma.TransactionClient, userId: string, vendor: { id: string; name: string }): Promise<void> }).tellOwnerFeeHoldsGoLive.bind(svc);
+    const vendor = { id: `hold-${RUN}`, name: STORE_NAME };
+    const told = () => owner.notification.findMany({ where: { userId: ids.storeOwner, data: { path: ['vendorId'], equals: vendor.id } } });
+    await asPerson(ids.other, () => app.prisma.$transaction((tx) => tell(tx, ids.storeOwner, vendor)));
+    expect(await told()).toEqual([expect.objectContaining({
+      userId: ids.storeOwner, type: 'SYSTEM_ANNOUNCEMENT', title: 'Documents approved', data: { vendorId: vendor.id },
+    })]);
+  });
+
   it('a once-a-day notice to a store owner, from a customer\'s checkout, is still sent once', async () => {
     const { tellOwnerHomeVisitsPaused } = await import('../modules/verification/home-visits');
     const service = await notices();
@@ -435,12 +450,12 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
                      FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE a.privilege_type = 'EXECUTE' ORDER BY 1) AS grantees
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
        WHERE p.proname LIKE 'swift_owner_wall_%' ORDER BY 1`;
-    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS].sort());
+    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS, ...OWNER_WALL_TICKET_ACTIONS].sort());
     for (const r of rows) {
       expect(r, r.name).toMatchObject({ secdef: true });
       expect(r.config, r.name).toContain('search_path=pg_catalog, public');
       expect([...r.grantees].sort(), r.name).toEqual([r.owner, 'swift_app'].sort());
-      expect(r.src.match(/(?<![.\w])(notifications|device_tokens)\b/g), `${r.name} names its table unqualified`).toBeNull();
+      expect(r.src.match(/(?<![.\w])(notifications|device_tokens|support_tickets)\b/g), `${r.name} names its table unqualified`).toBeNull();
     }
   });
 
@@ -498,7 +513,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/inactivity.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 4,
+      'modules/verification/verification.service.ts insertNoticeFor': 5,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
