@@ -27,8 +27,12 @@ interface ParcelView {
 }
 
 /** The recipient's words for the courier state machine — a sentence, not an
- *  enum. Unknown states fall through to the raw value rather than lying. */
+ *  enum. A state with no words here reads "In progress", never the raw code. */
 const STATUS_LABEL: Record<string, string> = {
+  // [BUG-GUARDS C5] A parcel just booked (or a status this page has no words
+  // for) used to print the raw code, e.g. "PENDING".
+  PENDING: 'Finding a courier',
+  ACCEPTED: 'Courier found',
   READY_FOR_PICKUP: 'Finding a courier',
   RIDER_ASSIGNED: 'Courier assigned',
   RIDER_EN_ROUTE_PICKUP: 'Courier heading to pickup',
@@ -42,6 +46,8 @@ const STATUS_LABEL: Record<string, string> = {
   // [E17 · DS231 F5] The courier could not deliver: the parcel goes back.
   RETURNING: 'Going back to the sender',
   RETURNED: 'Returned to the sender',
+  REFUNDED: 'This delivery was refunded',
+  FAILED: 'This delivery could not be completed',
 };
 
 // RETURNED is over too: the page stops polling a parcel that has gone back.
@@ -155,7 +161,7 @@ export function TrackClient({ token }: { token: string }) {
         ) : (
           <>
             <div className="mt-4 sw-card p-4">
-              <p className="text-base font-semibold">{STATUS_LABEL[view.status] ?? view.status}</p>
+              <p className="text-base font-semibold">{STATUS_LABEL[view.status] ?? 'In progress'}</p>
               {/* [W-47] aria-live so a screen reader hears the position age change,
                   and red once it stops being current — the page used to look
                   identical whether it was polling or had silently stopped. */}

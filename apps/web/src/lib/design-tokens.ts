@@ -59,6 +59,9 @@ export const swiftDesignVariables: SwiftCssVariables = {
   '--swift-ink': color.text.primary,
   '--swift-muted': color.text.secondary,
   '--swift-muted-soft': color.text.muted,
+  // [WEB-LAUNCH-CHECK F2] Grey text on the soft-pink panel (--swift-subtle):
+  // the plain grey is 4.32:1 there; this one step darker is 5.0:1 (WCAG AA 4.5:1).
+  '--swift-muted-on-subtle': '#6E6262',
   '--swift-canvas': color.surface.subtle,
   '--swift-card': color.surface.base,
   '--swift-sunken': color.surface.sunken,

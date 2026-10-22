@@ -26,6 +26,7 @@
   height: calc(var(--swift-hero-height) - var(--swift-space-5xl));
   border-radius: var(--swift-radius-xl);
   background: var(--swift-vertical-bg);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-vertical-ink);
 }
 
@@ -128,6 +129,7 @@
   padding-inline: var(--swift-space-md) var(--swift-space-xs);
   border-radius: var(--swift-radius-md);
   background: var(--swift-vertical-bg);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-vertical-ink);
   font-size: var(--swift-type-caption);
   line-height: var(--swift-leading-caption);
@@ -442,6 +444,8 @@
 
 .popular {
   background: var(--swift-red-50);
+
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
 }
 
@@ -479,6 +483,7 @@
   height: var(--swift-menu-image);
   border-radius: var(--swift-radius-md);
   background: var(--swift-vertical-bg);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-vertical-ink);
 }
 
@@ -756,6 +761,7 @@
   border: thin solid var(--swift-red);
   border-radius: var(--swift-radius-md);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
 }
 
@@ -943,6 +949,7 @@
   flex: none;
   border-radius: var(--swift-radius-md);
   background: var(--swift-vertical-bg);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-vertical-ink);
 }
 
@@ -1026,6 +1033,7 @@
   padding: var(--swift-space-xs) var(--swift-space-sm);
   border-radius: var(--swift-radius-full);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
   font-family: var(--swift-font-body-semibold), system-ui, sans-serif;
   font-size: var(--swift-type-micro);

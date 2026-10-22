@@ -217,6 +217,16 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
 // Kit 14–20: cover hero + floating chips, white sheet w/ name + info strip,
 // promos row, Recommended/Best-seller rails, then the full menu by category.
 export function RestaurantScreen() {
+  const route = useRoute<any>();
+  // [UI-SWEEP U10 S3-1] A store link or QR goes back to a store page already
+  // in the stack (navigate + pop) and hands the SAME mounted page the new
+  // store. The aisle, menu section, search and open sheets below belong to
+  // ONE store: a new store id is a new page, so store A's menu section can
+  // never empty store B's menu and A's report sheet can never file against B.
+  return <RestaurantStore key={route.params?.vendorId ?? ''} />;
+}
+
+function RestaurantStore() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
   const insets = useSafeAreaInsets();
@@ -428,7 +438,7 @@ export function RestaurantScreen() {
                 size={44}
                 active={!!v.isFavorite}
                 onPress={() =>
-                  isAuthenticated ? toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
+                  isAuthenticated ? !toggleFav.isPending && toggleFav.mutate({ vendorId, isFavorite: !!v.isFavorite }) : promptLogin()
                 }
               />
               <CircleChip
