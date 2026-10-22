@@ -30,6 +30,8 @@ import {
   type VendorBookingException,
 } from '../../../hooks/vendorops';
 import { money } from '../../../lib/money';
+import { errorMessage } from '../../../lib/apiError';
+import { touchTarget } from '../../../kit/touch-target';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
 
 function AppointmentCard({ b }: { b: VendorBooking }) {
@@ -86,6 +88,9 @@ export function VendorScheduleScreen({ navigation }: any) {
   const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
   const blockValid = fullDay || (HHMM.test(blockStart) && HHMM.test(blockEnd) && blockStart < blockEnd);
 
+  // [UI-SWEEP, web #2013 twin] The popup closes only when the block is saved.
+  // It used to close on ANY answer, so a refused block vanished without a
+  // word and the provider believed the afternoon was blocked.
   const submitBlock = () => {
     createBlock.mutate(
       {
@@ -93,13 +98,18 @@ export function VendorScheduleScreen({ navigation }: any) {
         ...(fullDay ? {} : { start: blockStart, end: blockEnd }),
         ...(blockReason.trim() ? { reason: blockReason.trim() } : {}),
       },
-      { onSettled: () => setBlocking(false) },
+      { onSuccess: () => setBlocking(false) },
     );
   };
+  const openBlocking = () => {
+    createBlock.reset();
+    setBlocking(true);
+  };
+  const blockWhen = (e: VendorBookingException) => (e.start ? `${e.start}–${e.end}` : 'all day');
 
   return (
     <Screen>
-      <SubHeader title="Schedule" navigation={navigation} hideBack action={{ label: 'Block time', onPress: () => setBlocking(true) }} />
+      <SubHeader title="Schedule" navigation={navigation} hideBack action={{ label: 'Block time', onPress: openBlocking }} />
       <View style={{ paddingHorizontal: GUTTER, marginBottom: space.md }}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.sm }}>
           {strip.map((d) => (
@@ -111,12 +121,22 @@ export function VendorScheduleScreen({ navigation }: any) {
         <LoadingBlock />
       ) : q.isError ? (
         <ErrorState message="We couldn't load your schedule. Check your connection and try again." onRetry={() => q.refetch()} />
+      ) : exceptionsQ.isError ? (
+        // [UI-SWEEP, web #2013 twin] Failure first: a failed blocked-time read
+        // never reads as "No bookings this day" (the day may be blocked).
+        <ErrorState message="We couldn't load your blocked time. Check your connection and try again." onRetry={() => exceptionsQ.refetch()} />
       ) : (
         <ScrollView
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
         >
+          {deleteBlock.isError ? (
+            // [UI-SWEEP, web #2013 twin] A refused unblock is said, never silent.
+            <T variant="caption" tone="error" style={{ marginBottom: space.sm }}>
+              {errorMessage(deleteBlock.error, 'Couldn’t remove that block. Try again.')}
+            </T>
+          ) : null}
           {dayBlocks.map((e) => (
             <Card
               key={e.id}
@@ -128,7 +148,7 @@ export function VendorScheduleScreen({ navigation }: any) {
               <Feather name="slash" size={16} color={color.text.muted} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold">
-                  {e.start ? `Blocked · ${e.start}–${e.end}` : 'Blocked · all day'}
+                  Blocked · {blockWhen(e)}
                 </T>
                 {e.reason ? (
                   <T variant="caption" tone="muted" numberOfLines={1}>
@@ -136,7 +156,15 @@ export function VendorScheduleScreen({ navigation }: any) {
                   </T>
                 ) : null}
               </View>
-              <Pressable onPress={() => deleteBlock.mutate(e.id)} hitSlop={10} accessibilityLabel="Remove block">
+              <Pressable
+                onPress={() => deleteBlock.mutate(e.id)}
+                disabled={deleteBlock.isPending}
+                hitSlop={10}
+                accessibilityRole="button"
+                accessibilityLabel={`Remove block, ${blockWhen(e)}`}
+                accessibilityState={{ disabled: deleteBlock.isPending }}
+                style={touchTarget(18)}
+              >
                 {({ pressed }) => <Feather name="x" size={18} color={color.text.muted} style={{ opacity: pressed ? 0.5 : 1 }} />}
               </Pressable>
             </Card>
@@ -178,6 +206,12 @@ export function VendorScheduleScreen({ navigation }: any) {
         <View style={{ alignSelf: 'stretch', marginBottom: space.lg }}>
           <LabeledInput label="Note (only you see this)" value={blockReason} onChangeText={setBlockReason} placeholder="Optional" />
         </View>
+        {createBlock.isError ? (
+          // [UI-SWEEP, web #2013 twin] The refusal stays on screen with the form.
+          <T variant="caption" tone="error" center style={{ alignSelf: 'stretch', marginBottom: space.md }}>
+            {errorMessage(createBlock.error, 'Couldn’t block that time. Try again.')}
+          </T>
+        ) : null}
         {/* [#947's grammar] Disabled says the ask. */}
         <PillButton
           label={blockValid ? 'Block time' : 'Times must be HH:MM, start before end'}
