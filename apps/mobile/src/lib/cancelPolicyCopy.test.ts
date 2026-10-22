@@ -23,7 +23,8 @@ const FAQ_SCREEN = read('src', 'modules', 'profile', 'screens', 'FaqScreen.tsx')
 const RULES: Array<{ rule: string; terms: RegExp; answer: RegExp }> = [
   { rule: 'a store order is free until the store accepts it', terms: /cancel an Order free while the Business has not yet accepted it/, answer: /free, while the store hasn’t accepted your order/ },
   { rule: 'after acceptance: no in-app cancel, contact the store', terms: /can no longer be cancelled in the app: contact the Business/, answer: /can’t be cancelled in the app: contact the store/ },
-  { rule: 'rides, parcels, bookings: 5 minutes after acceptance', terms: /five minutes after a driver, rider or provider accepts it/, answer: /for 5 minutes after a driver, rider or provider accepts/ },
+  // [owner 22 Oct 2026] one minute (was five), as the server's FREE_CANCEL_WINDOW_MIN enforces it.
+  { rule: 'rides, parcels, bookings: 1 minute after acceptance', terms: /for one minute after a driver, rider or provider accepts it/, answer: /for 1 minute after a driver, rider or provider accepts/ },
   { rule: 'a service job: free until booked', terms: /free in the app until the job is booked/, answer: /service job can be cancelled free until it is booked/ },
   { rule: 'still free when nobody was found or it runs very late', terms: /no driver or rider was found for your Order, or when it is running very late/, answer: /no driver or rider was found, or if it is running very late/ },
   { rule: 'never once on its way', terms: /Once your Order is on its way/, answer: /Once it is on its way, it can’t be cancelled/ },

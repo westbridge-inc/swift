@@ -5,7 +5,7 @@ import { generateKeyPair, type KeyObject } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig, ORDER_HOLD_FLOOR_MIN } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
 import { identitySalt } from '../modules/integrity/normalize';
@@ -518,16 +518,19 @@ describe('[ledger E08] production must be explicit about the order hold', () => 
     expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
   });
 
-  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '2', '4.99'])(
-    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the free-cancel window',
+  // [CANCEL-WINDOW · owner 22 Oct 2026] '1' joins the list: the free-cancel window after acceptance is now one
+  // minute, but the hold floor stays the settled five minutes (ORDER_HOLD_FLOOR_MIN) — the guard is never relaxed.
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '1', '2', '4.99'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the settled five-minute hold',
     (minutes) => {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
         .toThrow(/ORDER_HOLD_MINUTES/);
     },
   );
 
-  it('accepts the unset default and any hold at least as long as the free-cancel window (DS214 D1)', () => {
-    expect(FREE_CANCEL_WINDOW_MIN).toBe(5);
+  it('accepts the unset default and any hold at least the settled five minutes (DS214 D1) — not the one-minute window', () => {
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(ORDER_HOLD_FLOOR_MIN).toBe(5);
     for (const minutes of [undefined, '5', '7', '10']) {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
         .not.toThrow();
