@@ -33,7 +33,7 @@ import { feeCheckoutEveryPlatformOn } from './fee-checkout-switch';
 // production) and the checkout off, or killed on one platform, no partner
 // could pay with MMG, so the fee is paused rather than failed toward a
 // suspension nobody could pay their way out of. Production also refuses to
-// boot MMG_DRIVER=live without MMG_CHECKOUT_ENABLED=1 (mmg-checkout.ts).
+// boot MMG_DRIVER=live without MMG_CHECKOUT_ENABLED=1 (utils/boot-config.ts).
 //
 // The card rail counts as a live way to pay only when a partner can open it
 // (weeklyFeeCardLive: v2 on, not killed, a real provider; never the
