@@ -95,6 +95,27 @@ INSERT INTO restore_replay_changes SELECT 'device tokens', count(*) FROM c;
 WITH c AS (DELETE FROM verification_decision_outbox t USING restore_closed_ids x WHERE t."userId" = x.id
   AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'verification_decision_outbox' AND k.id = t.id::text) RETURNING 1)
 INSERT INTO restore_replay_changes SELECT 'queued approval work', count(*) FROM c;
+-- [#1905] What account erasure now also clears (account-erasure-register ERASURE_CLEARED); a row the live
+-- erasure kept (a held check-in delivery, a card session that is payment evidence, an owed revocation) is
+-- in the kept-rows ledger and stays.
+WITH c AS (DELETE FROM notifications t USING restore_closed_ids x WHERE t."userId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'notifications' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'in-app notices', count(*) FROM c;
+WITH c AS (DELETE FROM mover_revocation_outbox t USING restore_closed_ids x WHERE t."userId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'mover_revocation_outbox' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'finished mover access changes', count(*) FROM c;
+WITH c AS (DELETE FROM guardian_checkin_deliveries t USING restore_closed_ids x WHERE t."userId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'guardian_checkin_deliveries' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'safety check-in deliveries', count(*) FROM c;
+WITH c AS (DELETE FROM card_sessions t USING restore_closed_ids x WHERE t."userId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'card_sessions' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'card sessions that moved no money', count(*) FROM c;
+WITH c AS (DELETE FROM renewal_schedule t USING restore_closed_ids x WHERE t."subjectId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'renewal_schedule' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'document renewal reminders', count(*) FROM c;
+WITH c AS (DELETE FROM admins t USING restore_closed_ids x WHERE t."userId" = x.id
+  AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'admins' AND k.id = t.id::text) RETURNING 1)
+INSERT INTO restore_replay_changes SELECT 'staff permissions', count(*) FROM c;
 WITH c AS (DELETE FROM advertiser_members t USING restore_closed_ids x WHERE t."userId" = x.id
   AND NOT EXISTS (SELECT 1 FROM restore_kept_rows k WHERE k.tbl = 'advertiser_members' AND k.id = t."advertiserId" || '/' || t."userId") RETURNING 1)
 INSERT INTO restore_replay_changes SELECT 'advertiser memberships', count(*) FROM c;

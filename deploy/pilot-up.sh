@@ -551,6 +551,16 @@ if "osrm" not in s or any(x.get("ports") for x in s.values()):
 }
 verify_private_ports
 
+# [Row 324] Uploads outlive the application: the API and the worker must declare ONE
+# durable store (the same bucket, or one external shared volume), never a container
+# disk. Checked on the rendered configuration before anything is pulled, built or
+# stopped. The checker prints a fixed verdict only, never a configuration value.
+verify_upload_storage() {
+  "${COMPOSE[@]}" config --format json | python3 "$HERE/check-upload-storage.py" >/dev/null ||
+    die "upload storage topology refused: the API and the worker must share one durable store (one bucket, or one external volume)"
+}
+verify_upload_storage
+
 # [PROD-PATH] The database-only stage never runs under a serving API: a
 # migration under a live old binary is exactly what the full deploy stops
 # the API to avoid. Refused before anything is pulled or built.

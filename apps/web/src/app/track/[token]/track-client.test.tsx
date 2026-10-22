@@ -42,4 +42,12 @@ describe('the public tracking page on the return leg', () => {
     expect(await screen.findByText('Returned to the sender')).toBeTruthy();
     await waitFor(() => expect(screen.queryByText(/door to door/)).toBeNull());
   });
+
+  // [BUG-GUARDS C5] A parcel just booked, or a status the page has no words for, never shows its code.
+  it.each([['PENDING', 'Finding a courier'], ['FAILED', 'This delivery could not be completed'], ['SOMETHING_NEW', 'In progress']])('%s reads as words', async (status, words) => {
+    serve(status);
+    render(<TrackClient token="t-c5" />);
+    expect(await screen.findByText(words)).toBeTruthy();
+    expect(screen.queryByText(status)).toBeNull();
+  });
 });

@@ -6,7 +6,6 @@ import { SwitchAppSheet } from './customer-shell';
 import { mockApi, renderWithQuery, stubAudioContext } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
 import OrdersPage from '@/app/dashboard/orders/page';
-import TodayPage from '@/app/dashboard/page';
 import { expect } from 'vitest';
 const push = vi.fn();
 vi.mock('next/navigation', () => ({ usePathname: () => '/portal', useRouter: () => ({ push, replace: vi.fn() }) }));
@@ -79,15 +78,7 @@ describe('partner redesign', () => {
     expect(screen.getByRole('button', { name: /Needs attention/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Unrecognised/ })).toBeTruthy();
   });
-  it('sends the inverse server open state through the existing toggle endpoint', async () => {
-    const writes: unknown[] = [];
-    mockApi(({ url, method, init }) => {
-      if (method === 'PUT') { writes.push({ path: url.pathname, body: JSON.parse(String(init?.body)) }); return { body: { success: true } }; }
-      if (url.pathname.endsWith('/low-stock')) return { body: { success: true, data: [] } };
-      return { body: { success: true, data: { vendor: { isCurrentlyOpen: true, acceptingOrders: true, averageRating: 5, totalRatings: 1 }, today: { orders: 0, revenue: 0 }, week: { orders: 0, revenue: 0 }, month: { orders: 0, revenue: 0 } } } };
-    });
-    const view = renderWithQuery(<TodayPage />);
-    await view.user.click(await screen.findByRole('switch', { name: 'Store open' }));
-    await waitFor(() => expect(writes).toEqual([{ path: '/api/v1/vendor/vendor/toggle-open', body: { isCurrentlyOpen: false } }]));
-  });
+  // The store-open switch moved with the old Today page into the Orders home;
+  // it is tested there (orders-home.test.tsx, "opens and closes the store…").
+
 });

@@ -19,6 +19,7 @@ import {
 import { MutationError } from '@/components/MutationError';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 import { REASON_MIN } from '@/lib/reason-rules';
+import Link from 'next/link';
 
 /**
  * [MMG support lookup] Find a partner's MMG weekly-fee payment.
@@ -77,6 +78,26 @@ const when = (iso: string | null) => (iso
   : '—');
 const day = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en-GB', { timeZone: 'America/Guyana', day: 'numeric', month: 'short', year: 'numeric' }) : '—');
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : 'Something went wrong.');
+
+/**
+ * [U07] A return (or a held return's resolution) is a money action: its first
+ * answer is a second admin's approval. Once it is queued — or the server says
+ * an earlier ask for it is still waiting — the form is LOCKED: every further
+ * press used to file another approval for the same payment.
+ */
+function isQueuedAnswer(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === 'APPROVAL_REQUIRED' || code === 'APPROVAL_ALREADY_OPEN';
+}
+
+function WaitingForApproval() {
+  return (
+    <p role="status" className="text-xs text-[var(--muted)]">
+      Sent for a second admin&apos;s approval. Nothing has changed yet. Once approved, execute it from{' '}
+      <Link href="/approvals" className="underline">Approvals</Link>. Do not ask again.
+    </p>
+  );
+}
 
 function StatusPill({ status }: { status: MmgCheckoutSupportStatus }) {
   return <span className={`px-2.5 py-1 rounded-full text-xs whitespace-nowrap ${STATUS_TONE[status]}`}>{STATUS_WORDS[status]}</span>;
@@ -341,6 +362,8 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   const view = useQuery({ queryKey: ['mmg-fee-reversal', checkoutId], queryFn: () => fetchMmgFeeReversal(checkoutId), refetchOnWindowFocus: false });
   const refresh = () => qc.invalidateQueries({ queryKey: ['mmg-fee-reversal', checkoutId] });
   const ask = useMutation({ mutationFn: () => reverseMmgFeePayment(checkoutId, Number(typed), reason.trim()), onSettled: refresh });
+  // Two presses in one frame both see isPending false: the ref is set at once.
+  const sending = useRef(false);
   const check = useMutation({ mutationFn: (id: string) => checkMmgFeeReversal(id), onSettled: refresh });
   const v = view.data?.data as MmgFeeReversalView | undefined;
   // A failed read is said out loud: hiding the panel would hide a return that is held for a person.
@@ -356,7 +379,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
   if (!v || typeof v !== 'object' || typeof v.canReverse !== 'boolean' || !Array.isArray(v.reversals)) return null;
   const amountOk = typed.trim() !== '' && Number(typed) === amount;
   const reasonOk = reason.trim().length >= REASON_MIN;
-  const queued = (ask.error as { code?: string } | null)?.code === 'APPROVAL_REQUIRED';
+  const queued = isQueuedAnswer(ask.error);
 
   return (
     <section aria-label="Return this payment" className="rounded-lg border border-[var(--border)] p-4 space-y-3 text-sm">
@@ -390,7 +413,12 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
       ) : (
         <form
           className="space-y-2"
-          onSubmit={(e) => { e.preventDefault(); if (amountOk && reasonOk) ask.mutate(); }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!amountOk || !reasonOk || queued || sending.current) return;
+            sending.current = true;
+            ask.mutate(undefined, { onSettled: () => { sending.current = false; } });
+          }}
         >
           <p className="text-xs text-[var(--muted)]">
             MMG returns the whole payment ({gyd(amount)} {currencyCode}) to the partner&apos;s MMG account, and Swift deducts it from
@@ -401,6 +429,7 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
             onChange={(e) => setReason(e.target.value)}
             rows={2}
             maxLength={500}
+            disabled={queued}
             aria-label="Why it is being returned"
             placeholder="Why it is being returned (for example: paid this week twice). Required."
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
@@ -411,22 +440,20 @@ function ReturnPanel({ checkoutId, amount, currencyCode }: { checkoutId: string;
               value={typed}
               onChange={(e) => setTyped(e.target.value.replace(/[^0-9]/g, ''))}
               inputMode="numeric"
+              disabled={queued}
               aria-label="Amount to return"
               className="mt-1 block w-40 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
             />
           </label>
           <button
             type="submit"
-            disabled={ask.isPending || !amountOk || !reasonOk}
+            disabled={ask.isPending || queued || !amountOk || !reasonOk}
             className="rounded-lg bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-40"
           >
-            {ask.isPending ? 'Sending…' : 'Return this payment'}
+            {ask.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Return this payment'}
           </button>
-          {queued ? (
-            <p role="status" className="text-xs text-[var(--muted)]">
-              Sent for a second admin&apos;s approval. Nothing has changed yet. Once approved, execute it from Approvals.
-            </p>
-          ) : ask.error ? <MutationError error={ask.error} label="The return did not start" /> : null}
+          {queued ? <WaitingForApproval />
+            : ask.error ? <MutationError error={ask.error} label="The return did not start" /> : null}
         </form>
       )}
     </section>
@@ -454,14 +481,21 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
   const [reference, setReference] = useState('');
   const [reason, setReason] = useState('');
   const resolve = useMutation({ mutationFn: () => resolveMmgFeeReversal(reversalId, outcome, reference.trim(), reason.trim()), onSettled: onDone });
+  const sending = useRef(false);
   const ok = reference.trim().length >= 3 && reason.trim().length >= REASON_MIN;
-  const queued = (resolve.error as { code?: string } | null)?.code === 'APPROVAL_REQUIRED';
+  const queued = isQueuedAnswer(resolve.error);
   return (
     <form
       aria-label="Resolve the held return"
       className="space-y-2 rounded-md border border-[var(--border)] p-3"
-      onSubmit={(e) => { e.preventDefault(); if (ok) resolve.mutate(); }}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!ok || queued || sending.current) return;
+        sending.current = true;
+        resolve.mutate(undefined, { onSettled: () => { sending.current = false; } });
+      }}
     >
+      <fieldset disabled={queued} className="space-y-2">
       <p className="text-xs font-semibold">Resolve it from the MMG statement</p>
       <label className="flex items-center gap-2 text-xs">
         <input type="radio" name={`outcome-${reversalId}`} checked={outcome === 'NOT_RETURNED'} onChange={() => setOutcome('NOT_RETURNED')} />
@@ -497,12 +531,12 @@ function ResolveHeld({ reversalId, heldReason, lookupStatus, onDone }: { reversa
         placeholder="What you checked. Required."
         className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-sm"
       />
-      <button type="submit" disabled={resolve.isPending || !ok} className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40">
-        {resolve.isPending ? 'Sending…' : 'Send for approval'}
+      <button type="submit" disabled={resolve.isPending || queued || !ok} className="rounded-lg border border-[var(--border)] px-3 py-1 text-xs disabled:opacity-40">
+        {resolve.isPending ? 'Sending…' : queued ? 'Waiting for approval' : 'Send for approval'}
       </button>
-      {queued ? (
-        <p role="status" className="text-xs text-[var(--muted)]">Sent for a second admin&apos;s approval. Nothing has changed yet.</p>
-      ) : resolve.error ? <MutationError error={resolve.error} label="The return was not resolved" /> : null}
+      </fieldset>
+      {queued ? <WaitingForApproval />
+        : resolve.error ? <MutationError error={resolve.error} label="The return was not resolved" /> : null}
     </form>
   );
 }
