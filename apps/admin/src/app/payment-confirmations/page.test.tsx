@@ -194,7 +194,11 @@ describe('weekly-fee payment confirmations', () => {
     show('approvals');
     await user.click(await screen.findByRole('button', { name: 'Approved' }));
     await user.click(await screen.findByRole('button', { name: 'Execute the approved action' }));
+    // [U63] executing is confirmed in the panel first
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Execute it' }));
     expect(await screen.findByText(/Reload the payment confirmation before resolving it/)).toBeTruthy();
+    // the refusal stays in the panel until the operator closes it
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }));
     show('confirmations');
     form = await open(user);
     await user.click(within(form).getByRole('button', { name: 'Request approval' }));
@@ -355,6 +359,8 @@ it('the requester sees the reload message if confirmation evidence changes befor
   const { user } = renderWithQuery(<ApprovalsPage />);
   await user.click(screen.getByRole('button', { name: 'Approved' }));
   await user.click(await screen.findByRole('button', { name: 'Execute the approved action' }));
+  // [U63] executing is confirmed in the panel first
+  await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Execute it' }));
   expect(await screen.findByText(/Reload the payment confirmation before resolving it/)).toBeTruthy();
   expect(requestsByMethod(fetch, 'POST')).toHaveLength(1);
 });

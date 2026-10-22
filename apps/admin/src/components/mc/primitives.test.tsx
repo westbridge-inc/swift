@@ -299,7 +299,7 @@ describe('[MC-PR1] <ReasonDialog> runs the action and keeps the refusal in the p
     expect(within(dialog).queryByRole('textbox')).toBeNull(); // a C2 confirmation asks no reason
   });
 
-  it('useAskReason is the drop-in for askReason: same argument, a Promise of the reason or null', async () => {
+  it('useAskReason asks in the panel: a Promise of the reason, and a CANCELLED panel returns nothing — never a default', async () => {
     const user = mount();
     const answer = ask!({ action: 'ban this account', subject: 'a test user' });
     const dialog = await screen.findByRole('dialog', { name: 'Why are you about to ban this account for a test user?' });

@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 // [PAYMENT-SIMPLIFY #1825] The server sends mmgPayLinkEnabled (DRIVER_MMG_PAY_LINK, default OFF); the card shows
 // only when it is exactly true. Both ways are measured below.
-const server = vi.hoisted(() => ({ payLinkEnabled: false as boolean | undefined }));
+const server = vi.hoisted(() => ({ payLinkEnabled: false as boolean | undefined, sub: null as Record<string, unknown> | null }));
 
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react')>();
@@ -29,6 +29,9 @@ vi.mock('@tanstack/react-query', () => ({
 vi.mock('../../../kit', () => ({
   Card: 'Card',
   Header: 'Header',
+  IconChip: 'IconChip',
+  PopupCard: 'PopupCard',
+  PopupTitle: 'PopupTitle',
   LinkText: 'LinkText',
   LabeledInput: 'LabeledInput',
   PillButton: 'PillButton',
@@ -50,7 +53,7 @@ vi.mock('../../../hooks', () => ({
   useMoverStanding: () => ({ data: STANDING }),
   useVerificationStatus: () => ({ data: { roleVerified: true } }),
   useEarningsSummary: () => ({ data: { allTime: { total: 0 } } }),
-  useMoverSubscription: () => ({ data: null }),
+  useMoverSubscription: () => ({ data: server.sub }),
   useSetMoverBillingMethod: () => ({ mutate: vi.fn(), isPending: false }),
   useUploadVehiclePhoto: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
 }));
@@ -65,8 +68,9 @@ vi.mock('../../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: 'Ro
 vi.mock('../../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));
 vi.mock('../../../lib/stepUp', () => ({ isStepUpDismissed: () => false, serverMessage: () => '', fmtWhen: () => null }));
 vi.mock('../../../lib/images', () => ({ mediaUrl: (u: string) => u }));
-vi.mock('../../../components/billing/BillingSurfaces', () => ({ BillingStatusBlock: 'BillingStatusBlock', BillingStopControl: 'BillingStopControl' }));
-vi.mock('../../../lib/billing', () => ({ resumeBillingMethod: () => 'NONE' }));
+// [OWNER 21 Oct] The real billing blocks: their own spacing is what is measured below.
+vi.mock('../../../components/billing/BillingSurfaces', async (importOriginal) => importOriginal());
+vi.mock('../../../lib/billing', async (importOriginal) => ({ ...(await importOriginal<object>()), resumeBillingMethod: () => 'NONE' }));
 vi.mock('../../../stores/moverPreview', () => ({ useMoverPreview: () => false }));
 
 import { space } from '@swift/ui';
@@ -77,7 +81,7 @@ type El = React.ReactElement<Record<string, any>>;
 /** Call function components until a host element ('Card', 'View', …) is reached. */
 function host(el: El): El {
   let cur = el;
-  for (let i = 0; i < 10 && typeof cur.type === 'function'; i++) cur = (cur.type as (p: unknown) => El)(cur.props);
+  for (let i = 0; i < 10 && cur && typeof cur.type === 'function'; i++) cur = (cur.type as (p: unknown) => El)(cur.props);
   return cur;
 }
 const flat = (style: unknown): Record<string, number> =>
@@ -94,11 +98,15 @@ function edge(el: El, side: 'marginTop' | 'marginBottom'): number {
 }
 const isCard = (el: El): boolean => {
   const h = host(el);
+  if (!h) return false;
   return h.type === 'Card' || (h.type === 'View' && kids(h).length === 1 && isCard(kids(h)[0]!));
 };
 function find(el: El, type: string): El | null {
   if (el.type === type) return el;
-  for (const k of kids(typeof el.type === 'function' ? host(el) : el)) {
+  // A block that renders nothing (the real billing control without a plan) has no children.
+  const h = typeof el.type === 'function' ? host(el) : el;
+  if (!h) return null;
+  for (const k of kids(h)) {
     const f = find(k, type);
     if (f) return f;
   }
@@ -152,5 +160,39 @@ describe('driver Account, pay link on: every card has the same gap above it', ()
 
   it('every pair of consecutive cards is space.md apart (none touch, none doubled)', () => {
     expect(view.gaps()).toEqual(view.expected());
+  });
+});
+
+// [OWNER 21 Oct] The business Account had "Stop weekly billing" flush on the
+// card below it. The driver Account stacks with marginTop: every block —
+// cards, the billing notice, the full-width Stop button and the stopped
+// panel — keeps space.md above it (Log out keeps its own larger space).
+describe.each([
+  ['billing on (the Stop weekly billing button)', { status: 'ACTIVE', weeklyRate: 2000, autoRenew: true, currentPeriodEnd: '2026-10-28T12:00:00Z' }],
+  ['billing stopped (the Resume panel)', { status: 'ACTIVE', weeklyRate: 2000, autoRenew: false, currentPeriodEnd: '2026-10-28T12:00:00Z' }],
+] as const)('driver Account, %s: no block touches its neighbour', (_label, sub) => {
+  function blocksOf(children: El[]): El[] {
+    return children.flatMap((child) => {
+      let h: El | null = child;
+      for (let i = 0; i < 12 && h && typeof h.type === 'function'; i++) h = (h.type as (p: unknown) => El | null)(h.props);
+      if (!h) return [];
+      if (h.type === React.Fragment) return blocksOf(kids(h));
+      if (typeof h.type === 'string' && /^(PopupCard|RoleSwitcherSheet)$/.test(h.type)) return [];
+      return [h];
+    });
+  }
+  it('every pair of consecutive blocks is apart (space.md; Log out keeps space.xl)', () => {
+    server.payLinkEnabled = false;
+    server.sub = { ...sub };
+    const screen = MoverAccountScreen({ navigation: { navigate: vi.fn() } }) as El;
+    const list = blocksOf(kids(find(screen, 'ScrollView')!));
+    const text = (h: El) => JSON.stringify(h.props, (k, v) => (k === '_owner' || k === '_store' || typeof v === 'function' ? undefined : v)) ?? '';
+    expect(list.some((h) => /Stop weekly billing|Weekly billing stopped/.test(text(h))), list.map((h) => String(h.type)).join(' | ')).toBe(true);
+    const gaps = list.slice(1).map((b, i) => {
+      const gap = (flat(list[i]!.props['style'])['marginBottom'] ?? 0) + (flat(b.props['style'])['marginTop'] ?? 0);
+      const want = b.type === 'PillButton' && b.props['label'] === 'Log out' ? space.xl : space.md;
+      return { pair: `${String(list[i]!.type)} -> ${String(b.type)}${b.props['label'] ? ` (${b.props['label']})` : ''}`, gap, want };
+    });
+    expect(gaps.filter((g) => g.gap !== g.want).map((g) => `${g.pair}: ${g.gap}`)).toEqual([]);
   });
 });

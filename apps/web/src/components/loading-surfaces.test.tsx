@@ -90,12 +90,14 @@ describe('loading surfaces become content in the reserved layout', () => {
   });
 
   it('orders use the same row size before and after the list arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrders>>>();
-    vi.spyOn(ordersApi, 'getOrders').mockReturnValue(response.promise);
+    // [UI-SWEEP U13] Two reads: live orders, and a page of history.
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrderHistoryPage>>>();
+    vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValue({ items: [], total: 0 });
+    vi.spyOn(ordersApi, 'getOrderHistoryPage').mockReturnValue(response.promise);
     const view = mount(<OrdersPage />);
     expect(screen.getByLabelText('Loading your orders').querySelector('.swift-order-row')).toBeTruthy();
-    await response.finish([{ id: 'o1', vendorName: 'Local store', status: 'PENDING', totalAmount: 500 }]);
-    // The row (its name first); the in-progress band's Track link names it too.
+    await response.finish({ items: [{ id: 'o1', vendorName: 'Local store', status: 'DELIVERED', totalAmount: 500 }], page: 1, totalPages: 1, total: 1 });
+    // The history row, its name first.
     expect(await screen.findByRole('link', { name: /^Local store/ })).toBeTruthy();
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
@@ -145,12 +147,17 @@ it('search shows store-shaped placeholders during debounce and ignores a late an
 });
 
 it('orders cached for one person never appear while a different person’s list is loading', async () => {
-  vi.spyOn(ordersApi, 'getOrders').mockResolvedValueOnce([{ id: 'o1', vendorName: 'First order', status: 'PENDING' }])
+  // [UI-SWEEP U13] Both reads, live and history, are the person's own.
+  vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValueOnce({ items: [{ id: 'o1', vendorName: 'First order', status: 'PENDING' }], total: 1 })
+    .mockReturnValueOnce(new Promise(() => undefined));
+  vi.spyOn(ordersApi, 'getOrderHistoryPage').mockResolvedValueOnce({ items: [{ id: 'o2', vendorName: 'First history', status: 'DELIVERED' }], page: 1, totalPages: 1, total: 1 })
     .mockReturnValueOnce(new Promise(() => undefined));
   const view = mount(<OrdersPage />);
-  await screen.findByText('First order');
+  await screen.findByText('First history');
+  expect(screen.getAllByText(/First order/).length).toBeGreaterThan(0);
   person.scope = 'another-person'; person.epoch += 1;
   view.rerender(<OrdersPage />);
-  expect(screen.queryByText('First order')).toBeNull();
+  expect(screen.queryByText(/First order/)).toBeNull();
+  expect(screen.queryByText('First history')).toBeNull();
   expect(screen.getByLabelText('Loading your orders')).toBeTruthy();
 });

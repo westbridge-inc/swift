@@ -329,6 +329,7 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
       onNew,
       refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
       refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
     }, { serverAdmits: ownsStore });
   }, [vendorId, ownsStore, qc, previewType]);
 
@@ -448,11 +449,11 @@ export function useSetOrderFulfillmentMode() {
 
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
@@ -731,7 +732,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;

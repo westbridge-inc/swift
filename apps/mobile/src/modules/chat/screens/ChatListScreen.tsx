@@ -1,11 +1,12 @@
 /** @jsxImportSource react */
 import React, { useMemo } from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList, RefreshControl, View } from 'react-native';
 import { Image } from 'expo-image';
 import { Feather } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useOrders } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
 import { Card, EmptyState, ErrorState, Header, LoadingBlock, Screen, T } from '../../../kit';
 
@@ -19,6 +20,8 @@ export function ChatListScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const orders = useOrders<any>();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => orders.refetch());
 
   const rows = useMemo(() => {
     const all: any[] = Array.isArray(orders.data) ? orders.data : (orders.data?.orders ?? []);
@@ -61,6 +64,7 @@ export function ChatListScreen() {
         <FlatList
           data={rows}
           keyExtractor={(o) => o.id}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
           renderItem={({ item: o }) => {
             const rider = o.rider?.user ?? o.rider;

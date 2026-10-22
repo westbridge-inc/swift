@@ -114,7 +114,7 @@ describe('actual tab render contracts', () => {
       '../../safety/MonitoringControl': { MonitoringControl: 'MonitoringControl' },
       '../../../lib/customerIdCopy': { profileIdRowSub },
       '../../../lib/myRatingWords': { myRatingWords },
-      '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' },
+      '../../../kit': kit, '../../../kit/controls': { BrandSwitch: 'BrandSwitch' }, '../../../kit/toast': { toast: { error() {}, success() {}, show() {} } },
       'react-native-reanimated': { default: { View: 'AnimatedView' }, __esModule: true, FadeInDown: fluent, ReduceMotion: { System: 'system' } },
       '../../../components/RoleSwitcherSheet': { RoleSwitcherSheet: 'RoleSwitcherSheet' },
       '../../../services/api': { API_URL: 'https://invalid.example' }, '../../../lib/payLink': {}, '@tanstack/react-query': {},
