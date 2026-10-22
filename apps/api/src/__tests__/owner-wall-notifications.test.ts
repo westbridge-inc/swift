@@ -292,6 +292,9 @@ describe('[item 20] notifications written for someone else', () => {
     }
     const mine = () => owner.notification.count({ where: { userId: ids.other, body: `erase-${RUN}` } });
     expect(await mine()).toBe(1);
+    // [row 622] The erase action refuses an account that is not erased: the closure writes this tombstone first
+    // in its transaction (owner-wall-erase-guard.test.ts pins the refusal and the order).
+    await owner.user.update({ where: { id: erased }, data: { status: 'DEACTIVATED', phone: `deleted:${erased}` } });
     await asPerson(ids.other, () => app.prisma.$transaction((tx) => eraseOwedRowsInTransaction(tx, erased)));
     expect(await owner.notification.count({ where: { userId: erased } })).toBe(0);
     expect(await mine()).toBe(1);
