@@ -14,6 +14,7 @@ import { API_URL, driverApi, riderApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { BillingStatusBlock } from '../../../components/billing/BillingSurfaces';
 import { weeksCovered } from '../../../lib/billing';
+import { subscriptionWords } from '../../../lib/weeklyFee';
 import {
   getAuthSessionSnapshot,
   requireAuthSessionForPrincipal,
@@ -246,7 +247,7 @@ function WeeklyFeeCard({ sub, onPay }: { sub: unknown; onPay?: () => void }) {
           : status === 'SUSPENDED' || status === 'CHURNED'
             ? { label: status === 'SUSPENDED' ? 'Suspended' : 'Churned', tone: 'error' as const }
         : status
-          ? { label: status.replace(/_/g, ' ').toLowerCase(), tone: 'neutral' as const }
+          ? { label: subscriptionWords(status), tone: 'neutral' as const } // [UI-SWEEP U73] the Billing words, never the code
           : undefined;
   const rate = serverNumber(source['weeklyFeeGyd'] ?? source['customRate'] ?? source['weeklyRate']);
   const trialEnd = serverDate(source['trialEndDate']);

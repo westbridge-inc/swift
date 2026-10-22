@@ -207,4 +207,78 @@ describe('taxi hard pre-check (flag-gated)', () => {
     const order = allowed.json().data?.order ?? allowed.json().data;
     if (order?.id) orderIds.push(order.id);
   });
+
+  // [TAXI-FLOW 22 Oct 2026] One account, two modes: the booker's own online
+  // car can never take their ride (dispatch excludes the booker), so it is not
+  // "a driver nearby" for their own request either.
+  it('the booker’s OWN online car is not supply for their own request; a different driver is', async () => {
+    await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
+    const dual = await app.prisma.user.create({
+      data: {
+        phone: testPhone(),
+        firstName: 'Dual', lastName: 'Booker',
+        roles: ['MOVER', 'CUSTOMER'] as never[], activeRole: 'MOVER' as never,
+        isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2' as never,
+        customer: { create: {} },
+      },
+    });
+    userIds.push(dual.id);
+    const dualToken = app.jwt.sign({ userId: dual.id, role: 'CUSTOMER', jti: nanoid(8) });
+    const dualSession = await app.prisma.session.create({
+      data: {
+        userId: dual.id, token: dualToken, refreshToken: nanoid(48),
+        deviceId: 'avail-dual', deviceType: 'test',
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      },
+    });
+    const own = await app.prisma.driver.create({
+      data: {
+        userId: dual.id,
+        vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
+        licensePlate: `AV${nanoid(5)}`,
+        driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
+        isOnline: true, isAvailable: true, documentsVerified: true,
+        rideClass: 'ECONOMY' as never,
+        currentLat: SPOT.lat + 0.003, currentLng: SPOT.lng,
+        lastLocationUpdate: new Date(), locationSessionId: dualSession.id,
+      },
+    });
+    driverIds.push(own.id);
+    // Precondition (keeps the test honest): that car IS supply to anyone else.
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
+    expect((await availability()).json().data.level).toBe('LOW');
+
+    const requestAs = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/rides/request',
+        headers: { authorization: `Bearer ${dualToken}`, 'content-type': 'application/json' },
+        payload: {
+          pickup: SPOT,
+          dropoff: { lat: SPOT.lat + 0.02, lng: SPOT.lng },
+          pickupAddress: 'Remote Pier, Nowhere',
+          dropoffAddress: 'Far Landing, Nowhere',
+          passengerCount: 1,
+          rideClass: 'ECONOMY',
+        },
+      });
+    process.env['DISPATCH_AVAILABILITY'] = '1';
+    process.env['TAXI_ALLOW_REQUEST_ON_NONE'] = '0';
+    try {
+      const blocked = await requestAs();
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error.code).toBe('NO_DRIVERS_NEARBY');
+      expect(await app.prisma.order.count({ where: { customerId: dual.id } })).toBe(0);
+
+      // Control: a DIFFERENT driver in the field is real supply.
+      await makeDriver(0.005);
+      const allowed = await requestAs();
+      expect([200, 201]).toContain(allowed.statusCode);
+      const order = allowed.json().data?.order ?? allowed.json().data;
+      if (order?.id) orderIds.push(order.id);
+    } finally {
+      delete process.env['DISPATCH_AVAILABILITY'];
+      delete process.env['TAXI_ALLOW_REQUEST_ON_NONE'];
+    }
+  });
 });
