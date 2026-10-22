@@ -220,15 +220,17 @@ describe('[ADM-006] the law itself', () => {
     // the comments SAY the old constants, on purpose — they record what was
     // removed. Grade the code.
     expect(code(pages)).not.toMatch(/'(Suspended|Banned|Cancelled|Waived) by admin'/);
-    expect(pages).toMatch(/askReason\(/);
-    // that a cancelled prompt cancels the ACTION — never falling back to a
+    // [UI-FIX-ADMIN] they ask in the in-page panel (no browser prompt is left
+    // in the console: apps/admin/src/lib/ask-reason.test.ts refuses one).
+    expect(pages).toMatch(/\b(useAskReason|useActionDialog|useActionRunner)\(/);
+    // that a cancelled ask cancels the ACTION — never falling back to a
     // default, which is the shape that produced the canned strings — is
-    // behaviour, and is graded as behaviour next to the helper itself
-    // (apps/admin/src/lib/ask-reason.test.ts). A source scan of it looked
-    // convincing and proved nothing: it survived the mutation that made a
-    // cancelled prompt return 'Suspended by admin'.
-    expect(readFileSync(join(consoleSrc, 'lib', 'ask-reason.test.ts'), 'utf8'))
-      .toMatch(/a CANCELLED prompt returns nothing/);
+    // behaviour, and is graded as behaviour next to the panel itself
+    // (apps/admin/src/components/mc/primitives.test.tsx). A source scan of it
+    // looked convincing and proved nothing: it survived the mutation that made
+    // a cancelled prompt return 'Suspended by admin'.
+    expect(readFileSync(join(consoleSrc, 'components', 'mc', 'primitives.test.tsx'), 'utf8'))
+      .toMatch(/a CANCELLED panel returns nothing/);
   });
 
   it('the census: every C3-C5 route is covered by the law, and no C0-C2 route is', () => {

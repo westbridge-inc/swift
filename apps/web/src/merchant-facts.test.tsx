@@ -70,9 +70,13 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     const services = screen.getByRole('region', { name: 'What Swift does' });
     const words = services.textContent ?? '';
     for (const who of ['Customers', 'Businesses', 'Delivery riders', 'Taxi drivers']) expect(words, who).toContain(who);
-    expect(words).toMatch(/weekly fee/i);
-    // The published Terms name Swift's other charge: advertising a business can choose to buy.
-    expect(words).toMatch(/advertising/i);
+    // What Swift charges at launch, and nothing else: partners pay the flat weekly fee, there is no
+    // commission, and nothing is added to a customer's bill. Ads are off and not sold (GUARDRAILS §4),
+    // so the page offers no advertising. A new charge is named here before it is made.
+    expect(words).toMatch(/flat weekly fee/i);
+    expect(words).toMatch(/no commission on any sale, fare or tip/i);
+    expect(words).toMatch(/nothing is added to a\s+customer.s bill/i);
+    expect(words).not.toMatch(/advertis/i);
     expect(words).not.toMatch(/only charge/i);
     expect(within(services).getByRole('link', { name: /pricing/i }).getAttribute('href')).toBe('/pricing');
   });

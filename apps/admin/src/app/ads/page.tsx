@@ -13,7 +13,8 @@ import {
   suspendAdvertiser,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason, reasonTooShort } from '@/lib/ask-reason';
+import { reasonTooShort } from '@/lib/ask-reason';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,9 @@ export default function AdsReviewPage() {
   const [creativeReason, setCreativeReason] = useState<string>(CREATIVE_REJECT_REASONS[0]);
   const [notes, setNotes] = useState('');
   const [mutationError, setMutationError] = useState<unknown>(null);
+  // Reasons and confirmations are asked in the in-page panel, never a browser
+  // prompt; each decision still runs once (buttons disabled while it runs).
+  const dialog = useActionDialog();
 
   const advertisers = useQuery({
     queryKey: ['ads', 'advertisers', status],
@@ -184,6 +188,7 @@ export default function AdsReviewPage() {
                         value={reason}
                         onChange={(e) => setReason(e.target.value)}
                         placeholder="Why? The advertiser is told this."
+                        aria-label="Reason the advertiser is told"
                         className="w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
                       />
                       <div className="flex gap-2">
@@ -208,7 +213,7 @@ export default function AdsReviewPage() {
                       {status === 'PENDING_REVIEW' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const stated = askReason({ action: 'approve this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'approve', reason: stated }); }}
+                          onClick={async () => { const stated = await dialog.ask({ action: 'approve this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'approve', reason: stated }); }}
                           className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                         >
                           Approve
@@ -217,7 +222,7 @@ export default function AdsReviewPage() {
                       {status === 'REJECTED' || status === 'SUSPENDED' ? (
                         <button
                           disabled={busy}
-                          onClick={() => { const stated = askReason({ action: 'reinstate this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'reinstate', reason: stated }); }}
+                          onClick={async () => { const stated = await dialog.ask({ action: 'reinstate this advertiser', subject: a.companyName }); if (stated) advertiserAction.mutate({ id: a.id, action: 'reinstate', reason: stated }); }}
                           className="px-3 py-1.5 rounded-lg text-xs bg-[var(--bg)] border border-[var(--border)] disabled:opacity-50"
                         >
                           Reinstate
@@ -296,6 +301,7 @@ export default function AdsReviewPage() {
                         value={notes}
                         onChange={(e) => setNotes(e.target.value)}
                         placeholder="Anything else they should know (optional)"
+                        aria-label="Notes for the advertiser (optional)"
                         className="w-full text-sm bg-[var(--bg)] border border-[var(--border)] rounded-lg p-2"
                       />
                       <div className="flex gap-2">
@@ -319,7 +325,15 @@ export default function AdsReviewPage() {
                     <div className="flex gap-2 mt-3">
                       <button
                         disabled={busy}
-                        onClick={() => creativeAction.mutate({ id: c.id, action: 'approve' })}
+                        onClick={async () => {
+                          const go = await dialog.askWith({
+                            title: 'Approve this ad creative?',
+                            body: <p>It can run as soon as ads are switched on and its campaign is live.</p>,
+                            reason: false,
+                            confirmLabel: 'Approve creative',
+                          });
+                          if (go) creativeAction.mutate({ id: c.id, action: 'approve' });
+                        }}
                         className="px-3 py-1.5 rounded-lg text-xs bg-green-500/20 text-green-400 disabled:opacity-50"
                       >
                         Approve

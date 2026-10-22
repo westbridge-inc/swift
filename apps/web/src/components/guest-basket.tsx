@@ -9,6 +9,17 @@ import { uploadGuestBasket, type GuestMergeResult } from '@/lib/basket-merge';
 import { getSessionPrincipal } from '@/lib/auth';
 import { clearCart, money, readCheckoutAttempt } from '@/lib/customer';
 
+/** [BUG-GUARDS C5] What the server's check of one line means, in words — never
+ *  its code ("insufficient stock", "different store" read as a machine). */
+const VERDICT_WORDS: Record<string, string> = {
+  ADDED: 'added',
+  UNAVAILABLE: 'no longer available',
+  OPTIONS_CHANGED: 'its choices changed — add it again',
+  INSUFFICIENT_STOCK: 'not enough left in stock',
+  DIFFERENT_STORE: 'from a different store than your cart',
+  QUANTITY_LIMIT: 'more than the store allows in one order',
+};
+
 /** [#1594 review S3] The way out of a basket frozen mid-upload (another
  *  account on this browser, or a server that keeps failing). Nothing is
  *  ordered or sent; the person confirms first. */
@@ -56,7 +67,7 @@ export function GuestBasketSync() {
   return <section className="sw-card my-4 p-4" aria-label="Review your browser basket">
     <h2 className="font-semibold">Your basket needs a check</h2>
     <p role="alert" className="my-2">{error ?? (changedStore ? 'Your saved cart is from another store. Both baskets are unchanged.' : 'A price, choice or availability changed. Nothing from this basket was added.')}</p>
-    {result ? <ul>{result.verdicts.filter(v => v.status !== 'READY').map(v => <li key={v.clientLineId}>{readGuestBasket().lines.find(l => l.clientLineId === v.clientLineId)?.name ?? 'Item'}: {v.status === 'PRICE_CHANGED' ? `now ${money(v.unitPrice)}` : v.status.replaceAll('_', ' ').toLowerCase()}</li>)}</ul> : null}
+    {result ? <ul>{result.verdicts.filter(v => v.status !== 'READY').map(v => <li key={v.clientLineId}>{readGuestBasket().lines.find(l => l.clientLineId === v.clientLineId)?.name ?? 'Item'}: {v.status === 'PRICE_CHANGED' ? `now ${money(v.unitPrice)}` : VERDICT_WORDS[v.status] ?? 'needs a check'}</li>)}</ul> : null}
     <div className="mt-3 flex flex-wrap gap-3">
       <button className="sw-btn sw-btn-md" disabled={busy} onClick={() => void sync()}>Retry basket upload</button>
       {changedPrice ? <button className="sw-btn sw-btn-md sw-btn-outline" disabled={busy || !pricesKnown} onClick={() => {

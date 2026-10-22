@@ -30,6 +30,7 @@ declare const styles: {
   readonly primaryButton: string;
   readonly progressCard: string;
   readonly rating: string;
+  readonly reportProblem: string;
   readonly riderDetails: string;
   readonly secondaryButton: string;
   readonly sectionHeading: string;

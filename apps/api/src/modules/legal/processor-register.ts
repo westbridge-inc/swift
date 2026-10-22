@@ -125,7 +125,7 @@ export const PROCESSOR_REGISTER: readonly ProcessorEntry[] = [
     providerDirs: [], hosts: [],
     payload: ['DIAGNOSTIC'], lawfulBasis: 'LEGITIMATE_INTEREST',
     country: 'Swift infrastructure', leavesCountry: false, transferBasis: 'SELF_HOSTED', contractEnv: null,
-    note: 'Founder decision 2026-09-07: self-hosted (swift-infra/docker-compose.glitchtip.yml); SENTRY_DSN points at it. A sentry.io DSN would make this a third-party processor — not permitted by decision; events are scrubbed by the observability plugin either way.',
+    note: 'Founder decision 2026-09-07: self-hosted (swift-infra/docker-compose.glitchtip.yml); SENTRY_DSN points at it. A sentry.io DSN would make this a third-party processor — not permitted by decision; events are scrubbed by the observability plugin either way. [Owner 21 Oct 2026] The phone app\'s crash reports (EXPO_PUBLIC_SENTRY_DSN, apps/mobile crashReporting.ts) go to the same self-hosted GlitchTip: phone model and OS, app version, the error, language and time zone, and a random per-install id; no user, messages, location or screenshots. Crash and error reports are kept 90 days (Privacy Policy sections 5 and 6).',
   },
   {
     ref: 'TWILIO', party: 'Twilio Inc.', service: 'SMS one-time codes and notices',

@@ -201,11 +201,27 @@ export function railHealth(k: CashKpis | null): { state: 'ok' | 'watch' | 'bad';
  * action as broken at the exact moment it worked.
  */
 export function outcomeOfThrown(error: unknown): MoneyActionOutcome {
-  const e = (error ?? {}) as { status?: number; code?: string; message?: string; details?: { approvalId?: string } };
+  const e = (error ?? {}) as { status?: number; code?: string; message?: string; details?: { approvalId?: string; askedByYou?: boolean; approvalStatus?: string } };
   if (e.status === 202 && e.code === 'APPROVAL_REQUIRED') {
     return {
       kind: 'queued',
       message: 'Queued for a second admin. Nothing has moved yet — it happens when they approve.',
+      ...(e.details?.approvalId ? { approvalId: e.details.approvalId } : {}),
+    };
+  }
+  // [U06] A second ask for an act that is already waiting: nothing new was asked.
+  if (e.code === 'APPROVAL_ALREADY_OPEN') {
+    return {
+      kind: 'queued',
+      // Only the admin who asked can apply an approved ask: say whose it is,
+      // and whether it still waits for a second admin or for its asker.
+      message: e.details?.askedByYou === false
+        ? (e.details?.approvalStatus === 'APPROVED'
+          ? 'Another admin already asked for this, and it is approved and waiting for them to apply it from Approvals. Nothing new was asked, and nothing has moved yet.'
+          : 'Another admin already asked for this, and it is waiting in Approvals. Nothing new was asked, and nothing has moved yet.')
+        : (e.details?.approvalStatus === 'APPROVED'
+          ? 'Already approved and waiting for you to apply it from Approvals. Nothing new was asked, and nothing has moved yet.'
+          : 'Already waiting for a second admin. Nothing new was asked, and nothing has moved yet.'),
       ...(e.details?.approvalId ? { approvalId: e.details.approvalId } : {}),
     };
   }

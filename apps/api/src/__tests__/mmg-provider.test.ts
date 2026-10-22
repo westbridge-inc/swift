@@ -83,7 +83,13 @@ describe('MMG sandbox provider — merchant-initiated loop', () => {
     delete process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'];
     try {
       expect(() => getMmgProvider()).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      expect(() => getMmgProvider({ followUp: true })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
       process.env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] = '1';
+      // [S1 · Option A] The round trip alone lets the poller follow up requests already sent;
+      // the push rail itself also needs its own switch.
+      expect(getMmgProvider({ followUp: true })).toBeInstanceOf(LiveMmgProvider);
+      expect(() => getMmgProvider()).toThrow(/MMG_PUSH_RAIL_ON/);
+      process.env['MMG_PUSH_RAIL_ON'] = '1';
       expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
     } finally {
       process.env = prev;

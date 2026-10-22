@@ -9,7 +9,11 @@ export const navigationRef = createNavigationContainerRef<Record<string, object 
 export function safeNavigate(screen: string, params?: Record<string, unknown>): boolean {
   try {
     if (!navigationRef.isReady()) return false;
-    (navigationRef.navigate as (s: string, p?: Record<string, unknown>) => void)(screen, params);
+    // [UI-SWEEP U10] `pop: true`: a destination already in the stack is gone
+    // BACK to (React Navigation 7's plain navigate pushes a second copy — a
+    // second business home doubled the new-order alarm). One not in the stack
+    // is pushed as before.
+    (navigationRef.navigate as (s: string, p?: Record<string, unknown>, o?: { pop?: boolean }) => void)(screen, params, { pop: true });
     return true;
   } catch {
     // A screen the current stack doesn't mount (e.g. an earner tapping a
