@@ -33,8 +33,10 @@ import { MMG_PUSH_RAIL_ENV, mmgPushFollowUpOn, mmgPushRailOn } from '../provider
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
+import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
 
-const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const LIVE = {
   MMG_DRIVER: 'live', MMG_API_URL: 'https://api.mmg.gy/olive/publisher/v1', MMG_API_KEY: 'k', MMG_MERCHANT_ID: '5926000000',
   MMG_PASSWORD: 'p', MMG_MKEY: 'mk', MMG_MSECRET: 'ms',
@@ -203,10 +205,10 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
     const told = await app.prisma.notification.findMany({ where: { userId: owner, data: { path: ['kind'], equals: 'billing_failed' } } });
     expect(told).toHaveLength(1);
     expect(told[0]!.title).toBe('Subscription payment failed');
-    expect(told[0]!.body.startsWith(`${MMG_PUSH_OFF_REASON}.`)).toBe(true);
-    // The hosted checkout is not live in this test: the notice must not send the partner to it.
-    expect(told[0]!.body).not.toMatch(/checkout/i);
-    expect(told[0]!.body).toContain('The weekly fee of GY$12,000 is due now.');
+    // No retry is promised (one with the rail off can never collect), and the hosted checkout is not
+    // live in this test, so the notice must not send the partner to it.
+    expect(told[0]!.body).toBe("Automatic MMG charges are off, so this week's fee was not collected. The weekly fee of GY$12,000 is due now.");
+    expect(told[0]!.body).not.toMatch(/retry|checkout/i);
   });
 
   it('with the MMG checkout live, the same notice tells the partner to pay with MMG in the app, once, and names no other way to pay', async () => {
@@ -220,10 +222,52 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
     const told = await app.prisma.notification.findMany({ where: { userId: owner, data: { path: ['kind'], equals: 'billing_failed' } } });
     expect(told).toHaveLength(1);
     const body = told[0]!.body;
-    expect(body).toBe(`${MMG_PUSH_OFF_REASON}. We will retry after the remaining retry interval. Pay GY$12,000 with MMG in the Swift app.`);
+    expect(body).toBe("Automatic MMG charges are off, so this week's fee was not collected. Pay GY$12,000 with MMG in the Swift app.");
+    expect(body).not.toMatch(/retry/i);
     // One way to pay, said once: the MMG checkout in the app.
     expect(body.match(/with MMG/g)).toHaveLength(1);
     for (const door of [/\bagents?\b/i, /swift number/i, /\bcash\b/i, /account number/i]) expect(body).not.toMatch(door);
+  });
+
+  it('control: only the push-off week drops the retry sentence; a cash week that failed the same run keeps it', async () => {
+    const subId = await makeVendorSub('CASH');
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a cash plan never contacts MMG'));
+    expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
+    const notes = (await facts(subId)).failureNotes;
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).not.toBe(MMG_PUSH_OFF_REASON);
+    const owner = (await withRelations(subId)).vendor!.owner.userId;
+    const told = await app.prisma.notification.findMany({ where: { userId: owner, data: { path: ['kind'], equals: 'billing_failed' } } });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body.startsWith(`${notes[0]}. We will retry after the remaining retry interval. `)).toBe(true);
+  });
+
+  it('[G S4-1] the final warning of a push-off week: push and SMS name the suspension moment and the one way to pay, and promise no retry', async () => {
+    const subId = await makeVendorSub('MOBILE_MONEY');
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', ...checkoutLiveEnv() });
+    resetFeeCheckoutSwitchCache();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
+    const t0 = new Date();
+    expect(await billing.billSubscription((await withRelations(subId)) as any, t0)).toBe('failed');
+    resetDevChannelLog();
+    expect(await billing.billSubscription((await withRelations(subId)) as any, new Date(t0.getTime() + 25 * HOUR))).toBe('failed');
+    const s = await app.prisma.subscription.findUniqueOrThrow({ where: { id: subId } });
+    expect({ status: s.status, failedAttempts: s.failedAttempts }).toEqual({ status: 'PAST_DUE', failedAttempts: 2 });
+    expect((await facts(subId)).mmgPayments).toEqual([]);
+    const owner = await app.prisma.user.findUniqueOrThrow({ where: { id: (await withRelations(subId)).vendor!.owner.userId }, select: { id: true, phone: true } });
+    const warned = await app.prisma.notification.findMany({ where: { userId: owner.id, data: { path: ['kind'], equals: 'billing_final_warning' } } });
+    expect(warned).toHaveLength(1);
+    expect(warned[0]!.title).toBe('Final warning — payment needed');
+    expect(warned[0]!.body).toMatch(/^Automatic MMG charges are off\. Your subscription will be SUSPENDED at .+ unless the weekly fee is paid\. Pay GY\$12,000 with MMG in the Swift app\.$/);
+    const sms = devChannelLog.filter((e) => e.channel === 'sms' && e.to === owner.phone);
+    expect(sms).toHaveLength(1);
+    expect(sms[0]!.body).toMatch(/^Swift: your weekly fee is unpaid\. Your account will be suspended at .+ unless you pay\. Pay GY\$12,000 with MMG in the Swift app\.$/);
+    for (const text of [warned[0]!.body, sms[0]!.body]) {
+      expect(text).not.toMatch(/retry/i);
+      expect(text.match(/with MMG/g)).toHaveLength(1);
+      for (const door of [/\bagents?\b/i, /swift number/i, /\bcash\b/i, /account number/i]) expect(text).not.toMatch(door);
+    }
   });
 
   it('control: with the push rail on (sandbox, off production) the same plan IS sent a charge request', async () => {
