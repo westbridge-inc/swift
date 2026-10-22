@@ -97,7 +97,11 @@ export async function openCasesOf(db: PrismaClient, userId: string): Promise<Ope
     where: { OR: [{ riderId: { in: moverIds } }, { driverId: { in: moverIds } }, { vendorId: { in: vendorIds } }] }, select: { id: true },
   }) : []).map((x) => x.id);
   const checks: Record<OpenCaseKind, () => Promise<number>> = {
-    fraud_case: () => db.fraudCase.count({ where: { OR: [{ subjectUserId: userId }, { submissionId: { in: docIds } }] } }),
+    // [REVIEW-G S3-1] A confirmed case also names the subject's identity-cluster members (linkedAccountIds), held for a
+    // founder decision; the legal hold is on the subject only, so a linked account is kept here.
+    fraud_case: () => db.fraudCase.count({ where: { OR: [
+      { subjectUserId: userId }, { submissionId: { in: docIds } }, { linkedAccountIds: { array_contains: [userId] } },
+    ] } }),
     identity_review_case: async () => member ? db.identityReviewCase.count({ where: { clusterId: member.clusterId, status: 'OPEN' } }) : 0,
     enforcement_appeal: () => db.enforcementAction.count({ where: { accountId: userId, appeal: 'OPEN' } }),
     incident_case: () => db.incidentCase.count({ where: {

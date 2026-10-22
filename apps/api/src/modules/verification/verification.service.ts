@@ -2904,8 +2904,8 @@ export class VerificationService {
       orderBy: { createdAt: 'asc' }, select: { createdAt: true },
     });
     if (!notice) {
-      // [REVIEW-M S4-1] The in-app notice is the inbox row (written or the call throws, and then no record either);
-      // whether a push also reached a phone is recorded with it, never assumed.
+      // [REVIEW-M S4-1] The in-app notice is the inbox row; whether a push also reached a phone is recorded with it,
+      // never assumed.
       const reach = await this.notifications.sendReach({
         userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
         // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
@@ -2914,6 +2914,10 @@ export class VerificationService {
         data: { kind: 'verification_application_abandoned' },
         dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
       });
+      // [REVIEW-G S3-2] sendReach answers a failed inbox write with no id (it never throws, for its other callers). No
+      // inbox row = no notice: throw, so no notice record starts the purge clock; the person is counted as failed and
+      // noticed on the next run.
+      if (!reach.id) throw new Error('abandoned-application notice not written to the inbox');
       await this.prisma.auditLog.create({ data: {
         userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
         changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length, notificationId: reach.id, pushed: reach.pushed },

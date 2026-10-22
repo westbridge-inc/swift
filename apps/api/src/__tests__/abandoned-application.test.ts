@@ -378,6 +378,23 @@ describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance 
     expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
     expect((await docOf(d.id)).purgedAt).toBeNull();
   });
+
+  it('[REVIEW-G S3-2] an inbox notice that could not be written is no notice: no record, no purge clock, the person is counted and noticed on the next run', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    // sendReach logs a persist failure and answers with no id (best-effort for everyone else); here that must stop the step.
+    const unwritable = new Proxy(app.prisma, { get: (t, k) => (k === 'notification'
+      ? { create: async () => { throw new Error('synthetic inbox write failure'); } } : Reflect.get(t, k)) }) as PrismaClient;
+    const svc = new VerificationService(scoped([u]), new NotificationService(unwritable, app.io), new ApprovingKyc());
+    expect(await system(() => svc.sweepAbandonedApplications(new Date()))).toMatchObject({ noticed: 0, purged: 0, failed: 1 });
+    expect(await system(() => app.prisma.auditLog.count({ where: { userId: u, action: ABANDON_NOTICE_ACTION } }))).toBe(0);
+    expect(await notices(u)).toHaveLength(0);
+    // Fifteen days on, with the inbox writable again: noticed now, nothing deleted (the 14 days start at the real notice).
+    expect(await sweep(later(15), u)).toMatchObject({ noticed: 1, purged: 0, failed: 0 });
+    expect(await notices(u)).toHaveLength(1);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+  });
 });
 
 describe('[Row 249 · COORD security review] the open-case census: every case, report, dispute and hold that can name the person keeps', () => {
@@ -459,6 +476,22 @@ describe('[Row 249 · COORD security review] the open-case census: every case, r
       expect((await docOf(d.id)).purgedAt).toBeNull();
     });
   }
+
+  it('[REVIEW-G S3-1] fraud_case: a confirmed case naming the person only as a LINKED account (founder decision pending) keeps their documents', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const fraud = (linked: string[]) => raw((tx) => tx.fraudCase.create({ data: {
+      subjectUserId: other(), submissionId: `sub-${nanoid(8)}`, caseId: randomUUID(), reasonCode: 'SYNTHETIC', confirmedBy: 'test', linkedAccountIds: linked,
+    } }).then((r) => cleanups.push(() => raw((t) => t.fraudCase.delete({ where: { id: r.id } })))));
+    await fraud([other(), other()]);
+    expect(await system(() => openCasesOf(app.prisma, u))).toEqual([]);
+    await fraud([other(), u]);
+    expect(await system(() => openCasesOf(app.prisma, u))).toEqual(['fraud_case']);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
 });
 
 describe('[Row 249] an upload nobody claimed goes after 30 days while the account stays open', () => {
