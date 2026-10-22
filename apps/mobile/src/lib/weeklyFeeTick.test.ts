@@ -42,7 +42,7 @@ function find(node: unknown, pick: (n: { type?: unknown; props?: Record<string, 
   if (Array.isArray(node)) { for (const c of node) { const f = find(c, pick); if (f) return f; } return null; }
   const n = node as { type?: unknown; props?: Record<string, unknown> };
   if (pick(n)) return n as { props: Record<string, unknown> };
-  return find(n.props?.children, pick);
+  return find(n.props?.['children'], pick);
 }
 
 describe('feeTick — the tick for the fee on screen', () => {
