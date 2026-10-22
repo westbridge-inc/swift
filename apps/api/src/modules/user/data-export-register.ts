@@ -77,6 +77,12 @@ export interface ExportEntry {
   readonly model: string;
   /** Columns that equal the person's id (or their profile id, with `via`); a row matches on any. */
   readonly by: readonly string[];
+  /**
+   * For a child table with no person column of its own: the relation to its parent, whose `by` columns are the
+   * person's (a taxi ride's stops are the passenger's through the ride). The parent is itself exported to the
+   * person by those columns (account-export-register.test.ts holds both).
+   */
+  readonly through?: string;
   readonly via?: ExportVia;
   /** A unique, sortable column for paging. */
   readonly key: string;
@@ -128,6 +134,15 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   {
     category: 'orders', model: 'Order', by: ['customerId'], key: 'id', omit: { mmgPayUrlSnapshot: 'OTHER_PERSON', mmgRecipientNameSnapshot: 'OTHER_PERSON', mmgNumberSnapshot: 'OTHER_PERSON' },
     fields: ['id', 'orderNumber', 'orderType', 'customerId', 'status', 'pickupAddress', 'pickupLat', 'pickupLng', 'deliveryAddress', 'deliveryLat', 'deliveryLng', 'deliveryInstructions', 'courierPackageDescription', 'courierPackageSize', 'courierPackageWeight', 'courierRecipientName', 'courierRecipientPhone', 'courierSpeed', 'courierPayer', 'courierReturnReason', 'courierReturnRequestedAt', 'courierReturnedAt', 'courierPickupProofLat', 'courierPickupProofLng', 'taxiPickupAddress', 'taxiDropoffAddress', 'taxiPassengerCount', 'taxiDistance', 'taxiDuration', 'taxiStopCount', 'billableKm', 'billableKmSource', 'routeMatchedKm', 'routePolyline', 'routeMatchSource', 'routeMatchedAt', 'subtotalBase', 'subtotalMarkup', 'subtotalCustomer', 'deliveryFee', 'serviceFee', 'taxAmount', 'tipAmount', 'discount', 'totalAmount', 'currencyCode', 'taxiFareBase', 'taxiFarePerKm', 'taxiFarePerMin', 'taxiFareTotal', 'taxiFareSurge', 'rideClass', 'paymentMethod', 'paymentStatus', 'paymentId', 'mmgAttestedRef', 'mmgAttestedAt', 'mmgAttestedAmount', 'customerClaimedPaidAt', 'customerPaymentRef', 'customerMmgClaim', 'customerMmgClaimAt', 'mmgClaimResolution', 'mmgClaimResolvedAt', 'estimatedPrepTime', 'estimatedDeliveryTime', 'promisedAt', 'promiseBaseSeconds', 'promisePadSeconds', 'promiseRevisedAt', 'promiseRevisionReason', 'promiseRevisions', 'actualDeliveryTime', 'isExpress', 'scheduledFor', 'holdExpiresAt', 'releasedToVendorAt', 'foodAgeHeldAt', 'foodAgeWaivedAt', 'placedAt', 'acceptedAt', 'driverArrivedAt', 'preparingAt', 'readyAt', 'pickedUpAt', 'deliveredAt', 'cancelledAt', 'cancellationReason', 'lateCancelFeeDue', 'refundOwedAmount', 'refundOwedAt', 'refundRef', 'refundPaidAmount', 'refundSettledAt', 'doorCashCollectedAmount', 'doorCashShortfallAmount', 'doorCashReturnAmount', 'doorCashReturnStatus', 'doorCashReturnRecordedAt', 'doorCashReturnResolvedAt', 'promoCodeId', 'channel', 'attributionQrCodeId', 'ridePinVerified', 'ridePinVerifiedAt', 'fulfillment', 'fulfillmentMode', 'appointmentSlot', 'createdAt', 'updatedAt'],
+  },
+  {
+    // [REVIEW-M S3-1 · multi-stop] The places a passenger's taxi ride stopped at, each with its ride (orderId = the
+    // ride's id in "orders"), in the passenger's order: what the passenger's own ride screen shows
+    // (taxi-stops-read.ts). Never the row id, who moved the stop, or the driver's arrival evidence (the driver's
+    // own position). A driver's trip record carries no customer place, so it carries no stops either.
+    category: 'taxiStops', model: 'TaxiTripStop', through: 'order', by: ['customerId'], key: 'id', sortBy: ['orderId', 'sequence'],
+    omit: { id: 'SYSTEM', evidenceNote: 'OTHER_PERSON' },
+    fields: ['orderId', 'sequence', 'address', 'lat', 'lng', 'status', 'legMeters', 'legSeconds', 'arrivedAt', 'departedAt', 'skippedAt', 'skipReason', 'createdAt', 'updatedAt'],
   },
   {
     // A store review that names you: score, tags, words and the month, as the store's reviews page lists it.
@@ -437,6 +452,15 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
   'PersonProfile.accountId': { reason: 'SYSTEM', note: 'the document register index' },
   'BusinessProfile.ownerAccountId': { reason: 'SYSTEM', note: 'the document register index' },
   'DocumentRecord.accountId': { reason: 'SYSTEM', note: 'the document register index (the documents are in verificationDocuments)' },
+};
+
+/**
+ * [REVIEW-M S3-1] Child tables of a person's own record that hold a place (an address or a coordinate), have no
+ * person column of their own and are NOT exported `through` that record, with the reason. Anything else like
+ * them is red in account-export-register.test until it is exported through its parent or named here.
+ */
+export const PLACES_NOT_EXPORTED: Readonly<Record<string, string>> = {
+  Vendor: 'a store’s own record: the business’s address and map pin, which its customers and riders are shown (receipts, pickups), not a record about the person; the person’s link to the store is in storeOwnership',
 };
 
 /** Person links whose rows are already in a category through another column of the same row. */
