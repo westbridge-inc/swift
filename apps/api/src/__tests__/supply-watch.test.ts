@@ -142,6 +142,58 @@ describe('supply watcher', () => {
   });
 });
 
+describe('[TAXI-FLOW 22 Oct 2026] the watcher’s own car is not "drivers are back"', () => {
+  it('a dual-role customer whose OWN driver profile comes online is not told drivers are back', async () => {
+    const FIELD = { lat: 4.7489, lng: -59.3110 }; // a field no other suite uses
+    const me = await app.prisma.user.create({
+      data: {
+        phone: testPhone(),
+        firstName: 'Dual', lastName: 'Role',
+        roles: ['MOVER', 'CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
+        isPhoneVerified: true,
+        customer: { create: {} },
+      },
+    });
+    userIds.push(me.id);
+    const myToken = app.jwt.sign({ userId: me.id, role: 'CUSTOMER', jti: nanoid(8) });
+    const session = await app.prisma.session.create({
+      data: {
+        userId: me.id, token: myToken, refreshToken: nanoid(48),
+        deviceId: 'watch-dual', deviceType: 'test',
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      },
+    });
+    const res = await app.inject({
+      method: 'POST', url: '/api/v1/rides/availability/watch',
+      headers: { authorization: `Bearer ${myToken}`, 'content-type': 'application/json' },
+      payload: FIELD,
+    });
+    expect(res.statusCode).toBe(200);
+
+    // Their own car comes online right at the watched point.
+    const own = await app.prisma.driver.create({
+      data: {
+        userId: me.id,
+        vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2021, vehicleColor: 'Yellow',
+        licensePlate: `SW${nanoid(5)}`,
+        driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
+        isOnline: true, isAvailable: true, documentsVerified: true,
+        rideClass: 'ECONOMY' as never,
+        currentLat: FIELD.lat, currentLng: FIELD.lng,
+        lastLocationUpdate: new Date(), locationSessionId: session.id,
+      },
+    });
+    driverIds.push(own.id);
+
+    const dispatch = makeDispatchService(app as never);
+    const notifications = new NotificationService(app.prisma, app.io);
+    await scanSupplyWatches(app.prisma, dispatch, notifications);
+    const watch = await app.prisma.supplyWatch.findFirstOrThrow({ where: { customerId: me.id } });
+    expect(watch.notifiedAt).toBeNull();
+    expect(await app.prisma.notification.count({ where: { userId: me.id } })).toBe(0);
+  });
+});
+
 describe('struggling-delivery options (spec §4.2)', () => {
   it('prompts ONCE for a ready-no-rider order past the window; fresh or ridden orders stay quiet', async () => {
     const { scanStrugglingDeliveries } = await import('../modules/dispatch/supply-watch.service');
