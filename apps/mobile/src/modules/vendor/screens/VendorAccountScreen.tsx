@@ -469,6 +469,10 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
       <BillingStopControl
         sub={sub}
         who="store"
+        // [OWNER 21 Oct] This screen stacks its cards with marginBottom: the
+        // control keeps the same section gap below it, never flush on the
+        // "Your MMG number" card.
+        style={{ marginTop: 0, marginBottom: space.lg }}
         pending={setBilling.isPending}
         onStop={() => setBilling.mutate({ method: 'NONE' })}
         onResume={() =>

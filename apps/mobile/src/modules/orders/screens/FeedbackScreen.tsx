@@ -9,6 +9,7 @@ import { useItemFeedback, useOrder, useRateOrder, useRatingTags } from '../../..
 import { DARK_BLURHASH, vendorPhoto } from '../../../lib/images';
 import { Chip, ErrorState, Header, IconChip, LoadingBlock, PillButton, PopupCard, PopupTitle, Screen, Stars, T } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { useRowHold } from '../../../lib/useRowHold';
 
 const GUTTER = space['2xl'];
 
@@ -166,6 +167,7 @@ export function FeedbackScreen() {
   const [done, setDone] = useState(false);
   const tags = useRatingTags();
   const itemFeedback = useItemFeedback(orderId);
+  const holdRow = useRowHold();
   const toggle = (setter: React.Dispatch<React.SetStateAction<string[]>>) => (slug: string) =>
     setter((cur) => (cur.includes(slug) ? cur.filter((t) => t !== slug) : cur.length < RATING_MAX_TAGS ? [...cur, slug] : cur));
 
@@ -269,17 +271,22 @@ export function FeedbackScreen() {
                       {(['UP', 'DOWN'] as const).map((v) => (
                         <Pressable
                           key={v}
-                          onPress={() => {
-                            // [WR-026] Optimistic color, but roll it back if
-                            // the upsert fails — a stuck thumb claims saved
-                            // feedback that never landed.
-                            const prev = thumbs[line.itemId];
-                            setThumbs((cur) => ({ ...cur, [line.itemId]: v }));
-                            itemFeedback.mutate(
-                              { itemId: line.itemId, verdict: v },
-                              { onError: () => setThumbs((cur) => ({ ...cur, [line.itemId]: prev })) },
-                            );
-                          }}
+                          onPress={() =>
+                            // [BUG-GUARDS C2] One verdict per ITEM at a time (two in flight could land in either
+                            // order); another item's thumb still goes through while this one sends.
+                            holdRow(line.itemId, () => {
+                              // [WR-026] Optimistic color, but roll it back if
+                              // the upsert fails — a stuck thumb claims saved
+                              // feedback that never landed. The rollback rides
+                              // this call's own promise: mutate's per-call
+                              // onError only reaches the latest call.
+                              const prev = thumbs[line.itemId];
+                              setThumbs((cur) => ({ ...cur, [line.itemId]: v }));
+                              return itemFeedback
+                                .mutateAsync({ itemId: line.itemId, verdict: v })
+                                .catch(() => setThumbs((cur) => ({ ...cur, [line.itemId]: prev })));
+                            })
+                          }
                           hitSlop={8}
                           style={{ paddingHorizontal: space.sm }}
                           accessibilityLabel={v === 'UP' ? `Liked ${line.name}` : `Disliked ${line.name}`}
