@@ -63,19 +63,11 @@ function actionsFor(o: VendorOrder) {
   const isAppt = o.fulfillment === 'APPOINTMENT';
   const out: Array<{ label: string; kind: string; tone?: 'danger' }> = [];
   if (s === 'PENDING' || s === 'PLACED') {
-    // [O-4 · owner 22 Oct 2026] The store accepts the whole order once the customer has answered every
-    // "Out of stock" question (the server refuses earlier); rejecting stays open.
-    const deciding = (o.items ?? []).some((l) => l.subStatus === 'PENDING');
-    if (!deciding) out.push({ label: 'Accept', kind: 'accept' });
-    out.push({ label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
+    out.push({ label: 'Accept', kind: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
   } else if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
-    // [O-3 · REVIEW-F S4-1 on #2024] Accept now starts preparation: an order still ACCEPTED is an MMG
-    // order waiting for its money (or a pre-order for later). The unpaid MMG one gets no forward
-    // button (the server refuses it): "Paid by MMG" is the store's next step.
-    const mmgAwaitingMoney = o.paymentMethod === 'MOBILE_MONEY' && !['CLAIMED', 'CAPTURED'].includes(String(o.paymentStatus ?? '').toUpperCase());
-    if (!mmgAwaitingMoney) out.push({ label: 'Start preparing', kind: 'preparing' });
+    out.push({ label: 'Start preparing', kind: 'preparing' });
   } else if (s === 'PREPARING') {
     out.push({ label: isPickup ? 'Ready for pickup' : 'Mark ready', kind: 'ready' });
   } else if (COURIER_ACTIVE.includes(s)) {
@@ -136,31 +128,26 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
   // contains nothing. Saying "All picked ✓" there sent a rider to collect an
   // empty bag; the server now refuses to mark it ready, and this screen says
   // what is actually true.
-  // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order: a tick is a tool, never a gate
-  // (the server's readiness, picking.service). Only a question the customer has not answered holds
-  // the bag. Before accepting, every store type can mark an item "Out of stock".
-  const beforeAccept = String(order.status).toUpperCase() === 'PENDING';
-  const lineFulfilled = (l: OrderLine) => l.subStatus !== 'PENDING' && l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED';
-  const waiting = order.items.filter((l) => l.subStatus === 'PENDING').length;
+  const lineResolved = (l: OrderLine) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
+  const lineFulfilled = (l: OrderLine) => l.picked && l.subStatus !== 'REFUNDED' && l.subStatus !== 'REJECTED';
+  const open = order.items.filter((l) => !lineResolved(l)).length;
+  const waiting = order.items.filter((l) => !l.picked && l.subStatus === 'PENDING').length;
+  const pickable = open - waiting;
   const fulfilled = order.items.filter(lineFulfilled).length;
-  const ticked = order.items.filter((l) => l.picked && lineFulfilled(l)).length;
-  const removed = order.items.length - waiting - fulfilled;
-  const pickingSummary = beforeAccept
-    ? waiting > 0
-      ? `${waiting} waiting on the customer's answer — accept the order after they answer`
-      : fulfilled === 0 && order.items.length > 0
-        ? 'Every item was removed — reject this order instead'
-        : 'Before accepting: mark any item you can’t supply as out of stock'
-    : waiting > 0
-      ? `${waiting} waiting on customer`
+  const removed = order.items.length - open - fulfilled;
+  const pickingSummary =
+    open > 0
+      ? `Shelf picking — ${[pickable > 0 ? `${pickable} to pick` : '', waiting > 0 ? `${waiting} waiting on customer` : ''].filter(Boolean).join(', ')}`
       : fulfilled === 0
         ? 'Nothing left to hand over — cancel this order'
-        : `${ticked} of ${fulfilled} ticked (ticking is optional)${removed > 0 ? `, ${removed} removed` : ''}`;
+        : removed > 0
+          ? `Picked ✓ — ${fulfilled} of ${order.items.length} lines, ${removed} removed`
+          : 'All picked ✓';
   const busy = onBusy || pickedMut.isPending || subMut.isPending || refundMut.isPending;
-  // [W-27] An MMG order's totals cannot change in-app once money can have moved — the server refuses
-  // with MMG_ADJUSTMENT_UNAVAILABLE. [O-4] Before the store accepts (and before any payment) it can.
-  const mmgLocked = order.paymentMethod === 'MOBILE_MONEY'
-    && !(beforeAccept && ['PENDING', 'AUTHORIZED', ''].includes(String(order.paymentStatus ?? '').toUpperCase()));
+  // [W-27] An MMG order's totals cannot change in-app — the server refuses with
+  // MMG_ADJUSTMENT_UNAVAILABLE, because the money went straight to the store
+  // and Swift never held it. Saying so beats letting the store click into a 409.
+  const mmgLocked = order.paymentMethod === 'MOBILE_MONEY';
 
   return (
     <div className="mt-4 rounded-xl border border-[var(--swift-border)] bg-[var(--swift-subtle)] p-4">
@@ -170,21 +157,19 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
         {order.items.map((it) => (
           <div key={it.id} className="rounded-lg bg-[var(--swift-card)] p-3">
             <div className="flex items-center gap-3">
-              {!beforeAccept && <input
+              <input
                 type="checkbox"
                 checked={!!it.picked}
                 disabled={busy || it.subStatus === 'PENDING' || it.subStatus === 'REFUNDED' || it.subStatus === 'REJECTED'}
                 onChange={(e) => pickedMut.mutate({ lineId: it.id, picked: e.target.checked })}
                 aria-label={`Picked: ${it.quantity}× ${it.name}`}
                 className="h-4 w-4 accent-[var(--swift-red)]"
-              />}
+              />
               <span className="flex-1 text-sm">
                 <b>{it.quantity}×</b> {it.name}
               </span>
               {it.subStatus === 'PENDING' && (
-                <span className="text-xs font-semibold text-amber-600">
-                  {it.substituteName ? `Waiting on customer: ${it.substituteName}` : 'Asked the customer: continue without it, or cancel'}
-                </span>
+                <span className="text-xs font-semibold text-amber-600">Waiting on customer: {it.substituteName}</span>
               )}
               {/* [W-27] "Refunded" said money came back. On a cash order none
                   ever left: the line is removed and the bill is smaller at the
@@ -192,7 +177,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                   there is no tender here on which a refund could be owed. */}
               {it.subStatus === 'REFUNDED' && <span className="text-xs font-semibold text-[var(--swift-muted)]">Removed — not charged</span>}
               {it.subStatus === 'REJECTED' && <span className="text-xs font-semibold text-[var(--swift-red)]">Sub declined</span>}
-              {!beforeAccept && !it.picked && (it.subStatus === 'PENDING' || it.subStatus === 'APPROVED') && (
+              {!it.picked && (it.subStatus === 'PENDING' || it.subStatus === 'APPROVED') && (
                 <button
                   onClick={() => refundMut.mutate(it.id)}
                   disabled={busy || mmgLocked}
@@ -236,7 +221,7 @@ function PickList({ order, onBusy }: { order: VendorOrder; onBusy: boolean }) {
                     title={mmgLocked ? MMG_LINE_LOCK : undefined}
                     className="rounded-full bg-black/5 px-2.5 py-1 text-xs font-semibold disabled:opacity-50"
                   >
-                    {beforeAccept ? 'No substitute — ask the customer' : 'No substitute — remove line'}
+                    No substitute — remove line
                   </button>
                   {mmgLocked && (
                     <span className="text-xs text-[var(--swift-muted)]">{MMG_LINE_LOCK}</span>
@@ -351,9 +336,7 @@ function OrderDetail({ id, onClose }: { id: string; onClose: () => void }) {
   // the window offers the store's confirmation, or says why it cannot.
   // (A disputed order keeps only Reject: actionsFor.)
   const actions = actionsFor(o).filter((a) => !(a.kind === 'accept' && acceptHeldForPayment(o)));
-  // [O-4] Before accepting, every store type can mark an item out of stock; the shelf pick list after
-  // the accept stays with the quantity-tracked store types.
-  const pickable = !paused && (s === 'PENDING' || (['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s)));
+  const pickable = !paused && ['SUPERMARKET', 'STORE'].includes(o.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   // [W-25] The old predicate was "not captured and not cancelled", so a
   // FAILED, REFUNDED or UNRESOLVED payment offered a one-tap "received" — a

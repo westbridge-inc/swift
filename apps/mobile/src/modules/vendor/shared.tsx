@@ -33,30 +33,15 @@ export function orderActions(order: any): { label: string; action: VendorOrderAc
   return withoutForwardWorkWhilePaused(order, statusActions(order));
 }
 
-/** [O-3] An MMG order whose money has not moved yet (the server's MMG_MONEY_MOVED = CLAIMED or CAPTURED). */
-export function mmgAwaitingMoney(order: any): boolean {
-  return order?.paymentMethod === 'MOBILE_MONEY' && !['CLAIMED', 'CAPTURED'].includes(String(order?.paymentStatus ?? '').toUpperCase());
-}
-
 function statusActions(order: any): { label: string; action: VendorOrderActionKind }[] {
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
   const isAppt = order?.fulfillment === 'APPOINTMENT';
-  if (s === 'PENDING' || s === 'PLACED') {
-    // [O-4 · owner 22 Oct 2026] Accept the whole order once the customer has answered every
-    // "Out of stock" question (the server refuses earlier); rejecting stays open.
-    const deciding = (order?.items ?? []).some((l: any) => l?.subStatus === 'PENDING');
-    return [
-      ...(deciding ? [] : [{ label: 'Accept', action: 'accept' as const }]),
-      { label: isAppt ? 'Decline' : 'Reject', action: 'reject' as const },
-    ];
-  }
+  if (s === 'PENDING' || s === 'PLACED')
+    return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
   // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
-  // [O-3 · REVIEW-F S4-1 on #2024] Accept now starts preparation, so an order still ACCEPTED is an
-  // MMG order waiting for its money (or a pre-order for later). The unpaid MMG one has no forward
-  // button (the server refuses it): "Paid by MMG" on its card is the store's next step.
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return mmgAwaitingMoney(order) ? [] : [{ label: 'Start preparing', action: 'preparing' }];
+  if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
   if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
   // A rider claimed the order before the kitchen tapped anything (the normal
   // case when movers are close) — the buttons keep working via timestamps.
