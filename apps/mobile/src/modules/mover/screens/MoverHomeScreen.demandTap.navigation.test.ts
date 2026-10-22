@@ -26,6 +26,8 @@ const fx = vi.hoisted(() => ({
   goOnline: vi.fn(),
 }));
 
+// The push-off strip (main since this test was written) reads AppState; it is not what this test is about.
+vi.mock('../../../components/PushOffStrip', () => ({ PushOffStrip: () => null }));
 vi.mock('react-native', async () => {
   const R = await import('react');
   const h = R.createElement;
