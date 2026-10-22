@@ -168,6 +168,23 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
     expect(f.failureNotes).toEqual([MMG_PUSH_OFF_REASON]);
   });
 
+  it('the partner is told: the payment-failed notice is written and delivered, and names only a way to pay that exists today', async () => {
+    const subId = await makeVendorSub('MOBILE_MONEY');
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
+    expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
+    const owner = (await withRelations(subId)).vendor!.owner.userId;
+    const outbox = await app.prisma.billingFeeNotice.findMany({ where: { subscriptionId: subId }, select: { status: true, stageKey: true } });
+    expect(outbox).toEqual([{ status: 'DELIVERED', stageKey: 'failed:a1' }]);
+    const told = await app.prisma.notification.findMany({ where: { userId: owner, data: { path: ['kind'], equals: 'billing_failed' } } });
+    expect(told).toHaveLength(1);
+    expect(told[0]!.title).toBe('Subscription payment failed');
+    expect(told[0]!.body.startsWith(`${MMG_PUSH_OFF_REASON}.`)).toBe(true);
+    // The hosted checkout is not live in this test: the notice must not send the partner to it.
+    expect(told[0]!.body).not.toMatch(/checkout/i);
+    expect(told[0]!.body).toContain('The weekly fee of GY$12,000 is due now.');
+  });
+
   it('control: with the push rail on (sandbox, off production) the same plan IS sent a charge request', async () => {
     const subId = await makeVendorSub('MOBILE_MONEY');
     vi.stubEnv('MMG_DRIVER', 'sandbox');

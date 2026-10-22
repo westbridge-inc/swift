@@ -350,8 +350,10 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   throw error;
 }
 
-/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
-export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. It names
+ *  no way to pay: the payment-failed notice's paying sentence (feePayLine) names the MMG checkout only
+ *  while it is live for the partner, otherwise the amount and when it is due. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off';
 
 export class BillingService {
   private countryConfig: CountryConfigService;
