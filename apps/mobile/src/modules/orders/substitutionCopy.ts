@@ -10,6 +10,21 @@ export interface SubstitutionView {
   /** [SUBSTITUTION] When the question stops waiting, and what happens then. */
   decideBy?: string | null;
   ifNoAnswer?: 'REMOVE' | 'WITHDRAW' | null;
+  /** [O-4] SWAP = the store proposes another item; REMOVAL = nothing to swap, asked before the store accepts. */
+  kind?: 'SWAP' | 'REMOVAL' | null;
+}
+
+/** [O-4 · owner 22 Oct 2026] The store can't supply the item and has nothing to swap, and asked
+ *  BEFORE accepting: the customer continues without it (the total goes down) or cancels the order. */
+export function isRemovalQuestion(substitution: SubstitutionView | null | undefined): boolean {
+  return substitution?.kind === 'REMOVAL';
+}
+
+/** [O-4] What "Continue without it" does to the total, from the server's own number. */
+export function removalChangeText(substitution: SubstitutionView | null | undefined): string | null {
+  const delta = substitution?.priceDelta;
+  if (typeof delta !== 'number' || !Number.isFinite(delta) || delta >= 0) return null;
+  return `Continuing without it lowers your total by ${moneyExact(-delta)}. You pay only the new total.`;
 }
 
 /**

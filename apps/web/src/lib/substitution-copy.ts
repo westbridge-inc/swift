@@ -12,6 +12,20 @@ export interface SwapView {
   original?: { options?: ReadonlyArray<{ group?: string; name?: string }> | null } | null;
   decideBy?: string | null;
   ifNoAnswer?: 'REMOVE' | 'WITHDRAW' | null;
+  /** [O-4] SWAP = another item proposed; REMOVAL = nothing to swap, asked before the store accepts. */
+  kind?: 'SWAP' | 'REMOVAL' | null;
+}
+
+/** [O-4 · owner 22 Oct 2026] Asked before the store accepted, with nothing to swap: continue
+ *  without the item (the total goes down) or cancel the order. Mirrors the phone. */
+export function isRemovalQuestion(view: SwapView | null | undefined): boolean {
+  return view?.kind === 'REMOVAL';
+}
+
+export function removalChangeText(view: SwapView | null | undefined): string | null {
+  const delta = view?.priceDelta;
+  if (typeof delta !== 'number' || !Number.isFinite(delta) || delta >= 0) return null;
+  return `Continuing without it lowers your total by ${exact(-delta)}. You pay only the new total.`;
 }
 
 const exact = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: Number.isInteger(n) ? 0 : 2, maximumFractionDigits: 2 })}`;

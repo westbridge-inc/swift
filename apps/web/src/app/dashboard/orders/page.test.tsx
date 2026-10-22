@@ -787,6 +787,24 @@ describe('disputed MMG orders pause the web dashboard', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(await within(dialog).findByRole('button', { name: 'Start preparing' })).toBeTruthy();
   });
+
+  it('[O-3 · REVIEW-F S4-1] an accepted MMG order still waiting for its money offers no "Start preparing" (the server refuses it); a cash one does', async () => {
+    const unpaid = { status: 'ACCEPTED', fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', paymentMethod: 'MOBILE_MONEY', paymentStatus: 'PENDING' };
+    mockApi(boardHandler([wireVendorOrder(unpaid)], wireVendorOrderDetail(unpaid)));
+    const { user, unmount } = renderWithQuery(<OrdersPage />);
+    await user.click(await rowFor('SW-1001'));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText('MMG — the customer pays your store’s MMG account.')).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Start preparing' })).toBeNull();
+    unmount();
+
+    const cash = { status: 'ACCEPTED', fulfillment: 'DELIVERY', fulfillmentMode: 'PLATFORM_RIDER', paymentMethod: 'CASH', paymentStatus: 'PENDING' };
+    mockApi(boardHandler([wireVendorOrder(cash)], wireVendorOrderDetail(cash)));
+    const second = renderWithQuery(<OrdersPage />);
+    await second.user.click(await rowFor('SW-1001'));
+    const cashDialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(cashDialog).findByRole('button', { name: 'Start preparing' })).toBeTruthy();
+  });
 });
 
 // ---------------------------------------------------------------------------

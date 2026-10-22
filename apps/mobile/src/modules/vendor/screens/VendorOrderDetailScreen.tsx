@@ -171,9 +171,14 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
   const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
-  const pickable = ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
-  const lineResolved = (l: any) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
-  const openLines = pickable ? items.filter((l) => !lineResolved(l)).length : 0;
+  // [O-4 · owner 22 Oct 2026] Before accepting, EVERY store type can mark an item out of stock (the
+  // customer is asked); after the accept the shelf pick list stays with quantity-tracked stores. A
+  // tick is a tool, never a gate: only an unanswered customer question holds the order.
+  const beforeAccept = s === 'PENDING';
+  const pickable = beforeAccept || (['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s));
+  const openLines = pickable ? items.filter((l) => l.subStatus === 'PENDING').length : 0;
+  const mmgLinesLocked = order.paymentMethod === 'MOBILE_MONEY'
+    && !(beforeAccept && ['PENDING', 'AUTHORIZED', ''].includes(String(order.paymentStatus ?? '').toUpperCase()));
   /** Same substitutionGroup wins; otherwise same category; always in stock. */
   const substituteCandidates = (line: any) => {
     const all: any[] = (menu.data ?? []).flatMap((c: any) => (c.items ?? []).map((i: any) => ({ ...i, categoryId: c.id })));
@@ -327,7 +332,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
             </T>
             {pickable ? (
               <T variant="caption" weight="semibold" tone={openLines === 0 ? 'muted' : 'brand'}>
-                {openLines === 0 ? 'All picked' : `${openLines} to pick`}
+                {openLines > 0
+                  ? (beforeAccept ? `${openLines} waiting on the customer — accept after they answer` : `${openLines} waiting on the customer`)
+                  : (beforeAccept ? 'Out of stock? Mark it before accepting' : 'Ticking is optional')}
               </T>
             ) : null}
           </View>
@@ -337,7 +344,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
             return (
               <View key={it.id} style={{ paddingVertical: 6, opacity: closed ? 0.45 : 1 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start' }}>
-                  {pickable && !closed ? (
+                  {pickable && !beforeAccept && !closed ? (
                     <Pressable
                       onPress={() => !pending && picking.setPicked.mutate({ orderId: order.id, lineId: it.id, picked: !it.picked })}
                       hitSlop={8}
@@ -370,7 +377,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                     ) : null}
                     {pending ? (
                       <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 2 }}>
-                        Waiting on the customer: {it.substituteName}
+                        {it.substituteName ? `Waiting on the customer: ${it.substituteName}` : 'Asked the customer: continue without it, or cancel'}
                       </T>
                     ) : null}
                     {pending && storeSwapWaitText(it.substituteDecideBy, order.paymentMethod) ? (
@@ -403,14 +410,17 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                             style={{ height: 32, paddingHorizontal: space.md }}
                           />
                         ))}
-                        <Chip
-                          label="Refund line"
-                          onPress={() => {
-                            setSubFor(null);
-                            picking.refundLine.mutate({ orderId: order.id, lineId: it.id });
-                          }}
-                          style={{ height: 32, paddingHorizontal: space.md }}
-                        />
+                        {/* [O-4] MMG: a line change is refused once money can have moved; no dead-end chip then. */}
+                        {mmgLinesLocked ? null : (
+                          <Chip
+                            label={beforeAccept ? 'No substitute: ask the customer' : 'Refund line'}
+                            onPress={() => {
+                              setSubFor(null);
+                              picking.refundLine.mutate({ orderId: order.id, lineId: it.id });
+                            }}
+                            style={{ height: 32, paddingHorizontal: space.md }}
+                          />
+                        )}
                         <Chip label="Back" selected onPress={() => setSubFor(null)} style={{ height: 32, paddingHorizontal: space.md }} />
                       </View>
                     ) : (
@@ -427,7 +437,7 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                     off instead (the server removes it, lowers the total and
                     tells the customer). Not on MMG: its total can't change
                     in-app, and the server refuses. */}
-                {pickable && pending && order.paymentMethod !== 'MOBILE_MONEY' ? (
+                {pickable && !beforeAccept && pending && order.paymentMethod !== 'MOBILE_MONEY' ? (
                   <View style={{ marginLeft: 64 }}>
                     <Pressable
                       onPress={() => picking.refundLine.mutate({ orderId: order.id, lineId: it.id })}

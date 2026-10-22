@@ -363,7 +363,7 @@ describe('[O-4] MMG: the total may change only before acceptance and before any 
 
   it('a waiting MMG order on which money may already have moved (a customer "I paid") keeps its total fixed', async () => {
     const orderId = await placeOrder('MOBILE_MONEY');
-    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { customerMmgClaim: 'PAID' } }));
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { customerMmgClaim: 'PAID', customerMmgClaimAt: new Date(), customerClaimedPaidAt: new Date() } }));
     const rice = await lineOf(orderId, grocer.rice);
     const refused = await outOfStock(orderId, rice.id);
     expect(refused.statusCode, refused.body).toBe(409);
