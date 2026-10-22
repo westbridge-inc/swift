@@ -8,11 +8,14 @@
 -- of a closed account finds it committed.
 --
 -- Same shape as before: SECURITY DEFINER, run as their owner (the migration
--- owner, which the wall tooling requires to be superuser or BYPASSRLS, so the
--- guard sees every users row; without that it refuses, never passes), pinned
--- search_path, schema-qualified tables, no dynamic SQL. CREATE OR REPLACE keeps
+-- owner), pinned search_path, schema-qualified tables, no dynamic SQL. CREATE OR REPLACE keeps
 -- the owner and the grants; they are restated below. A refusal is loud
 -- (insufficient_privilege) and rolls the caller's transaction back.
+-- users has FORCE ROW LEVEL SECURITY: the guard sees the users rows the
+-- caller's tenant binding shows (the same view the closure's FOR UPDATE of the
+-- person's row already has, so it sees the tombstone written just before in
+-- that transaction). A row it cannot see reads as not in erasure: it refuses,
+-- never passes.
 CREATE OR REPLACE FUNCTION public.swift_owner_wall_erase_devices(p_user_id text) RETURNS integer
   LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, public AS $$
 DECLARE
