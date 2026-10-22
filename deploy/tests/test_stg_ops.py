@@ -201,7 +201,7 @@ class StgCDoctorHealthDetail(unittest.TestCase):
         # containers are running with a restart policy, and the db queries
         # fail (warn, not FAIL). Keeps the doctor's container section from
         # failing on a test host that merely has no stack running.
-        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
+        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*|*"ps -q clamd"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
         # Pin the disk check at 57% so the doctor tests do not depend on the
         # host's free space.
         sh_shim(self.bin, "df", 'echo "Filesystem Size Used Avail Capacity Mounted"\necho "/dev/disk1 100Gi 43Gi 57Gi 57% /"')

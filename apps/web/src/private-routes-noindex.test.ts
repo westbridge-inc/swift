@@ -70,6 +70,7 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
   'dashboard/insights/page.tsx',
+  'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
   'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',

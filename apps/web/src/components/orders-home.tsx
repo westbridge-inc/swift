@@ -319,7 +319,8 @@ export function ManageGrid({ store, owner, onOrderHistory }: { store: HubStore |
         <Tile icon={BarChart3} label="Insights" detail={revenueDetail} href="/dashboard/insights"
           badge={revenueKnown ? <DeltaBadge cur={revenueWindow.cur.revenue} prev={revenueWindow.prev?.revenue ?? null} /> : undefined}
           badgeLabel={revenueKnown ? financialDeltaLabel(revenueWindow.cur.revenue, revenueWindow.prev?.revenue ?? null) : undefined} />
-        <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href="/dashboard/settings" />
+        {/* As the app: a Services store's hours tile opens its Schedule, every other store's opens Account. */}
+        <Tile icon={CalendarClock} label="Hours & schedule" detail={scheduleDetail} href={store?.vendorType === 'SERVICE' ? '/dashboard/schedule' : '/dashboard/settings'} />
         <Tile icon={QrCode} label={owner ? 'My QR & number' : 'My QR'} detail={qrDetail} href={qrQ.data?.shortUrl ?? '/dashboard/settings'} external={!!qrQ.data?.shortUrl}
           badge={qrStatus ? <Pill tone={qrStatus === 'ACTIVE' ? 'success' : 'neutral'}>{qrStatusWords(qrStatus)}</Pill> : undefined}
           badgeLabel={qrStatus ? `QR: ${qrStatusWords(qrStatus)}` : undefined} />
