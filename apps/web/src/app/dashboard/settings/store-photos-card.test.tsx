@@ -43,7 +43,7 @@ describe('[IMAGES-E2E] the store photos card', () => {
 
   it('one photo request at a time: while the cover uploads, no press on either slot sends another', async () => {
     vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile(KEY, null) as never);
-    let finish: (v: never) => void = () => undefined;
+    let finish: (_v: never) => void = () => undefined;
     const upload = vi.spyOn(vendorApi, 'uploadStorePhoto').mockImplementation(() => new Promise((r) => { finish = r as never; }));
     const remove = vi.spyOn(vendorApi, 'removeStorePhoto').mockResolvedValue({ id: 'store-1', logoUrl: null, coverImageUrl: null });
     renderWithQuery(<StorePhotosCard storeId="store-1" />);

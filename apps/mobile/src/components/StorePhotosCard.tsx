@@ -112,9 +112,12 @@ export function StorePhotosCard({ store }: { store: { logoUrl?: string | null; c
               <View style={{ flexDirection: 'row', gap: space.md, marginTop: 4 }}>
                 <LinkText
                   label={working ? 'Working…' : current ? 'Change' : 'Add photo'}
+                  disabled={sending}
                   onPress={sending ? undefined : () => { void pick(slot, aspect); }}
                 />
-                {current && !working ? <LinkText label="Remove" tone="muted" onPress={() => { if (remove.isPending || upload.isPending) return; remove.mutate(slot); }} /> : null}
+                {current && !working ? (
+                  <LinkText label="Remove" tone="muted" disabled={sending} onPress={sending ? undefined : () => remove.mutate(slot)} />
+                ) : null}
               </View>
             </View>
           </View>

@@ -64,6 +64,7 @@ describe('[IMAGES-E2E] StorePhotosCard: one photo request at a time', () => {
     expect(change).toHaveLength(2);
     expect(remove).toHaveLength(2);
     change.forEach((l) => expect(typeof l.props['onPress']).toBe('function'));
+    [...change, ...remove].forEach((l) => expect(l.props['disabled'], `${String(l.props['label'])} looks live`).toBe(false));
     remove[0]!.props['onPress']();
     expect(state.calls.remove).toBe(1);
   });
@@ -75,5 +76,17 @@ describe('[IMAGES-E2E] StorePhotosCard: one photo request at a time', () => {
     change.forEach((l) => expect(l.props['onPress'], `${String(l.props['label'])} stays held`).toBeUndefined());
     remove.forEach((l) => l.props['onPress']?.());
     expect(state.calls).toEqual({ upload: 0, remove: 0 });
+  });
+
+  // [REVIEW-G S4-1 on #1909 139351d5] A held link LOOKS held (greyed, read as disabled), Remove included,
+  // and has no press at all, like the web card's disabled buttons.
+  it.each(['upload', 'remove'] as const)('while a %s runs, every link on the card is shown disabled and has no press', (busy) => {
+    state.pending[busy] = true;
+    const { change, remove } = render();
+    expect(remove).toHaveLength(2);
+    [...change, ...remove].forEach((l) => {
+      expect(l.props['disabled'], `${String(l.props['label'])} shown disabled`).toBe(true);
+      expect(l.props['onPress'], `${String(l.props['label'])} has no press`).toBeUndefined();
+    });
   });
 });
