@@ -26,6 +26,7 @@ import {
   useVendorBookingExceptions,
   useCreateBookingException,
   useDeleteBookingException,
+  useVendorMenu,
   type VendorBooking,
   type VendorBookingException,
 } from '../../../hooks/vendorops';
@@ -34,7 +35,23 @@ import { errorMessage } from '../../../lib/apiError';
 import { touchTarget } from '../../../kit/touch-target';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '../../../lib/appointmentTime';
 
+/** [UI-SWEEP, REVIEW-F 07:08Z] A booking's words. This is BookingStatus
+ *  (RESERVED, CONFIRMED, COMPLETED, CANCELLED), its own vocabulary, not an
+ *  order's. GET /vendor/bookings drops only CANCELLED, so a COMPLETED
+ *  appointment is served, and it used to read 'Reserved'. A status this build
+ *  was not taught (newer server, older OTA) says so, never a guess. */
+export function bookingStatusPill(status: string): { label: string; tone: 'success' | 'neutral' } {
+  switch (status) {
+    case 'RESERVED': return { label: 'Reserved', tone: 'neutral' };
+    case 'CONFIRMED': return { label: 'Confirmed', tone: 'success' };
+    case 'COMPLETED': return { label: 'Completed', tone: 'neutral' };
+    case 'CANCELLED': return { label: 'Cancelled', tone: 'neutral' };
+    default: return { label: 'Status unavailable', tone: 'neutral' };
+  }
+}
+
 function AppointmentCard({ b }: { b: VendorBooking }) {
+  const pill = bookingStatusPill(b.status);
   return (
     <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.sm }}>
       <View style={{ alignItems: 'center', minWidth: 60 }}>
@@ -48,7 +65,7 @@ function AppointmentCard({ b }: { b: VendorBooking }) {
           {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
         </T>
       </View>
-      <TonePill tone={b.status === 'CONFIRMED' ? 'success' : 'neutral'} label={b.status === 'CONFIRMED' ? 'Confirmed' : 'Reserved'} />
+      <TonePill tone={pill.tone} label={pill.label} />
     </Card>
   );
 }
@@ -61,6 +78,9 @@ function AppointmentCard({ b }: { b: VendorBooking }) {
 export function VendorScheduleScreen({ navigation }: any) {
   const q = useVendorBookings();
   const exceptionsQ = useVendorBookingExceptions();
+  // [UI-SWEEP, REVIEW-F 07:08Z] Names a one-listing block. A label only: when
+  // the menu is not loaded the block says 'One listing', never the whole store.
+  const menuQ = useVendorMenu();
   // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
   const pull = usePullToRefresh(() => Promise.all([q.refetch(), exceptionsQ.refetch()]));
   const createBlock = useCreateBookingException();
@@ -106,6 +126,21 @@ export function VendorScheduleScreen({ navigation }: any) {
     setBlocking(true);
   };
   const blockWhen = (e: VendorBookingException) => (e.start ? `${e.start}–${e.end}` : 'all day');
+  // [UI-SWEEP, REVIEW-F 07:08Z] A block with an itemId closes ONE listing; it
+  // used to read 'Blocked · all day', as if the whole store were closed.
+  const listingNames = new Map<string, string>();
+  for (const c of (menuQ.data ?? []) as Array<{ items?: Array<{ id: string; name: string }> }>) {
+    for (const it of c.items ?? []) listingNames.set(it.id, it.name);
+  }
+  const blockListing = (e: VendorBookingException) => (e.itemId ? listingNames.get(e.itemId) ?? null : null);
+  const blockTitle = (e: VendorBookingException) => {
+    if (!e.itemId) return `Blocked · ${blockWhen(e)}`;
+    return `${blockListing(e) ?? 'One listing'} blocked · ${blockWhen(e)}`;
+  };
+  const blockSpoken = (e: VendorBookingException) => {
+    if (!e.itemId) return blockWhen(e);
+    return `${blockListing(e) ?? 'one listing'}, ${blockWhen(e)}`;
+  };
 
   return (
     <Screen>
@@ -148,7 +183,7 @@ export function VendorScheduleScreen({ navigation }: any) {
               <Feather name="slash" size={16} color={color.text.muted} />
               <View style={{ flex: 1 }}>
                 <T variant="body" weight="semibold">
-                  Blocked · {blockWhen(e)}
+                  {blockTitle(e)}
                 </T>
                 {e.reason ? (
                   <T variant="caption" tone="muted" numberOfLines={1}>
@@ -161,7 +196,7 @@ export function VendorScheduleScreen({ navigation }: any) {
                 disabled={deleteBlock.isPending}
                 hitSlop={10}
                 accessibilityRole="button"
-                accessibilityLabel={`Remove block, ${blockWhen(e)}`}
+                accessibilityLabel={`Remove block, ${blockSpoken(e)}`}
                 accessibilityState={{ disabled: deleteBlock.isPending }}
                 style={touchTarget(18)}
               >

@@ -22,6 +22,7 @@ const fx = vi.hoisted(() => ({
   exceptions: vi.fn(),
   create: vi.fn(),
   remove: vi.fn(),
+  menu: vi.fn(),
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -72,6 +73,7 @@ vi.mock('../../../hooks/vendorops', async () => {
     useVendorBookingExceptions: () => useQuery({ queryKey: ['vendor', 'booking-exceptions'], queryFn: () => fx.exceptions() }),
     useCreateBookingException: () => { const qc = useQueryClient(); return useMutation({ mutationFn: (v: unknown) => fx.create(v), onSuccess: after(qc) }); },
     useDeleteBookingException: () => { const qc = useQueryClient(); return useMutation({ mutationFn: (id: string) => fx.remove(id), onSuccess: after(qc) }); },
+    useVendorMenu: () => useQuery({ queryKey: ['vendor', 'menu'], queryFn: () => fx.menu() }),
   };
 });
 
@@ -95,6 +97,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   fx.bookings.mockResolvedValue([]);
   fx.exceptions.mockResolvedValue([]);
+  fx.menu.mockResolvedValue([]);
   client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
@@ -146,5 +149,67 @@ describe('[UI-SWEEP, web #2013 twin] the store Schedule says what failed', () =>
     await settle();
     expect(text()).toContain('Only the owner can unblock time.');
     expect(text()).toContain('Blocked · 13:00–17:00');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP, REVIEW-F 07:08Z on web #2013 + this screen] The Schedule's words
+// are true:
+//   - GET /vendor/bookings drops only CANCELLED, so a COMPLETED appointment is
+//     served — and it read 'Reserved' (every status but CONFIRMED did);
+//   - a block on ONE listing (itemId) read 'Blocked · all day', as if the whole
+//     store were closed — it now names the listing (from the store's own menu;
+//     'One listing' when the name is not known, never the whole store).
+// ---------------------------------------------------------------------------
+describe('[UI-SWEEP, REVIEW-F 07:08Z] the store Schedule names what it shows', () => {
+  const today = () => appointmentDayKey(new Date());
+  const booking = (status: string) => ({
+    id: `bk-${status}`, serviceName: 'Haircut', price: 2000, status, orderId: null, customer: { firstName: 'Ann' },
+    slotStart: `${today()}T15:00:00.000Z`, slotEnd: `${today()}T15:30:00.000Z`,
+  });
+
+  it.each([
+    ['RESERVED', 'Reserved'],
+    ['CONFIRMED', 'Confirmed'],
+    ['COMPLETED', 'Completed'],
+    ['SOMETHING_NEWER', 'Status unavailable'],
+  ])('a %s booking reads %s', async (status, words) => {
+    fx.bookings.mockResolvedValue([booking(status)]);
+    await render();
+    expect(text()).toContain('Haircut');
+    expect(text()).toContain(words);
+    for (const other of ['Reserved', 'Confirmed', 'Completed', 'Status unavailable'].filter((w) => w !== words)) {
+      expect(text(), `${status} never reads '${other}'`).not.toContain(other);
+    }
+    expect(text(), 'the raw status is never shown').not.toContain(status);
+  });
+
+  const block = (over: Record<string, unknown>) => ({ id: 'b-1', itemId: null, date: `${today()}T00:00:00.000Z`, start: null, end: null, reason: null, ...over });
+
+  it('a whole-store block still reads "Blocked · all day"', async () => {
+    fx.exceptions.mockResolvedValue([block({})]);
+    await render();
+    expect(text()).toContain('Blocked · all day');
+    expect(button('Remove block, all day')).toBeDefined();
+  });
+
+  it('a one-listing block names the listing, never reads as the whole store', async () => {
+    fx.exceptions.mockResolvedValue([block({ itemId: 'it-2', start: '13:00', end: '17:00' })]);
+    fx.menu.mockResolvedValue([
+      { id: 'c-1', name: 'Cuts', items: [{ id: 'it-1', name: 'Haircut' }, { id: 'it-2', name: 'Beard trim' }] },
+    ]);
+    await render();
+    expect(text()).toContain('Beard trim blocked · 13:00–17:00');
+    expect(text()).not.toContain('Blocked · 13:00–17:00');
+    expect(button('Remove block, Beard trim, 13:00–17:00'), 'the remove control names the listing').toBeDefined();
+  });
+
+  it('a one-listing block whose name is unknown (menu failed, or the listing is gone) says "One listing", never the whole store', async () => {
+    fx.exceptions.mockResolvedValue([block({ itemId: 'it-gone' })]);
+    fx.menu.mockRejectedValue(new Error('offline'));
+    await render();
+    expect(text()).toContain('One listing blocked · all day');
+    expect(text()).not.toContain('Blocked · all day');
+    expect(button('Remove block, one listing, all day')).toBeDefined();
   });
 });
