@@ -131,7 +131,14 @@ export function PersonalDataScreen({ route, navigation }: any = {}) {
     },
   });
 
-  if (profile.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (profile.isLoading) {
+    return (
+      <Screen>
+        <Header title="Personal Data" />
+        <LoadingBlock />
+      </Screen>
+    );
+  }
   if (profile.isError || !p) {
     return (
       <Screen>

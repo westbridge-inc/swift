@@ -187,6 +187,17 @@ body {
    so the marker .swift-order-row carries no size of its own [WEB-REDESIGN].
    The store page's placeholder is drawn with the page's own classes [W6]. */
 .swift-bone { animation: swift-bone 1.6s ease-in-out infinite alternate; }
+
+/* [WEB-LAUNCH-CHECK F2 · REVIEW-F2 #1962 S3-1] On the soft-pink panel the
+   plain grey is 4.32:1 (AA needs 4.5:1); the storefront tints are as light.
+   Every tinted panel turns its grey text one step darker, so the legal footers,
+   the /contact cards, the "Couldn't load" panel, selected options and the
+   partner notes all pass and a new panel cannot forget. Stylesheet blocks that
+   paint a tint set the same override (pinned by launch-check-a11y.test).
+   Hover-only tints (hover:bg-...) are a different class. */
+.bg-\[var\(--swift-subtle\)\],
+.bg-\[var\(--swift-red-50\)\],
+.bg-\[var\(--swift-vertical-bg\)\] { --swift-muted: var(--swift-muted-on-subtle); }
 @keyframes swift-bone { to { opacity: 0.5; } }
 
 @layer base {
@@ -425,6 +436,7 @@ body {
     overflow: hidden;
     border-radius: var(--swift-radius-lg);
     background: var(--swift-red-50);
+    --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
     color: var(--swift-red-600);
   }
 
@@ -451,6 +463,7 @@ body {
     flex: none;
     border-radius: var(--swift-radius-md);
     background: var(--swift-red-50);
+    --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
     color: var(--swift-red-600);
   }
 
@@ -473,11 +486,13 @@ body {
     border-radius: var(--swift-radius-full);
     font: 600 13px/18px var(--swift-face-body), system-ui, sans-serif;
     background: var(--swift-red-50);
+    --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
     color: var(--swift-red-600);
     white-space: nowrap;
   }
   .sw-status-success { background: var(--swift-soft-success); color: var(--swift-success); }
-  .sw-status-neutral { background: var(--swift-border); color: var(--swift-muted); }
+  /* [REVIEW-F2 #1962 S3-1, found with it] the plain grey on the line colour was 3.96:1; the panel grey is 4.59:1. */
+  .sw-status-neutral { background: var(--swift-border); color: var(--swift-muted-on-subtle); }
   .sw-status-warning { background: var(--swift-soft-warning); color: var(--swift-warning); }
   .sw-status-error { background: var(--swift-soft-danger); color: var(--swift-error); }
 
@@ -489,6 +504,7 @@ body {
     padding: 16px;
     border-radius: var(--swift-radius-md);
     background: var(--swift-red-50);
+    --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
     color: var(--swift-red-600);
     font: 500 13px/18px var(--swift-face-body), system-ui, sans-serif;
   }
@@ -512,6 +528,7 @@ body {
     margin-bottom: 16px;
     border-radius: 28px;
     background: var(--swift-red-50);
+    --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
     color: var(--swift-red-600);
   }
 
@@ -613,7 +630,7 @@ body {
   @media (min-width: 47.5rem) { .sw-order-board { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
   .sw-order-card { border-radius: 16px; background: var(--swift-card); padding: 16px; box-shadow: 0 6px 14px rgba(33,26,26,.08); overflow-wrap: anywhere; }
   .sw-board-empty { padding: 24px 16px; border: 1px dashed var(--swift-border-strong); border-radius: 16px; text-align: center; color: var(--swift-muted); font-size: 13px; line-height: 18px; }
-  .sw-status { display: inline-flex; border-radius: 9999px; padding: 5px 12px; background: var(--swift-red-50); color: var(--swift-red); font-size: 13px; line-height: 18px; font-weight: 600; }
+  .sw-status { display: inline-flex; border-radius: 9999px; padding: 5px 12px; background: var(--swift-red-50); --swift-muted: var(--swift-muted-on-subtle); color: var(--swift-red); font-size: 13px; line-height: 18px; font-weight: 600; }
   .sw-stock-switch { position: relative; width: 52px; height: 32px; flex: none; border-radius: 9999px; }
   .sw-stock-knob { position: absolute; top: 3px; left: 3px; width: 26px; height: 26px; border-radius: 9999px; background: var(--swift-white); box-shadow: 0 1px 3px rgba(33,26,26,.25); }
   .sw-partner :where(button, a, input, select) { touch-action: manipulation; }

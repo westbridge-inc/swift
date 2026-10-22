@@ -28,14 +28,16 @@ function personIdColumns(): string[] {
  * person column, pinned end to end: the erasure calls the helper with the person's id, the helper calls the
  * function, and the function's newest definition deletes from that table by that column.
  */
-const WALL_ERASERS: Record<string, { helper: string; fn: string; table: string }> = {
-  'DeviceToken.userId': { helper: 'eraseUserDevices', fn: 'swift_owner_wall_erase_devices', table: 'device_tokens' },
+const WALL_ERASERS: Record<string, { helper: string; fn: string; table: string; lib: string }> = {
+  'DeviceToken.userId': { helper: 'eraseUserDevices', fn: 'swift_owner_wall_erase_devices', table: 'device_tokens', lib: 'owner-rls.ts' },
+  // [item 20] Under the owner wall a plain delete by an admin or the retry sweep removes none of the person's notices.
+  'Notification.userId': { helper: 'eraseNoticesOf', fn: 'swift_owner_wall_erase_notices', table: 'notifications', lib: 'owner-wall-notices.ts' },
 };
 function wallEraserDeletes(link: string): boolean {
-  const { helper, fn, table } = WALL_ERASERS[link]!;
+  const { helper, fn, table, lib: libFile } = WALL_ERASERS[link]!;
   const column = link.split('.')[1]!;
   if (!new RegExp(`\\b${helper}\\(tx, userId\\)`).test(ERASURE_SOURCES)) return false;
-  const lib = readFileSync(join(__dirname, '..', 'lib', 'owner-rls.ts'), 'utf8');
+  const lib = readFileSync(join(__dirname, '..', 'lib', libFile), 'utf8');
   const body = lib.split(`export async function ${helper}(`)[1]?.split('\n}\n')[0] ?? '';
   if (!body.includes(`public.${fn}(`)) return false;
   const dir = join(__dirname, '..', '..', 'prisma', 'migrations');

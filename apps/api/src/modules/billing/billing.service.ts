@@ -1,4 +1,5 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
@@ -28,6 +29,7 @@ import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { batchClock } from '../../utils/batch-clock';
+import { billingErrorCode } from './billing-error-code';
 import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
@@ -223,6 +225,8 @@ export interface BillingCycleResult {
   errors: number;
   /** MMG merchant-initiated requests awaiting the payer's phone approval */
   pending: number;
+  /** [COORD 18 Oct 20:33Z] The `errors`, counted by error code (billing-error-code.ts). */
+  errorCodes: Record<string, number>;
 }
 
 /**
@@ -431,7 +435,7 @@ export class BillingService {
       },
     });
 
-    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0 };
+    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0, errorCodes: {} };
 
     // USD pricing (Part 20): ONE rate per billing run, resolved here and
     // stamped on every charge this run creates. Null = flag off → legacy.
@@ -442,9 +446,15 @@ export class BillingService {
       try {
         const outcome = await this.billSubscription(sub as SubWithRelations, clock(), usd);
         result[outcome] += 1;
-      } catch {
-        // Partial failure mid-batch: record and continue
+      } catch (err) {
+        // Partial failure mid-batch: record and continue. [COORD 18 Oct 20:33Z] Never silently: a
+        // swallowed failure hid a dunning loop 2,768 times on staging. Each one is logged with the
+        // subscription and the error's code only (never its message: it can carry personal data),
+        // and counted by code for the run's summary line and its failure page.
+        const code = billingErrorCode(err);
         result.errors += 1;
+        result.errorCodes[code] = (result.errorCodes[code] ?? 0) + 1;
+        log().error({ subscriptionId: sub.id, code }, '[billing] one subscription failed in the billing run; the run goes on and retries it next hour');
       }
     }
 
@@ -5132,7 +5142,9 @@ export class BillingService {
       return 'untold';
     }
     // The inbox row is what the payer was told: a retried send returns the first row, with its own date.
-    const inbox = await this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } });
+    // [item 20] The PAYER's row, read back by whoever runs the rise (an admin, the billing job): under the owner
+    // wall a plain read sees only the reader's own notices, so it names its capability.
+    const inbox = await ownerWallSystem('billing:fee-rise-notice-readback', () => this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } }));
     const told = (inbox?.data ?? {}) as Record<string, unknown>;
     const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null);
     const toldFrom = iso(told['appliesFrom']);

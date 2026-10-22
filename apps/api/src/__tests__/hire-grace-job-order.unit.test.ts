@@ -16,13 +16,15 @@ it('a failed hire-licence reminder does not prevent the daily retention purge', 
     expireLapsedDocuments: async () => { effects.push('expire'); return 0; },
     sendExpiryReminders: async () => { effects.push('remind'); return 0; },
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); return 0; },
+    sweepAbandonedApplications: async () => { effects.push('abandoned'); return { noticed: 0, purged: 0, failed: 0 }; },
+    sweepStaleUnclaimedUploads: async () => { effects.push('uploads'); return { people: 0, erased: 0, held: 0, pending: 0 }; },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
     // [owner 15 Oct · no grace] TRANSFORMED: the sweep is the hire-licence sweep (was hirePermitGraceSweep).
     hireLicenceSweep: async () => { effects.push('grace'); throw new Error('synthetic grace unavailable'); },
   };
-  const ctx = { log: { error: () => effects.push('logged') } };
+  const ctx = { log: { error: () => effects.push('logged'), info: () => undefined } };
   await expect(run(verification, ctx)).rejects.toThrow('synthetic grace unavailable');
-  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'purge', 'grace']);
+  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'abandoned', 'uploads', 'purge', 'grace']);
 });
 
 // [R24] The rejected-document clocks are set before the reaper runs, and a failure setting
@@ -39,10 +41,12 @@ it('a failed rejected-document schedule does not prevent the daily retention pur
     expireLapsedDocuments: async () => { effects.push('expire'); return 0; },
     sendExpiryReminders: async () => { effects.push('remind'); return 0; },
     scheduleRejectedDocumentRetention: async () => { effects.push('schedule-rejected'); throw new Error('synthetic schedule unavailable'); },
+    sweepAbandonedApplications: async () => { effects.push('abandoned'); throw new Error('synthetic abandoned-application sweep unavailable'); },
+    sweepStaleUnclaimedUploads: async () => { effects.push('uploads'); return { people: 0, erased: 0, held: 0, pending: 0 }; },
     purgeExpiredDocuments: async () => { effects.push('purge'); return 0; },
     hireLicenceSweep: async () => { effects.push('grace'); return 0; },
   };
-  const ctx = { log: { error: () => effects.push('logged') } };
+  const ctx = { log: { error: () => effects.push('logged'), info: () => undefined } };
   await run(verification, ctx);
-  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'logged', 'purge', 'grace']);
+  expect(effects).toEqual(['expire', 'remind', 'schedule-rejected', 'logged', 'abandoned', 'logged', 'uploads', 'purge', 'grace']);
 });

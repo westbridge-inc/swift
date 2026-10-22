@@ -30,6 +30,7 @@ import { STORE_TEAM_SELECT, teamOf } from '../modules/notification/store-team';
 import { resolveIdentityById } from '../modules/auth/preauth-identity';
 import { bindTenantTransaction, runWithTenant } from './prisma';
 import { sessionCredentialDigest } from '../lib/session-credential';
+import { BROWSER_SOCKET_PATH, browserSocketCredentialOf } from '../modules/auth/browser-session';
 
 // Socket payloads come straight off the wire from any authenticated client —
 // validate them like request bodies. cuid ids are 25 chars; 64 is headroom.
@@ -71,6 +72,17 @@ interface SocketAuthorityRow {
   activeRole: UserRole;
 }
 
+/** [PERF row 8] The handshake's credential. A phone's access token exactly as
+ * before (`auth.token`); otherwise the website's access cookie, behind the
+ * socket cookie gate in browser-session.ts (client 'web' + an allowlisted
+ * Origin). Either way it is an access token, and everything after this line
+ * verifies it the same way. undefined = no credential. */
+function handshakeCredentialOf(handshake: { auth: unknown; headers: Record<string, string | string[] | undefined> }): string | undefined {
+  const token = (handshake.auth as Record<string, unknown>)?.['token'] as string | undefined;
+  if (token) return token;
+  return browserSocketCredentialOf(handshake) || undefined;
+}
+
 export const socketPlugin = fp(async (app: FastifyInstance) => {
   const corsOrigin = resolveCorsOrigins(process.env['CORS_ORIGIN'], process.env['NODE_ENV']);
 
@@ -85,6 +97,19 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
     // Every current event is a small identifier payload. Bound both normal and
     // pre-authorization packet memory well below Socket.IO's 1 MiB default.
     maxHttpBufferSize: MAX_SOCKET_PACKET_BYTES,
+  });
+  // [PERF row 8] The website's door to this same socket server. Its access
+  // cookie is Path=/api/v1, so a browser sends it only to a URL under /api/v1:
+  // a WebSocket upgrade at /api/v1/socket.io/ is handed to the engine at the
+  // engine's own path, and from there it is the same server, rooms and checks
+  // as a phone's. Upgrades only: the website opens a WebSocket directly, and a
+  // plain request under that path stays Fastify's (404). /socket.io/ is
+  // unchanged for every phone build.
+  const engineUpgradePath = `${io.path().replace(/\/$/, '')}/`;
+  app.server.prependListener('upgrade', (request: { url?: string }) => {
+    if (request.url?.startsWith(BROWSER_SOCKET_PATH)) {
+      request.url = engineUpgradePath + request.url.slice(BROWSER_SOCKET_PATH.length);
+    }
   });
   const authService = new AuthService(app);
   const adapterClients: Redis[] = [];
@@ -532,7 +557,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
 
   // Require valid JWT on every connection — no unauthenticated sockets
   io.use(async (socket, next) => {
-    const token = (socket.handshake.auth as Record<string, unknown>)?.['token'] as string | undefined;
+    const token = handshakeCredentialOf(socket.handshake);
     if (!token) {
       return next(new Error('Authentication required'));
     }
@@ -567,7 +592,7 @@ export const socketPlugin = fp(async (app: FastifyInstance) => {
   io.on('connection', (socket) => {
     // These values passed the first read, but are not activated until the
     // authorization-only rooms are registered and a second read converges.
-    const token = (socket.handshake.auth as Record<string, unknown>)?.['token'] as string | undefined;
+    const token = handshakeCredentialOf(socket.handshake);
     const userId = socket.data.userId as string;
     const tenantId = socket.data.tenantId as string;
     const authSessionId = socket.data.authSessionId as string;

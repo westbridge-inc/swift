@@ -4,6 +4,7 @@
 // subscriptions — no hardcoded rate table (which undercounted large vendors
 // 33% and counted non-active statuses). This component only formats.
 import { DataUnavailable } from './DataUnavailable';
+import { label } from '@/lib/labels';
 
 const LABELS: Record<string, string> = {
   DELIVERY_RIDER: 'Delivery Riders',
@@ -44,7 +45,7 @@ export function RevenueBreakdown({ data, weeklyTotal, weeklyWaived, unavailable 
       <div className="space-y-3">
         {data?.map((item) => (
           <div key={item.type} className="flex items-center justify-between text-sm">
-            <span className="text-[var(--muted)]">{LABELS[item.type] || item.type}</span>
+            <span className="text-[var(--muted)]">{LABELS[item.type] ?? label('SubscriptionType', item.type)}</span>
             <span>
               {item.count} active ={' '}
               <span className="font-semibold text-white">
