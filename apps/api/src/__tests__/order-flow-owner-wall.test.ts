@@ -41,6 +41,8 @@ const WALL_KEYS = ['SYSTEM_DATABASE_URL', 'TENANT_UNSCOPED_ACCESS', 'TENANT_RLS_
 // The ruling's numbers, written here (not imported) so a changed constant reds this file.
 const RIDERLESS_GRACE_MIN = 15;
 const DEFAULT_PREP_PROMISE_MIN = 30;
+// [O-3 · #2024] A store's Accept starts preparation: the accepted cash order waits at PREPARING.
+const ACCEPTED_STATUS = 'PREPARING';
 const FOOD_TOO_OLD_REASON = 'FOOD_TOO_OLD';
 
 let w: WalkWorld;
@@ -142,7 +144,7 @@ describe('[OF-01 · #1890 wall ON] the riderless cutoff sees its own notice thro
     await ageWorld(w, 5 * MIN);
     await walled(() => runWithTenant(order.tenantId, () => sweepFoodAge(deps)));
     expect(notices.sends).toBe(1);
-    expect((await owner.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await owner.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
 
     // One grace after the warning, walled, as the job: cancelled; still exactly one warning.
     await ageWorld(w, (RIDERLESS_GRACE_MIN - 10) * MIN + 1_000);

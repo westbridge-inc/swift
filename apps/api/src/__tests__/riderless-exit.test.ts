@@ -32,6 +32,9 @@ const SWEEP = 5 * MIN;
 const COURIER_WAIT_LIMIT_MIN = 60;
 const RIDERLESS_GRACE_MIN = 15;
 const DEFAULT_PREP_PROMISE_MIN = 30; // the Vendor.estimatedPrepTime default
+// [O-3 · owner 22 Oct 2026, #2024] A store's Accept starts preparation in one tap: a cash store
+// order the store has accepted waits riderless at PREPARING (acceptedAt kept: the prep clock reads it).
+const ACCEPTED_STATUS = 'PREPARING';
 const FOOD_TOO_OLD_REASON = 'FOOD_TOO_OLD';
 const NO_RIDER_FOR_PARCEL_REASON = 'NO_RIDER_FOR_PARCEL';
 const CUTOFF_TITLES = ['Still no rider — you can cancel for free', 'No rider yet — you can cancel for free'];
@@ -79,7 +82,7 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
     // Short of the cutoff: still waiting, nothing said about cancelling.
     await advance(w, cast, (cutoffMin - 5) * MIN, SWEEP);
     let row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    expect(row.status).toBe('ACCEPTED');
+    expect(row.status).toBe(ACCEPTED_STATUS);
     let notes = await noticesOf(id, cast.customer.userId);
     expect(cutoffNotices(notes)).toHaveLength(0);
     expect(await readTooLateToDeliver(w.app.prisma, row)).toBe(false);
@@ -88,7 +91,7 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
     // predicate agrees at that moment (same clock, same limit).
     await advance(w, cast, 10 * MIN, SWEEP);
     row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    expect(row.status).toBe('ACCEPTED');
+    expect(row.status).toBe(ACCEPTED_STATUS);
     notes = await noticesOf(id, cast.customer.userId);
     const cutoffNotes = cutoffNotices(notes);
     expect(cutoffNotes).toHaveLength(1);
@@ -99,7 +102,7 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
     // Inside the grace: nothing more.
     await advance(w, cast, (RIDERLESS_GRACE_MIN - 6) * MIN, SWEEP);
     row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    expect(row.status).toBe('ACCEPTED');
+    expect(row.status).toBe(ACCEPTED_STATUS);
     expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
 
     // Grace over, still no rider: the system cancels, through the seam.
@@ -154,7 +157,7 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
     await ageWorld(w, 14 * MIN - await sinceNotice());
     await runSweeps(w);
     await drainDue(w);
-    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
     expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
     // 15 minutes after the notice (one second past, for the clocks' rounding): cancelled.
     expect(await sinceNotice()).toBeLessThan(15 * MIN);
@@ -185,7 +188,7 @@ describe('[OF-01] a riderless store order nobody marks ready ends — one honest
       await drainDue(w);
       await runSweeps(w);
       const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-      expect(row.status).toBe('ACCEPTED');
+      expect(row.status).toBe(ACCEPTED_STATUS);
       expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(0);
       expect(await readTooLateToDeliver(w.app.prisma, row)).toBe(false);
     } finally {
@@ -240,7 +243,7 @@ describe('[OF-01 · REVIEW-G S3-1/S3-2] the grace never hangs on a notice, and m
     // Inside the grace, ticks re-try the notice and keep one record.
     await ageWorld(w, 10 * MIN);
     await sweepFoodAge(deps);
-    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
     expect(await w.app.prisma.algoDecision.count({ where: { subjectId: id, outcome: RIDERLESS_TOLD_OUTCOME } })).toBe(1);
     // A grace after the record: cancelled, notice or no notice.
     await ageWorld(w, (RIDERLESS_GRACE_MIN - 10) * MIN + 1_000);
@@ -286,7 +289,7 @@ describe('[OF-01 · REVIEW-G S3-1/S3-2] the grace never hangs on a notice, and m
     await ageWorld(w, 5 * MIN);
     await sweepFoodAge(failing); // the read is refused: nothing is sent, nothing is decided
     expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
-    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
     await ageWorld(w, (RIDERLESS_GRACE_MIN - 10) * MIN + 1_000);
     await sweepFoodAge(failing);
     const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
@@ -357,7 +360,7 @@ describe('[OF-01 · REVIEW-M S4-1] each riderless stretch gets its own warning a
     await offline(cast);
     await runSweeps(w);
     await drainDue(w);
-    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
     expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(2);
     const sinceNewWarning = async () => {
       const told = await w.app.prisma.algoDecision.findFirstOrThrow({
@@ -368,7 +371,7 @@ describe('[OF-01 · REVIEW-M S4-1] each riderless stretch gets its own warning a
     await ageWorld(w, 14 * MIN - await sinceNewWarning());
     await runSweeps(w);
     await drainDue(w);
-    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('ACCEPTED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(ACCEPTED_STATUS);
     await ageWorld(w, 15 * MIN - await sinceNewWarning() + 1_000);
     await runSweeps(w);
     await drainDue(w);
