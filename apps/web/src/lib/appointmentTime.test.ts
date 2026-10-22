@@ -21,7 +21,7 @@ describe('web appointment times in the market zone', () => {
   it('every appointment surface renders through lib/appointmentTime', () => {
     // [W6] The old store page is a permanent redirect now; the store's one page
     // offers no appointment times on the web yet (its checkout cannot book them).
-    for (const rel of ['app/(app)/orders/[id]/page.tsx', 'app/dashboard/orders/page.tsx', 'components/NewOrderTakeover.tsx']) {
+    for (const rel of ['app/(app)/orders/[id]/page.tsx', 'app/dashboard/orders/page.tsx', 'app/dashboard/orders/order-detail.tsx', 'components/NewOrderTakeover.tsx']) {
       const text = readFileSync(join(process.cwd(), 'src', rel), 'utf8');
       expect(text, rel).toMatch(/from '@\/lib\/appointmentTime'/);
     }
