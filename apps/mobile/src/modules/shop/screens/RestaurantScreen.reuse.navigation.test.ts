@@ -58,7 +58,10 @@ vi.mock('../../../stores/authStore', () => {
 });
 vi.mock('../../../navigation/authContinuation', () => ({ requestAuthContinuation: vi.fn() }));
 // [IMAGES-E2E #1909] The store hero asks for the hero width (1280 px variant).
-vi.mock('../../../lib/images', () => ({ HERO_PHOTO_WIDTH: 1280, itemPhoto: () => null, vendorPhoto: () => null }));
+// [IMAGES-E2E #1973] Each menu section can carry its photo (SectionPhotoHeader): no photo here, so the plain
+// section header shows; the native image view is not loaded.
+vi.mock('expo-image', () => ({ Image: () => null }));
+vi.mock('../../../lib/images', () => ({ HERO_PHOTO_WIDTH: 1280, LIST_PHOTO_WIDTH: 640, categoryPhoto: () => null, itemPhoto: () => null, vendorPhoto: () => null }));
 vi.mock('../../../components/SellerInfo', () => ({ SellerInfo: () => null }));
 vi.mock('../../../kit/toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 vi.mock('../../../kit/scrim', () => ({ Scrim: () => null }));
