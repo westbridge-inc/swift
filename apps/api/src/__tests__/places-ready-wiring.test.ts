@@ -34,7 +34,7 @@ describe('the application reports address search in /ready and the /health detai
       const before = await app.inject('/ready');
       expect(before.json()).toMatchObject({ places: { provider: 'google', status: 'unknown', since: null } });
 
-      getPlacesHealth().recordFailure('autocomplete', { reason: 'auth', httpStatus: 403, googleStatus: 'PERMISSION_DENIED' });
+      getPlacesHealth().recordFailure('autocomplete', { reason: 'auth', httpStatus: 403, googleStatus: 'PERMISSION_DENIED' }, 'u-wiring');
       const ready = await app.inject('/ready');
       const body = ready.json();
       expect(body).toMatchObject({ places: { provider: 'google', status: 'failing' } });

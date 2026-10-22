@@ -11,6 +11,7 @@ import {
 } from '../providers/places/places-failure';
 import {
   PLACES_ALERT_FAILURES,
+  PLACES_ALERT_MIN_CALLERS,
   PLACES_ALERT_WINDOW_MS,
   PLACES_PAGE_KEY,
   PLACES_PAGE_RETRY_MS,
@@ -246,7 +247,10 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
   const AUTH: PlacesFailure = { reason: 'auth', httpStatus: 403, googleStatus: 'PERMISSION_DENIED', googleReason: 'API_KEY_INVALID' };
   let t = 0;
   const clock = () => t;
-  beforeEach(() => { t = Date.UTC(2026, 9, 22, 6, 0, 0); });
+  // Two real customers taking turns: a page needs failures from more than one caller.
+  let n = 0;
+  const who = () => (n++ % 2 === 0 ? 'u-a' : 'u-b');
+  beforeEach(() => { t = Date.UTC(2026, 9, 22, 6, 0, 0); n = 0; });
 
   it('starts unknown, turns ok on an answer and failing on a failure, each "since" the first call of its streak', () => {
     const h = new PlacesHealth(clock);
@@ -257,10 +261,10 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
     h.recordOk();
     expect(h.readiness('google')).toEqual({ provider: 'google', status: 'ok', since: okSince });
     t += 1000;
-    h.recordFailure('autocomplete', AUTH);
+    h.recordFailure('autocomplete', AUTH, who());
     const failingSince = new Date(t).toISOString();
     t += 1000;
-    h.recordFailure('details', AUTH);
+    h.recordFailure('details', AUTH, who());
     expect(h.readiness('google')).toEqual({ provider: 'google', status: 'failing', since: failingSince });
     t += 1000;
     h.recordOk();
@@ -269,7 +273,7 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
 
   it('readiness carries no failure detail; the detail view names the last failure and when', () => {
     const h = new PlacesHealth(clock);
-    h.recordFailure('reverse', AUTH);
+    h.recordFailure('reverse', AUTH, who());
     expect(Object.keys(h.readiness('google')).sort()).toEqual(['provider', 'since', 'status']);
     expect(h.detail('google')).toMatchObject({
       provider: 'google',
@@ -283,24 +287,24 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
   it(`pages exactly when ${PLACES_ALERT_FAILURES} failures fall inside ${PLACES_ALERT_WINDOW_MS / 60_000} minutes, then not again until the retry interval`, () => {
     const h = new PlacesHealth(clock);
     for (let i = 1; i < PLACES_ALERT_FAILURES; i++) {
-      expect(h.recordFailure('autocomplete', AUTH).page).toBe(false);
+      expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(false);
       t += 1000;
     }
-    expect(h.recordFailure('autocomplete', AUTH)).toEqual({ page: true, failuresInWindow: PLACES_ALERT_FAILURES });
+    expect(h.recordFailure('autocomplete', AUTH, who())).toEqual({ page: true, failuresInWindow: PLACES_ALERT_FAILURES });
     t += 1000;
-    expect(h.recordFailure('autocomplete', AUTH).page).toBe(false);
+    expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(false);
     t += PLACES_PAGE_RETRY_MS - 2000;
-    expect(h.recordFailure('autocomplete', AUTH).page).toBe(false);
+    expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(false);
     t += 1000;
     // Still failing past the retry interval: try again (a page nobody received stays retryable).
-    expect(h.recordFailure('autocomplete', AUTH).page).toBe(true);
+    expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(true);
   });
 
   it('failures spread wider than the window never page', () => {
     const h = new PlacesHealth(clock);
     const gap = Math.ceil(PLACES_ALERT_WINDOW_MS / (PLACES_ALERT_FAILURES - 1)) + 1;
     for (let i = 0; i < PLACES_ALERT_FAILURES * 3; i++) {
-      expect(h.recordFailure('autocomplete', AUTH).page).toBe(false);
+      expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(false);
       t += gap;
     }
   });
@@ -309,7 +313,7 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
     const h = new PlacesHealth(clock);
     let paged = false;
     for (let i = 0; i < PLACES_ALERT_FAILURES; i++) {
-      paged = h.recordFailure('autocomplete', AUTH).page || paged;
+      paged = h.recordFailure('autocomplete', AUTH, who()).page || paged;
       t += 1000;
       h.recordOk();
       t += 1000;
@@ -319,7 +323,7 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
 
   it('the open page resolves only once the condition clears (fewer than the threshold inside the window), and only once', () => {
     const h = new PlacesHealth(clock);
-    for (let i = 0; i < PLACES_ALERT_FAILURES; i++) { h.recordFailure('autocomplete', AUTH); t += 1000; }
+    for (let i = 0; i < PLACES_ALERT_FAILURES; i++) { h.recordFailure('autocomplete', AUTH, who()); t += 1000; }
     expect(h.recordOk()).toEqual({ resolve: false });
     t += PLACES_ALERT_WINDOW_MS;
     expect(h.recordOk()).toEqual({ resolve: true });
@@ -329,9 +333,46 @@ describe('PlacesHealth: last known status and the paging threshold', () => {
 
   it('an answer with no page open never resolves anything', () => {
     const h = new PlacesHealth(clock);
-    h.recordFailure('autocomplete', AUTH);
+    h.recordFailure('autocomplete', AUTH, who());
     t += PLACES_ALERT_WINDOW_MS + 1;
     expect(h.recordOk()).toEqual({ resolve: false });
+  });
+
+  it(`one caller alone never pages, however many failures; a second caller failing inside the window does (min ${PLACES_ALERT_MIN_CALLERS} callers)`, () => {
+    const h = new PlacesHealth(clock);
+    for (let i = 0; i < PLACES_ALERT_FAILURES * 4; i++) {
+      expect(h.recordFailure('autocomplete', AUTH, 'u-lone').page).toBe(false);
+      t += 1000;
+    }
+    expect(h.recordFailure('autocomplete', AUTH, 'u-second').page).toBe(true);
+  });
+
+  it('the detail view counts the callers in the window and never names one', () => {
+    const h = new PlacesHealth(clock);
+    h.recordFailure('autocomplete', AUTH, 'u-secret-caller-1');
+    h.recordFailure('autocomplete', AUTH, 'u-secret-caller-2');
+    h.recordFailure('autocomplete', AUTH, 'u-secret-caller-2');
+    expect(h.detail('google')).toMatchObject({ failuresInWindow: 3, callersInWindow: 2 });
+    expect(JSON.stringify(h.detail('google'))).not.toContain('u-secret-caller');
+  });
+
+  it('a caller-caused rejection handed to the tracker is ignored: no status change, never toward the threshold', () => {
+    const REJECTED: PlacesFailure = { reason: 'rejected', httpStatus: 400, googleStatus: 'INVALID_ARGUMENT' };
+    const h = new PlacesHealth(clock);
+    for (let i = 0; i < PLACES_ALERT_FAILURES * 3; i++) {
+      expect(h.recordFailure('autocomplete', REJECTED, who())).toEqual({ page: false, failuresInWindow: 0 });
+      t += 1000;
+    }
+    expect(h.readiness('google')).toEqual({ provider: 'google', status: 'unknown', since: null });
+    h.recordOk();
+    const okSince = new Date(t).toISOString();
+    t += 1000;
+    h.recordFailure('details', REJECTED, who());
+    expect(h.readiness('google')).toEqual({ provider: 'google', status: 'ok', since: okSince });
+    expect(h.detail('google')).toMatchObject({ lastFailure: null, lastFailureAt: null, failuresInWindow: 0 });
+    for (let i = 1; i < PLACES_ALERT_FAILURES; i++) expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(false);
+    expect(h.recordFailure('autocomplete', REJECTED, who()).page).toBe(false);
+    expect(h.recordFailure('autocomplete', AUTH, who()).page).toBe(true);
   });
 
   it('the provider name is the configured one, and an unknown value is not echoed', () => {
@@ -358,7 +399,11 @@ async function harness(places: PlacesProvider, health: PlacesHealth, providerNam
   vi.stubEnv('PLACES_PROVIDER', providerName);
   const app = Fastify({ logger: { level: 'warn', redact: loggerRedactConfig, stream: sink } });
   registerErrorHandler(app);
-  app.decorate('authenticate', async (request) => { request.user = { userId: 'u-places-loud', role: 'CUSTOMER' }; });
+  // The caller is the x-test-user header (default u-places-loud): paging needs failures from more than one caller.
+  app.decorate('authenticate', async (request) => {
+    const who = request.headers['x-test-user'];
+    request.user = { userId: typeof who === 'string' ? who : 'u-places-loud', role: 'CUSTOMER' };
+  });
   await app.register(placesRoutes, { prefix: '/api/v1/places', provider: places, health, pager });
   await app.ready();
   h.app = app;
@@ -477,7 +522,7 @@ describe('places routes: persistent failures page ops once, and the page closes 
     try {
       stubFetch(() => googleError(403, 'PERMISSION_DENIED', 'API_KEY_SERVICE_BLOCKED', `key ${KEY}`));
       for (let i = 0; i < PLACES_ALERT_FAILURES + 3; i++) {
-        const res = await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}` });
+        const res = await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: { 'x-test-user': i % 2 === 0 ? 'u-a' : 'u-b' } });
         expect(res.statusCode).toBe(503);
         t += 1000;
       }
@@ -520,6 +565,105 @@ describe('places routes: persistent failures page ops once, and the page closes 
   });
 });
 
+describe('places routes: a caller-caused rejection is that caller\'s own "no matches", never a page or a health change', () => {
+  const as = (user: string) => ({ 'x-test-user': user });
+
+  it('autocomplete refused as a bad request (400 INVALID_ARGUMENT) answers 200 [], logs a warning (no query), counts "rejected", pages nobody, leaves health alone', async () => {
+    stubFetch(() => googleError(400, 'INVALID_ARGUMENT', undefined, `Invalid input ${QUERY}`));
+    let t = Date.UTC(2026, 9, 22, 6, 0, 0);
+    const health = new PlacesHealth(() => t);
+    const h = await harness(new GooglePlacesProvider(KEY), health);
+    try {
+      const n = PLACES_ALERT_FAILURES * 3;
+      for (let i = 0; i < n; i++) {
+        const res = await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: as(`u-${i % 4}`) });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ success: true, data: [] });
+        t += 1000;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+      expect(h.pages).toHaveLength(0);
+      expect(health.readiness('google')).toEqual({ provider: 'google', status: 'unknown', since: null });
+      expect(health.detail('google')).toMatchObject({ lastFailure: null, failuresInWindow: 0, callersInWindow: 0 });
+      expect(await counterValue({ provider: 'google', op: 'autocomplete', outcome: 'rejected' })).toBe(n);
+      const lines = h.logs().trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(lines.filter((l) => l['msg'] === 'places provider failure')).toHaveLength(0);
+      const rejected = lines.filter((l) => l['msg'] === 'places request rejected');
+      expect(rejected).toHaveLength(n);
+      expect(rejected[0]!['level']).toBe(40); // warn, not error
+      expect(rejected[0]!['places']).toEqual({
+        provider: 'google', op: 'autocomplete', reason: 'rejected', httpStatus: 400, googleStatus: 'INVALID_ARGUMENT', queryLength: QUERY.length,
+      });
+      expect(h.logs()).not.toContain(QUERY);
+      expect(h.logs()).not.toContain(KEY);
+    } finally { await h.app.close(); }
+  });
+
+  it('details and reverse refused as bad requests answer 200 null, and an ok provider stays ok', async () => {
+    const health = new PlacesHealth();
+    const h = await harness(new GooglePlacesProvider(KEY), health);
+    try {
+      stubFetch(() => jsonResponse(200, SUGGESTIONS));
+      expect((await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}` })).statusCode).toBe(200);
+      const okSince = health.readiness('google').since;
+      expect(health.readiness('google').status).toBe('ok');
+      stubFetch(() => googleError(400, 'INVALID_ARGUMENT'));
+      const details = await h.app.inject({ method: 'GET', url: '/api/v1/places/details?placeId=not-a-place', headers: as('u-x') });
+      expect(details.statusCode).toBe(200);
+      expect(details.json()).toEqual({ success: true, data: null });
+      stubFetch(() => jsonResponse(200, { status: 'INVALID_REQUEST', results: [] }));
+      const reverse = await h.app.inject({ method: 'GET', url: '/api/v1/places/reverse?lat=6.8&lng=-58.1', headers: as('u-y') });
+      expect(reverse.statusCode).toBe(200);
+      expect(reverse.json()).toEqual({ success: true, data: { address: null } });
+      expect(health.readiness('google')).toEqual({ provider: 'google', status: 'ok', since: okSince });
+      expect(await counterValue({ provider: 'google', op: 'details', outcome: 'rejected' })).toBe(1);
+      expect(await counterValue({ provider: 'google', op: 'reverse', outcome: 'rejected' })).toBe(1);
+      expect(h.pages).toHaveLength(0);
+    } finally { await h.app.close(); }
+  });
+
+  it(`rejections never top up real failures: ${PLACES_ALERT_FAILURES - 1} provider failures plus a flood of rejections page nobody`, async () => {
+    let t = Date.UTC(2026, 9, 22, 6, 0, 0);
+    const health = new PlacesHealth(() => t);
+    const h = await harness(new GooglePlacesProvider(KEY), health);
+    try {
+      stubFetch(() => googleError(503, 'UNAVAILABLE'));
+      for (let i = 0; i < PLACES_ALERT_FAILURES - 1; i++) {
+        expect((await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: as(i % 2 ? 'u-a' : 'u-b') })).statusCode).toBe(503);
+        t += 1000;
+      }
+      stubFetch(() => googleError(400, 'INVALID_ARGUMENT'));
+      for (let i = 0; i < PLACES_ALERT_FAILURES * 3; i++) {
+        expect((await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: as(`u-flood-${i}`) })).statusCode).toBe(200);
+        t += 1000;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+      expect(h.pages).toHaveLength(0);
+      expect(health.detail('google')).toMatchObject({ status: 'failing', failuresInWindow: PLACES_ALERT_FAILURES - 1, lastFailure: { reason: 'upstream' } });
+    } finally { await h.app.close(); }
+  });
+
+  it('one account hammering a provider failure (quota it burned itself) never pages ops alone; a second customer failing does', async () => {
+    let t = Date.UTC(2026, 9, 22, 6, 0, 0);
+    const health = new PlacesHealth(() => t);
+    const h = await harness(new GooglePlacesProvider(KEY), health);
+    try {
+      stubFetch(() => googleError(429, 'RESOURCE_EXHAUSTED', 'RATE_LIMIT_EXCEEDED'));
+      for (let i = 0; i < PLACES_ALERT_FAILURES * 4; i++) {
+        expect((await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: as('u-hammer') })).statusCode).toBe(503);
+        t += 1000;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+      expect(h.pages).toHaveLength(0);
+      expect((await h.app.inject({ method: 'GET', url: `/api/v1/places/autocomplete?q=${QUERY}`, headers: as('u-customer') })).statusCode).toBe(503);
+      await vi.waitFor(() => expect(h.pages).toHaveLength(1));
+      expect(h.pages[0]!.data).toMatchObject({ reason: 'quota' });
+      expect(JSON.stringify(h.pages[0])).not.toContain('u-hammer');
+      expect(JSON.stringify(h.pages[0])).not.toContain('u-customer');
+    } finally { await h.app.close(); }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 4. Readiness reports the provider and its last known status, never fails on
 //    it, and never calls Google.
@@ -542,7 +686,7 @@ describe('/ready names the address-search provider and its last known status', (
   it('a failing provider is reported (provider, status, since) and /ready stays 200 ready, with no Google call', async () => {
     let t = Date.UTC(2026, 9, 22, 6, 0, 0);
     const health = new PlacesHealth(() => t);
-    health.recordFailure('autocomplete', { reason: 'auth', httpStatus: 403, googleStatus: 'PERMISSION_DENIED' });
+    health.recordFailure('autocomplete', { reason: 'auth', httpStatus: 403, googleStatus: 'PERMISSION_DENIED' }, 'u-a');
     const f = stubFetch(() => jsonResponse(200, {}));
     const app = readinessApp({ checkPlaces: () => health.readiness('google') });
     try {
