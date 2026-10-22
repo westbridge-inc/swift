@@ -902,6 +902,14 @@ export const servicesApi = {
     data: { trade: string; bio?: string; portfolioPhotos?: string[] },
     session?: AuthSessionSnapshot,
   ) => api.post('/services/providers', data, capturedAuthConfig(session)),
+  // [IMAGES-E2E] Photos of the provider's own work: uploaded (the server scans each one and
+  // redraws it without location or camera data), or taken down by file name.
+  uploadPortfolioPhoto: (form: FormData) =>
+    api.post('/services/providers/me/portfolio', form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
       type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';

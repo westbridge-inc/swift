@@ -1024,6 +1024,12 @@ export class DispatchService {
      *  size (a food/grocery order's bulk — never parcel work). Omitted = any
      *  vehicle, exactly as before. */
     packageSize?: string | null,
+    /** [TAXI-FLOW 22 Oct 2026] The person the supply is FOR. Dispatch never
+     *  offers a ride to its booker (findCandidates' excludeUserId), so a probe
+     *  made on someone's behalf — the ride queue, "drivers are back" — must not
+     *  count that person's own driver profile as supply either. Omitted = the
+     *  anonymous area read, exactly as before. */
+    excludeUserId?: string | null,
   ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     /** Stable client contract: null when no eligible fresh mover exists. */
@@ -1038,7 +1044,7 @@ export class DispatchService {
       null,
       tenantId,
       packageSize ?? null,
-      undefined,
+      excludeUserId ?? undefined,
       undefined,
       undefined,
       false,
