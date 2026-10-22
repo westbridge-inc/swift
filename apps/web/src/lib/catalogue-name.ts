@@ -25,13 +25,13 @@ export function catalogueName(vendorType: string | null | undefined): CatalogueN
 }
 
 /** The selected store's type, from the same stores read the console shell makes
- *  (`known` once that read has answered). */
-export function useSelectedVendorType(): { vendorType: string | undefined; known: boolean } {
+ *  (`known` once that read has answered; `failed` when it failed with no answer). */
+export function useSelectedVendorType(): { vendorType: string | undefined; known: boolean; failed: boolean } {
   const storeId = useStoreId();
   const stores = useQuery({ queryKey: ['stores'], queryFn: getStores });
   const list = stores.data?.stores ?? [];
   const store = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
-  return { vendorType: store?.vendorType, known: stores.isSuccess };
+  return { vendorType: store?.vendorType, known: stores.isSuccess, failed: stores.isError && stores.data === undefined };
 }
 
 /** The selected store's items-tab name. */

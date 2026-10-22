@@ -113,8 +113,8 @@ function BlockTimeDialog({ dayKey, onClose }: { dayKey: string; onClose: () => v
 export default function SchedulePage() {
   const storeId = useStoreId();
   const queryClient = useQueryClient();
-  const { manager, known: roleKnown } = useStoreRole();
-  const { vendorType, known: typeKnown } = useSelectedVendorType();
+  const { manager, known: roleKnown, failed: roleFailed } = useStoreRole();
+  const { vendorType, known: typeKnown, failed: typeFailed } = useSelectedVendorType();
   const service = vendorType === 'SERVICE';
   const enabled = manager && service;
   const bookings = useQuery({ queryKey: storeKey(storeId, 'bookings'), queryFn: getBookings, enabled, refetchInterval: 60_000 });
@@ -142,6 +142,14 @@ export default function SchedulePage() {
       {enabled && <button type="button" className="sw-btn sw-btn-md" onClick={() => setBlocking(true)}>Block time</button>}
     </div>
   );
+  // Failure first: a store read that failed never reads as "loading" for ever.
+  if (roleFailed || typeFailed) {
+    const retry = () => {
+      void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'my-role') });
+      void queryClient.invalidateQueries({ queryKey: ['stores'] });
+    };
+    return <div className="space-y-6">{header}<DataUnavailable what="your store" onRetry={retry} /></div>;
+  }
   if (roleKnown && !manager) {
     return <div className="space-y-6">{header}<p className="sw-card p-6 text-sm text-[var(--swift-muted)]">The schedule is for the store&apos;s owner and managers.</p></div>;
   }
