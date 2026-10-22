@@ -14,6 +14,7 @@ import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { orderSocketFixture } from './helpers/order-socket-fixture';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { testPrismaClient } from './helpers/test-prisma-client';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 4/8] The driver moves the ride through its stops, through
@@ -468,5 +469,48 @@ describe('the passenger did not come back to the car at a stop', () => {
     const row = await rideRow(rideId);
     expect({ status: row.status, pay: row.paymentStatus }).toEqual({ status: 'FAILED', pay: 'FAILED' });
     expect(await filings()).toBe(1);
+  });
+});
+
+describe('a stop move racing the end of the trip', () => {
+  // REVIEW-G K12: moveTaxiStop takes the order row's lock (the one the trip's
+  // start, its fare outcome, its completion and every status change take)
+  // before it reads the ride. The per-stop compare-and-set only stops a double
+  // move of one stop; a stop move racing the trip's end is serialised by this
+  // lock alone. A second connection holds the row, ends the trip under it (as
+  // the no-show does) and lets go only once the move is seen waiting on it.
+  it('the move waits on the order row, then sees the ended trip and writes nothing', async () => {
+    vi.stubEnv('TAXI_MAX_STOPS', '3');
+    const driver = await makeDriver(PICKUP, true);
+    const customer = await makeCustomer();
+    const rideId = await startedRide(driver, customer, [S1]);
+    await start(driver, rideId);
+    const raw = testPrismaClient();
+    try {
+      let move: Promise<LightMyRequestResponse> | undefined;
+      await raw.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT "id" FROM "orders" WHERE "id" = ${rideId} FOR UPDATE`;
+        const pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0]!.pid;
+        move = stopAction(driver, rideId, 1, 'arrived');
+        const deadline = Date.now() + 10_000;
+        for (;;) {
+          const waiting = (await raw.$queryRaw<Array<{ waiting: number }>>`
+            SELECT count(*)::int AS waiting FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`)[0]!.waiting;
+          if (waiting > 0) break;
+          if (Date.now() > deadline) throw new Error('the stop move never waited on the order row: it does not take the lock');
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        await tx.order.update({ where: { id: rideId }, data: { status: 'FAILED' } });
+      }, { timeout: 20_000, maxWait: 5_000 });
+
+      const moved = await move!;
+      expect(moved.statusCode, moved.body).toBe(409);
+      expect(moved.json().error).toMatchObject({ code: 'INVALID_STATUS' });
+      const [row] = await stopRows(rideId);
+      expect({ status: row!.status, arrivedAt: row!.arrivedAt }).toEqual({ status: 'PENDING', arrivedAt: null });
+      expect(stopEvents(rideId)).toEqual([]);
+    } finally {
+      await raw.$disconnect();
+    }
   });
 });
