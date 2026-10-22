@@ -12,8 +12,8 @@ import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
-import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -1913,7 +1913,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
       ? order.items[0]?.itemId ?? null
       : null;
-    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
+    // [O-3 · owner 22 Oct 2026] Accept IS the start of preparation (STORE_ACCEPT_PATH): one tap,
+    // PENDING -> ACCEPTED -> PREPARING in this one commit, one push to the customer. A booking or an
+    // MMG order still waiting for "Paid by MMG" stops at ACCEPTED (preparationMayStart).
+    const [acceptedStatus, preparingStatus] = STORE_ACCEPT_PATH;
+    const updated = await orderService.updateStatus(order.id, acceptedStatus, request.user.userId, 'Accepted by vendor', {
+      continueTo: { target: preparingStatus, note: 'Preparing: the store accepted the order', when: preparationMayStart },
       withinTransaction: async (tx, lockedOrder) => {
         // [Q12 · AX289 F1] An order whose hold lapsed before the release sweep
         // reached it: accepting takes it out of the sweep's reach, so the
@@ -2063,6 +2068,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
+    }
+    // [O-3] Accept already started preparation. Store builds 9/11/12 (and a stale web tab) still
+    // show "Start preparing" after an accept: their tap is a 200 no-op that answers with the order
+    // as it is — never an error, never a second status row or push. A closed order still refuses.
+    if (order.preparingAt && !isTerminalOrderStatus(order.status)) {
+      return { success: true, data: order };
     }
     if (COURIER_ACTIVE.includes(order.status)) {
       if (order.preparingAt) return { success: true, data: order }; // double-tap safe
@@ -2443,7 +2454,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
-    const updated = capture.order;
+    // [O-3 · STORE_ACCEPT_PATH] An MMG order the store accepted before the money arrived stopped at
+    // ACCEPTED (payment-first). "Paid by MMG" is where its preparation starts: the rest of the
+    // store's one-tap accept, never a separate "Start preparing". After the claim committed, and on
+    // its own: a booking, a disputed claim (the seam re-decides payment-first on the locked row) or
+    // an order that moved on first is left as it is, and the claim stands either way.
+    const startPreparation = capture.order.status === STORE_ACCEPT_PATH[0] && preparationMayStart(capture.order);
+    const prepared = startPreparation
+      ? await orderService.updateStatus(order.id, STORE_ACCEPT_PATH[1], request.user.userId, 'Preparing: the store confirmed the MMG payment', {
+        allowedFrom: [STORE_ACCEPT_PATH[0]],
+      }).catch((err: unknown) => {
+        request.log.warn({ err, orderId: order.id }, '[O-3] preparation did not start with the MMG payment; the store can still start it');
+        return null;
+      })
+      : null;
+    const updated = prepared ?? capture.order;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
