@@ -38,6 +38,7 @@ import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
+import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 import {
   OWNER_WALL_NOTICE_ACTIONS, insertNoticeFor, noticeId, pendingStaffInvitesOf, publicPhoneAsked, staffInviteesOf, upsertNoticeFor,
 } from '../lib/owner-wall-notices';
@@ -435,12 +436,12 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
                      FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE a.privilege_type = 'EXECUTE' ORDER BY 1) AS grantees
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
        WHERE p.proname LIKE 'swift_owner_wall_%' ORDER BY 1`;
-    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS].sort());
+    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS, ...OWNER_WALL_TICKET_ACTIONS].sort());
     for (const r of rows) {
       expect(r, r.name).toMatchObject({ secdef: true });
       expect(r.config, r.name).toContain('search_path=pg_catalog, public');
       expect([...r.grantees].sort(), r.name).toEqual([r.owner, 'swift_app'].sort());
-      expect(r.src.match(/(?<![.\w])(notifications|device_tokens)\b/g), `${r.name} names its table unqualified`).toBeNull();
+      expect(r.src.match(/(?<![.\w])(notifications|device_tokens|support_tickets)\b/g), `${r.name} names its table unqualified`).toBeNull();
     }
   });
 
