@@ -156,6 +156,18 @@ export default function ImportPage() {
               </ul>
             </>
           )}
+          {(result.notesCount ?? 0) > 0 && (
+            <>
+              <p className="mt-2 text-sm font-semibold text-amber-700">
+                {result.notesCount === 1 ? '1 row was' : `${result.notesCount} rows were`} imported without a photo. Photos are uploaded, never imported: add them on each item.
+              </p>
+              <ul className="mt-2 max-h-64 space-y-1 overflow-auto text-sm text-[var(--swift-muted)]">
+                {(result.notes ?? []).map((n) => (
+                  <li key={n.row}>Row {n.row}: {n.note}</li>
+                ))}
+              </ul>
+            </>
+          )}
           {result.failedCount > 0 && (
             <>
               <p className="mt-2 text-sm font-semibold text-[var(--swift-red)]">{result.failedCount} rows failed:</p>

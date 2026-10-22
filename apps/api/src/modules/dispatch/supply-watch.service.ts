@@ -38,10 +38,12 @@ export async function scanSupplyWatches(
   for (const w of watches) {
     const tenantId = tenantByCustomer.get(w.customerId);
     if (!tenantId) continue;
+    // [TAXI-FLOW 22 Oct 2026] The watcher's own driver profile is not
+    // "drivers are back" for them.
     const supply = await dispatch.getAvailability(w.pool === 'RIDER' ? 'RIDER' : 'DRIVER', {
       lat: w.lat,
       lng: w.lng,
-    }, 0, tenantId);
+    }, 0, tenantId, null, w.customerId);
     if (supply.level === 'NONE') continue;
 
     // Stamp FIRST (CAS on notifiedAt null) so a racing scan can't double-send.

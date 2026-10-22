@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
 import { enterTenant } from '../../plugins/tenant-context';
@@ -293,7 +294,7 @@ export async function publicRoutes(app: FastifyInstance) {
         categories: vendor.categories
           .map((c) => ({
             ...c,
-            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
+            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice), imageUrl: servedPhotoAddress(i.imageUrl) })),
           }))
           // An empty category is vendor housekeeping, not a public menu section.
           .filter((c) => c.items.length > 0),
