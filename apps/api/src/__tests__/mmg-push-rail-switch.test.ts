@@ -9,14 +9,17 @@
 // checkout page only. Now:
 //   - live MMG (checkout, lookup, reversal) needs no round-trip flag (boot-config.test.ts);
 //   - the push rail needs MMG_PUSH_RAIL_ON=1 AND the round trip, never in production;
-//   - with it off, the billing run sends nothing to MMG: the week fails with a
-//     "pay on the checkout page" note, like a cash plan;
+//   - with it off, the billing run sends nothing to MMG: the week fails like a
+//     cash plan, and the payment-failed notice tells the partner to pay with MMG
+//     in the app while the checkout is live (otherwise the amount and when it is
+//     due); never an agent or a Swift Number;
 //   - with it off, the poller never follows up a request it cannot match by
 //     OUR reference (no round trip): the row waits untouched;
 //   - with it off, a partner cannot switch to automatic MMG charges.
 // Subjects are stores (vendor subscriptions): their fee has one owner.
 // ---------------------------------------------------------------------------
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import { generateKeyPairSync } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { PaymentMethod } from '@prisma/client';
@@ -29,6 +32,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MMG_PUSH_RAIL_ENV, mmgPushFollowUpOn, mmgPushRailOn } from '../providers/mmg/mmg-provider';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
 
 const DAY = 24 * 60 * 60 * 1000;
 const LIVE = {
@@ -116,6 +120,26 @@ async function facts(subId: string) {
 function stubLive(extra: Record<string, string> = {}) {
   for (const [k, v] of Object.entries({ ...LIVE, ...extra })) vi.stubEnv(k, v);
 }
+/** The MMG checkout page live (MMG_CHECKOUT_ENABLED=1 with a complete live configuration).
+ *  Every key is generated here, for this file only: never a value from any MMG file. */
+let checkoutKeys: { mmgPublic: string; swiftPrivate: string } | null = null;
+function checkoutLiveEnv(): Record<string, string> {
+  if (!checkoutKeys) {
+    const rsa = () => generateKeyPairSync('rsa', { modulusLength: 4096 });
+    const mmg = rsa();
+    const swift = rsa();
+    checkoutKeys = {
+      mmgPublic: mmg.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+      swiftPrivate: swift.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    };
+  }
+  return {
+    MMG_CHECKOUT_ENABLED: '1', MMG_CHECKOUT_MERCHANT_ID: '0000001', MMG_CHECKOUT_CLIENT_ID: 'client-test',
+    MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test', MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
+    MMG_CHECKOUT_SECRET_KEY: 'not-a-secret', MMG_CHECKOUT_PUBLIC_KEY: checkoutKeys.mmgPublic,
+    MMG_CHECKOUT_PRIVATE_KEY: checkoutKeys.swiftPrivate,
+  };
+}
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -157,7 +181,7 @@ afterAll(async () => {
 });
 
 describe('[Option A] the billing run never pushes while the switch is off', () => {
-  it('live MMG with the round trip verified but no push switch: nothing reaches MMG; the week fails with the checkout note', async () => {
+  it('live MMG with the round trip verified but no push switch: nothing reaches MMG; the week fails with the push-off note', async () => {
     const subId = await makeVendorSub('MOBILE_MONEY');
     stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
@@ -183,6 +207,23 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
     // The hosted checkout is not live in this test: the notice must not send the partner to it.
     expect(told[0]!.body).not.toMatch(/checkout/i);
     expect(told[0]!.body).toContain('The weekly fee of GY$12,000 is due now.');
+  });
+
+  it('with the MMG checkout live, the same notice tells the partner to pay with MMG in the app, once, and names no other way to pay', async () => {
+    const subId = await makeVendorSub('MOBILE_MONEY');
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', ...checkoutLiveEnv() });
+    resetFeeCheckoutSwitchCache();
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
+    expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
+    expect((await facts(subId)).mmgPayments).toEqual([]);
+    const owner = (await withRelations(subId)).vendor!.owner.userId;
+    const told = await app.prisma.notification.findMany({ where: { userId: owner, data: { path: ['kind'], equals: 'billing_failed' } } });
+    expect(told).toHaveLength(1);
+    const body = told[0]!.body;
+    expect(body).toBe(`${MMG_PUSH_OFF_REASON}. We will retry after the remaining retry interval. Pay GY$12,000 with MMG in the Swift app.`);
+    // One way to pay, said once: the MMG checkout in the app.
+    expect(body.match(/with MMG/g)).toHaveLength(1);
+    for (const door of [/\bagents?\b/i, /swift number/i, /\bcash\b/i, /account number/i]) expect(body).not.toMatch(door);
   });
 
   it('control: with the push rail on (sandbox, off production) the same plan IS sent a charge request', async () => {
