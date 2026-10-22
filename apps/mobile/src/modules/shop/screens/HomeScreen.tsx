@@ -32,6 +32,7 @@ import { money } from '../../../lib/money';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
+import { trackRouteFor } from '../../../lib/orderTrackRoute';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
@@ -270,7 +271,12 @@ function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProj
             label="Track"
             variant="dark"
             size="sm"
-            onPress={() => navigation.navigate('Delivery', { orderId: order.id })}
+            // [TAXI-FLOW 22 Oct] A ride tracks on the ride screen, never the
+            // store's: the server's orderType picks (orderTrackRoute.ts).
+            onPress={() => {
+              const target = trackRouteFor(order);
+              navigation.navigate(target.screen, target.params);
+            }}
           />
         </View>
 

@@ -231,7 +231,7 @@ export async function assertRideGates(
   // drivers come online mid-search).
   if (opts.dispatch && opts.pickup
     && process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId);
+    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId, null, user.id);
     if (supply.level === 'NONE') {
       throw new AppError(
         409,
