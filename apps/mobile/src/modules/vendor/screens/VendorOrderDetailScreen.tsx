@@ -108,7 +108,17 @@ function ContactCard({
   );
 }
 
-export function VendorOrderDetailScreen({ navigation, route }: any) {
+export function VendorOrderDetailScreen(props: any) {
+  // [UI-SWEEP U10 S3-1] A tap to a screen already in the stack goes back to
+  // it (navigate + pop), and a push for another order while this screen is
+  // open re-uses it too: React Navigation hands the SAME mounted screen the
+  // new order. Everything below is order-local (the typed collection code,
+  // the Reject / Confirm delivered popups, the swap picker), so a new order
+  // id is a new screen: order A's half-done hand-over can never act on B.
+  return <VendorOrderDetailBody key={props.route?.params?.orderId ?? ''} {...props} />;
+}
+
+function VendorOrderDetailBody({ navigation, route }: any) {
   const orderId: string | undefined = route.params?.orderId;
   const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
   const returnReceived = useReturnReceived();

@@ -13,7 +13,7 @@ import { getTenantId } from '../../plugins/tenant-context';
 import { NotificationService, notifyAdmins, tenantOfUser, tenantOfSubscription } from '../notification/notification.service';
 import { CountryConfigService, partnerRateFor, PricingConfigError, type PartnerRate, type PartnerSubject, type SubscriptionTiers } from '../country/country-config.service';
 import type { PaymentProvider } from '../../providers/payment/payment-provider';
-import { getMmgProvider, mmgDisabled } from '../../providers/mmg/mmg-provider';
+import { getMmgProvider, mmgDisabled, mmgPushFollowUpOn, mmgPushRailOn } from '../../providers/mmg/mmg-provider';
 import { noLivePayPath } from './fee-pause';
 import { consumeMmgReactivation, feePauseHoldsBilling, feePauseSpanOpen, mmgReactivationPeriodEnd } from './mmg-pause';
 import type { MmgTransaction, MmgTxResult } from '../../providers/mmg/mmg-provider';
@@ -27,6 +27,8 @@ import { isDuplicateOn } from '../money/evidence';
 import { weeklyFeeFor } from './subscription-fee';
 import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor, type PriceBookRow } from './price-book';
 import { WEEKLY_RETIER_ON } from './weekly-retier';
+import { batchClock } from '../../utils/batch-clock';
+import { billingErrorCode } from './billing-error-code';
 import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
@@ -222,6 +224,8 @@ export interface BillingCycleResult {
   errors: number;
   /** MMG merchant-initiated requests awaiting the payer's phone approval */
   pending: number;
+  /** [COORD 18 Oct 20:33Z] The `errors`, counted by error code (billing-error-code.ts). */
+  errorCodes: Record<string, number>;
 }
 
 /**
@@ -349,6 +353,9 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   throw error;
 }
 
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
+
 export class BillingService {
   private countryConfig: CountryConfigService;
   private cardRailProvider: CardRailProvider | null | undefined;
@@ -391,7 +398,12 @@ export class BillingService {
   }
 
   /** Bill everything due. One subscription's failure never kills the batch. */
-  async runBillingCycle(now = new Date()): Promise<BillingCycleResult> {
+  async runBillingCycle(at?: Date): Promise<BillingCycleResult> {
+    // [REVIEW-M #1832 S3-1] Each subscription is billed at the time it is really billed
+    // (utils/batch-clock.ts), never at the run's start instant; a caller standing at a
+    // chosen instant (`at`: a test, a replay) gets exactly that instant for every item.
+    const now = at ?? new Date();
+    const clock = batchClock(at);
     await this.recoverConfirmationSettlements(undefined, now);
     // [F2 · fee-rise-notice.ts] Held weekly-fee rises first: a payer told, a told
     // rise whose date the next fee has reached moved in, before anything due is priced.
@@ -420,7 +432,7 @@ export class BillingService {
       },
     });
 
-    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0 };
+    const result: BillingCycleResult = { processed: 0, succeeded: 0, failed: 0, suspended: 0, skipped: 0, errors: 0, pending: 0, errorCodes: {} };
 
     // USD pricing (Part 20): ONE rate per billing run, resolved here and
     // stamped on every charge this run creates. Null = flag off → legacy.
@@ -429,11 +441,17 @@ export class BillingService {
     for (const sub of due) {
       result.processed += 1;
       try {
-        const outcome = await this.billSubscription(sub as SubWithRelations, now, usd);
+        const outcome = await this.billSubscription(sub as SubWithRelations, clock(), usd);
         result[outcome] += 1;
-      } catch {
-        // Partial failure mid-batch: record and continue
+      } catch (err) {
+        // Partial failure mid-batch: record and continue. [COORD 18 Oct 20:33Z] Never silently: a
+        // swallowed failure hid a dunning loop 2,768 times on staging. Each one is logged with the
+        // subscription and the error's code only (never its message: it can carry personal data),
+        // and counted by code for the run's summary line and its failure page.
+        const code = billingErrorCode(err);
         result.errors += 1;
+        result.errorCodes[code] = (result.errorCodes[code] ?? 0) + 1;
+        log().error({ subscriptionId: sub.id, code }, '[billing] one subscription failed in the billing run; the run goes on and retries it next hour');
       }
     }
 
@@ -1909,6 +1927,14 @@ export class BillingService {
       return { ok: false, reason: 'MMG payments are switched off right now' };
     }
 
+    // [S1 · SWITCHES 21 Oct, Option A] The push rail is its own switch (mmg-provider mmgPushRailOn),
+    // off in production: no charge request goes to the partner's phone. The week has no automatic
+    // rail, like a cash subscription, and fails; the fee notice tells the partner to pay on the MMG
+    // checkout page (feePayLine) while it is live. Never a push "because MMG is live".
+    if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn && !mmgPushRailOn()) {
+      return { ok: false, reason: MMG_PUSH_OFF_REASON };
+    }
+
     if (sub.billingMethod === 'MOBILE_MONEY' && sub.mmgPayerMsisdn) {
       const mmg = getMmgProvider();
       // SWIFT-004 — MMG double-charge guard. The poller's synthetic 24h expiry
@@ -3303,8 +3329,9 @@ export class BillingService {
    * jittered), stamped BEFORE the provider call so a crash can't hot-loop.
    */
   async pollPendingMmgCharges(
-    now = new Date(),
+    at?: Date,
   ): Promise<{ settled: number; banked: number; adopted: number; failed: number; stillPending: number }> {
+    const now = at ?? new Date();
     const candidates = await this.prisma.subscriptionPayment.findMany({
       where: { status: { in: ['PENDING', 'UNKNOWN'] }, paymentMethod: 'MOBILE_MONEY' },
       orderBy: { lastPolledAt: { sort: 'asc', nulls: 'first' } },
@@ -3319,13 +3346,19 @@ export class BillingService {
     // [PROD-PATH] MMG fully off: no row is stamped, looked up, expired or
     // dunned. Only MMG's own answer may resolve a request it once accepted
     // [LAW M-5], so every row waits, untouched, until MMG is switched on.
-    if (mmgDisabled()) {
+    // [S1 · Option A] A request already sent is followed up only where OUR reference's round trip is
+    // proved (mmgPushFollowUpOn); otherwise it waits untouched, exactly as above. Never a new push.
+    if (mmgDisabled() || !mmgPushFollowUpOn()) {
       out.stillPending = pending.length;
       return out;
     }
 
-    const mmg = getMmgProvider();
+    const mmg = getMmgProvider({ followUp: true });
+    // [REVIEW-M #1832 S3-1] Up to 200 network-bound items: each is looked up, expired and settled at
+    // the time it is really processed, never at the run's start instant (a chosen `at` stays exact).
+    const clock = batchClock(at);
     for (const payment of pending) {
+      const itemNow = clock();
       const sub = await this.prisma.subscription.findUnique({
         where: { id: payment.subscriptionId },
         include: {
@@ -3339,7 +3372,9 @@ export class BillingService {
       const ttlAt = payment.expiresAt ?? new Date(payment.createdAt.getTime() + MMG_REQUEST_TTL_MS);
 
       // Stamp the poll clock FIRST — a crash mid-item degrades to a slower
-      // retry, never a hot loop against the provider.
+      // retry, never a hot loop against the provider. (The backoff stamp keeps
+      // the run's start: the due filter above read it, and an earlier stamp
+      // only ever means a sooner retry.)
       await this.prisma.subscriptionPayment
         .updateMany({ where: { id: payment.id }, data: { lastPolledAt: now, pollBackoffSec: jitter(nextBackoff(payment.pollBackoffSec)) } })
         .catch(() => {});
@@ -3354,7 +3389,7 @@ export class BillingService {
             // contradict it. Both the observation and ID adoption serialize
             // with payer, subscription and payment authority.
             if (match.status === 'approved') {
-              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, now);
+              const observed = await this.retainMmgHistoryApproval(sub as SubWithRelations, payment.id, match, itemNow);
               if (observed === 'adopted') out.adopted += 1;
               else out.stillPending += 1;
             } else if (await this.adoptMmgHistoryId(sub as SubWithRelations, payment.id, match)) {
@@ -3366,7 +3401,7 @@ export class BillingService {
           out.stillPending += 1; // provider unreachable — UNKNOWN stays UNKNOWN [LAW M-5]
           continue;
         }
-        if (now >= ttlAt) {
+        if (itemNow >= ttlAt) {
           // A never-authorized reservation may expire. A dispatched request
           // remains UNKNOWN: an empty history page is not proof of absence.
           // [M-04] Terminal status and dunning outcome land in ONE transaction,
@@ -3375,7 +3410,7 @@ export class BillingService {
           try {
             const outcome = await this.terminalizeFailedPayment(
               sub as SubWithRelations, payment, { status: 'EXPIRED', failureCode: 'REQUEST_EXPIRED', from: ['UNKNOWN'], providerAbsenceOnly: true },
-              'MMG request lost in transit — never confirmed at MMG', now, periodKey,
+              'MMG request lost in transit — never confirmed at MMG', itemNow, periodKey,
             );
             if (!outcome) { out.stillPending += 1; continue; }
             out.failed += 1;
@@ -3388,7 +3423,7 @@ export class BillingService {
         continue;
       }
 
-      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, now);
+      const lookupSource = await this.startMmgLookup(sub as SubWithRelations, payment.id, itemNow);
       if (!lookupSource?.externalRef) { out.stillPending += 1; continue; }
       let lookup: MmgTransaction;
       try {
@@ -3398,7 +3433,7 @@ export class BillingService {
         continue;
       }
       const status = lookup.status;
-      const expired = status === 'expired' || (status === 'pending' && now.getTime() >= ttlAt.getTime());
+      const expired = status === 'expired' || (status === 'pending' && itemNow.getTime() >= ttlAt.getTime());
 
       // SWIFT-AUD-D2-04, completed: settle is single-winner AND atomic. The
       // CAS claim now lives INSIDE the same transaction as the period advance
@@ -3410,7 +3445,7 @@ export class BillingService {
             sub as SubWithRelations,
             payment.id,
             lookup,
-            now,
+            itemNow,
           );
           if (result === 'lost') continue;
           if (result === 'held') {
@@ -3427,7 +3462,7 @@ export class BillingService {
           const outcome = await this.terminalizeFailedPayment(
             sub as SubWithRelations, payment,
             { status: expired ? 'EXPIRED' : 'FAILED', failureCode: expired ? 'REQUEST_EXPIRED' : mapMmgFailure(status), from: ['PENDING', 'UNKNOWN'], providerAbsenceOnly: status === 'pending', mmgLookup: this.mmgLookupObservation(lookupSource, lookup) },
-            `MMG request ${expired ? 'expired unapproved' : status}`, now, periodKey,
+            `MMG request ${expired ? 'expired unapproved' : status}`, itemNow, periodKey,
           );
           if (!outcome) { out.stillPending += 1; continue; }
           out.failed += 1;
@@ -3462,6 +3497,15 @@ export class BillingService {
     }
     if (method === 'MOBILE_MONEY' && !mmgPayerMsisdn?.trim()) {
       throw new AppError(400, 'MSISDN_REQUIRED', 'Your MMG account number is required to pay the weekly fee via MMG.');
+    }
+    // [S1 · SWITCHES 21 Oct, Option A] While the push rail is off, automatic MMG charges are never
+    // offered: a switch TO it is refused. A plan already on it may resume (the in-app resume keeps
+    // its method), and is never pushed: the billing run tells it to pay on the checkout page.
+    if (method === 'MOBILE_MONEY' && !mmgPushRailOn()) {
+      const current = await this.prisma.subscription.findUnique({ where: { id: subscriptionId }, select: { billingMethod: true } });
+      if (current?.billingMethod !== 'MOBILE_MONEY') {
+        throw new AppError(409, 'MMG_AUTO_CHARGE_OFF', 'Automatic MMG charges are not available. Pay your weekly fee with MMG on the checkout page in the app.');
+      }
     }
     // [REVIEW-PARTNER · DL-5] The store-review fiction has no money rail to choose (before any write).
     if (await isReviewSubscription(this.prisma, subscriptionId)) throw new ReviewDemoMoneyRefusedError();

@@ -292,6 +292,126 @@ export async function readFeeCollectionAuthority(db: Db, subscriptionId: string)
   }
 }
 
+type FeeCollectionRead = { allowed: boolean; canonical: boolean; mover: MoverFeeResolution | null };
+const NOT_COLLECTABLE: FeeCollectionRead = { allowed: false, canonical: false, mover: null };
+const MOVER_FEE_TYPES: Array<Subscription['type']> = ['TAXI_DRIVER', 'DELIVERY_RIDER', 'COURIER_RIDER'];
+const PAYER_SELECT = {
+  id: true, riderId: true, driverId: true, vendorId: true,
+  rider: { select: { user: { select: { id: true, tenantId: true } } } },
+  driver: { select: { user: { select: { id: true, tenantId: true } } } },
+  vendor: { select: { tenantId: true, owner: { select: { user: { select: { id: true, tenantId: true } } } } } },
+} as const;
+type PayerRow = Prisma.SubscriptionGetPayload<{ select: typeof PAYER_SELECT }>;
+
+/** subscriptionPayer's rule on a row already read: exactly one owner, and that owner's user. */
+function payerOfRow(sub: PayerRow): SubscriptionPayer | null {
+  if ([sub.riderId, sub.driverId, sub.vendorId].filter(Boolean).length !== 1) return null;
+  const user = sub.rider?.user ?? sub.driver?.user ?? sub.vendor?.owner.user;
+  if (!user) return null;
+  return { userId: user.id, tenantId: user.tenantId, kind: sub.vendorId ? 'VENDOR' : 'MOVER' };
+}
+
+/**
+ * [PERF row 561] readFeeCollectionAuthority for a whole list, in a fixed number of reads.
+ * The admin console's home asked it once per ACTIVE subscription, each mover's in a transaction
+ * of its own: about 0.4 s at 210 subscriptions and 0.8 s at 500, on every 30 s refresh.
+ *
+ * The answer per subscription is the same as readFeeCollectionAuthority's. Payers are read once:
+ * owners, users, every mover's sources and their persisted authority. A payer whose answer can
+ * depend on money history (an ACTIVE authority with alias sources, or several sources and no
+ * authority yet) is not decided here: its subscriptions go through readFeeCollectionAuthority
+ * unchanged. Read-only, for the dashboard's forecast; money effects still take the locked decision.
+ */
+export async function readFeeCollectionAuthorities(db: PrismaClient, subscriptionIds: string[]): Promise<Map<string, FeeCollectionRead>> {
+  const out = new Map<string, FeeCollectionRead>();
+  if (!subscriptionIds.length) return out;
+  const rows = await db.subscription.findMany({ where: { id: { in: subscriptionIds } }, select: PAYER_SELECT });
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const moverSubs = new Map<string, { payer: SubscriptionPayer; subs: string[] }>();
+  for (const id of subscriptionIds) {
+    const row = byId.get(id);
+    const payer = row ? payerOfRow(row) : null;
+    if (!payer) { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+    if (payer.kind === 'VENDOR') { out.set(id, { allowed: true, canonical: true, mover: null }); continue; }
+    const group = moverSubs.get(payer.userId) ?? { payer, subs: [] };
+    group.subs.push(id);
+    moverSubs.set(payer.userId, group);
+  }
+  if (!moverSubs.size) return out;
+
+  const userIds = [...moverSubs.keys()];
+  const read = await db.$transaction(async (tx) => {
+    await bindTenantTransaction(tx);
+    const [users, sources, persisted] = await Promise.all([
+      tx.user.findMany({ where: { id: { in: userIds } }, select: { id: true, tenantId: true } }),
+      tx.subscription.findMany({
+        where: { OR: [{ rider: { userId: { in: userIds } } }, { driver: { userId: { in: userIds } } }] },
+        orderBy: { id: 'asc' },
+        select: { ...PAYER_SELECT, type: true, createdAt: true, rider: { select: { userId: true, user: { select: { id: true, tenantId: true } } } }, driver: { select: { userId: true, user: { select: { id: true, tenantId: true } } } } },
+      }),
+      tx.moverFeeAuthority.findMany({ where: { userId: { in: userIds } }, include: { members: true } }),
+    ]);
+    return { users, sources, persisted };
+  });
+  const users = new Map(read.users.map((u) => [u.id, u]));
+  const authorities = new Map(read.persisted.map((a) => [a.userId, a]));
+  const sourcesOf = new Map<string, typeof read.sources>();
+  for (const source of read.sources) {
+    for (const userId of new Set([source.rider?.userId, source.driver?.userId])) {
+      if (!userId || !moverSubs.has(userId)) continue;
+      sourcesOf.set(userId, [...(sourcesOf.get(userId) ?? []), source]);
+    }
+  }
+
+  const fallback: string[] = [];
+  for (const [userId, { payer, subs }] of moverSubs) {
+    const decide = (): MoverFeeResolution | null | 'INVALID' | 'FALLBACK' => {
+      const user = users.get(userId);
+      if (!user || user.tenantId !== payer.tenantId) return 'INVALID';
+      const sources = sourcesOf.get(userId) ?? [];
+      for (const source of sources) {
+        const owner = payerOfRow(source);
+        if (!owner || owner.kind !== 'MOVER' || owner.userId !== payer.userId || owner.tenantId !== payer.tenantId) return 'INVALID';
+      }
+      if (!sources.length) return null;
+      const ids = sources.map((s) => s.id).sort();
+      const p = authorities.get(userId);
+      if (p) {
+        if (p.tenantId !== payer.tenantId || !ids.includes(p.canonicalSubscriptionId)) return 'INVALID';
+        const knownIds = p.members.map((m) => m.subscriptionId).sort();
+        const addedSource = JSON.stringify(knownIds) !== JSON.stringify(ids);
+        const aliases = sources.filter((s) => s.id !== p.canonicalSubscriptionId);
+        if (p.state === 'ACTIVE' && !addedSource && aliases.length) return 'FALLBACK'; // money history decides
+        return {
+          payerUserId: payer.userId, tenantId: payer.tenantId,
+          canonicalSubscriptionId: p.canonicalSubscriptionId, sourceSubscriptionIds: ids,
+          feeType: p.feeType, revision: p.revision,
+          state: addedSource ? 'FINANCE_HOLD' : p.state,
+          holdReason: addedSource ? 'UNREGISTERED_MOVER_SOURCE' : p.holdReason,
+        };
+      }
+      if (sources.length > 1) return 'FALLBACK'; // ambiguity needs the trial and money-history checks
+      const canonical = sources[0]!;
+      if (!MOVER_FEE_TYPES.includes(canonical.type)) return 'INVALID';
+      return {
+        payerUserId: payer.userId, tenantId: payer.tenantId,
+        canonicalSubscriptionId: canonical.id, sourceSubscriptionIds: ids,
+        feeType: canonical.type, revision: 0, state: 'ACTIVE', holdReason: null,
+      };
+    };
+    const mover = decide();
+    if (mover === 'FALLBACK') { fallback.push(...subs); continue; }
+    for (const id of subs) {
+      if (mover === 'INVALID') { out.set(id, { ...NOT_COLLECTABLE }); continue; }
+      const canonical = !!mover && mover.canonicalSubscriptionId === id;
+      out.set(id, { allowed: canonical && mover?.state === 'ACTIVE', canonical, mover });
+    }
+  }
+  const slow = await Promise.all(fallback.map(async (id) => [id, await readFeeCollectionAuthority(db, id)] as const));
+  for (const [id, answer] of slow) out.set(id, answer);
+  return out;
+}
+
 /** Authenticated readers use one canonical view while retaining each original
  * financial source for review. No classification or SAN assignment happens here. */
 export async function readMoverFeeSubscription(db: Db, payer: { userId: string; tenantId: string }) {

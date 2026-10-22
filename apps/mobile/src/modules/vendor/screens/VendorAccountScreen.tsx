@@ -469,6 +469,10 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
       <BillingStopControl
         sub={sub}
         who="store"
+        // [OWNER 21 Oct] This screen stacks its cards with marginBottom: the
+        // control keeps the same section gap below it, never flush on the
+        // "Your MMG number" card.
+        style={{ marginTop: 0, marginBottom: space.lg }}
         pending={setBilling.isPending}
         onStop={() => setBilling.mutate({ method: 'NONE' })}
         onResume={() =>
@@ -612,7 +616,14 @@ function PromosSection() {
             </View>
           );
         })}
-        {promos.length === 0 && !promosQ.isLoading ? (
+        {promosQ.isError && promos.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your promo codes.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => promosQ.refetch()} />
+          </View>
+        ) : promos.length === 0 && !promosQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No codes yet — run your first promotion and it shows on your storefront.
           </T>
@@ -757,7 +768,14 @@ function StaffSection() {
             </Pressable>
           </View>
         ))}
-        {members.length === 0 && !staffQ.isLoading ? (
+        {staffQ.isError && members.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your team.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => staffQ.refetch()} />
+          </View>
+        ) : members.length === 0 && !staffQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No team members yet — add your manager or floor staff by phone.
           </T>

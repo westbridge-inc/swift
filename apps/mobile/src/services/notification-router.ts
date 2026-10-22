@@ -36,7 +36,7 @@ const PARTNER_FEE_KINDS = new Set([
 ]);
 
 /** [PUSH-ROUTING] Document notices sent to whoever owns the document. */
-const DOCUMENT_KINDS = new Set(['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder']);
+const DOCUMENT_KINDS = new Set(['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder', 'verification_application_abandoned']);
 
 /** [PUSH-ROUTING] Document notices only a mover receives (the API tags them earner). */
 const MOVER_DOCUMENT_KINDS = new Set(['verification_forced_offline', 'verification_vehicle_lapsed', 'compliance_review_failed']);
@@ -348,6 +348,14 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // never mounts. Runs AFTER the kind branches so a deliberate business
   // destination (mmg_unattested_cancellation → Main) still wins.
   if (audience === 'business' && orderId) return { screen: 'VendorOrderDetail', params: { orderId } };
+
+  // Only a producer-authoritative taxi marker selects this destination.
+  // A cancelled driver's ride is no longer ActiveJob; Main mounts their
+  // available mover home. Bare historical order ids keep the generic contract.
+  if (data['orderType'] === 'TAXI' && orderId && data['rideId'] === orderId) {
+    if (audience === 'earner') return { screen: 'Main' };
+    if (audience === 'customer') return { screen: 'Taxi' };
+  }
 
   // Orders: any payload carrying an orderId lands on that order's tracking
   // screen — covers status updates, substitutions, pickup READY.

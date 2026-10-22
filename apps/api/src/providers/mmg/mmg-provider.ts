@@ -797,6 +797,38 @@ export function mmgDisabled(env: Record<string, string | undefined> = process.en
   return env['MMG_DRIVER'] === 'disabled';
 }
 
+/**
+ * [S1 · SWITCHES 21 Oct, Option A] The merchant-initiated PUSH rail (Swift
+ * sends a charge request to a partner's MMG phone) is a separate switch from
+ * MMG itself. The weekly fee is paid on the MMG checkout page (GUARDRAILS §1);
+ * the push rail is unproven (the merchant reference round trip,
+ * MMG_REFERENCE_ROUNDTRIP_VERIFIED) and stays OFF unless this exact switch is
+ * on. Live MMG for the checkout, its lookup and reversals never needs it.
+ */
+export const MMG_PUSH_RAIL_ENV = 'MMG_PUSH_RAIL_ON';
+
+/** True only where Swift may send a push charge request:
+ *   - sandbox (synthetic, never production: the boot guard and the factories refuse it there);
+ *   - live, outside production, with MMG_PUSH_RAIL_ON=1 AND the reference round trip verified.
+ *  Production never pushes for now: its boot guard also refuses the switch. */
+export function mmgPushRailOn(env: Record<string, string | undefined> = process.env): boolean {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  if (isProduction(env)) return false;
+  if (driver === 'sandbox') return true;
+  if (driver !== 'live') return false;
+  return env[MMG_PUSH_RAIL_ENV] === '1' && env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] === '1';
+}
+
+/** True where a push request Swift already sent may be followed up (looked up
+ *  by OUR reference, history-matched, settled or expired): that needs the
+ *  reference round trip proved, never the push switch. Off: such a row waits,
+ *  untouched, as under MMG_DRIVER=disabled [LAW M-5]. */
+export function mmgPushFollowUpOn(env: Record<string, string | undefined> = process.env): boolean {
+  const driver = env['MMG_DRIVER'] ?? 'sandbox';
+  if (driver === 'sandbox') return !isProduction(env);
+  return driver === 'live' && env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] === '1';
+}
+
 export class MmgDisabledError extends AppError {
   constructor(operation: string) {
     super(503, 'MMG_DISABLED', `MMG is switched off on this server (MMG_DRIVER=disabled); ${operation} was not sent.`);
@@ -896,8 +928,10 @@ export function getMmgReversalClient(env: Record<string, string | undefined> = p
   }
 }
 
-/** Driver selection is config, not code. Defaults to the sandbox. */
-export function getMmgProvider(): MmgMerchantProvider {
+/** Driver selection is config, not code. Defaults to the sandbox.
+ *  `followUp`: the poller's lookups of requests already sent (needs only the
+ *  reference round trip); default: the push rail itself (needs mmgPushRailOn). */
+export function getMmgProvider(opts: { followUp?: boolean } = {}): MmgMerchantProvider {
   const driver = process.env['MMG_DRIVER'] ?? 'sandbox';
   if (driver === 'disabled') return new DisabledMmgProvider();
   if (isProduction() && driver === 'sandbox') {
@@ -912,6 +946,12 @@ export function getMmgProvider(): MmgMerchantProvider {
         throw new Error(
           'MMG_DRIVER=live requires MMG_REFERENCE_ROUNDTRIP_VERIFIED=1 after sandbox UAT proves ' +
           'x-wss-correlationid -> lookup metadata.description and history external_id round-trip',
+        );
+      }
+      if (!opts.followUp && !mmgPushRailOn(process.env)) {
+        throw new Error(
+          `The MMG push rail is off (${MMG_PUSH_RAIL_ENV}): Swift sends no charge request to a partner's phone; ` +
+          'the weekly fee is paid on the MMG checkout page',
         );
       }
       if (isProduction() && /mmgtest|\buat\b|sandbox/i.test(cfg.baseUrl)) {

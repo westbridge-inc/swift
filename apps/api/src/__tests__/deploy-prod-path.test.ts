@@ -64,6 +64,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": routing}))
     else:
         services = {n: {} for n in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"}, {"published": "443", "target": 443, "protocol": "tcp"}]}
         for profile in ("web", "admin"):
             if "--profile" in argv and profile in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--profile"]:
@@ -153,7 +156,7 @@ function preparePilot() {
   const here = join(tmp, 'repo', 'deploy');
   mkdirSync(join(here, 'routing-data', 'osrm'), { recursive: true });
   writeFileSync(join(here, 'routing-data', 'osrm', 'guyana-latest.osrm'), '');
-  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
+  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'check-upload-storage.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
     copyFileSync(join(DEPLOY, f), join(here, f));
   }
   // backup.sh --check-key (the owner-key proof, run with real GnuPG in deploy/tests/test_backup_encryption.py)
@@ -1394,7 +1397,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
   psql(source, opts.fixture ?? FIXTURE);
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
-  copyFileSync(join(DEPLOY, 'restore.sh'), join(here, 'restore.sh'));
+  // [#1977] restore.sh replays the erasure ledger with the two SQL files that ship next to it.
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
   const dump = join(tmp, `${id}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
@@ -1408,7 +1412,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
-  const res = spawnSync('bash', [join(here, 'restore.sh'), ...(opts.args ?? ['--compare-source']), dump, scratch], {
+  // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
+  const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
     timeout: 120_000,
     env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },
