@@ -1327,6 +1327,8 @@ export class DispatchService {
           id: true, status: true, riderId: true, driverId: true, orderType: true, holdExpiresAt: true,
           fulfillment: true, fulfillmentMode: true, fulfillmentModeVersion: true, orderNumber: true, rideClass: true, isExpress: true, courierPackageSize: true,
           customerId: true, pickupLat: true, pickupLng: true, taxiPassengerCount: true,
+          // [REVIEW-G S4-1] The food-age cutoff below pins the riderless stretch it read.
+          riderAssignmentVersion: true,
           // [TAXI multi-stop] Whether the ride has stops: the offer card shows them.
           taxiStopCount: true,
           subtotalBase: true, paymentMethod: true, paymentStatus: true, tenantId: true, readyAt: true, foodAgeHeldAt: true, foodAgeWaivedAt: true,

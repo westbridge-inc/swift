@@ -295,8 +295,10 @@ export interface RetireableOrder {
   fulfillmentModeVersion?: number;
   /** [OF-01 · REVIEW-M S4-1] The riderless stretch's identity: a database
    *  trigger bumps it on every assignment and release, so each stretch with no
-   *  rider gets its own warning and its own grace. */
-  riderAssignmentVersion?: number;
+   *  rider gets its own warning and its own grace. [REVIEW-G S4-1] Required, not
+   *  optional: the cancel's locked re-read pins it, so a caller that forgets to
+   *  SELECT it fails to compile instead of cancelling a stretch it never saw. */
+  riderAssignmentVersion: number;
   readyAt: Date | null;
   vendor: { name: string; owner: { userId: string } } | null;
 }
@@ -352,6 +354,11 @@ export async function settleTooOldOrder(
     const live = await tx.order.findFirst({
       where: {
         id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
+        // [REVIEW-G S4-1] The SAME riderless stretch the caller read: a rider who
+        // took the order and handed it back between that read and this lock
+        // started a new stretch, which gets its own warning and its own grace
+        // before any cancel (the version changes on every assignment and release).
+        riderAssignmentVersion: order.riderAssignmentVersion,
         // [REPORT-070 F-06] "No rider found" is only a fact about work that
         // NEEDS a platform rider: a pickup order or a store's own delivery is
         // riderless by design and must never be retired for it.
@@ -854,7 +861,7 @@ async function settleAfterGrace(
   const told = await deps.prisma.algoDecision.findFirst({
     where: {
       algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, outcome: RIDERLESS_TOLD_OUTCOME,
-      inputs: { path: ['assignmentVersion'], equals: order.riderAssignmentVersion ?? 0 },
+      inputs: { path: ['assignmentVersion'], equals: order.riderAssignmentVersion },
     },
     orderBy: { createdAt: 'asc' },
     select: { createdAt: true },
@@ -864,7 +871,7 @@ async function settleAfterGrace(
       algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId,
       outcome: RIDERLESS_TOLD_OUTCOME,
       sentence: `No rider ${ageMinutes - limitMinutes} min past the cutoff: the customer is told they can cancel for free, and the system cancels ${RIDERLESS_GRACE_MIN} min from now if no rider comes.`,
-      inputs: { ageMinutes, limitMinutes, basis, graceMinutes: RIDERLESS_GRACE_MIN, assignmentVersion: order.riderAssignmentVersion ?? 0 },
+      inputs: { ageMinutes, limitMinutes, basis, graceMinutes: RIDERLESS_GRACE_MIN, assignmentVersion: order.riderAssignmentVersion },
     });
     // No durable "told at" means no grace has started: say nothing yet, try next tick.
     if (!recorded) return 'WAITING';
@@ -882,7 +889,7 @@ export const RIDERLESS_TOLD_OUTCOME = 'RIDERLESS_CUTOFF_TOLD';
 /** The ONE "you can cancel for free" notice (deduped per order, so a re-send of a
  *  delivered notice collapses into it). */
 async function sendRiderlessCutoffNotice(deps: RescueDeps, order: RetireableOrder, basis: WaitBasis): Promise<void> {
-  const dedupeKey = riderlessCutoffNoticeKey(order.id, order.riderAssignmentVersion ?? 0);
+  const dedupeKey = riderlessCutoffNoticeKey(order.id, order.riderAssignmentVersion);
   // [#1890 owner wall · COORD 13:56Z] A system read of someone's inbox names its
   // capability. Nothing is DECIDED on this read (the grace runs from the
   // decision row): an empty read only re-sends a notice whose key collapses it
