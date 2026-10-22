@@ -179,7 +179,7 @@ const bodyOf = (text: string, head: string, close: string) => {
   expect(end, head).toBeGreaterThan(at);
   return text.slice(at + head.length, end);
 };
-const awaited = (body: string) => [...stripComments(body).matchAll(/await\s+([\w.]+)\(/g)].map((m) => m[1]);
+const awaited = (body: string) => [...stripComments(body).matchAll(/await\s+([\w.]+)\(/g)].map((m) => m[1]!);
 
 describe('[row 622] pinned: nothing between the tombstone and its old place reads users.status or users.phone', () => {
   const account = read('modules/user/account.service.ts');
