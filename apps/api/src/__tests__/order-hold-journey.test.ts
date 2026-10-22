@@ -823,7 +823,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
     const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
     expect(res.statusCode, res.body).toBe(200);
     const row = await orderRow(order.id);
-    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'ACCEPTED', hold: null, released: true });
+    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'PREPARING', hold: null, released: true }); // [O-3] one tap: Accept starts preparation
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
 
     // Out of the sweep's reach: nothing released, counted, alerted or armed.
@@ -870,7 +870,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
       delete holdReleaseObserver[seam];
     }
     expect(accepted?.statusCode, accepted?.body).toBe(200);
-    expect((await orderRow(order.id)).status).toBe('ACCEPTED');
+    expect((await orderRow(order.id)).status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
     expect((await storeHeard(store, order)).pushes).toEqual([]);
     // A ladder the release wrote before the acceptance stops at its first rung.
