@@ -440,6 +440,9 @@ const CENSUS: Case[] = [
   // ETA and dispatch ranking has quietly reverted to straight-line distance.
   // Admin-only, and the action is on the OSRM host, not in any app.
   { k: 'ops_osrm_fallback', to: null, why: 'admins — the fix is on the routing host, not on a screen' },
+  // [PLACES-LOUD] Address search (Google) keeps failing: customers are told search is not
+  // working and set places on the map. The fix is the key / Google Cloud console, not a screen.
+  { k: 'ops_places_failing', to: null, why: 'admins — the fix is the Google key and console, not a screen' },
   { k: 'ops_scheduler_stall', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },
