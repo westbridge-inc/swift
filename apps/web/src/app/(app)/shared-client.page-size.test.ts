@@ -31,10 +31,11 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
     },
   },
   'lib/customer-orders.ts': {
-    calls: ['getOrders', 'getOrder', 'decideSubstitution', 'cancelOrder'],
+    // [UI-SWEEP U13 / U17] The list reads live orders and paged history apart, and reorders.
+    calls: ['getLiveOrders', 'getOrderHistoryPage', 'reorder', 'getOrder', 'decideSubstitution', 'cancelOrder'],
     imports: ["import { apiFetch } from './auth';"],
     users: {
-      'app/(app)/orders/page.tsx': "import { getOrders } from '@/lib/customer-orders';",
+      'app/(app)/orders/page.tsx': "import { getLiveOrders, getOrderHistoryPage, reorder } from '@/lib/customer-orders';",
       'app/(app)/orders/[id]/page.tsx': "import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';",
     },
   },
@@ -46,7 +47,7 @@ const MOVED: Record<string, { calls: string[]; imports: string[]; users: Record<
   'lib/customer-courier.ts': {
     calls: ['courierEstimate', 'requestCourier'],
     imports: ["import { apiFetch } from './auth';"],
-    users: { 'app/(app)/courier/page.tsx': "import { courierEstimate, requestCourier } from '@/lib/customer-courier';" },
+    users: { 'app/(app)/courier/page.tsx': "import { courierEstimate, requestCourier, type CourierRequest } from '@/lib/customer-courier';" },
   },
   'lib/customer-rides.ts': {
     calls: ['rideAvailability', 'rideEstimate', 'activeRide', 'getRide', 'watchRide', 'rideCapabilities', 'requestRide', 'rideSos'],

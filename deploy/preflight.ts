@@ -46,7 +46,7 @@ import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
 import { SECRET_FILE_NAMES, applySecretFiles, assembleDatabaseUrl } from '../apps/api/src/utils/secret-files';
 import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
-import { darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
+import { darkFeatureMisconfigurations, darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let envPath = path.join(HERE, '.env');
@@ -351,6 +351,13 @@ console.log('');
       console.log(`  ${f.title}  [${f.offWhen !== undefined ? `${f.setting}=${f.offWhen}` : f.setting}]`);
       console.log(`    ${f.whileOff}`);
     }
+  }
+  // [SWITCHES fact-check] Switched ON without what it needs: worse than off, and just as quiet.
+  const broken = darkFeatureMisconfigurations(production);
+  if (broken.length > 0) {
+    console.log('');
+    console.log('  Switched ON but missing what it needs:');
+    for (const line of broken) console.log(`    ${line}`);
   }
   const configRows = darkFeatureStatus(production).filter((r) => r.source === 'config');
   if (configRows.length > 0) {

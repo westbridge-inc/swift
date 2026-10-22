@@ -1,5 +1,5 @@
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
 import AdsReviewPage from './page';
 import { API_ORIGIN, mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -58,7 +58,6 @@ function handler(extra?: (_r: ApiRequest) => { body: unknown } | undefined) {
 
 describe('the two ads gates finally have a reviewer', () => {
   it('approving an advertiser hits the endpoint that moves them out of PENDING_REVIEW', async () => {
-    vi.stubGlobal('prompt', vi.fn().mockReturnValue('Business documents verified and the checklist is complete'));
     const fetchMock = mockApi(handler((r) => {
       if (r.method === 'PUT' && r.url.pathname === '/api/v1/admin/ads/advertisers/adv-1/approve') {
         return { body: { success: true, data: { status: 'APPROVED' } } };
@@ -69,6 +68,10 @@ describe('the two ads gates finally have a reviewer', () => {
 
     expect(await screen.findByText('Demerara Rum Co.')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Approve' }));
+    // the reason is asked in the in-page panel, never a browser prompt
+    const panel = await screen.findByRole('dialog');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), 'Business documents verified and the checklist is complete');
+    await user.click(within(panel).getByRole('button', { name: 'Continue' }));
 
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     expect(requestsByMethod(fetchMock, 'PUT')[0]![0]).toBe(`${API_ORIGIN}/api/v1/admin/ads/advertisers/adv-1/approve`);
@@ -114,6 +117,10 @@ describe('the two ads gates finally have a reviewer', () => {
     expect((screen.getByAltText('Try our new blend') as HTMLImageElement).src).toBe(creative.fileUrl);
 
     await user.click(screen.getByRole('button', { name: 'Approve' }));
+    // [S4] approving a creative is confirmed first (one click used to publish it)
+    const confirm = await screen.findByRole('dialog');
+    expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
+    await user.click(within(confirm).getByRole('button', { name: 'Approve creative' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(1));
     expect(requestsByMethod(fetchMock, 'PUT')[0]![0]).toBe(`${API_ORIGIN}/api/v1/admin/ads/creatives/cre-1/approve`);
   });

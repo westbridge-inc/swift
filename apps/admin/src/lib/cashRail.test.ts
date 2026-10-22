@@ -195,6 +195,18 @@ describe('how apiFetch actually delivers a 202', () => {
     expect(o.approvalId).toBe('ap9');
   });
 
+  it('[REVIEW-F2 S4-1] a second ask that already stands says whose it is and whether it is approved', async () => {
+    const { outcomeOfThrown } = await import('./cashRail');
+    const standing = (details: Record<string, unknown>) => outcomeOfThrown(Object.assign(new Error('x'), { status: 409, code: 'APPROVAL_ALREADY_OPEN', details: { approvalId: 'ap7', ...details } }));
+    expect(standing({ askedByYou: true, approvalStatus: 'PENDING' })).toMatchObject({ kind: 'queued', approvalId: 'ap7', message: expect.stringContaining('Already waiting for a second admin') });
+    expect(standing({ askedByYou: true, approvalStatus: 'APPROVED' }).message).toContain('Already approved and waiting for you to apply it');
+    expect(standing({ askedByYou: false, approvalStatus: 'PENDING' }).message).toContain('Another admin already asked for this, and it is waiting in Approvals');
+    expect(standing({ askedByYou: false, approvalStatus: 'APPROVED' }).message).toContain('approved and waiting for them to apply it');
+    for (const d of [{ askedByYou: true, approvalStatus: 'APPROVED' }, { askedByYou: false, approvalStatus: 'APPROVED' }, { askedByYou: false, approvalStatus: 'PENDING' }]) {
+      expect(standing(d).message).not.toContain('waiting for a second admin');
+    }
+  });
+
   it('a genuine failure stays a failure, with the server\'s own words', async () => {
     const { outcomeOfThrown } = await import('./cashRail');
     const thrown = Object.assign(new Error('Already matched.'), { status: 409, code: 'NOT_UNMATCHED' });

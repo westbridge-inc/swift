@@ -55,7 +55,7 @@ vi.mock('../services/notification-priming', () => ({ maybePrimeNotifications: vi
 vi.mock('expo-location', () => ({ Accuracy: { Balanced: 3 }, getLastKnownPositionAsync: vi.fn(), getCurrentPositionAsync: vi.fn() }));
 
 import { useAvailableJobs } from './mover';
-import { boardPaused } from '../lib/moverBoard';
+import { BOARD_MAX_AGE_MS, boardPaused, recentBoard } from '../lib/moverBoard';
 import { POLL } from '../lib/pollPolicy';
 
 type BoardQuery = { enabled: boolean; refetchInterval: () => number | false; queryKey: unknown[] };
@@ -90,6 +90,15 @@ describe('[PERF partner #4] the job board', () => {
 
   it('the same board query either way, so the read resumes into the same cache when the ride ends', () => {
     expect(useBoard('DRIVER', true, true).queryKey).toEqual(useBoard('DRIVER', true, false).queryKey);
+  });
+
+  it('after a rest, an answer older than three slow-network board polls is not drawn (#1919 review S4-1)', () => {
+    const now = 1_000_000_000;
+    expect(BOARD_MAX_AGE_MS).toBe(3 * 30_000);
+    expect(recentBoard([1], now - 89_000, now)).toEqual([1]);
+    expect(recentBoard([1], now - 91_000, now)).toEqual([]);
+    expect(recentBoard([1], undefined, now)).toEqual([1]);
+    expect(recentBoard(undefined, now, now)).toEqual([]);
   });
 
   it('the rule itself', () => {

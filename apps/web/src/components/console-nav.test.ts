@@ -1,21 +1,40 @@
 import { describe, expect, it } from 'vitest';
-import { History, Receipt, Settings } from 'lucide-react';
+import { History, Receipt } from 'lucide-react';
 import { dashboardNav as navFor } from '@/app/dashboard/dashboard-shell';
-
-const dashboardNav = navFor('Products');
 import { NAV as portalNav } from '@/app/portal/portal-shell';
 
 describe('console navigation', () => {
-  it('keeps Today first and places Weekly fee between Bulk import and Settings', () => {
-    expect(dashboardNav.map(({ label }) => label)).toEqual([
-      'Today', 'Orders', 'Products', 'Bulk import', 'Weekly fee', 'Settings',
-    ]);
+  // Owner ruling (11 Oct): the website has the app's four sections
+  // (apps/mobile/src/modules/vendor/VendorStack.tsx): Orders · the items tab
+  // named for the store type · Insights (owners and managers) · Account. Staff
+  // see the items tab as "Availability" and no Insights, as in the app.
+  it.each(['Menu', 'Inventory', 'Products', 'Services'] as const)('an owner or manager of a %s store sees the app\'s four sections, in the rail and the dock', (name) => {
+    const nav = navFor(name, 'MANAGER');
+    expect(nav.map(({ label }) => label)).toEqual(['Orders', name, 'Insights', 'Account']);
+    expect(nav.map(({ href }) => href)).toEqual(['/dashboard/orders', '/dashboard/inventory', '/dashboard/insights', '/dashboard/settings']);
+    expect(navFor(name, 'OWNER').map(({ label }) => label)).toEqual(['Orders', name, 'Insights', 'Account']);
   });
 
-  // Owner ruling (11 Oct): the items tab carries the app's name for the store's type.
-  it.each(['Menu', 'Inventory', 'Products', 'Services'] as const)('shows %s in the phone dock beside Orders, Weekly fee and Settings', (name) => {
-    expect(navFor(name).filter((item) => item.dock !== false).map(({ label }) => label)).toEqual(['Orders', name, 'Weekly fee', 'Settings']);
-    expect(navFor(name).find((item) => item.href === '/dashboard/inventory')?.label).toBe(name);
+  // The app's R1 tab (VendorStack: isService && manager): a Services store runs its
+  // day from a booking agenda, so its owners and managers get Schedule after Orders.
+  it.each(['OWNER', 'MANAGER'] as const)('a %s of a Services store also sees Schedule, right after Orders', (role) => {
+    const nav = navFor('Services', role, 'SERVICE');
+    expect(nav.map(({ label }) => label)).toEqual(['Orders', 'Schedule', 'Services', 'Insights', 'Account']);
+    expect(nav[1]?.href).toBe('/dashboard/schedule');
+  });
+
+  it('no Schedule for a Services store\'s staff, nor for any other store type, as in the app', () => {
+    expect(navFor('Services', 'STAFF', 'SERVICE').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
+    expect(navFor('Services', undefined, 'SERVICE').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
+    for (const [name, type] of [['Menu', 'RESTAURANT'], ['Inventory', 'SUPERMARKET'], ['Products', 'STORE']] as const) {
+      expect(navFor(name, 'OWNER', type).map(({ label }) => label)).toEqual(['Orders', name, 'Insights', 'Account']);
+    }
+  });
+
+  it('a staff login sees Orders, Availability and Account, as in the app', () => {
+    expect(navFor('Menu', 'STAFF').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
+    // Unknown role reads as least privilege (the app's vendorSurfaceForRole).
+    expect(navFor('Menu', undefined).map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
   });
 
   it('places Weekly fee after the portal work items and before Account', () => {
@@ -24,12 +43,9 @@ describe('console navigation', () => {
     ]);
   });
 
-  it('gives both Weekly fee links their own receipt icon', () => {
-    const dashboardFee = dashboardNav.find(({ label }) => label === 'Weekly fee');
+  it('gives the portal Weekly fee link its own receipt icon', () => {
     const portalFee = portalNav.find(({ label }) => label === 'Weekly fee');
-    expect(dashboardFee?.icon).toBe(Receipt);
     expect(portalFee?.icon).toBe(Receipt);
-    expect(dashboardFee?.icon).not.toBe(Settings);
     expect(portalFee?.icon).not.toBe(History);
   });
 });

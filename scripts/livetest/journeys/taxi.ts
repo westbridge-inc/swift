@@ -1,15 +1,15 @@
-// Taxi journeys [TASK-057]: TAXI-01..05. Every ride needs an L2 passenger
+// Taxi journeys [TASK-057]: TAXI-01..06. Every ride needs an L2 passenger
 // (C7 is raised to L2 through identity review in provisioning); drivers are
 // online through their real endpoints and keep fresh positions via the suite
-// heartbeat.
+// heartbeat. TAXI-06 is the ride with a stop (TAXI_MAX_STOPS).
 
 import { OTP, BASE, ORIGIN, upload, type Session } from '../client.js';
 import type { Journey, Recorder } from '../journey.js';
-import { GET, POST, PUT, req, sleep, brief, pick, waitFor, codeOf } from './common.js';
+import { GET, POST, PUT, req, sleep, brief, pick, waitFor, codeOf, waitForNotification, type Res } from './common.js';
 import type { Ctx } from './context.js';
 import { mover, onlineOf, setOnline, pollOffer, driverArrives, releaseDrivers, closeRide } from './dispatch.js';
 import { registerFresh } from './auth.js';
-import { asAdmin, reviewerTypedBody, uploadDoc } from '../provision.js';
+import { asAdmin, reviewerTypedBody, uploadDoc, ping } from '../provision.js';
 import { uniquePng } from '../roster.js';
 import { twoPerson } from './admin-util.js';
 
@@ -426,4 +426,282 @@ export const TAXI_05: Journey<Ctx> = {
   },
 };
 
-export const TAXI_JOURNEYS = [TAXI_01, TAXI_02, TAXI_03, TAXI_04, TAXI_05];
+// ---------------------------------------------------------------------------
+// [TAXI multi-stop] TAXI-06: a ride with a stop, over the real endpoints, on
+// whatever TAXI_MAX_STOPS the target runs (GET /rides/capabilities says which).
+//  - Off (0 or unset, the launch default): a stop is refused at the quote, the
+//    request and the queue (409 MULTI_STOP_UNAVAILABLE) and nothing is written;
+//    the stop cases are reported SKIP with that reason.
+//  - On (1-3; set it on the private journeys instance, never the public API):
+//    one driver goes online declaring TAXI_STOPS_V1, as builds 11/12 do once
+//    the server offers stops, while a NEARER driver stays an app without it.
+//    Ride 1 arrives at the stop (the car is there), waits, leaves, ends paid;
+//    ride 2 arrives from far away (not verified, #1908) and skips the stop.
+// The capability is cleared again at the end (a plain go-online), so no
+// journey after this one meets a driver that runs stops.
+// ---------------------------------------------------------------------------
+
+/** About 1.2 km from PICKUP and the other way from DROPOFF: the trip with the
+ *  stop (~4.4 km) is longer than the trip without it (~2.1 km), and an arrival
+ *  reported from the pickup is far outside the 300 m arrival check. */
+const STOP = { lat: 6.8000, lng: -58.1550, address: 'TEST stop, Hadfield Street' };
+const TAXI_STOPS_CAPABILITY = 'TAXI_STOPS_V1';
+/** The evidence note's suffix for an arrival the GPS check did not accept (#1908). */
+const STOP_NOT_VERIFIED = 'not verified, so this wait is not charged';
+/** TAXI_STOP_NO_SHOW_GRACE_MINUTES, in seconds. */
+const STOP_GRACE_SECONDS = 10 * 60;
+/** PUT /driver/location persists one fix per driver per 10 s (dispatch.ts). */
+const FIX_DEBOUNCE_MS = 11_000;
+const STOPS_OFF = ['MULTI_STOP_UNAVAILABLE'];
+
+const tripWith = (stops: readonly unknown[], expectedFare?: number) =>
+  rideBody({ stops, ...(expectedFare === undefined ? {} : { expectedFare }) });
+
+/** The economy fare quoted for A → (stops) → C, or null when none was quoted. */
+async function quoteTrip(passenger: Session, stops: readonly unknown[]): Promise<{ res: Res; fare: number | null }> {
+  const res = await POST('/rides/estimate', { pickup: PICKUP, dropoff: DROPOFF, ...(stops.length > 0 ? { stops } : {}) }, passenger.token);
+  const eco = (res.json?.data?.tiers ?? []).find((t: any) => t.rideClass === 'ECONOMY');
+  const fare = Number(eco?.fare);
+  return { res, fare: res.ok && Number.isFinite(fare) && fare > 0 ? fare : null };
+}
+
+const stopMove = (s: Session, rideId: string, sequence: number, action: 'arrived' | 'depart' | 'skip', body: Record<string, unknown> = {}) =>
+  action === 'skip'
+    ? POST(`/driver/rides/${rideId}/stops/${sequence}/skip`, body, s.token)
+    : PUT(`/driver/rides/${rideId}/stops/${sequence}/${action}`, body, s.token);
+
+/** The ride's stops as the console's order page reads them (with the evidence note). */
+async function consoleStops(ctx: Ctx, rideId: string): Promise<any[] | null> {
+  const r = await GET(`/admin/orders/${rideId}`, ctx.admin.token);
+  return r.ok && Array.isArray(r.json?.data?.stops) ? r.json.data.stops : null;
+}
+
+/** The car is at `point`: the heartbeat holds it there, and one fix is
+ *  reported past the location debounce, so the persisted position is this one. */
+async function driveTo(ctx: Ctx, id: string, point: { lat: number; lng: number }): Promise<void> {
+  ctx.stash.heartbeatOverrides[id] = point;
+  await sleep(FIX_DEBOUNCE_MS);
+  await PUT('/driver/location', { latitude: point.lat, longitude: point.lng, accuracy: 5 }, mover(ctx, id).session.token);
+}
+
+/** Online as a driver app that runs stops (what builds 11/12 send at go-online
+ *  once GET /rides/capabilities says maxStops > 0). */
+async function onlineWithStops(ctx: Ctx, id: string): Promise<Res> {
+  const m = mover(ctx, id);
+  await setOnline(ctx, id, false);
+  const r = await POST('/driver/go-online', { latitude: m.lat, longitude: m.lng, capabilities: [TAXI_STOPS_CAPABILITY] }, m.session.token);
+  if (r.ok) {
+    await ping(m);
+    if (!ctx.world.onlineMovers.includes(id)) ctx.world.onlineMovers.push(id);
+  }
+  return r;
+}
+
+/** A booked ride with a stop: its id and the passenger's PIN. */
+async function bookWithStop(rec: Recorder, passenger: Session, fare: number, label: string): Promise<{ id: string; pin: string } | null> {
+  const r = await POST('/rides/request', tripWith([STOP], fare), passenger.token);
+  if (!rec.expect(`${label}: booked at the quoted fare with its stop`, r, 201, undefined, `status=${r.json?.data?.ride?.status}`)) return null;
+  return { id: String(r.json.data.ride.id), pin: String(r.json.data.ride.ridePin ?? '') };
+}
+
+/** The capable driver takes the ride from its offer and starts the trip. */
+async function takeAndStart(rec: Recorder, ctx: Ctx, capable: string, ride: { id: string; pin: string }, label: string): Promise<Session> {
+  const got = await pollOffer(ctx, ride.id, onlineOf(ctx, 'driver'), 60_000);
+  rec.require(`${label}: offered to the driver whose app runs stops, never the nearer older app`, got?.moverId === capable,
+    got ? `offered to ${got.moverId} (capable: ${capable})` : 'no offer in 60 s');
+  const D = mover(ctx, capable).session;
+  rec.must(`${label}: ${capable} accepts`, await POST('/driver/offers/accept', { orderId: ride.id, offerAttemptId: got!.offer.offerAttemptId }, D.token), 200);
+  if (label === 'ride 1') {
+    rec.deny('no stop move before the passenger is aboard', await stopMove(D, ride.id, 1, 'arrived'), [409], ['INVALID_STATUS']);
+  }
+  await PUT(`/driver/rides/${ride.id}/en-route`, {}, D.token);
+  rec.must(`${label}: the driver arrives at the pickup`, await driverArrives(ctx, capable, ride.id, PICKUP), 200);
+  rec.must(`${label}: the passenger's PIN verifies`, await PUT(`/driver/rides/${ride.id}/verify-pin`, { pin: ride.pin }, D.token), 200);
+  rec.must(`${label}: the trip starts`, await PUT(`/driver/rides/${ride.id}/start`, {}, D.token), 200);
+  return D;
+}
+
+/** Cleanup for a ride with stops: "Fare collected" waits for every stop (409
+ *  STOPS_REMAINING), so the driver leaves an arrived stop and skips a pending
+ *  one, then the usual close. Run twice: a PIN-verified ride that never started
+ *  is started by closeRide, which the open stop then holds. */
+async function closeStopRide(ctx: Ctx, passenger: Session, rideId: string, driverId: string): Promise<string | null> {
+  const finishStops = async () => {
+    const r = (await GET(`/rides/${rideId}`, passenger.token)).json?.data;
+    if (r?.status !== 'RIDE_IN_PROGRESS') return;
+    const D = mover(ctx, driverId).session;
+    for (const s of (r.stops ?? []) as any[]) {
+      if (s.status === 'ARRIVED') await stopMove(D, rideId, s.sequence, 'depart');
+      else if (s.status === 'PENDING') await stopMove(D, rideId, s.sequence, 'skip', { reason: 'Couldn’t reach the stop' });
+    }
+  };
+  await finishStops();
+  if (!(await closeRide(ctx, passenger, rideId, DROPOFF))) return null;
+  await finishStops();
+  return closeRide(ctx, passenger, rideId, DROPOFF);
+}
+
+/** TAXI_MAX_STOPS is 0: every door to a stop is shut, and nothing is written. */
+async function stopsSwitchedOff(rec: Recorder, passenger: Session): Promise<void> {
+  rec.deny('a quote with a stop while stops are off', (await quoteTrip(passenger, [STOP])).res, [409], STOPS_OFF);
+  const before = (await activeRide(passenger))?.id ?? null;
+  rec.deny('a ride request with a stop while stops are off', await POST('/rides/request', tripWith([STOP], 1000), passenger.token), [409], STOPS_OFF);
+  const after = (await activeRide(passenger))?.id ?? null;
+  rec.check('the refused request booked nothing', after === before, `active ride before=${before ?? 'none'} after=${after ?? 'none'}`);
+  rec.deny('joining the queue with a stop while stops are off', await POST('/rides/queue/join', tripWith([STOP], 1000), passenger.token), [409], STOPS_OFF);
+  const q = await GET('/rides/queue', passenger.token);
+  rec.check('the refused join holds no queue entry', !q.json?.data?.id, `→ ${brief(q)}`);
+  rec.skipCase('a ride with a stop, end to end',
+    'TAXI_MAX_STOPS is 0 on this target (the launch default): stops are off, and the off state is proven above. Set TAXI_MAX_STOPS=1 on the private journeys instance (never the public API) to run the stop cases.');
+}
+
+/** TAXI_MAX_STOPS is 1-3: the whole stop journey, two rides. */
+async function stopsSwitchedOn(rec: Recorder, ctx: Ctx, C7: Session, maxStops: number, plainFare: number | null): Promise<void> {
+  const online = drivers(ctx);
+  rec.require('two drivers online (one app runs stops, one does not)', online.length >= 2, online.join(','));
+  const capable = online[0]!;
+  const older = online[1]!;
+  const O = mover(ctx, older).session;
+  const made: string[] = [];
+  try {
+    // The quote: the whole route priced once, the stop included.
+    const q = await quoteTrip(C7, [STOP]);
+    const est = q.res.json?.data;
+    rec.check('a quote with a stop prices the whole route as one trip', q.fare !== null && est?.stopCount === 1 && est?.maxStops === maxStops,
+      `→ ${brief(q.res)} economy=${q.fare} stopCount=${est?.stopCount} maxStops=${est?.maxStops} legs=${Array.isArray(est?.legs) ? est.legs.length : 'none'}`);
+    rec.check('the stop is priced: the trip with it costs more than the trip without it', q.fare !== null && plainFare !== null && q.fare > plainFare, `with=${q.fare} without=${plainFare}`);
+    rec.require('a quoted fare to book at', q.fare !== null, '');
+    const fare = q.fare!;
+    if (maxStops < 3) {
+      const tooMany = Array.from({ length: maxStops + 1 }, (_, i) => ({ lat: STOP.lat - 0.002 * i, lng: STOP.lng, address: `TEST stop ${i + 1}, Hadfield Street` }));
+      rec.deny(`a quote with ${maxStops + 1} stops, past the configured ${maxStops}`, (await quoteTrip(C7, tooMany)).res, [400], ['TOO_MANY_STOPS']);
+    }
+
+    // The booking rules, before anything is written.
+    rec.deny('a ride with a stop must carry the fare it was shown', await POST('/rides/request', tripWith([STOP]), C7.token), [400], ['EXPECTED_FARE_REQUIRED']);
+    rec.deny('a fare the passenger was not shown is never booked', await POST('/rides/request', tripWith([STOP], fare + 100), C7.token), [409], ['FARE_CHANGED']);
+    rec.deny('the queue holds no trip with stops', await POST('/rides/queue/join', tripWith([STOP], fare), C7.token), [409], ['MULTI_STOP_QUEUE_UNSUPPORTED']);
+    rec.check('none of the refusals booked a ride', !(await activeRide(C7)), '');
+
+    // One app runs stops; the other, NEARER to the pickup, does not.
+    rec.must('a driver app that runs stops goes online saying so (TAXI_STOPS_V1)', await onlineWithStops(ctx, capable), 200);
+    await driveTo(ctx, older, PICKUP);
+
+    // Ride 1: arrive at the stop, wait, leave, end paid.
+    const ride1 = await bookWithStop(rec, C7, fare, 'ride 1');
+    rec.require('ride 1 is booked', !!ride1, '');
+    made.push(ride1!.id);
+    const r1 = (await GET(`/rides/${ride1!.id}`, C7.token)).json?.data;
+    rec.check('the passenger’s ride carries its stop, the stop to reach next, and the quoted fare',
+      r1?.stops?.length === 1 && r1.stops[0].status === 'PENDING' && r1.nextStopSequence === 1 && Number(r1.taxiFareTotal ?? r1.totalAmount) === fare,
+      `stops=${JSON.stringify((r1?.stops ?? []).map((s: any) => s.status))} next=${r1?.nextStopSequence} fare=${r1?.taxiFareTotal ?? r1?.totalAmount} quoted=${fare}`);
+    rec.deny('an app that cannot run stops accepts it (stale or forged)', await POST(`/driver/rides/${ride1!.id}/accept`, {}, O.token), [409], ['APP_UPDATE_REQUIRED']);
+    const pending = (await GET(`/rides/${ride1!.id}`, C7.token)).json?.data;
+    rec.check('the refused accept wrote nothing', pending?.status === 'PENDING' && !pending?.driverId, `status=${pending?.status}`);
+    const board = await GET('/driver/rides/available', O.token);
+    rec.check('that app’s board never shows the ride', board.ok && !JSON.stringify(board.json?.data ?? []).includes(ride1!.id), `→ ${brief(board)}`);
+    const D = await takeAndStart(rec, ctx, capable, ride1!, 'ride 1');
+
+    rec.deny('another driver moves this ride’s stop', await stopMove(O, ride1!.id, 1, 'arrived'), [403, 404]);
+    rec.deny('the passenger moves a stop', await stopMove(C7, ride1!.id, 1, 'arrived'), [403, 404]);
+    rec.deny('a stop this ride does not have', await stopMove(D, ride1!.id, 2, 'arrived'), [404], ['STOP_NOT_FOUND']);
+    rec.deny('leave the stop before arriving at it', await stopMove(D, ride1!.id, 1, 'depart'), [409], ['STOP_NOT_ARRIVED']);
+    rec.deny('“Fare collected” while the stop is still open', await POST(`/driver/rides/${ride1!.id}/handover`, { outcome: 'paid', gps: STOP }, D.token), [409], ['STOPS_REMAINING']);
+    rec.deny('“passenger did not come back” on the way to the stop', await POST(`/driver/rides/${ride1!.id}/handover`, { outcome: 'no_show', gps: PICKUP }, D.token), [409], ['STOPS_REMAINING']);
+
+    await driveTo(ctx, capable, STOP);
+    const arrive = await stopMove(D, ride1!.id, 1, 'arrived');
+    rec.expect('ride 1: arrived at stop 1, the car at the stop', arrive, 200);
+    const wait = arrive.json?.data?.stopWait;
+    const graceSeconds = wait ? (Date.parse(wait.noShowAvailableAt) - Date.parse(wait.arrivedAt)) / 1000 : NaN;
+    rec.check('the grace runs 10 minutes from the arrival, on the server clock', arrive.json?.data?.stop?.status === 'ARRIVED' && graceSeconds === STOP_GRACE_SECONDS,
+      `stop=${arrive.json?.data?.stop?.status} grace=${graceSeconds}s`);
+    const again = await stopMove(D, ride1!.id, 1, 'arrived');
+    rec.check('a repeated tap is answered as it is, nothing new written', again.ok && again.json?.replayed === true, `→ ${brief(again)} replayed=${again.json?.replayed}`);
+    const seen = await activeRide(C7);
+    rec.check('the passenger sees the car at stop 1', seen?.stops?.[0]?.status === 'ARRIVED' && seen?.nextStopSequence === 1, `stop=${seen?.stops?.[0]?.status} next=${seen?.nextStopSequence}`);
+    const early = await POST(`/driver/rides/${ride1!.id}/handover`, { outcome: 'no_show', gps: STOP }, D.token);
+    rec.deny('“passenger did not come back” inside the 10-minute grace', early, [409], ['STOP_WAIT_NOT_ELAPSED']);
+    rec.check('the refusal says when the grace ends', !!wait && early.json?.error?.details?.retryAt === wait.noShowAvailableAt,
+      `retryAt=${early.json?.error?.details?.retryAt} noShowAvailableAt=${wait?.noShowAvailableAt}`);
+    rec.check('the refused no-show wrote nothing', (await activeRide(C7))?.status === 'RIDE_IN_PROGRESS', '');
+    const note1 = (await consoleStops(ctx, ride1!.id))?.[0]?.evidenceNote;
+    rec.check('an arrival made at the stop is not marked unverified', typeof note1 === 'string' && !note1.includes(STOP_NOT_VERIFIED), `note=${note1 ?? 'none'}`);
+
+    const depart = await stopMove(D, ride1!.id, 1, 'depart');
+    rec.check('ride 1: done at stop 1, the destination is next', depart.ok && depart.json?.data?.stop?.status === 'DEPARTED' && depart.json?.data?.nextStopSequence === null && depart.json?.data?.stopWait === null,
+      `→ ${brief(depart)} stop=${depart.json?.data?.stop?.status} next=${depart.json?.data?.nextStopSequence}`);
+    rec.deny('a stop already left cannot be skipped', await stopMove(D, ride1!.id, 1, 'skip', { reason: 'Passenger asked to skip it' }), [409], ['STOP_ALREADY_RESOLVED']);
+    rec.expect('ride 1: “Fare collected” at the destination', await POST(`/driver/rides/${ride1!.id}/handover`, { outcome: 'paid', gps: DROPOFF }, D.token), 200);
+    const done1 = (await GET(`/rides/${ride1!.id}`, C7.token)).json?.data;
+    rec.check('ride 1 reads DELIVERED, cash captured, at the quoted fare', done1?.status === 'DELIVERED' && done1?.paymentStatus === 'CAPTURED' && Number(done1?.taxiFareTotal ?? done1?.totalAmount) === fare,
+      `status=${done1?.status} payment=${done1?.paymentStatus} fare=${done1?.taxiFareTotal ?? done1?.totalAmount} quoted=${fare}`);
+    const receipt1 = await GET(`/customer/orders/${ride1!.id}/receipt`, C7.token);
+    rec.check('the receipt names the stop the fare covered', receipt1.ok && receipt1.text.includes(`Stops: 1. ${STOP.address}`) && !receipt1.text.includes('(skipped)'), `→ ${brief(receipt1)}`);
+    const con1 = await consoleStops(ctx, ride1!.id);
+    rec.check('the console’s order page shows the stop, reached and left', con1?.length === 1 && con1[0].status === 'DEPARTED' && !!con1[0].arrivedAt && !!con1[0].departedAt,
+      `stops=${JSON.stringify((con1 ?? []).map((s: any) => s.status))}`);
+
+    // Ride 2: an arrival far from the stop, then a skip.
+    const ride2 = await bookWithStop(rec, C7, fare, 'ride 2');
+    rec.require('ride 2 is booked', !!ride2, '');
+    made.push(ride2!.id);
+    await takeAndStart(rec, ctx, capable, ride2!, 'ride 2');
+    rec.expect('ride 2: an arrival reported ~1.2 km from the stop is never refused', await stopMove(D, ride2!.id, 1, 'arrived'), 200);
+    const note2 = (await consoleStops(ctx, ride2!.id))?.[0]?.evidenceNote;
+    if (typeof note2 === 'string' && note2.includes(STOP_NOT_VERIFIED)) {
+      rec.check('#1908: the far arrival is recorded as not verified (its wait is never charged)', true, `note=${note2}`);
+    } else {
+      rec.skipCase('#1908: an arrival far from the stop is recorded as not verified',
+        `this build wrote no verification on the far arrival (note=${note2 ?? 'none'}): #1908 is not in it, so the waiting charge must stay off with stops on`);
+    }
+    rec.deny('a skip without a reason', await stopMove(D, ride2!.id, 1, 'skip', {}), [400]);
+    rec.deny('a skip reason the passenger must never be sent (a phone number)', await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Call me on 600 1234 instead' }), [400], ['SKIP_REASON_REFUSED']);
+    const skip = await stopMove(D, ride2!.id, 1, 'skip', { reason: 'Road or access blocked' });
+    rec.check('ride 2: stop 1 skipped with its reason, the destination next', skip.ok && skip.json?.data?.stop?.status === 'SKIPPED' && skip.json?.data?.stop?.skipReason === 'Road or access blocked' && skip.json?.data?.nextStopSequence === null,
+      `→ ${brief(skip)} stop=${skip.json?.data?.stop?.status}`);
+    const told = await waitForNotification(C7, (n) => n?.title === 'Stop 1 skipped' && JSON.stringify(n).includes(ride2!.id));
+    rec.check('the passenger is told the stop was skipped, and why', !!told && String(told.body ?? '').includes('Road or access blocked'), told ? 'notice found' : 'no notice in 20 s');
+    rec.deny('“passenger did not come back” inside the grace of a stop arrived at and then skipped', await POST(`/driver/rides/${ride2!.id}/handover`, { outcome: 'no_show', gps: STOP }, D.token), [409], ['STOP_WAIT_NOT_ELAPSED']);
+    rec.expect('ride 2: “Fare collected” at the destination', await POST(`/driver/rides/${ride2!.id}/handover`, { outcome: 'paid', gps: DROPOFF }, D.token), 200);
+    const done2 = (await GET(`/rides/${ride2!.id}`, C7.token)).json?.data;
+    rec.check('ride 2 reads DELIVERED at the quoted fare (a skip does not change it)', done2?.status === 'DELIVERED' && Number(done2?.taxiFareTotal ?? done2?.totalAmount) === fare,
+      `status=${done2?.status} fare=${done2?.taxiFareTotal ?? done2?.totalAmount} quoted=${fare}`);
+    const receipt2 = await GET(`/customer/orders/${ride2!.id}/receipt`, C7.token);
+    rec.check('the receipt marks the stop skipped', receipt2.ok && receipt2.text.includes(`Stops: 1. ${STOP.address} (skipped)`), `→ ${brief(receipt2)}`);
+    const con2 = await consoleStops(ctx, ride2!.id);
+    rec.check('the console’s order page shows the stop skipped with its reason', con2?.[0]?.status === 'SKIPPED' && con2[0].skipReason === 'Road or access blocked',
+      `stops=${JSON.stringify((con2 ?? []).map((s: any) => s.status))}`);
+  } finally {
+    for (const id of made) {
+      const left = await closeStopRide(ctx, C7, id, capable);
+      if (left) ctx.log(`    TAXI-06 left live: ${left}`);
+    }
+    // A plain go-online clears the capability (the server records it at every go-online).
+    await setOnline(ctx, capable, false);
+    const back = await setOnline(ctx, capable, true);
+    rec.cleanup(`${capable} back online as an app without stops`, back.ok, `→ ${brief(back)}`);
+    releaseDrivers(ctx, [capable, older]);
+  }
+}
+
+export const TAXI_06: Journey<Ctx> = {
+  id: 'TAXI-06',
+  estimateSeconds: 300,
+  title: 'A ride with a stop (TAXI_MAX_STOPS)',
+  cases: 'the stop count the app may offer; off: a stop refused at the quote, the request and the queue, nothing written; on: the whole route quoted, the quoted fare required, no stops in the queue, offered and given only to a driver app that runs stops, stop moves only in the trip by the ride’s driver, arrive/wait/leave and skip, no fare or no-show while a stop is open or inside its grace, the passenger told of a skip, the receipt and the console list the stops, a far arrival not verified (#1908)',
+  async run(rec, ctx) {
+    const C7 = ctx.roster.customers.C7!.session;
+    rec.require('an L2 passenger was provisioned', !ctx.world.notReady.C7, ctx.world.notReady.C7 ?? '');
+    const caps = await GET('/rides/capabilities', C7.token);
+    const maxStops = Number(caps.json?.data?.maxStops);
+    rec.require('GET /rides/capabilities says how many stops a ride may carry (0 to 3)', caps.ok && Number.isInteger(maxStops) && maxStops >= 0 && maxStops <= 3,
+      `→ ${brief(caps)} maxStops=${String(caps.json?.data?.maxStops)}`);
+    const plain = await quoteTrip(C7, []);
+    rec.check('a ride without stops is quoted as always', plain.fare !== null, `→ ${brief(plain.res)} economy=${plain.fare}`);
+    if (maxStops === 0) return stopsSwitchedOff(rec, C7);
+    return stopsSwitchedOn(rec, ctx, C7, maxStops, plain.fare);
+  },
+};
+
+export const TAXI_JOURNEYS = [TAXI_01, TAXI_02, TAXI_03, TAXI_04, TAXI_05, TAXI_06];

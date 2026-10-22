@@ -4,6 +4,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
 import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /**
  * [S-19] War-room socket membership is not delivery acknowledgement.
@@ -235,7 +236,8 @@ export async function syncOpsAlertReadReceipts(prisma: PrismaClient): Promise<nu
   const rows = await prisma.opsAlertRecipient.findMany({ where: { seenAt: null, notificationId: { not: null }, opsAlert: { acknowledgedAt: null, closedAt: null } }, select: { id: true, notificationId: true }, take: 500 });
   let seen = 0;
   for (const r of rows) {
-    const n = await prisma.notification.findUnique({ where: { id: r.notificationId! }, select: { readAt: true } });
+    // [item 20] A responder's notice, read by the receipt sync: the named capability under the owner wall.
+    const n = await ownerWallSystem('ops-alert:read-receipt', () => prisma.notification.findUnique({ where: { id: r.notificationId! }, select: { readAt: true } }));
     if (n?.readAt) { await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { seenAt: n.readAt } }); seen += 1; }
   }
   return seen;

@@ -6,6 +6,7 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useAddresses, useDeleteAddress, useSetCartAddress, useSetDefaultAddress } from '../../../hooks/customer';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PillButton, Screen, T } from '../../../kit';
+import { errorMessage } from '../../../lib/apiError';
 
 // Address book, in kit row-card language. With route.params.selectFor==='cart'
 // a tap binds the address to the server-side cart and returns to it.
@@ -50,7 +51,8 @@ export function AddressesScreen() {
           style: 'destructive',
           onPress: () =>
             remove.mutate(a.id, {
-              onError: () => Alert.alert('Could not remove it', 'Check your connection and try again.'),
+              // [#1907 review S4-1] A refusal with its own words says them.
+              onError: (err) => Alert.alert('Could not remove it', errorMessage(err, 'Check your connection and try again.')),
             }),
         },
       ],
@@ -69,7 +71,7 @@ export function AddressesScreen() {
     picking.current = true;
     setCartAddress.mutate(a.id, {
       onSuccess: () => navigation.goBack(),
-      onError: () => Alert.alert('Could not use this address', 'Check your connection and try again.'),
+      onError: (err) => Alert.alert('Could not use this address', errorMessage(err, 'Check your connection and try again.')),
       onSettled: () => { picking.current = false; },
     });
   };

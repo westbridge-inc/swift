@@ -3,6 +3,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { getChannels, type SmsProvider } from '../../providers/notifications/channels';
 import { runWithTenant } from '../../plugins/tenant-context';
 import { AccountService } from './account.service';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 /**
  * [R23 · research C10 · DPA s.4(1)(e)] A CUSTOMER account nobody has used for 12 months is
@@ -182,7 +183,7 @@ export async function inactivitySweep(deps: InactivityDeps, now: Date = new Date
     // The notice date is the clock: set once (a concurrent run cannot start it twice).
     const claimed = await prisma.user.updateMany({ where: { id: u.id, inactivityNoticeAt: null }, data: { inactivityNoticeAt: now } });
     if (claimed.count !== 1) continue;
-    await prisma.notification.create({ data: { userId: u.id, type: 'SYSTEM_ANNOUNCEMENT', title: text.title, body: text.body } });
+    await insertNoticeFor(prisma, { userId: u.id, type: 'SYSTEM_ANNOUNCEMENT', title: text.title, body: text.body });
     run.noticed += 1;
   }
 

@@ -6,9 +6,10 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchSubscriptions, waiveSubscriptionFee, topUpSubscription, setAsideSubscriptionCredit, recordSubscriptionRefundPaid, releaseSubscriptionRefund, fetchBillingEvents } from '@/lib/api';
 import { outcomeOfThrown, type MoneyActionOutcome } from '@/lib/cashRail';
 import { StatusPill, gyd } from '@/components/detail';
-import { askReason, reasonTooShort } from '@/lib/ask-reason';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 const FILTERS = ['ALL', 'TRIAL', 'ACTIVE', 'PAST_DUE', 'SUSPENDED', 'CANCELLED'] as const;
 
@@ -86,6 +87,16 @@ export default function SubscriptionsPage() {
     mutationFn: ({ id, reason }: { id: string; reason: string }) => waiveSubscriptionFee(id, reason),
     onSuccess: invalidate,
   });
+  // [U06] Waiving and recording a fee payment are C4: the first answer is a
+  // second admin's approval. Both used to show nothing (a refusal was
+  // swallowed, a queued ask looked like a dead button) and invited a second
+  // press. The panel shows the answer; once queued, that row's button is locked.
+  const actions = useActionRunner(invalidate);
+  const dialog = useActionDialog();
+  const [queuedAsks, setQueuedAsks] = useState<Record<string, true>>({});
+  const lockIfQueued = (key: string) => (outcome: { tone: string } | null) => {
+    if (outcome?.tone === 'queued') setQueuedAsks((all) => ({ ...all, [key]: true }));
+  };
   // [M-08] The idempotency key belongs to the ATTEMPT: minted when the admin
   // confirms an amount, reused if that same top-up is retried after an error
   // or a lost response, and released only once the server has answered. A
@@ -155,7 +166,6 @@ export default function SubscriptionsPage() {
   // page; production holds recording a payment by hand (BILLING_TOPUP_HOLD),
   // so the button is not offered while the server says the hold is on.
   const recordingHeld = (data as any)?.manualFeeRecording === 'held';
-  const recordError = topup.error as { message?: string } | null;
 
   return (
     <div>
@@ -165,7 +175,9 @@ export default function SubscriptionsPage() {
           {FILTERS.map((f) => (
             <button
               key={f}
+              type="button"
               onClick={() => setFilter(f)}
+              aria-pressed={filter === f}
               className={`px-2.5 py-1 rounded-lg text-xs ${
                 filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
               }`}
@@ -183,9 +195,7 @@ export default function SubscriptionsPage() {
           Recording fee payments by hand is on hold: partners pay through the MMG checkout page. A payment that arrived another way is refunded.
         </p>
       ) : null}
-      {recordError?.message ? (
-        <p role="alert" className="text-red-400 text-xs -mt-4 mb-6">{recordError.message}</p>
-      ) : null}
+      {actions.banner}
 
       <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
         <table className="w-full text-sm">
@@ -237,43 +247,50 @@ export default function SubscriptionsPage() {
                       <td className="p-4 text-right">
                         <div className="flex gap-2 justify-end">
                           <button
+                            type="button"
                             onClick={() => setOpenTrail(openTrail === s.id ? null : s.id)}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10"
                           >
                             {openTrail === s.id ? 'Hide trail' : 'Billing trail'}
                           </button>
                           {!recordingHeld && <button
-                            onClick={() => {
-                              const amt = window.prompt(`Record a weekly-fee payment received by cash/bank for ${h.name} (whole GYD):`);
-                              const n = Number(amt);
-                              if (!amt || !Number.isInteger(n) || n <= 0) return;
-                              const reference = window.prompt(
-                                'Bank or MMG reference for the transfer that arrived (this is the proof, and one transfer credits one account):',
-                              );
-                              if (!reference) return;
-                              // The clause asks for a confirmation naming the TARGET and the DELTA.
-                              if (!window.confirm(`Credit ${h.name} with GY$${n.toLocaleString()} against transfer ${reference}?`)) return;
-                              const reason = askReason({ action: 'record this fee payment', subject: `${h.name} (${reference})` });
-                              if (reason) topup.mutate({ id: s.id, amount: n, reference, reason });
-                            }}
-                            disabled={topup.isPending}
+                            type="button"
+                            onClick={() => void actions.run({
+                              // The clause asks for a confirmation naming the TARGET and the DELTA: the panel
+                              // names the holder, and the amount and transfer are what the operator types.
+                              title: `Record a weekly-fee payment for ${h.name}?`,
+                              body: <p>Only for money that arrived by cash or bank transfer. The reference is the proof, and one transfer credits one account. A second admin approves it.</p>,
+                              confirmLabel: 'Record payment',
+                              fields: [
+                                { kind: 'amount', name: 'amount', label: 'Amount received (GYD)' },
+                                { kind: 'reference', name: 'reference', label: 'Bank or MMG reference of the transfer' },
+                              ],
+                              submit: ({ reason, values }) => topup.mutateAsync({ id: s.id, amount: Number(values['amount']), reference: String(values['reference']), reason }),
+                              success: () => `Payment recorded for ${h.name}.`,
+                            }).then(lockIfQueued(`${s.id}:fee-payment`))}
+                            disabled={topup.isPending || queuedAsks[`${s.id}:fee-payment`] === true}
                             className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Record fee payment
+                            {queuedAsks[`${s.id}:fee-payment`] ? 'Payment waiting for approval' : 'Record fee payment'}
                           </button>}
                           {Number(s.refundSetAside ?? 0) > 0 ? (
                             <>
                               <button
-                                onClick={() => {
+                                type="button"
+                                onClick={async () => {
                                   const owed = Number(s.refundSetAside);
-                                  const how = window.prompt(`GY$${owed.toLocaleString()} is set aside to refund ${h.name}. Paid back by MMG or BANK?`, 'MMG');
-                                  const method = how?.trim().toUpperCase() === 'BANK' ? 'BANK_TRANSFER' : how?.trim().toUpperCase() === 'MMG' ? 'MMG' : null;
-                                  if (!method) return;
-                                  const reference = window.prompt('Reference of the refund you paid (MMG or bank). It is the proof the money went back:');
-                                  if (!reference) return;
-                                  if (!window.confirm(`Record that GY$${owed.toLocaleString()} was paid back to ${h.name} by ${method === 'MMG' ? 'MMG' : 'bank transfer'} (${reference})? A second admin approves it.`)) return;
-                                  const reason = askReason({ action: 'record this refund payout', subject: `${h.name} (${reference})` });
-                                  if (reason) recordPaid.mutate({ id: s.id, amount: owed, method, reference, setAsideId: String(s.refundSetAsideId ?? ''), reason });
+                                  const answer = await dialog.askWith({
+                                    title: `Record that GY$${owed.toLocaleString()} was paid back to ${h.name}?`,
+                                    body: <p>Only once the refund has really been paid outside Swift. The reference is the proof the money went back. A second admin approves the record.</p>,
+                                    confirmLabel: 'Record payout',
+                                    fields: [
+                                      { kind: 'choice', name: 'method', label: 'Paid back by', options: [{ value: 'MMG', label: 'MMG' }, { value: 'BANK_TRANSFER', label: 'Bank transfer' }] },
+                                      { kind: 'reference', name: 'reference', label: 'Reference of the refund you paid' },
+                                    ],
+                                  });
+                                  if (!answer) return;
+                                  const method = answer.values['method'] === 'BANK_TRANSFER' ? 'BANK_TRANSFER' : 'MMG';
+                                  recordPaid.mutate({ id: s.id, amount: owed, method, reference: String(answer.values['reference']), setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -281,11 +298,15 @@ export default function SubscriptionsPage() {
                                 Record payout
                               </button>
                               <button
-                                onClick={() => {
+                                type="button"
+                                onClick={async () => {
                                   const owed = Number(s.refundSetAside);
-                                  if (!window.confirm(`Return the GY$${owed.toLocaleString()} set aside for ${h.name} to their credit? Only if the refund could not be paid.`)) return;
-                                  const reason = askReason({ action: 'return this refund set-aside to credit', subject: h.name });
-                                  if (reason) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason });
+                                  const answer = await dialog.askWith({
+                                    title: `Return the GY$${owed.toLocaleString()} set aside for ${h.name} to their credit?`,
+                                    body: <p>Only if the refund could not be paid. A second admin approves it.</p>,
+                                    confirmLabel: 'Return to credit',
+                                  });
+                                  if (answer) release.mutate({ id: s.id, amount: owed, setAsideId: String(s.refundSetAsideId ?? ''), reason: answer.reason });
                                 }}
                                 disabled={refundBusy || payoutReported || payoutNotCompleted}
                                 className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -295,11 +316,15 @@ export default function SubscriptionsPage() {
                             </>
                           ) : Number(s.prepaidBalance?.balance ?? 0) > 0 && (
                             <button
-                              onClick={() => {
+                              type="button"
+                              onClick={async () => {
                                 const credit = Number(s.prepaidBalance.balance);
-                                if (!window.confirm(`Set aside ${h.name}'s unused credit of GY$${credit.toLocaleString()} for a refund? A second admin approves it. Do not pay anything yet: pay only once it shows as set aside, then record the payout here.`)) return;
-                                const reason = askReason({ action: 'set this credit aside for a refund', subject: h.name });
-                                if (reason) setAside.mutate({ id: s.id, amount: credit, reason });
+                                const answer = await dialog.askWith({
+                                  title: `Set aside ${h.name}'s unused credit of GY$${credit.toLocaleString()} for a refund?`,
+                                  body: <p>A second admin approves it. Do not pay anything yet: pay only once it shows as set aside, then record the payout here.</p>,
+                                  confirmLabel: 'Set aside for refund',
+                                });
+                                if (answer) setAside.mutate({ id: s.id, amount: credit, reason: answer.reason });
                               }}
                               disabled={refundBusy}
                               className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
@@ -309,17 +334,19 @@ export default function SubscriptionsPage() {
                           )}
                           {!s.feeWaived && (
                             <button
-                              onClick={() => {
-                                const reason = window.prompt(
-                                  `Waive this period's fee for ${h.name}? Say why — this is revenue Swift is giving up, and the reason is kept:`,
-                                );
-                                if (!reason || reasonTooShort(reason)) return;
-                                waive.mutate({ id: s.id, reason: reason.trim() });
-                              }}
-                              disabled={waive.isPending}
+                              type="button"
+                              onClick={() => void actions.run({
+                                title: `Waive this period's fee for ${h.name}?`,
+                                body: <p>This is revenue Swift is giving up. A second admin approves it.</p>,
+                                confirmLabel: 'Waive fee',
+                                reason: { label: 'Why it is waived', hint: 'Kept on the record and read by the second admin.' },
+                                submit: ({ reason }) => waive.mutateAsync({ id: s.id, reason }),
+                                success: () => `Fee waived for ${h.name} for this period.`,
+                              }).then(lockIfQueued(`${s.id}:waive`))}
+                              disabled={waive.isPending || queuedAsks[`${s.id}:waive`] === true}
                               className="px-3 py-1 rounded-lg text-xs border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                             >
-                              Waive fee
+                              {queuedAsks[`${s.id}:waive`] ? 'Waiver waiting for approval' : 'Waive fee'}
                             </button>
                           )}
                         </div>
