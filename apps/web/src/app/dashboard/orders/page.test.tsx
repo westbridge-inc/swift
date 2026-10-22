@@ -184,10 +184,12 @@ describe('vendor order board — money is never invented', () => {
     expect(screen.getByText(/Ring the bell twice/)).toBeTruthy();
   });
 
-  it('renders an empty bucket without inventing a figure', async () => {
+  it('renders an empty board without inventing a figure', async () => {
     mockApi(boardHandler([], wireVendorOrderDetail()));
     renderWithQuery(<OrdersPage />);
-    expect(await screen.findAllByText('Nothing here right now')).toHaveLength(3);
+    // Nothing open: the app's quiet board (PR A) instead of three empty lanes.
+    expect(await screen.findByText('You are all caught up')).toBeTruthy();
+    expect(screen.getByText('No active orders shown')).toBeTruthy();
     expect(document.body.textContent ?? '').not.toMatch(/NaN/);
   });
 });
@@ -234,7 +236,8 @@ describe('delivery owner controls', () => {
   it('requires an explicit handoff confirmation before closing a self-delivery', async () => {
     const { user, fetchMock } = await openDeliveryOwner({ fulfillmentMode: 'VENDOR_DELIVERY' });
 
-    await user.click(screen.getByRole('button', { name: 'Confirm delivered' }));
+    // The card offers "Confirm delivered" too, and opens this same window for it.
+    await user.click(within(screen.getByRole('dialog', { name: 'Order details' })).getByRole('button', { name: 'Confirm delivered' }));
     expect(screen.getByRole('dialog', { name: 'Confirm store delivery' })).toBeTruthy();
     expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/delivered'))).toBe(false);
 
@@ -314,7 +317,9 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
       const { fetchMock } = await openMmgDetail(paymentStatus);
       expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
       // and the screen is not silent about it
-      expect(screen.getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      // Said in the order window — and on the card, as in the app (VendorOrderCard payBlockedReason).
+      expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
+      expect(within(screen.getByRole('article', { name: 'Order SW-1001' })).getByText(/refunded|failed|unresolved|window closed/i)).toBeTruthy();
       expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
     },
   );
@@ -329,7 +334,9 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     await waitFor(() => expect(screen.getByText('MMG — the customer pays your store’s MMG account.')).toBeTruthy());
     expect(screen.queryByRole('button', { name: /^Paid by MMG$/i })).toBeNull();
     expect(screen.queryByLabelText(/MMG transaction reference/i)).toBeNull();
-    expect(screen.getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    // Said in the order window, and on the card as in the app (VendorOrderCard).
+    expect(within(screen.getByRole('dialog', { name: 'Order details' })).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
+    expect(within(row.closest('article')!).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
     expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('confirm-payment'))).toHaveLength(0);
   });
 
@@ -753,10 +760,13 @@ describe('disputed MMG orders pause the web dashboard', () => {
     expect(row.textContent).toContain('Payment under review — order paused');
     await user.click(row);
     await screen.findByText('MMG — the customer pays your store’s MMG account.');
+    // The order window. (Its card on the board says the same and withholds the
+    // same buttons: the forward-button checks below cover the whole screen.)
+    const dialog = screen.getByRole('dialog', { name: 'Order details' });
     // The phone's own words (order-dispute.ts). A dispute can be a reference
     // mismatch where the customer says they DID pay, so the notice never says
     // the customer is disputing the payment (review S4-1).
-    expect(screen.getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
+    expect(within(dialog).getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
     expect(screen.queryByText(/customer disputes/i)).toBeNull();
     for (const name of ['Accept', 'Start preparing', 'Mark ready', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'Find a rider', 'We’ll deliver', 'Get a Swift rider']) {
       expect(screen.queryByRole('button', { name }), name).toBeNull();
@@ -764,7 +774,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
     expect(screen.queryByRole('checkbox')).toBeNull();
     expect(screen.queryByRole('button', { name: /^Paid by MMG$/ })).toBeNull();
     // Declining stays where it was: the server allows it.
-    if (status === 'PENDING') expect(screen.getByRole('button', { name: 'Reject' })).toBeTruthy();
+    if (status === 'PENDING') expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeTruthy();
   });
 
   it('control: the same order without a dispute keeps its forward buttons', async () => {
@@ -774,7 +784,8 @@ describe('disputed MMG orders pause the web dashboard', () => {
     const row = await rowFor('SW-1001');
     expect(row.textContent).not.toContain('order paused');
     await user.click(row);
-    expect(await screen.findByRole('button', { name: 'Start preparing' })).toBeTruthy();
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByRole('button', { name: 'Start preparing' })).toBeTruthy();
   });
 });
 

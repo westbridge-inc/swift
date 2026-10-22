@@ -4,6 +4,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { adminAudienceWhere } from '../notification/notification.service';
 import { ackDeadlineSeconds } from '../safety/ops-alert';
 import { gyd, shortHandoverPage } from './door-cash';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 /** Resolve the existing operations audience without inheriting a rider's
  * tenant filter. Store-review fiction must never page real operators. */
@@ -45,13 +46,10 @@ async function stageCashPage(
   });
   const ids: string[] = [];
   for (const recipient of alert.recipients) {
-    const notice = await tx.notification.create({
-      data: {
-        userId: recipient.userId, type: 'SYSTEM_ANNOUNCEMENT', title: page.title, body: page.body,
-        dedupeKey: page.dedupeKey,
-        data: { ...page.data, orderId: order.id, opsAlertId: alert.id },
-      },
-      select: { id: true },
+    const notice = await insertNoticeFor(tx, {
+      userId: recipient.userId, type: 'SYSTEM_ANNOUNCEMENT', title: page.title, body: page.body,
+      dedupeKey: page.dedupeKey,
+      data: { ...page.data, orderId: order.id, opsAlertId: alert.id },
     });
     await tx.opsAlertRecipient.update({
       where: { id: recipient.id }, data: { notificationId: notice.id, deliveredAt: now },

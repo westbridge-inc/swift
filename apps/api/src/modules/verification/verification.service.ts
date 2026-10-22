@@ -53,6 +53,8 @@ import {
   reconcileProviderVerifications,
   refreshProviderVerification,
 } from '../services/services.service';
+import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -639,10 +641,11 @@ export class VerificationService {
 
   /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
   private async pageBreakerOnce(profileCode: string, rate: number): Promise<void> {
-    const recent = await this.prisma.notification.findFirst({
+    // [item 20] Any admin's page, read from whoever's extraction tripped the breaker: the named capability under the owner wall.
+    const recent = await ownerWallSystem('verification:breaker-page-once', () => this.prisma.notification.findFirst({
       where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, createdAt: { gt: new Date(Date.now() - 6 * 3_600_000) }, body: { contains: profileCode } },
       select: { id: true },
-    });
+    }));
     if (recent) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: null,
@@ -1194,10 +1197,10 @@ export class VerificationService {
           documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
         } });
       }
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
         data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1263,10 +1266,10 @@ export class VerificationService {
     }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
       // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
         data: { kind: 'verification_rejected' },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -2288,13 +2291,13 @@ export class VerificationService {
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      const notice = await db.notification.create({ data: {
+      const notice = await insertNoticeFor(db, {
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your store is now a registered seller',
         body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
         data: { kind: 'vendor_tier_promoted', vendorId },
-      } });
+      });
       this.projectionNotices.get(db)?.push(notice.id);
     });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
@@ -2351,19 +2354,22 @@ export class VerificationService {
     userId: string,
     vendor: { id: string; name: string },
   ): Promise<void> {
-    const already = await db.notification.findFirst({
-      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
-      select: { id: true },
-    });
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const already = ownerRlsBindEnabled()
+      ? await publicPhoneAsked(db, userId, vendor.id)
+      : await db.notification.findFirst({
+        where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+        select: { id: true },
+      });
     if (already) return;
-    const notice = await db.notification.create({ data: {
+    const notice = await insertNoticeFor(db, {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Add the number customers can call',
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
-    } });
+    });
     this.projectionNotices.get(db)?.push(notice.id);
   }
 
