@@ -85,6 +85,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
+  // [Row 249] The abandoned-application sweep's open-case census (reports about a person's rating, message, store or
+  // item): read-only, run by the daily documents job on the system login (runAsSystem 'verification:abandoned-case-census').
+  'modules/verification/abandoned-application.ts': { sites: 2, role: 'JOB' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },
   'modules/verification/object-authority.ts': { sites: 3, role: 'SHARED' },
   'modules/verification/subjects.ts': { sites: 1, role: 'SHARED' },

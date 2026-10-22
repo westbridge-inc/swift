@@ -92,11 +92,19 @@ export function PillButton({
 }
 
 /** Bare inline text action — “See All”, “Forgot password?”. */
-export function LinkText({ label, onPress, tone = 'brand' as const }: { label: string; onPress?: () => void; tone?: 'brand' | 'muted' }) {
+export function LinkText({ label, onPress, tone = 'brand' as const, disabled = false }: { label: string; onPress?: () => void; tone?: 'brand' | 'muted'; disabled?: boolean }) {
+  // `disabled`: held like a disabled PillButton (no press, read as disabled, greyed).
   return (
-    <Pressable onPress={onPress} hitSlop={8} accessibilityRole="button" accessibilityLabel={label}>
+    <Pressable
+      onPress={disabled ? undefined : onPress}
+      disabled={disabled || undefined}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={disabled ? { disabled: true } : undefined}
+    >
       {({ pressed }) => (
-        <View style={{ opacity: pressed ? 0.6 : 1 }}>
+        <View style={{ opacity: disabled ? 0.45 : pressed ? 0.6 : 1 }}>
           <T variant="label" tone={tone} weight="medium">
             {label}
           </T>
