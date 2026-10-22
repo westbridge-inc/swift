@@ -18,6 +18,7 @@ CREATE TABLE "upload_scan_debts" (
     "signature" TEXT,
     "quarantinedAt" TIMESTAMP(3),
     "quarantineKey" TEXT,
+    "releasedAt" TIMESTAMP(3),
 
     CONSTRAINT "upload_scan_debts_pkey" PRIMARY KEY ("id")
 );

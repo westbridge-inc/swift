@@ -1,7 +1,8 @@
 /**
  * [Row 312 · COORD ruling 21 Oct] The debt of an upload stored WITHOUT a malware scan.
  *
- * scanUpload answers 'UNSCANNED' for safety evidence while the scanner is down, and for the
+ * scanUpload answers 'UNSCANNED' for evidence (safety evidence, delivery and handover proof) while the
+ * scanner is down, and for the
  * BYPASS_SURFACES under MALWARE_SCAN_BYPASS=1. The route stores the file and then records it here:
  * one upload_scan_debts row holding the object key, the file's sha256, its surface, why it was not
  * scanned and whether the stored bytes are sealed (envelope-encrypted). No person or tenant id and
@@ -31,10 +32,25 @@ import { decryptBuffer, getKeyProvider } from '../providers/storage/envelope';
 import type { StorageProvider } from '../providers/storage/storage-provider';
 import {
   clamdInstream, malwareScanBypassOn, malwareScannerStatus, privateScannerAddress, CLAMD_DEFAULT_PORT,
-  SAFETY_EVIDENCE_SURFACES, type ScanOutcome, type UploadSurface,
+  NEVER_REFUSED_SURFACES, type ScanOutcome, type UploadSurface,
 } from './malware-scan';
 
 export const QUARANTINE_FOLDER = 'quarantine/uploads';
+/** Evidence the scanner was UP but could not scan is stored straight here by its route (never served). */
+export const QUARANTINE_HELD_FOLDER = 'quarantine/held';
+
+/** The folder an upload is stored in: the held quarantine folder for scan outcome 'QUARANTINE'. */
+export function heldFolder(outcome: ScanOutcome, folder: string): string {
+  return outcome === 'QUARANTINE' ? `${QUARANTINE_HELD_FOLDER}/${folder}` : folder;
+}
+
+export { assertServableKey, isQuarantineKey } from '../providers/storage/quarantine-key';
+
+/** A platform admin's release of held evidence after a manual check: once, and only a HELD row. */
+export async function releaseHeldUpload(prisma: DebtDb, id: string, now = new Date()): Promise<boolean> {
+  const r = await prisma.uploadScanDebt.updateMany({ where: { id, result: 'HELD', releasedAt: null }, data: { releasedAt: now } });
+  return r.count === 1;
+}
 export const QUARANTINE_DAYS = 30;
 export const CLOSED_ROW_DAYS = 30;
 export const RESCAN_BATCH = 25;
@@ -53,17 +69,16 @@ export async function recordUnscannedUpload(
   input: { surface: UploadSurface; fileKey: string; buffer: Buffer; sealed?: boolean; storage: Pick<StorageProvider, 'delete'> },
   env: Env = process.env,
 ): Promise<void> {
-  if (outcome !== 'UNSCANNED') return;
-  const reason = SAFETY_EVIDENCE_SURFACES.has(input.surface) ? 'evidence' : malwareScanBypassOn(env) ? 'bypass' : 'evidence';
+  if (outcome !== 'UNSCANNED' && outcome !== 'QUARANTINE') return;
+  const reason = NEVER_REFUSED_SURFACES.has(input.surface) ? 'evidence' : malwareScanBypassOn(env) ? 'bypass' : 'evidence';
+  const sha256 = createHash('sha256').update(input.buffer).digest('hex');
   try {
     await prisma.uploadScanDebt.create({
-      data: {
-        surface: input.surface,
-        reason,
-        fileKey: input.fileKey,
-        sealed: input.sealed === true,
-        sha256: createHash('sha256').update(input.buffer).digest('hex'),
-      },
+      data: outcome === 'QUARANTINE'
+        // Held: already in the quarantine folder (the route stored it there); not rescanned; a platform
+        // admin releases it after a manual check. Paged by the scanner watch while unreleased.
+        ? { surface: input.surface, reason: 'evidence', fileKey: input.fileKey, sealed: input.sealed === true, sha256, result: 'HELD', quarantinedAt: new Date(), quarantineKey: input.fileKey }
+        : { surface: input.surface, reason, fileKey: input.fileKey, sealed: input.sealed === true, sha256 },
     });
   } catch {
     // Never keep an unscanned file nobody will rescan.
@@ -187,8 +202,9 @@ export async function rescanUploadDebt(deps: RescanDeps): Promise<RescanResult> 
 /** Quarantined copies are purged after QUARANTINE_DAYS; closed clean/gone rows after CLOSED_ROW_DAYS. */
 async function purgeOldDebt(deps: RescanDeps, now: Date): Promise<void> {
   const quarantineCutoff = new Date(now.getTime() - QUARANTINE_DAYS * 86_400_000);
+  // Evidence is never lost: only the quarantined copies of bypass uploads are purged.
   const expired = await deps.prisma.uploadScanDebt.findMany({
-    where: { quarantinedAt: { lt: quarantineCutoff }, quarantineKey: { not: null } },
+    where: { quarantinedAt: { lt: quarantineCutoff }, quarantineKey: { not: null }, reason: 'bypass' },
     take: RESCAN_BATCH,
   });
   for (const row of expired) {

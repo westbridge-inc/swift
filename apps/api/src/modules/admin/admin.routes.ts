@@ -1,5 +1,6 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
+import { releaseHeldUpload } from '../../lib/upload-scan-debt';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -7161,6 +7162,33 @@ export async function adminRoutes(app: FastifyInstance) {
       }
     });
     return { success: true, data: { queue, id, retried: true } };
+  });
+
+  // [Row 312 · COORD 21 Oct] Evidence the malware scanner was UP but could not scan (an error or a
+  // timeout on the file itself) is stored straight into quarantine, served to no one, and paged. A
+  // platform admin lists it here and releases each after a manual check. Rows hold no person id and
+  // no content: the object key, the digest, the surface.
+  app.get('/upload-scan-debts/held', { preHandler: [platformControlGuard] }, async () => {
+    const rows = await app.prisma.uploadScanDebt.findMany({
+      where: { result: 'HELD', releasedAt: null },
+      orderBy: { createdAt: 'asc' },
+      take: 200,
+      select: { id: true, surface: true, fileKey: true, sha256: true, createdAt: true },
+    });
+    return { success: true, data: rows };
+  });
+
+  app.post('/upload-scan-debts/:id/release', { preHandler: [platformControlGuard] }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
+    const released = await app.prisma.$transaction(async (tx) => {
+      const ok = await releaseHeldUpload(tx, id);
+      if (!ok) throw new AppError(409, 'NOT_HELD', 'This upload is not held (already released, or never held).');
+      // The release and its trail commit together.
+      await auditIn(tx, request.user.userId, 'RELEASE_HELD_UPLOAD', 'UploadScanDebt', id, { reason: body.reason }, request);
+      return ok;
+    });
+    return { success: true, data: { id, released } };
   });
 
   /** DELETE /dlq/:queue/:id — discard a dead job for good. */

@@ -562,6 +562,9 @@ export const ADMIN_ROUTE_AUTHORITY: Readonly<Record<AdminRouteKey, AdminRouteAut
   'GET /dlq': c('C0', 'ops.read'),
   'POST /dlq/:queue/:id/requeue': c('C2', 'ops.dlq.requeue'),
   'DELETE /dlq/:queue/:id': c('C3', 'ops.dlq.delete'),
+  // [Row 312] Evidence held in the malware quarantine: listed, and released after a manual check.
+  'GET /upload-scan-debts/held': c('C1', 'ops.uploads.held.read'),
+  'POST /upload-scan-debts/:id/release': c('C3', 'ops.uploads.release'),
 
   // ── Discovery taxonomy ──────────────────────────────────────────────────
   'GET /discovery/categories': c('C0', 'discovery.read'),

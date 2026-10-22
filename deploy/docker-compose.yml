@@ -228,9 +228,9 @@ services:
       MALWARE_SCAN: ${MALWARE_SCAN:-clamd}
       CLAMD_HOST: clamd
       CLAMD_PORT: "3310"
-      # [COORD 21 Oct] The production emergency switch: 1 stores a mover's uploads
-      # (liveness, onboarding, delivery/handover proof) UNSCANNED while the scanner
-      # is down, each rescanned once it answers. Pages ops hourly; doctor,
+      # [COORD 21 Oct] The production emergency switch: 1 stores liveness selfies,
+      # onboarding documents and vehicle photos UNSCANNED while the scanner is
+      # down, each rescanned once it answers. Pages ops hourly; doctor,
       # preflight and pilot-up shout. Empty = off.
       MALWARE_SCAN_BYPASS: ${MALWARE_SCAN_BYPASS:-}
     volumes:
@@ -291,9 +291,9 @@ services:
       MALWARE_SCAN: ${MALWARE_SCAN:-clamd}
       CLAMD_HOST: clamd
       CLAMD_PORT: "3310"
-      # [COORD 21 Oct] The production emergency switch: 1 stores a mover's uploads
-      # (liveness, onboarding, delivery/handover proof) UNSCANNED while the scanner
-      # is down, each rescanned once it answers. Pages ops hourly; doctor,
+      # [COORD 21 Oct] The production emergency switch: 1 stores liveness selfies,
+      # onboarding documents and vehicle photos UNSCANNED while the scanner is
+      # down, each rescanned once it answers. Pages ops hourly; doctor,
       # preflight and pilot-up shout. Empty = off.
       MALWARE_SCAN_BYPASS: ${MALWARE_SCAN_BYPASS:-}
     volumes:

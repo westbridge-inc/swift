@@ -375,7 +375,7 @@ fi
 for tool in git docker curl python3; do command -v "$tool" >/dev/null 2>&1 || die "$tool is required"; done
 # [COORD 21 Oct] MALWARE_SCAN_BYPASS_SHOUT: the emergency bypass is loud on every deploy.
 if [ "$(env_setting MALWARE_SCAN_BYPASS)" = 1 ]; then
-  echo "WARNING: MALWARE_SCAN_BYPASS=1 — THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON: while clamd is down, liveness selfies, onboarding documents and photos, and delivery and handover proof are stored WITHOUT a scan (rescanned once it answers; ops are paged hourly). Remove it from deploy/.env once clamd answers." >&2
+  echo "WARNING: MALWARE_SCAN_BYPASS=1 — THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON: while clamd is down, liveness selfies, onboarding documents and vehicle photos are stored WITHOUT a scan (rescanned once it answers; ops are paged hourly). Remove it from deploy/.env once clamd answers." >&2
 fi
 # [PROD-PATH] The production stack obtains certificates for every name it
 # serves, so each must already resolve to this host. Until DNS moves, the

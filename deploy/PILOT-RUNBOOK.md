@@ -220,14 +220,19 @@ the new API image on the scanner network, that the EICAR test string is refused
 and ordinary bytes pass. While clamd does not answer, every upload is refused
 (503) and the worker pages ops after two failed checks (two minutes apart).
 `./deploy/doctor.sh` reports it. clamd is the container's main process, so a
-SHUTDOWN restarts the container. Two exceptions store an upload UNSCANNED and
-owe it a rescan (upload_scan_debts; the worker rescans every five minutes once
+SHUTDOWN restarts the container. "Down" means the connection to clamd failed
+AND a fresh PING fails; then two exceptions store an upload UNSCANNED and owe
+it a rescan (upload_scan_debts; the worker rescans every five minutes once
 clamd answers, and a positive or unscannable file is quarantined and paged):
-safety evidence is never refused, and the production emergency switch
-`MALWARE_SCAN_BYPASS=1` in deploy/.env (then recreate api and worker) covers the
-liveness selfie, onboarding documents and photos, and delivery and handover
-proof. While it is set, pilot-up, the doctor and the preflight shout and ops are
-paged every hour. Remove it as soon as clamd answers.
+evidence (safety evidence, delivery and handover proof) is never refused, and
+the production emergency switch `MALWARE_SCAN_BYPASS=1` in deploy/.env (then
+recreate api and worker) covers exactly the liveness selfies, onboarding documents and vehicle photos. Never a profile picture. While it is set, pilot-up, the doctor and
+the preflight shout and ops are paged every hour. Remove it as soon as clamd
+answers. If clamd is UP but fails on one file (an error or a timeout on the
+file itself), that file is refused, bypass or not; evidence is instead stored
+straight into the quarantine (served to no one) and paged, and a platform admin
+releases it after a manual check (`GET /admin/upload-scan-debts/held`, `POST
+/admin/upload-scan-debts/:id/release` with a reason; audited).
 
 Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
 a signature reload (freshclam checks 12 times a day); the service's ceiling is

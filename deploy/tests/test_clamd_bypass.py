@@ -73,6 +73,35 @@ class BypassWiring(unittest.TestCase):
         self.assertIn("THE EMERGENCY BYPASS IS ON", text)
 
 
+class TheBypassSetIsPinned(unittest.TestCase):
+    """[Security finding 2, COORD 21 Oct] The bypass covers EXACTLY what the code says, and every
+    operator-facing text names exactly that set: never the profile picture (avatar), and never the
+    evidence (it is never refused anyway, bypass or not)."""
+
+    PHRASE = "liveness selfies, onboarding documents and vehicle photos"
+    CODE = DEPLOY.parent / "apps" / "api" / "src" / "lib" / "malware-scan.ts"
+
+    def test_the_code_set(self):
+        text = self.CODE.read_text()
+        body = re.search(r"export const BYPASS_SURFACES[^=]*=\s*new Set<UploadSurface>\(\[([^\]]*)\]\)", text).group(1)
+        self.assertEqual(sorted(re.findall(r"'([a-z-]+)'", body)), ["liveness", "vehicle-photo", "verification"])
+
+    def test_every_operator_text_names_exactly_that_set(self):
+        texts = {
+            "pilot-up warning": fragment(PILOT_UP.read_text(), "# [COORD 21 Oct] MALWARE_SCAN_BYPASS_SHOUT", "\nfi\n"),
+            "doctor": fragment((DEPLOY / "doctor.sh").read_text(), "# [COORD 21 Oct] The upload malware scan emergency bypass shouts while it is set.", "\nfi\n"),
+            "preflight": fragment((DEPLOY / "preflight.ts").read_text(), "if (fileEnv['MALWARE_SCAN_BYPASS'] === '1') {", "} else if"),
+            "runbook": " ".join(fragment((DEPLOY / "PILOT-RUNBOOK.md").read_text(), "`MALWARE_SCAN_BYPASS=1` in deploy/.env", "Never a profile picture.").split()),
+            "env example": " ".join(fragment((DEPLOY / ".env.deploy.example").read_text(), "# Emergency only (production): MALWARE_SCAN_BYPASS=1", "# MALWARE_SCAN_BYPASS=").replace("#", " ").split()),
+            "compose": " ".join(fragment(COMPOSE.read_text(), "# [COORD 21 Oct] The production emergency switch", "MALWARE_SCAN_BYPASS: ").replace("#", " ").split()),
+        }
+        for name, text in texts.items():
+            flat = " ".join(text.split())
+            self.assertIn(self.PHRASE, flat, name)
+            for wrong in ("avatar", "profile photo", "handover proof", "delivery proof", "courier"):
+                self.assertNotIn(wrong, flat.lower().replace("never a profile picture", ""), (name, wrong))
+
+
 class ClamdIsTheMainProcess(unittest.TestCase):
     def test_command_execs_clamd_and_freshclam_runs_beside_it(self):
         block = service_block(COMPOSE, "clamd")

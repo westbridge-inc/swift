@@ -1,3 +1,4 @@
+import { assertServableKey } from './quarantine-key';
 import { mkdir, writeFile, unlink, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -100,6 +101,8 @@ export class LocalStorageProvider implements StorageProvider, BoundedObjectReade
 
   /** Dev signed URL: HMAC over key+expiry so it is time-limited, not a raw link. */
   async getSignedUrl(fileKey: string, ttlSeconds: number = DEFAULT_TTL_SECONDS): Promise<string> {
+    // [Row 312] Nothing in the malware quarantine is ever served.
+    assertServableKey(fileKey);
     const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
     const sig = crypto
       .createHmac('sha256', this.signingSecret)
@@ -175,6 +178,8 @@ export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
   }
 
   async getSignedUrl(fileKey: string, ttlSeconds: number = DEFAULT_TTL_SECONDS): Promise<string> {
+    // [Row 312] Nothing in the malware quarantine is ever served.
+    assertServableKey(fileKey);
     return presignS3(
       this.client,
       new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }),

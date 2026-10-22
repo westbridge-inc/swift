@@ -235,7 +235,7 @@ fi
 env_line() { [ -f "$HERE/.env" ] && grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
 # [COORD 21 Oct] The upload malware scan emergency bypass shouts while it is set.
 if [ "$(env_line MALWARE_SCAN_BYPASS)" = 1 ]; then
-  bad "MALWARE_SCAN_BYPASS=1 in deploy/.env: THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON (uploads stored unscanned while clamd is down; ops paged hourly)"
+  bad "MALWARE_SCAN_BYPASS=1 in deploy/.env: THE UPLOAD MALWARE SCAN EMERGENCY BYPASS IS ON (liveness selfies, onboarding documents and vehicle photos stored unscanned while clamd is down; ops paged hourly)"
 fi
 if [ "$(env_line TENANT_RLS_BIND)" = 1 ]; then
   WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)"

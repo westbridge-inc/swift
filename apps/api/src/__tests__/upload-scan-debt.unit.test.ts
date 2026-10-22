@@ -1,10 +1,11 @@
 /**
  * [Row 312 · COORD ruling 21 Oct] When the scanner is down:
- *  (1) safety evidence (SOS, incident and report evidence) is NEVER refused: it is stored, flagged
- *      unscanned and paged to ops (owner rule, 18 Oct);
- *  (2) MALWARE_SCAN_BYPASS=1 is the production emergency switch: the uploads a mover needs to work
- *      (liveness selfie, onboarding documents and photos, delivery and handover proof) are stored
- *      flagged unscanned instead of refused. Everything else still waits for the scanner.
+ *  (1) evidence (safety evidence: SOS, incident and report evidence, owner rule 18 Oct; delivery and
+ *      handover proof, COORD 21 Oct) is NEVER refused: it is stored, flagged unscanned and paged;
+ *  (2) MALWARE_SCAN_BYPASS=1 is the production emergency switch: exactly the liveness selfies,
+ *      onboarding documents and vehicle photos are stored flagged unscanned instead of refused (never
+ *      a profile picture). Everything else still waits for the scanner.
+ * ("Down" = the connection failed AND a fresh PING fails: upload-scan-reachable.unit.test.ts.)
  * Every upload stored unscanned is an UploadScanDebt row; the upload-rescan job scans it once clamd
  * answers again, and a positive is moved to quarantine (out of every place that serves it) and paged.
  * A signature found is ALWAYS refused (422), bypass or not.
@@ -21,7 +22,7 @@ vi.mock('../modules/ops/ops-page', () => ({
 }));
 
 import { pageOps } from '../modules/ops/ops-page';
-import { BYPASS_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, scanUpload, type UploadSurface } from '../lib/malware-scan';
+import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, scanUpload, type UploadSurface } from '../lib/malware-scan';
 import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, RESCAN_BATCH, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
 import { encryptBuffer, generateDek } from '../providers/storage/envelope';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
@@ -77,17 +78,40 @@ describe('[Row 312] what an upload meets while the scanner is down', () => {
     expect([...SAFETY_EVIDENCE_SURFACES]).toEqual(['safety-evidence']);
   });
 
+  it('[COORD 21 Oct] delivery and handover proof are evidence too: never refused (bypass or not), flagged unscanned', async () => {
+    expect([...NEVER_REFUSED_SURFACES].sort()).toEqual(['courier-proof', 'handover-proof', 'safety-evidence']);
+    for (const surface of ['courier-proof', 'handover-proof'] as const) {
+      for (const env of [DOWN, { ...DOWN, MALWARE_SCAN_BYPASS: '1' }]) {
+        const l = log();
+        await expect(scanUpload(Buffer.from('proof photo'), { surface, log: l }, env), surface).resolves.toBe('UNSCANNED');
+        expect(l.error).toHaveBeenCalledWith(expect.objectContaining({ surface }), expect.stringMatching(/unscanned/));
+      }
+    }
+    // A file clamd POSITIVELY flags is still refused.
+    const { env } = await fakeClamd();
+    for (const surface of ['courier-proof', 'handover-proof'] as const) {
+      await expect(scanUpload(EICAR_LIKE, { surface, log: log() }, env), surface).rejects.toMatchObject({ statusCode: 422, code: 'UPLOAD_REJECTED' });
+    }
+    // Recorded as evidence (paged as evidence), with or without the bypass.
+    const db = fakeDb();
+    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'handover-proof', fileKey: 'handover-proof/o/1', buffer: Buffer.from('p'), storage: fakeStorage() as never }, {});
+    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'courier-proof', fileKey: 'courier-proof/o/1', buffer: Buffer.from('p'), storage: fakeStorage() as never }, { MALWARE_SCAN_BYPASS: '1' });
+    expect(db.rows.map((r) => r['reason'])).toEqual(['evidence', 'evidence']);
+  });
+
   it('without the bypass every other surface is refused 503', async () => {
-    for (const surface of ALL.filter((s) => !SAFETY_EVIDENCE_SURFACES.has(s))) {
+    for (const surface of ALL.filter((s) => !NEVER_REFUSED_SURFACES.has(s))) {
       await expect(scanUpload(Buffer.from('x'), { surface, log: log() }, DOWN), surface).rejects.toMatchObject({ statusCode: 503, code: 'UPLOAD_SCAN_UNAVAILABLE' });
     }
   });
 
   it('MALWARE_SCAN_BYPASS=1: what a mover needs to work is accepted unscanned; the rest still waits', async () => {
     const env = { ...DOWN, MALWARE_SCAN_BYPASS: '1' };
-    expect([...BYPASS_SURFACES].sort()).toEqual(['avatar', 'courier-proof', 'handover-proof', 'liveness', 'safety-evidence', 'vehicle-photo', 'verification']);
+    // [COORD 21 Oct, security finding 2] EXACTLY the set: the liveness selfie, onboarding documents and
+    // vehicle photos. Never the avatar (any user's profile picture is shown to others).
+    expect([...BYPASS_SURFACES].sort()).toEqual(['liveness', 'vehicle-photo', 'verification']);
     for (const surface of ALL) {
-      if (BYPASS_SURFACES.has(surface)) await expect(scanUpload(Buffer.from('x'), { surface, log: log() }, env), surface).resolves.toBe('UNSCANNED');
+      if (BYPASS_SURFACES.has(surface) || NEVER_REFUSED_SURFACES.has(surface)) await expect(scanUpload(Buffer.from('x'), { surface, log: log() }, env), surface).resolves.toBe('UNSCANNED');
       else await expect(scanUpload(Buffer.from('x'), { surface, log: log() }, env), surface).rejects.toMatchObject({ statusCode: 503 });
     }
     for (const value of ['', '0', 'true', 'yes', 'on', '2']) expect(malwareScanBypassOn({ ...DOWN, MALWARE_SCAN_BYPASS: value }), value).toBe(false);
@@ -206,16 +230,16 @@ describe('[Row 312] the rescan once clamd answers', () => {
 
   it('positive: moved to quarantine (gone from where it was served), recorded and paged', async () => {
     const { env } = await fakeClamd();
-    const db = fakeDb([{ id: 'd1', surface: 'avatar', reason: 'bypass', fileKey: 'avatars/u/1', sealed: false, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null }]);
-    const storage = fakeStorage(new Map([['avatars/u/1', EICAR_LIKE]]));
+    const db = fakeDb([{ id: 'd1', surface: 'vehicle-photo', reason: 'bypass', fileKey: 'vehicles/u/1', sealed: false, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null }]);
+    const storage = fakeStorage(new Map([['vehicles/u/1', EICAR_LIKE]]));
     await expect(rescanUploadDebt(deps(db, storage, env))).resolves.toMatchObject({ scanned: 1, quarantined: 1 });
-    expect(storage.objects.has('avatars/u/1')).toBe(false);
+    expect(storage.objects.has('vehicles/u/1')).toBe(false);
     const row = db.rows[0]!;
     expect(row).toMatchObject({ result: 'FOUND', signature: 'Eicar-Test-Signature', quarantinedAt: expect.any(Date) });
     expect(String(row['quarantineKey'])).toMatch(new RegExp(`^${QUARANTINE_FOLDER}/`));
     expect(storage.objects.get(String(row['quarantineKey']))!.equals(EICAR_LIKE)).toBe(true);
     expect(pageOps).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(pageOps).mock.calls[0]![1]).toMatchObject({ title: UPLOAD_QUARANTINED_PAGE_TITLE, data: { kind: 'ops_upload_quarantined', surface: 'avatar' } });
+    expect(vi.mocked(pageOps).mock.calls[0]![1]).toMatchObject({ title: UPLOAD_QUARANTINED_PAGE_TITLE, data: { kind: 'ops_upload_quarantined', surface: 'vehicle-photo' } });
   });
 
   it('a sealed upload is opened with its own key and the PLAINTEXT is scanned; the quarantine keeps the ciphertext', async () => {
@@ -235,7 +259,7 @@ describe('[Row 312] the rescan once clamd answers', () => {
   it('an object already erased, or a sealed one whose key was shredded, closes without a scan', async () => {
     const { env, seen } = await fakeClamd();
     const db = fakeDb([
-      { id: 'd1', surface: 'avatar', reason: 'bypass', fileKey: 'avatars/u/gone', sealed: false, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null },
+      { id: 'd1', surface: 'vehicle-photo', reason: 'bypass', fileKey: 'vehicles/u/gone', sealed: false, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null },
       { id: 'd2', surface: 'verification', reason: 'bypass', fileKey: sealedObject(2), sealed: true, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null },
       // The crypto-shred nulls the wrapped key and keeps the row (encrypted_objects.wrappedDek).
       { id: 'd3', surface: 'verification', reason: 'bypass', fileKey: sealedObject(3), sealed: true, sha256: 'x', attempts: 0, rescannedAt: null, quarantinedAt: null },
@@ -309,14 +333,32 @@ describe('[Row 312] every upload that can be stored unscanned records its debt',
     let covered = 0;
     for (const file of walk(MODULES)) {
       const src = readFileSync(file, 'utf8');
-      for (const surface of BYPASS_SURFACES) {
+      for (const surface of new Set([...BYPASS_SURFACES, ...NEVER_REFUSED_SURFACES])) {
         const scans = src.split(`scanUpload(`).slice(1).filter((s) => s.slice(0, 200).includes(`surface: '${surface}'`)).length;
         const records = src.split(`recordUnscannedUpload(`).slice(1).filter((s) => s.slice(0, 400).includes(`surface: '${surface}'`)).length;
         covered += scans;
         if (records < scans) missing.push(`${file.slice(MODULES.length + 1)} ${surface}: ${scans} scans, ${records} records`);
       }
     }
-    expect(covered).toBeGreaterThanOrEqual(8); // the census sees the real call sites
+    expect(covered).toBeGreaterThanOrEqual(7); // the census sees the real call sites (avatar left the bypass)
+    expect(missing).toEqual([]);
+  });
+
+  it('each evidence site stores a QUARANTINE outcome in the held quarantine folder (heldFolder), never its normal folder', () => {
+    const missing: string[] = [];
+    let sites = 0;
+    for (const file of walk(MODULES)) {
+      const src = readFileSync(file, 'utf8');
+      for (const surface of NEVER_REFUSED_SURFACES) {
+        const scans = src.split('scanUpload(').slice(1).filter((s) => s.slice(0, 200).includes(`surface: '${surface}'`));
+        for (const after of scans) {
+          sites += 1;
+          const upload = after.slice(0, after.indexOf('recordUnscannedUpload('));
+          if (!/\.upload\([\s\S]*folder: heldFolder\(scan, /.test(upload)) missing.push(`${file.slice(MODULES.length + 1)} ${surface}`);
+        }
+      }
+    }
+    expect(sites).toBeGreaterThanOrEqual(3);
     expect(missing).toEqual([]);
   });
 
