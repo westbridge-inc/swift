@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { BarChart3, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Calendar, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
 import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import type { ShellPerson } from '@/components/customer-shell';
@@ -20,13 +20,16 @@ import { StoreLiveFeed } from '@/components/store-live-feed';
  * The business console's places: the app's four sections
  * (apps/mobile/src/modules/vendor/VendorStack.tsx), owner ruling 11 Oct 2026.
  * The items tab is named for the store's type (lib/catalogue-name); staff see
- * it as "Availability" and have no Insights, exactly as in the app. Weekly fee,
- * bulk import and hours are reached from the Orders home and Account.
+ * it as "Availability" and have no Insights, exactly as in the app. A Services
+ * store's owners and managers also get Schedule after Orders (the app's R1 tab:
+ * a Services store runs its day from a booking agenda). Weekly fee, bulk import
+ * and hours are reached from the Orders home and Account.
  */
-export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined) => {
+export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined, vendorType?: string) => {
   const manager = role === 'OWNER' || role === 'MANAGER';
   return [
     { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
+    ...(manager && vendorType === 'SERVICE' ? [{ href: '/dashboard/schedule', label: 'Schedule', icon: Calendar, exact: false }] : []),
     { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
     ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
     // Account is the store's settings page until the app's Account screen lands (PR D).
@@ -145,7 +148,7 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
 
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
   const { role } = useStoreRole();
-  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role), [selected?.vendorType, role]);
+  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role, selected?.vendorType), [selected?.vendorType, role]);
 
   // [PERF row 8] The store's live feed, for a store the server listed for this account.
   const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;

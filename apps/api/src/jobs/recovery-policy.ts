@@ -74,6 +74,7 @@ export const JOB_RECOVERY: Record<JobName, Recovery> = {
   'audit-chain-verify': { policy: 'SAFE_REPLAY', why: 'Walks the audit chain and recomputes every link; writes only a gauge and, on a break, an admin notification. A second run repeats the same verdict.' },
   'audit-chain-anchor': { policy: 'SAFE_REPLAY', why: 'Appends one anchor row with the current head and tells the admins. A replay appends a second anchor of the same head — harmless, and the table is append-only by design.' },
   'erasure-ledger-watch': { policy: 'SAFE_REPLAY', why: 'Reads ledger counts and ages and pages through pageOps, which dedupes on an open page. It writes no business rows.' },
+  'malware-scanner-watch': { policy: 'SAFE_REPLAY', why: 'Asks the scanner PING, counts consecutive failures in one Redis key and pages through pageOps, which keeps one open page per title. It writes no business rows; a replay is one more ask.' },
   'backup-freshness': { policy: 'SAFE_REPLAY', why: 'Reads backup state and pages through opsPageOnce, which is explicitly deduped. It writes no business rows.' },
   'batching-shadow-scan': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
   'billing-fx-notices': { policy: 'NOT_CERTIFIED', why: 'Not yet certified — see the method in this file.' },
@@ -141,6 +142,7 @@ export type JobName =
   | 'auto-complete'
   | 'backup-freshness'
   | 'erasure-ledger-watch'
+  | 'malware-scanner-watch'
   | 'reaper-lag'
   | 'audit-chain-verify'
   | 'audit-chain-anchor'
