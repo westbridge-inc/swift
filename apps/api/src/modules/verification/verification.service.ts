@@ -2391,13 +2391,15 @@ export class VerificationService {
     userId: string,
     vendor: { id: string; name: string },
   ): Promise<void> {
-    const notice = await db.notification.create({ data: {
+    // [item 20] The owner's inbox, written inside the projection transaction (often an admin's or a job's): with the
+    // wall on, an INSERT without RETURNING through the one notice helper (notice_write admits it; a read-back would not).
+    const notice = await insertNoticeFor(db, {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Documents approved',
       body: `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`,
       data: { vendorId: vendor.id },
-    } });
+    });
     this.projectionNotices.get(db)?.push(notice.id);
   }
 

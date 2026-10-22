@@ -512,7 +512,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/inactivity.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 4,
+      'modules/verification/verification.service.ts insertNoticeFor': 5,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
