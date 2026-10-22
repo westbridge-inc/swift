@@ -15,6 +15,22 @@ describe('console navigation', () => {
     expect(navFor(name, 'OWNER').map(({ label }) => label)).toEqual(['Orders', name, 'Insights', 'Account']);
   });
 
+  // The app's R1 tab (VendorStack: isService && manager): a Services store runs its
+  // day from a booking agenda, so its owners and managers get Schedule after Orders.
+  it.each(['OWNER', 'MANAGER'] as const)('a %s of a Services store also sees Schedule, right after Orders', (role) => {
+    const nav = navFor('Services', role, 'SERVICE');
+    expect(nav.map(({ label }) => label)).toEqual(['Orders', 'Schedule', 'Services', 'Insights', 'Account']);
+    expect(nav[1]?.href).toBe('/dashboard/schedule');
+  });
+
+  it('no Schedule for a Services store\'s staff, nor for any other store type, as in the app', () => {
+    expect(navFor('Services', 'STAFF', 'SERVICE').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
+    expect(navFor('Services', undefined, 'SERVICE').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
+    for (const [name, type] of [['Menu', 'RESTAURANT'], ['Inventory', 'SUPERMARKET'], ['Products', 'STORE']] as const) {
+      expect(navFor(name, 'OWNER', type).map(({ label }) => label)).toEqual(['Orders', name, 'Insights', 'Account']);
+    }
+  });
+
   it('a staff login sees Orders, Availability and Account, as in the app', () => {
     expect(navFor('Menu', 'STAFF').map(({ label }) => label)).toEqual(['Orders', 'Availability', 'Account']);
     // Unknown role reads as least privilege (the app's vendorSurfaceForRole).

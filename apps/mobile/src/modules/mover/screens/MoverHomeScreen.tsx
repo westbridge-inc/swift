@@ -53,6 +53,7 @@ import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
 import { useJobRing } from '../../../hooks/useJobRing';
 import { PushOffStrip } from '../../../components/PushOffStrip';
+import { docLabel } from '../../../components/onboarding/docLabels';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -818,7 +819,7 @@ export function MoverHomeScreen({ navigation }: any) {
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
                   <Feather name="clock" size={15} color={dk.warning} style={{ marginTop: 1 }} />
                   <T variant="label" style={{ flex: 1, color: dk.text }}>
-                    Your {expiringDoc.docType.replace(/_/g, ' ')} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
+                    Your {docLabel(expiringDoc.docType)} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
                   </T>
                 </View>
               )}

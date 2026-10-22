@@ -6,6 +6,7 @@ import { withAlpha } from './surface';
 import { color, space } from '@swift/ui';
 import { T, TonePill } from '../../kit';
 import { money } from '../../lib/money';
+import { moverStatusLabel } from '../../lib/orderStatus';
 
 export const GUTTER = space['2xl'];
 
@@ -59,10 +60,10 @@ export function CustomerTrustBadge({ trust, cash }: { trust?: { trustLevel: stri
 
 export function JobStatusPill({ status, dark }: { status?: string; dark?: boolean }) {
   const s = String(status ?? '').toUpperCase();
-  const label = s.replace(/_/g, ' ').toLowerCase();
-  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={s === 'DELIVERED' ? 'Delivered' : 'Completed'} tone="success" dark={dark} />;
-  if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" dark={dark} />;
-  return <TonePill label={label || 'In progress'} tone="brand" dark={dark} />;
+  // [UI-SWEEP U73] The status in the rider's and driver's words (lib/orderStatus),
+  // never the code with spaces; the pill keeps only its tone.
+  const tone = s === 'DELIVERED' || s === 'COMPLETED' ? 'success' : s === 'CANCELLED' ? 'error' : 'brand';
+  return <TonePill label={moverStatusLabel(s)} tone={tone} dark={dark} />;
 }
 
 /** Pickup → drop-off pair with the dot / line / pin idiom.
