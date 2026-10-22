@@ -79,6 +79,7 @@ import {
 } from '../order/order-status';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 const updateRiderProfileSchema = z.object({
   riderType: z.nativeEnum(RiderType).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
@@ -1226,12 +1227,14 @@ export async function riderRoutes(app: FastifyInstance) {
   const ACTIVE_ORDER_INCLUDE = {
     vendor: {
       select: {
-        id: true, name: true, logoUrl: true, phone: true,
+        // [O-1] Not `phone`: that is the store's account/OTP line, and no build read it.
+        id: true, name: true, logoUrl: true,
         latitude: true, longitude: true,
         addressLine1: true, city: true,
       },
     },
-    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
+    // [COORD 17 Oct] The rider calls the customer: first name + phone, never the last name.
+    // [O-1] The phone goes only to an installed store build (withCounterpartPhones on the way out).
     customer: {
       select: {
         id: true,
@@ -1268,7 +1271,8 @@ export async function riderRoutes(app: FastifyInstance) {
     const order = await app.prisma.order.findUnique({
       where: { id: rider.currentOrderId, riderId: rider.id },
       // [F-0011] The response spreads this row wholesale — omit at the source.
-      omit: HANDOVER_SECRETS_OMIT,
+      // [O-1] Likewise the parcel recipient's number: no build read it.
+      omit: { ...HANDOVER_SECRETS_OMIT, courierRecipientPhone: true },
       include: ACTIVE_ORDER_INCLUDE,
     });
 
@@ -1280,7 +1284,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return { success: true, data: null };
     }
 
-    return { success: true, data: activeOrderView(order) };
+    return { success: true, data: withCounterpartPhones(request, activeOrderView(order)) };
   });
 
   /** GET /orders/active-legs — [B6] EVERY live leg, not only the pointer's.
@@ -1294,10 +1298,10 @@ export async function riderRoutes(app: FastifyInstance) {
     const rows = await app.prisma.order.findMany({
       where: { riderId: rider.id, orderType: { not: 'TAXI' }, status: { notIn: TERMINAL_ORDER_STATUSES } },
       orderBy: { acceptedAt: 'asc' },
-      omit: HANDOVER_SECRETS_OMIT,
+      omit: { ...HANDOVER_SECRETS_OMIT, courierRecipientPhone: true },
       include: ACTIVE_ORDER_INCLUDE,
     });
-    const legs = rows.map((o) => ({ ...activeOrderView(o), isPrimary: o.id === rider.currentOrderId }));
+    const legs = rows.map((o) => ({ ...withCounterpartPhones(request, activeOrderView(o)), isPrimary: o.id === rider.currentOrderId }));
     const first = legs[0];
     const run = legs.length >= 2 && first
       ? {

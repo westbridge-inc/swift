@@ -163,6 +163,17 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'money',
   },
   {
+    // [O-1 · owner 22 Oct 2026] ON until store builds 9-12 / vc7-vc8 are retired (launch checklist).
+    key: 'counterpart_phones_to_old_apps',
+    setting: 'COUNTERPART_PHONES_TO_OLD_APPS',
+    source: 'env',
+    offWhen: '0',
+    title: "Old app builds still get the other party's number",
+    whileOff:
+      "No app is sent another person's personal phone number: phones on store builds 9-12 (iPhone) and vc7-vc8 (Android) show no Call button for the rider, driver, customer or store on a live order and use chat or support instead. Builds that know the Swift call bridge are not affected (they are never sent a number). Set to 0 only when those builds are retired.",
+    impact: 'product',
+  },
+  {
     key: 'web_taxi_booking',
     setting: 'WEB_TAXI_BOOKING',
     source: 'env',

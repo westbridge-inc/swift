@@ -77,6 +77,7 @@ import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
 import { assertHirePlateChange } from '../verification/hire-plate';
 import { weeklyFeeMissingRowPolicy, ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { withCounterpartPhones } from '../calls/counterpart-phone';
 
 const updateDriverProfileSchema = z.object({
   vehicleMake: z.string().max(50).optional(),
@@ -869,7 +870,8 @@ export async function driverRoutes(app: FastifyInstance) {
       // [F-0011] Polled continuously by the driver app — the PIN must never ride along.
       omit: HANDOVER_SECRETS_OMIT,
       include: {
-        // [COORD 17 Oct] The driver calls the passenger (no masked calling yet): first name + phone, never the last name.
+        // [COORD 17 Oct] The driver calls the passenger: first name + phone, never the last name.
+        // [O-1] The phone goes only to an installed store build (withCounterpartPhones below).
         customer: { select: { id: true, firstName: true, phone: true } },
         statusHistory: { orderBy: { createdAt: 'desc' }, take: 10 },
       },
@@ -890,6 +892,7 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] From the arrival on, the live wait: what the driver
     // collects on top of the route fare, the same number the freeze will take.
     const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
+    if (order) withCounterpartPhones(request, order);
     return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...stopWait, ...waiting } : order };
   });
 
@@ -1037,7 +1040,7 @@ export async function driverRoutes(app: FastifyInstance) {
           id: driver.id,
           firstName: driver.user.firstName,
           lastName: driver.user.lastName,
-          phone: driver.user.phone,
+          // [O-1] Never the driver's number here: no build ever read it, and the order room is not a directory.
           avatar: driver.user.avatar,
           vehicleMake: driver.vehicleMake,
           vehicleModel: driver.vehicleModel,
