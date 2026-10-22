@@ -60,9 +60,14 @@ describe('vendorPhoto / itemPhoto — never invent a photograph [F-264]', () => 
 
 
 describe('categoryPhoto — the merchant\'s own picture or nothing [S8]', () => {
-  it("returns the category's own image when the merchant set one", () => {
-    expect(categoryPhoto({ name: 'Mains', imageUrl: 'https://cdn.swiftgy.com/c/mains.webp' }))
-      .toBe('https://cdn.swiftgy.com/c/mains.webp');
+  it("returns the category's own photo when Swift keeps it, sized from the ladder", () => {
+    expect(categoryPhoto({ name: 'Mains', imageUrl: 'items/v1/abcdefghijklmnop.jpg' }, 640))
+      .toMatch(/\/items\/v1\/abcdefghijklmnop\.jpg\?w=640$/);
+  });
+
+  it('[IMAGES-E2E PR5 · COORD ruling 19 Oct (a)] never an outside address: a customer\'s phone loads no third-party host', () => {
+    expect(categoryPhoto({ name: 'Mains', imageUrl: 'https://cdn.swiftgy.com/c/mains.webp' })).toBeNull();
+    expect(categoryPhoto({ name: 'Mains', imageUrl: '//elsewhere.example/x.jpg' })).toBeNull();
   });
 
   it('returns null when there is no picture — the caller draws PhotoPlaceholder', () => {
