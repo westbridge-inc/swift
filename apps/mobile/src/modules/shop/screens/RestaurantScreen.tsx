@@ -12,7 +12,7 @@ import { requestAuthContinuation } from '../../../navigation/authContinuation';
 import { distanceLabel } from '../../../lib/geo';
 import { STORE_REPORT_REASONS } from '../../../lib/reportReasons';
 import { forgivingFilter } from '../../../lib/forgivingSearch';
-import { itemPhoto, vendorPhoto } from '../../../lib/images';
+import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
@@ -367,7 +367,7 @@ function RestaurantStore() {
             colour; nothing here tints the image. */}
         <View>
           <Photo
-            uri={vendorPhoto(v)}
+            uri={vendorPhoto(v, HERO_PHOTO_WIDTH)}
             label={v.name}
             // The store's name is set ON this photo, in the title below — so
             // a store with no cover photo must not print it a second time in

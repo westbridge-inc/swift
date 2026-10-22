@@ -14,7 +14,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { touchTarget } from '../../../kit/touch-target';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useDriverRouteLine } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { CustodyRecoverySection } from '../CustodyRecoverySection';
 import { useMoverPreview } from '../../../stores/moverPreview';
@@ -35,8 +35,10 @@ import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emerg
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
+import { driverMapLine } from '../../../lib/routeLine';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { moverStatusLabel } from '../../../lib/orderStatus';
 import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -196,6 +198,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // [TAXI multi-stop · part 4] With a stop open, the passenger-didn't-come-back
   // outcome opens only at the server's grace time for that stop.
   const noShowOpen = useNoShowOpen(isDriver ? liveJob : null);
+  // [TAXI route line] The road through the ride's own points when the server
+  // has one (read once per ride, never polled); else the straight heading.
+  const roadLine = useDriverRouteLine(isDriver ? liveJob : null);
 
   // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
   // changes — a stacked-leg switch, a leg dropped from the run (the
@@ -266,6 +271,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const itinerary = isDriver ? rideStops(job) : [];
   const itineraryPoints = itinerary.flatMap((s) => (s.lat != null && s.lng != null ? [{ sequence: s.sequence, latitude: s.lat, longitude: s.lng }] : []));
   const routePoints = pickup && drop ? [pickup, ...itineraryPoints.map(({ latitude, longitude }) => ({ latitude, longitude })), drop] : [];
+  const mapLine = driverMapLine(isDriver ? roadLine.data : null, routePoints);
   const region =
     itineraryPoints.length > 0 && pickup && drop
       ? regionAround(routePoints)
@@ -662,11 +668,12 @@ export function ActiveJobScreen({ navigation }: any) {
           ))}
           {pickup && drop ? (
             <>
-              {/* Bold route line: white halo under the accent stroke. Geodesic
-                  connector — a heading, not turn-by-turn. [TAXI multi-stop]
-                  It runs through the stops in order. */}
-              <Polyline coordinates={routePoints} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
-              <Polyline coordinates={routePoints} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
+              {/* Bold route line: white halo under the accent stroke. [TAXI route
+                  line] The road the server's routing engine gives, through the
+                  stops in order; without one, the geodesic heading through the
+                  same points, as before (a heading, not turn-by-turn). */}
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={color.brand[500]} strokeWidth={5} />
             </>
           ) : null}
         </MapView>
@@ -750,7 +757,8 @@ export function ActiveJobScreen({ navigation }: any) {
                   {job.orderNumber ? `ORDER #${job.orderNumber}` : 'CURRENT JOB'}
                 </T>
                 <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
-                  {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
+                  {/* [UI-SWEEP U73] the status in words, never the code */}
+                  {moverStatusLabel(job.status)}
                 </T>
               </View>
               <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>
