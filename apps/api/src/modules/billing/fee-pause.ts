@@ -50,14 +50,36 @@ import { feeCheckoutEveryPlatformOn } from './fee-checkout-switch';
 /** The switch row the MMG checkout's per-platform rule reads. */
 export type PayPathReader = Pick<PrismaClient, 'platformConfig'>;
 
+/** Every setting the MMG checkout's configuration is read from (providers/mmg/mmg-checkout.ts).
+ *  fee-pause-pay-path.test.ts keeps this list equal to what that file reads. */
+export const CHECKOUT_CONFIG_ENV = [
+  'NODE_ENV', 'MMG_DRIVER', 'MMG_CHECKOUT_ENABLED', 'MMG_CHECKOUT_URL', 'MMG_CHECKOUT_MERCHANT_ID', 'MMG_CHECKOUT_CLIENT_ID',
+  'MMG_CHECKOUT_MERCHANT_NAME', 'MMG_CHECKOUT_SECRET_KEY', 'MMG_CHECKOUT_RETURN_ORIGIN', 'MMG_CHECKOUT_PUBLIC_KEY',
+  'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_CREATION_ZONE',
+] as const;
+/** The last answer, with the exact settings it was computed from: the fee pause is read on hot paths
+ *  (catalogue, order gates), and loading the live configuration parses two RSA keys. A setting that
+ *  changes (a test, or a restart) misses the cache and is computed again. */
+let configuredCache: { settings: readonly (string | undefined)[]; configured: boolean } | null = null;
+
+/** Tests clear the remembered checkout-configuration answer. */
+export function resetMmgCheckoutConfiguredCache(): void {
+  configuredCache = null;
+}
+
 /** MMG_CHECKOUT_ENABLED=1 with a configuration its provider loads (never the disabled provider). */
 function mmgCheckoutConfigured(env: Record<string, string | undefined>): boolean {
   if (!mmgCheckoutEnabled(env)) return false;
+  const settings = CHECKOUT_CONFIG_ENV.map((name) => env[name]);
+  if (configuredCache && configuredCache.settings.every((value, i) => value === settings[i])) return configuredCache.configured;
+  let configured: boolean;
   try {
-    return getMmgCheckoutProvider(env).driver !== 'disabled';
+    configured = getMmgCheckoutProvider(env).driver !== 'disabled';
   } catch {
-    return false; // an incomplete configuration is no way to pay (the boot guard refuses it first)
+    configured = false; // an incomplete configuration is no way to pay (the boot guard refuses it first)
   }
+  configuredCache = { settings, configured };
+  return configured;
 }
 
 /** Can a partner pay the weekly fee with MMG on this server right now? */

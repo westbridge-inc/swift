@@ -18,6 +18,8 @@
 // ---------------------------------------------------------------------------
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { generateKeyPair, type KeyObject } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { PaymentMethod } from '@prisma/client';
@@ -28,7 +30,8 @@ import { BillingService, MMG_PUSH_OFF_REASON } from '../modules/billing/billing.
 import { NotificationService } from '../modules/notification/notification.service';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { MMG_PUSH_RAIL_ENV } from '../providers/mmg/mmg-provider';
-import { noLivePayPath } from '../modules/billing/fee-pause';
+import { CHECKOUT_CONFIG_ENV, noLivePayPath, resetMmgCheckoutConfiguredCache } from '../modules/billing/fee-pause';
+import * as mmgCheckout from '../providers/mmg/mmg-checkout';
 import { FEE_CHECKOUT_PLATFORMS_KEY, resetFeeCheckoutSwitchCache } from '../modules/billing/fee-pay-actions';
 import { FEE_PAUSE_REPAIR_PREFIX, MMG_PAUSE_CLOCKS_KEY, feePauseStatus, syncMmgPauseClock } from '../modules/billing/mmg-pause';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
@@ -154,6 +157,38 @@ describe('the pay-path truth table (no database)', () => {
     reader.value = { ios: true };
     expect(await paused(reader, env)).toBe(false);
     expect(reader.reads).toBe(3);
+  });
+
+  it('[perf] the checkout configuration is loaded once per set of settings, and again whenever any one of them changes', async () => {
+    resetMmgCheckoutConfiguredCache();
+    const load = vi.spyOn(mmgCheckout, 'getMmgCheckoutProvider');
+    try {
+      const env = test({ ...LIVE, ...checkoutOn() });
+      const reader = rowReader(null);
+      for (let i = 0; i < 5; i += 1) expect(await paused(reader, { ...env })).toBe(false);
+      expect(load).toHaveBeenCalledTimes(1);
+      // Any setting the configuration is read from misses the cache: here, each one emptied refuses.
+      for (const name of CHECKOUT_CONFIG_ENV.filter((n) => !['NODE_ENV', 'MMG_DRIVER', 'MMG_CHECKOUT_CREATION_ZONE', 'MMG_CHECKOUT_URL'].includes(n))) {
+        const before = load.mock.calls.length;
+        expect(await paused(reader, { ...env, [name]: undefined }), name).toBe(true);
+        if (name !== 'MMG_CHECKOUT_ENABLED') expect(load.mock.calls.length, name).toBe(before + 1);
+      }
+      // ... and the complete settings again are a way to pay again.
+      expect(await paused(reader, env)).toBe(false);
+      // NODE_ENV too: production without an explicit checkout page refuses.
+      expect(await paused(reader, { ...env, NODE_ENV: 'production' })).toBe(true);
+    } finally {
+      load.mockRestore();
+      resetMmgCheckoutConfiguredCache();
+    }
+  });
+
+  it('[perf] the cached settings cover every setting the checkout configuration reads', () => {
+    const source = readFileSync(join(__dirname, '../providers/mmg/mmg-checkout.ts'), 'utf8');
+    const read = new Set([...source.matchAll(/env\['([A-Z0-9_]+)'\]/g)].map((m) => m[1]!));
+    expect(read.size).toBeGreaterThan(5);
+    for (const name of read) expect(CHECKOUT_CONFIG_ENV, name).toContain(name);
+    expect(CHECKOUT_CONFIG_ENV).toContain('NODE_ENV'); // isProduction(env)
   });
 
   it('a live card rail is a way to pay whatever MMG is', async () => {
@@ -307,6 +342,40 @@ describe('live MMG with the push rail off and the checkout off: every fee is pau
       const started = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_FEE_PAUSE_STARTED', createdAt: { gte: new Date(t0.getTime() - 1000) } }, select: { changes: true } });
       expect(started).toHaveLength(1);
       expect(started[0]!.changes).toMatchObject({ reason: 'NO_LIVE_PAY_PATH', mmg: 'no-push-rail-no-live-checkout', card: 'off' });
+    } finally {
+      await noPauseOpen();
+    }
+  });
+});
+
+describe('the pause opens and closes as a platform switch goes off and on', () => {
+  it('ios:false opens the pause (audited, admin sees it, fees held); ios back on closes it and billing resumes', async () => {
+    const subId = await makeVendorSub('MOBILE_MONEY');
+    const env = { NODE_ENV: 'development', ...LIVE, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', ...checkoutOn() };
+    stub(env);
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
+    const t0 = new Date();
+    const since = new Date(t0.getTime() - 1000);
+    const audit = (action: string) => app.prisma.auditLog.findMany({ where: { action, createdAt: { gte: since } }, select: { changes: true } });
+    try {
+      expect(await syncMmgPauseClock(app.prisma, t0, env)).toMatchObject({ paused: false });
+      expect(await audit('BILLING_FEE_PAUSE_STARTED')).toHaveLength(0);
+
+      await setPlatforms({ ios: false });
+      expect(await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 60_000), env)).toMatchObject({ paused: true });
+      const started = await audit('BILLING_FEE_PAUSE_STARTED');
+      expect(started).toHaveLength(1);
+      expect(started[0]!.changes).toMatchObject({ reason: 'NO_LIVE_PAY_PATH', mmg: 'no-push-rail-no-live-checkout', card: 'off' });
+      expect(await feePauseStatus(app.prisma, {}, new Date(), env)).toMatchObject({ paused: true, reason: 'NO_LIVE_PAY_PATH' });
+      expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('pending');
+      expect((await facts(subId)).failed).toEqual([]);
+
+      await setPlatforms({ ios: true });
+      expect(await syncMmgPauseClock(app.prisma, new Date(t0.getTime() + 2 * 60_000), env)).toMatchObject({ paused: false });
+      expect(await audit('BILLING_FEE_PAUSE_ENDED')).toHaveLength(1);
+      expect(await feePauseStatus(app.prisma, {}, new Date(), env)).toMatchObject({ paused: false, resumePending: false });
+      expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
+      expect((await facts(subId)).failed).toEqual([MMG_PUSH_OFF_REASON]);
     } finally {
       await noPauseOpen();
     }
