@@ -75,15 +75,40 @@ export function vendorRespondBy(
     createdAt: Date;
     fulfillment?: string | null;
     appointmentSlot?: Date | null;
+    /** [O-4] The order's lines, when the caller has them: a pre-accept customer question moves the clock. */
+    items?: ReadonlyArray<{ substituteDecideBy?: Date | null }>;
   },
   opts: { slaMinutes: number; holdMs: number },
 ): Date | null {
   if (order.status !== 'PENDING') return null;
   const start = order.placedAt ?? order.createdAt;
-  if (order.fulfillment === 'APPOINTMENT') {
-    return new Date(start.getTime() + appointmentAutoCancelDelayMs(start, order.appointmentSlot ?? null, opts.slaMinutes));
+  const placed = order.fulfillment === 'APPOINTMENT'
+    ? new Date(start.getTime() + appointmentAutoCancelDelayMs(start, order.appointmentSlot ?? null, opts.slaMinutes))
+    : new Date(start.getTime() + opts.holdMs + opts.slaMinutes * 60_000);
+  const afterQuestion = storeClockAfterQuestion(order.items ?? [], opts.slaMinutes);
+  return afterQuestion && afterQuestion > placed ? afterQuestion : placed;
+}
+
+/**
+ * [O-4 · owner 22 Oct 2026] Before accepting, a store may ask the customer about
+ * an out-of-stock item. The store is never auto-cancelled for the customer's
+ * time: its response clock restarts from the customer's answer (or from the
+ * question's deadline while it is open). On a waiting order a line's
+ * substituteDecideBy is either an open question's deadline or a closed
+ * pre-accept question's decision instant (picking.service closedQuestionStamp);
+ * the latest of them plus the SLA is when the store must have answered.
+ * Null when no question was asked.
+ */
+export function storeClockAfterQuestion(
+  lines: ReadonlyArray<{ substituteDecideBy?: Date | null }>,
+  slaMinutes: number,
+): Date | null {
+  let latest: number | null = null;
+  for (const line of lines) {
+    const at = line.substituteDecideBy?.getTime();
+    if (at != null && (latest == null || at > latest)) latest = at;
   }
-  return new Date(start.getTime() + opts.holdMs + opts.slaMinutes * 60_000);
+  return latest == null ? null : new Date(latest + slaMinutes * 60_000);
 }
 
 /**

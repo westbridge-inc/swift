@@ -7,7 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, MMG_SWAP_SETTLES_DIRECTLY } from './substitution-view';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, type AdjustableOrder } from './substitution-view';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
@@ -18,8 +18,12 @@ import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
  *  every picking operation that would rewrite an MMG total fails closed.
  *  Same-price substitutions pass (no money effect); CASH orders pass (the
  *  door handover collects the adjusted amount). */
-function assertMmgMoneyAdjustable(order: { paymentMethod: string | null }): void {
-  if (order.paymentMethod !== 'MOBILE_MONEY') return;
+function assertMmgMoneyAdjustable(order: AdjustableOrder): void {
+  // [O-4 · owner 22 Oct 2026] Before the store accepts, no MMG payment can exist
+  // yet (the store's number shows only after acceptance; no pay link, no claim):
+  // the total may still change, and the customer pays only the total they
+  // confirmed. orderTotalAdjustable decides it; an unprojected fact fails closed.
+  if (orderTotalAdjustable(order)) return;
   throw new AppError(
     409,
     'MMG_ADJUSTMENT_UNAVAILABLE',
@@ -47,11 +51,38 @@ function assertMmgMoneyAdjustable(order: { paymentMethod: string | null }): void
 // for the CAS winner.
 // ---------------------------------------------------------------------------
 
-/** Order states where the pick list is editable by the vendor. */
+/** Order states where the pick list is editable by the vendor.
+ *  [O-4 · owner 22 Oct 2026] PENDING too: BEFORE accepting, the store marks a
+ *  line "Out of stock" (a swap or a removal question the customer answers);
+ *  ticking a line still waits for the accept (setPicked). */
 const PICKABLE_STATES = [
+  'PENDING',
   'ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP',
   'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP',
 ];
+
+/** [O-4] The order facts orderTotalAdjustable and the MMG gate read, projected
+ *  wherever a pick-list write decides on money. */
+const ADJUSTABLE_SELECT = {
+  status: true, paymentMethod: true, paymentStatus: true, orderType: true, mmgClaimMismatchAt: true,
+  acceptedAt: true, mmgAttestedRef: true, customerMmgClaim: true, mmgPayUrlSnapshot: true,
+} as const;
+
+/** The line + order facts every vendor pick-list action reads first. */
+const LINE_INCLUDE = {
+  order: { select: { ...ADJUSTABLE_SELECT, id: true, customerId: true, orderNumber: true, vendorId: true, totalAmount: true } },
+} as const;
+type PickLine = Prisma.OrderItemGetPayload<{ include: typeof LINE_INCLUDE }>;
+
+/** [O-4] Before acceptance a question is part of the store's answer to the
+ *  order (the un-gated ACCEPTED step of the MMG gate); after it, preparation. */
+const questionGateTarget = (status: string) => (status === 'PENDING' ? 'ACCEPTED' : 'PREPARING') as 'ACCEPTED' | 'PREPARING';
+
+/** [O-4] A pre-accept question keeps its decision instant on the line
+ *  (substituteDecideBy), so the store's response clock restarts from the
+ *  customer's answer (autoCancelUnresponsiveOrder, vendorRespondBy). After
+ *  acceptance the field is cleared on close, as before. */
+const closedQuestionStamp = (status: string, at: Date) => (status === 'PENDING' ? at : null);
 
 type PickableStatus = import('@prisma/client').OrderStatus;
 
@@ -78,12 +109,16 @@ export class PickingService {
    * empty bag, a customer charged a delivery fee for it.
    */
   static lineResolved(line: { picked: boolean; subStatus: string }): boolean {
-    return line.picked || line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED';
+    // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order: a tick is a
+    // tool, never a gate. A line is unsettled only while the customer is still
+    // deciding on it (an open swap or removal question).
+    return line.subStatus !== 'PENDING';
   }
 
-  /** [W-28] A line is FULFILLED when something is actually going in the bag. */
+  /** [W-28] A line is FULFILLED when something is actually going in the bag:
+   *  [O-4] every line the store did not take off (ticked or not). */
   static lineFulfilled(line: { picked: boolean; subStatus: string }): boolean {
-    return line.picked && line.subStatus !== 'REFUNDED' && line.subStatus !== 'REJECTED';
+    return line.subStatus !== 'PENDING' && line.subStatus !== 'REFUNDED' && line.subStatus !== 'REJECTED';
   }
 
   /** Gate for Mark-ready on quantity-tracked stores: no open lines. */
@@ -113,13 +148,10 @@ export class PickingService {
     };
   }
 
-  private async getLine(orderId: string, lineId: string) {
+  private async getLine(orderId: string, lineId: string): Promise<PickLine> {
     const line = await this.prisma.orderItem.findFirst({
       where: { id: lineId, orderId },
-      include: { order: { select: {
-        id: true, status: true, customerId: true, orderNumber: true, vendorId: true,
-        paymentMethod: true, paymentStatus: true, orderType: true, mmgClaimMismatchAt: true,
-      } } },
+      include: LINE_INCLUDE,
     });
     if (!line) throw new NotFoundError('Order line', lineId);
     if (!PICKABLE_STATES.includes(line.order.status)) {
@@ -131,6 +163,11 @@ export class PickingService {
   /** Staff tick/untick a shelf-picked line. */
   async setPicked(orderId: string, lineId: string, picked: boolean) {
     const line = await this.getLine(orderId, lineId);
+    // [O-4] Ticks belong to preparation: before the accept, a line is only ever
+    // marked "Out of stock".
+    if (line.order.status === 'PENDING') {
+      throw new AppError(409, 'ACCEPT_FIRST', 'Accept the order first. Before accepting you can only mark an item out of stock.');
+    }
     // [SPS-F-0016 / REPORT-004 F-004-05] Ticking a line IS preparing the order
     // — gated for unpaid MMG like every other affirmative prep action.
     // Unticking (corrective) stays open. This preview check only answers
@@ -156,7 +193,7 @@ export class PickingService {
           id: lineId,
           orderId,
           subStatus: { notIn: ['PENDING', 'REFUNDED', 'REJECTED'] },
-          order: { status: { in: PICKABLE_STATES as PickableStatus[] } },
+          order: { status: { in: PICKABLE_STATES.filter((st) => st !== 'PENDING') as PickableStatus[] } },
         },
         data: { picked },
       });
@@ -179,7 +216,7 @@ export class PickingService {
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
     const order = await tx.order.findUnique({
       where: { id: orderId },
-      select: { status: true, paymentMethod: true, paymentStatus: true, orderType: true, mmgClaimMismatchAt: true },
+      select: ADJUSTABLE_SELECT,
     });
     if (!order) throw new NotFoundError('Order', orderId);
     await mmgClaimLockObserver.afterLock?.({ orderId, actor: 'PICK' });
@@ -198,7 +235,8 @@ export class PickingService {
     const line = await this.getLine(orderId, lineId);
     // [SPS-F-0016] Proposing a substitute is affirmative preparation — gated.
     // (Early answer only; the authority is the gate on the locked row below.)
-    assertMmgFulfilmentAllowed(line.order, 'PREPARING');
+    // [O-4] Before the accept it is part of the store's answer (ACCEPTED gate).
+    assertMmgFulfilmentAllowed(line.order, questionGateTarget(line.order.status));
     if (line.picked) throw new AppError(409, 'ALREADY_PICKED', 'This line is already picked');
     if (line.subStatus !== 'NONE') {
       throw new AppError(409, 'SUBSTITUTION_EXISTS', `This line is already ${line.subStatus.toLowerCase()}`);
@@ -243,7 +281,7 @@ export class PickingService {
     // not pay" committing after the preview leaves nothing to propose on.
     await this.prisma.$transaction(async (tx) => {
       const order = await this.lockPickableOrder(tx, orderId);
-      assertMmgFulfilmentAllowed(order, 'PREPARING');
+      assertMmgFulfilmentAllowed(order, questionGateTarget(order.status));
       if (priceChange !== 0) assertMmgMoneyAdjustable(order);
       const updated = await tx.orderItem.updateMany({
         where: {
@@ -293,9 +331,12 @@ export class PickingService {
     return this.prisma.orderItem.findUnique({ where: { id: lineId } });
   }
 
-  /** No substitute possible → refund the line: totals shrink, stock returns. */
+  /** No substitute possible → refund the line: totals shrink, stock returns.
+   *  [O-4] Before the store accepts, the line is not removed yet: the CUSTOMER
+   *  is asked (askRemoval) — continue without it, or cancel the order. */
   async refundLine(orderId: string, lineId: string, changedBy: string) {
     const line = await this.getLine(orderId, lineId);
+    if (line.order.status === 'PENDING') return this.askRemoval(line, changedBy);
     if (line.picked) throw new AppError(409, 'ALREADY_PICKED', 'This line is already picked');
     // Idempotent on BOTH closed states [REPORT-005 F-005-02]: a customer
     // rejection also closes the line — refunding it again double-decremented
@@ -329,17 +370,87 @@ export class PickingService {
     throw new AppError(409, 'LINE_CHANGED', 'This line just changed — refresh the order');
   }
 
+  /**
+   * [O-4 · owner 22 Oct 2026] "Out of stock" with nothing to swap, BEFORE the
+   * store accepts. Consumer protection: the customer agrees to the changed
+   * order before paying. So the line becomes an open question with nothing
+   * proposed (subStatus PENDING, no substitute): "Continue without it" removes
+   * it (the server lowers the total), "Cancel order" is the free cancel a
+   * waiting order already has. No answer by decideBy = removed (the safe
+   * default the swap question already uses: the total only goes down). The
+   * store accepts the rest after the answer (the accept refuses while a
+   * question is open). Same lock, gates and evidence as a swap proposal.
+   */
+  private async askRemoval(line: PickLine, changedBy: string) {
+    const orderId = line.order.id;
+    if (line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED') return line;
+    if (line.subStatus !== 'NONE') {
+      throw new AppError(409, 'CUSTOMER_DECIDING', `The customer is still deciding about ${line.name}. Wait for the answer, or reject the order.`);
+    }
+    assertMmgFulfilmentAllowed(line.order, 'ACCEPTED');
+    assertMmgMoneyAdjustable(line.order);
+    const decideMinutes = substitutionDecideMinutes();
+    const decideBy = new Date(Date.now() + decideMinutes * 60_000);
+    await this.prisma.$transaction(async (tx) => {
+      const order = await this.lockPickableOrder(tx, orderId);
+      if (order.status !== 'PENDING') {
+        throw new AppError(409, 'LINE_CHANGED', 'This order just changed — refresh it');
+      }
+      assertMmgFulfilmentAllowed(order, 'ACCEPTED');
+      assertMmgMoneyAdjustable(order);
+      const asked = await tx.orderItem.updateMany({
+        where: { id: line.id, orderId, subStatus: 'NONE', picked: false, order: { status: 'PENDING' } },
+        data: { subStatus: 'PENDING', substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: decideBy },
+      });
+      if (asked.count === 0) {
+        throw new AppError(409, 'LINE_CHANGED', 'This line just changed — refresh the order');
+      }
+      await tx.orderStatusLog.create({
+        data: { orderId, status: 'PENDING', changedBy, note: `Out of stock, customer asked: ${line.name}` },
+      });
+    });
+    this.emitPickState(line.order.vendorId, orderId, line.id, { subStatus: 'PENDING' });
+    await emitToOrderRoom(this.prisma, this.io, orderId, 'order:substitution', {
+      orderId, lineId: line.id, originalName: line.name, substituteName: null, substitutePrice: null,
+      quantity: line.quantity, status: 'PENDING', kind: 'REMOVAL', decideBy: decideBy.toISOString(),
+    });
+    const lower = Math.min(Number(line.totalCustomer), Number(line.order.totalAmount));
+    await this.notifications.send({
+      userId: line.order.customerId,
+      type: 'ORDER_UPDATE',
+      title: `${line.name} is out of stock`,
+      body: `The store can't supply ${line.name} for order #${line.order.orderNumber}. In the app, continue without it (your total goes down by $${lower.toLocaleString()}) or cancel the order, within ${decideMinutes} minutes. If you don't answer, it comes off your order and your total goes down.`,
+      data: { orderId, kind: 'substitution_pending', lineId: line.id },
+    });
+    return this.prisma.orderItem.findUnique({ where: { id: line.id } });
+  }
+
   /** The customer's verdict on a pending substitution. */
   async decideSubstitution(orderId: string, lineId: string, customerId: string, approve: boolean) {
     const line = await this.prisma.orderItem.findFirst({
       where: { id: lineId, orderId, order: { customerId } },
       include: { order: { select: {
-        id: true, status: true, customerId: true, orderNumber: true, vendorId: true,
-        paymentMethod: true, paymentStatus: true, orderType: true,
+        ...ADJUSTABLE_SELECT,
+        id: true, customerId: true, orderNumber: true, vendorId: true,
       } } },
     });
     if (!line) throw new NotFoundError('Order line', lineId);
     if (line.subStatus !== 'PENDING') {
+      throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
+    }
+
+    // [O-4] A removal question (nothing proposed): "Continue without it" is the
+    // yes — the line comes off and the total goes down. Its other answer is
+    // "Cancel order" (the free cancel of a waiting order), never a decline here.
+    if (isRemovalQuestion(line)) {
+      if (!approve) {
+        throw new AppError(409, 'CANCEL_INSTEAD', 'To keep this item you can cancel the order instead: nothing has been charged.');
+      }
+      assertMmgMoneyAdjustable(line.order);
+      const closed = await this.closeLine(line, 'REFUNDED', customerId, { note: `Customer continued without: ${line.name}` });
+      if (closed) return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      const finalLine = await this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      if (finalLine && (finalLine.subStatus === 'REFUNDED' || finalLine.subStatus === 'REJECTED')) return finalLine;
       throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
     }
 
@@ -377,15 +488,15 @@ export class PickingService {
       const order = await tx.order.findFirst({
         where: { id: orderId, customerId },
         select: {
-          id: true, status: true, paymentMethod: true, paymentStatus: true,
-          orderType: true, riderId: true, totalAmount: true, vendorId: true, mmgClaimMismatchAt: true,
+          ...ADJUSTABLE_SELECT,
+          id: true, riderId: true, totalAmount: true, vendorId: true,
         },
       });
       if (!order) throw new NotFoundError('Order', orderId);
       if (!PICKABLE_STATES.includes(order.status)) {
         throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${order.status}`);
       }
-      assertMmgFulfilmentAllowed(order, 'PREPARING');
+      assertMmgFulfilmentAllowed(order, questionGateTarget(order.status));
 
       const fresh = await tx.orderItem.findFirst({ where: { id: lineId, orderId } });
       if (!fresh || fresh.subStatus !== 'PENDING') {
@@ -420,7 +531,7 @@ export class PickingService {
         where: { id: lineId, subStatus: 'PENDING', picked: false },
         data: {
           subStatus: 'APPROVED',
-          substituteDecideBy: null,
+          substituteDecideBy: closedQuestionStamp(order.status, new Date()),
           picked: false, // staff still has to shelf-pick the substitute
           name: `${fresh.substituteName} (sub for ${fresh.name})`,
           basePrice: substitutePrice,
@@ -518,7 +629,8 @@ export class PickingService {
       const ord = await tx.order.findUniqueOrThrow({
         where: { id: line.order.id },
         select: {
-          status: true, paymentMethod: true, riderId: true,
+          ...ADJUSTABLE_SELECT,
+          riderId: true,
           subtotalBase: true, subtotalCustomer: true, totalAmount: true,
         },
       });
@@ -548,7 +660,7 @@ export class PickingService {
           // wait is over on the row it writes, not on the row it read.
           ...(opts.decidedBefore ? { substituteDecideBy: { lte: opts.decidedBefore } } : {}),
         },
-        data: { subStatus, substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: null },
+        data: { subStatus, substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: closedQuestionStamp(ord.status, new Date()) },
       });
       if (cas.count === 0) return false;
       await tx.order.update({
@@ -598,9 +710,10 @@ export class PickingService {
   async expireSubstitution(lineId: string, now: Date = new Date()): Promise<'removed' | 'withdrawn' | 'started' | 'skipped'> {
     const line = await this.prisma.orderItem.findFirst({
       where: { id: lineId, subStatus: 'PENDING', picked: false },
-      include: { order: { select: { id: true, status: true, customerId: true, orderNumber: true, vendorId: true, paymentMethod: true } } },
+      include: { order: { select: { ...ADJUSTABLE_SELECT, id: true, customerId: true, orderNumber: true, vendorId: true } } },
     });
     if (!line || !PICKABLE_STATES.includes(line.order.status)) return 'skipped';
+    const removal = isRemovalQuestion(line);
     if (!line.substituteDecideBy) {
       const started = await this.prisma.orderItem.updateMany({
         where: { id: line.id, subStatus: 'PENDING', picked: false, substituteDecideBy: null },
@@ -620,7 +733,7 @@ export class PickingService {
         });
         if (cas.count === 0) return false;
         await tx.orderStatusLog.create({
-          data: { orderId: line.orderId, status: order.status as PickableStatus, changedBy, note: `Substitution withdrawn, no answer in time: ${line.name} → ${line.substituteName ?? 'substitute'}` },
+          data: { orderId: line.orderId, status: order.status as PickableStatus, changedBy, note: removal ? `Out-of-stock question withdrawn, no answer in time: ${line.name}` : `Substitution withdrawn, no answer in time: ${line.name} → ${line.substituteName ?? 'substitute'}` },
         });
         return true;
       });
@@ -630,8 +743,10 @@ export class PickingService {
       await this.notifications.send({
         userId: line.order.customerId,
         type: 'ORDER_UPDATE',
-        title: `${line.name}: the swap question closed`,
-        body: `The store's swap question on order #${line.order.orderNumber} got no answer in time. The store settles ${line.name} with you directly.`,
+        title: removal ? `${line.name}: the question closed` : `${line.name}: the swap question closed`,
+        body: removal
+          ? `The store's question about ${line.name} on order #${line.order.orderNumber} got no answer in time. The store settles ${line.name} with you directly.`
+          : `The store's swap question on order #${line.order.orderNumber} got no answer in time. The store settles ${line.name} with you directly.`,
         data: { orderId: line.orderId, lineId: line.id },
       });
       return 'withdrawn';
@@ -639,14 +754,16 @@ export class PickingService {
 
     const closed = await this.closeLine(line, 'REFUNDED', changedBy, {
       decidedBefore: now,
-      note: `Line removed, no answer to the swap in time: ${line.name}`,
+      note: removal ? `Line removed, no answer to the out-of-stock question in time: ${line.name}` : `Line removed, no answer to the swap in time: ${line.name}`,
     });
     if (!closed) return 'skipped';
     await this.notifications.send({
       userId: line.order.customerId,
       type: 'ORDER_UPDATE',
       title: `${line.name} removed from your order`,
-      body: `The store's swap question got no answer in time, so ${line.name} came off order #${line.order.orderNumber}. Your total went down by $${closed.decTotal.toLocaleString()}.`,
+      body: removal
+        ? `You didn't answer in time, so ${line.name} (out of stock) came off order #${line.order.orderNumber}. Your total went down by $${closed.decTotal.toLocaleString()}.`
+        : `The store's swap question got no answer in time, so ${line.name} came off order #${line.order.orderNumber}. Your total went down by $${closed.decTotal.toLocaleString()}.`,
       data: { orderId: line.orderId, kind: 'line_refunded', lineId: line.id },
     });
     return 'removed';
