@@ -533,6 +533,46 @@ describe('Services — risk-tiered browse', () => {
     for (const row of res.json().data.providers) expect(row.licenceCheckedOn).toBeNull();
   });
 
+  // [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The licence line also comes from the trade's REQUIRED licence (the GEI licence
+  // of an electrician or a solar installer): "Licence on file, checked on [date]" with the day a PERSON approved it.
+  // An engine's approval (kyc:auto) still lets the provider work (the gate reads the record) but is never shown as a
+  // licence a person checked (GUARDRAILS §7(4)).
+  it('[ROLE-DOCS] a solar installer works only with a GEI licence, and the licence a person approved shows with its date', async () => {
+    const trade = 'solar_generator_inverter_installer';
+    const reviewer = await makeUserWithSession(['ADMIN'], 'ADMIN');
+    const checkedAt = new Date('2026-10-20T14:00:00.000Z');
+    const licensed = async (reviewedBy: string, reviewedAt: Date) => {
+      const u = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+      await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(await providerChecklist(app.prisma, u.userId)).toEqual(['national_id', 'police_clearance', 'gei_electrical_licence']);
+      await approveProviderDocs(u.userId);
+      const before = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(before.json().data.isVerified).toBe(false); // no licence, no work
+      await app.prisma.verificationDocument.create({
+        data: { userId: u.userId, role: 'CUSTOMER', docType: 'gei_electrical_licence', fileUrl: 'storage://t/gei.jpg', status: 'APPROVED', consentAt: new Date(), privacyNoticeVersion: 'v1', reviewedBy, reviewedAt },
+      });
+      const after = await inject('POST', '/api/v1/services/providers', { trade, bio: 'Panels and inverters' }, u.token);
+      expect(after.json().data.isVerified).toBe(true);
+      return { ...u, providerId: after.json().data.id as string };
+    };
+    const byPerson = await licensed(reviewer.userId, checkedAt);
+    const byEngine = await licensed('kyc:auto', new Date('2026-10-21T09:00:00.000Z'));
+
+    const res = await inject('GET', `/api/v1/services/providers?trade=${trade}`);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.riskTier).toBe('HIGH');
+    const rows = res.json().data.providers as Array<{ id: string; certified: boolean; selfSkilled: boolean; licenceCheckedOn: string | null }>;
+    expect(rows.find((r) => r.id === byPerson.providerId)).toMatchObject({ certified: true, selfSkilled: false, licenceCheckedOn: checkedAt.toISOString() });
+    expect(rows.find((r) => r.id === byEngine.providerId)).toMatchObject({ certified: false, selfSkilled: true, licenceCheckedOn: null });
+    expect(rows[0]!.id).toBe(byPerson.providerId); // a licence a person checked is listed first
+
+    const me = await inject('GET', '/api/v1/services/providers/me', undefined, byPerson.token);
+    expect(me.json().data).toMatchObject({ certified: true, selfSkilled: false });
+    expect(me.json().data.licenceCheckedOn).toBe(checkedAt.toISOString());
+    const engineMe = await inject('GET', '/api/v1/services/providers/me', undefined, byEngine.token);
+    expect(engineMe.json().data).toMatchObject({ certified: false, selfSkilled: true, licenceCheckedOn: null });
+  });
+
   it('the verified-first promise holds mechanically: unverified never list, a CLAIM is not a badge, real certs outrank ratings', async () => {
     // Isolated trade so the electrician rows above can't blur the ordering.
     const trade = 'plumbing';
