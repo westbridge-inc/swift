@@ -37,5 +37,7 @@ describe('the items tab is named for the store type, like the app', () => {
       expect(within(rail).queryByRole('link', { name: other })).toBeNull();
       expect(within(dock).queryByRole('link', { name: other })).toBeNull();
     }
+    // The app's four sections, for an owner (the fixture's role).
+    expect(within(dock).getAllByRole('link').map((link) => link.textContent)).toEqual(['Orders', name, 'Insights', 'Account']);
   });
 });

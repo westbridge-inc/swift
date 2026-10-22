@@ -3,9 +3,7 @@ import { screen, within, waitFor } from '@testing-library/react';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 import { AdvertiserCampaigns, CampaignRead } from './advertiser-campaigns';
 import { Notifications } from './notifications';
-import { BusinessStatus } from './business-status';
 import InventoryPage from '@/app/dashboard/inventory/page';
-import TodayPage from '@/app/dashboard/page';
 
 const campaign = { id: 'c1', name: 'Lunch special', status: 'DRAFT', statusReason: null, placement: { name: 'Home card', key: 'HOME', tier: 'STANDARD', mediaKind: 'IMAGE' }, cities: ['Georgetown'], startWeek: '2026-10-05', endWeek: '2026-10-12', totalAmount: 2500, currency: 'GYD', invoices: [{ id: 'invoice1', number: 'ADS-1', status: 'PAID', amount: 2500 }], creatives: [], bookings: [] };
 describe('partner read views and controls', () => {
@@ -73,16 +71,8 @@ describe('partner read views and controls', () => {
     // Nothing can be created while advertising is off, so no pointer to do so.
     expect(screen.queryByText(/Create and manage campaigns/)).toBeNull();
   });
-  it.each([['RESTAURANT', 'Restock in Menu →'], ['SUPERMARKET', 'Restock in Inventory →'], ['STORE', 'Restock in Products →'], ['SERVICE', 'Restock in Services →']])('the low-stock link on Today names a %s store catalogue like the app: %s', async (vendorType, words) => {
-    mockApi(({ url }) => {
-      if (url.pathname.endsWith('/vendor/stores')) return { body: { success: true, data: { stores: [{ id: 'store-1', name: 'Test shop', vendorType, isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole: 'OWNER' } } };
-      if (url.pathname.endsWith('/items/low-stock')) return { body: { success: true, data: [{ id: 'rice', name: 'Rice', basePrice: '2500', isAvailable: true, stockQuantity: 1, lowStockThreshold: 5 }] } };
-      return { body: { success: true, data: { vendor: { isCurrentlyOpen: true, acceptingOrders: true, averageRating: 5, totalRatings: 1 }, today: { orders: 0, revenue: 0 }, week: { orders: 0, revenue: 0 }, month: { orders: 0, revenue: 0 } } } };
-    });
-    renderWithQuery(<TodayPage />);
-    const link = await screen.findByRole('link', { name: words });
-    expect(link.getAttribute('href')).toBe('/dashboard/inventory');
-  });
+  // Today's "Restock in …" link went with the Today page: the app's Orders home
+  // names the catalogue on its "Menu & inventory" tile instead (orders-home.test.tsx).
   it('reads notification pages without following untrusted payload links', async () => {
     const pages: string[] = [];
     mockApi(({ url }) => { pages.push(url.searchParams.get('page')!); return { body: { success: true, data: [{ id: 'n1', title: 'Order update', body: 'Your order is ready.', isRead: false, createdAt: '2026-10-04T12:00:00Z', data: { url: 'https://untrusted.test' } }], meta: { total: 21 } } }; });
@@ -93,41 +83,8 @@ describe('partner read views and controls', () => {
     await waitFor(() => expect(pages).toEqual(['1', '2']));
     expect(screen.getByText('Page 2')).toBeTruthy();
   });
-  // The overview's real shape (vendor-analytics.service.ts overview): no store name in it.
-  const overview = { vendor: { averageRating: 4.8, totalRatings: 12, totalOrders: 40, isCurrentlyOpen: true, acceptingOrders: true }, today: { orders: 2, revenue: 2500 }, week: { orders: 9, revenue: 12500 }, month: { orders: 30, revenue: 50000 }, activeMenuItems: 12, pendingOrders: 2, queueValue: 5000 };
-  const storesAs = (myRole: string) => ({ stores: [{ id: 'store-1', name: 'Test shop', vendorType: 'STORE', isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true }], selectedId: 'store-1', myRole });
-  it('names the store from the stores list and pauses orders through the existing accepting-orders endpoint (owner or manager)', async () => {
-    const writes: unknown[] = [];
-    mockApi(({ method, url, init }) => {
-      if (method === 'PUT') { writes.push({ path: url.pathname, body: JSON.parse(String(init?.body)) }); return { body: { success: true } }; }
-      if (url.pathname.endsWith('/vendor/stores')) return { body: { success: true, data: storesAs('MANAGER') } };
-      if (url.pathname.endsWith('/analytics/overview')) return { body: { success: true, data: overview } };
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    const view = renderWithQuery(<BusinessStatus />);
-    const strip = await screen.findByRole('region', { name: 'Store status' });
-    expect(await within(strip).findByText('Test shop')).toBeTruthy();
-    expect(await within(strip).findByText('$2,500')).toBeTruthy();
-    await view.user.click(await within(strip).findByRole('button', { name: 'Pause orders' }));
-    await waitFor(() => expect(writes).toEqual([{ path: '/api/v1/vendor/vendor/toggle-orders', body: { acceptingOrders: false } }]));
-  });
-  it('a staff login sees the store and its state, with no manager-only numbers, no pause button and no error', async () => {
-    const paths: string[] = [];
-    mockApi(({ url }) => {
-      paths.push(url.pathname);
-      if (url.pathname.endsWith('/vendor/stores')) return { body: { success: true, data: storesAs('STAFF') } };
-      if (url.pathname.endsWith('/analytics/overview')) return { status: 403, body: { success: false, error: { code: 'FORBIDDEN', message: 'Managers only' } } };
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    renderWithQuery(<BusinessStatus />);
-    const strip = await screen.findByRole('region', { name: 'Store status' });
-    expect(await within(strip).findByText('Test shop')).toBeTruthy();
-    expect(within(strip).getByText(/open and taking orders/)).toBeTruthy();
-    // Same as the app: only an owner or manager pauses orders (VendorOps canManage).
-    expect(within(strip).queryByRole('button', { name: /Pause orders|Resume orders/ })).toBeNull();
-    expect(screen.queryByText(/Couldn.t load your store status/)).toBeNull();
-    expect(paths).not.toContain('/api/v1/vendor/analytics/overview');
-  });
+  // The store strip above the board was replaced by the app's cards on the Orders
+  // home (PR A); its staff / manager rules are tested in orders-home.test.tsx.
   it('turns the selected menu item off without changing its stock count', async () => {
     const writes: unknown[] = [];
     mockApi(({ method, url, init }) => {
