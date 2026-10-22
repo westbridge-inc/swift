@@ -170,7 +170,9 @@ describe('[TAXI-FLOW 22 Oct 2026] the watcher’s own car is not "drivers are ba
     });
     expect(res.statusCode).toBe(200);
 
-    // Their own car comes online right at the watched point.
+    // The same account switches to driver mode and its own car comes online
+    // right at the watched point (a real online driver: activeRole MOVER).
+    await app.prisma.user.update({ where: { id: me.id }, data: { activeRole: 'MOVER' as never } });
     const own = await app.prisma.driver.create({
       data: {
         userId: me.id,
@@ -187,10 +189,49 @@ describe('[TAXI-FLOW 22 Oct 2026] the watcher’s own car is not "drivers are ba
 
     const dispatch = makeDispatchService(app as never);
     const notifications = new NotificationService(app.prisma, app.io);
+    // Precondition (keeps the test honest): that car IS live supply to anyone
+    // else — the anonymous area read counts it.
+    expect((await dispatch.getAvailability('DRIVER', FIELD, 0, me.tenantId)).level).not.toBe('NONE');
+
     await scanSupplyWatches(app.prisma, dispatch, notifications);
     const watch = await app.prisma.supplyWatch.findFirstOrThrow({ where: { customerId: me.id } });
     expect(watch.notifiedAt).toBeNull();
     expect(await app.prisma.notification.count({ where: { userId: me.id } })).toBe(0);
+
+    // Control: a DIFFERENT driver comes online at the same point — the same
+    // watch is told, once. Only the watcher's own car was excluded.
+    const du = await app.prisma.user.create({
+      data: {
+        phone: testPhone(),
+        firstName: 'Other', lastName: 'Driver',
+        roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
+        isPhoneVerified: true,
+      },
+    });
+    userIds.push(du.id);
+    const otherSession = await app.prisma.session.create({
+      data: {
+        userId: du.id, token: app.jwt.sign({ userId: du.id, role: 'MOVER', jti: nanoid(8) }), refreshToken: nanoid(48),
+        deviceId: `watch-other-${du.id}`, deviceType: 'test',
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      },
+    });
+    const other = await app.prisma.driver.create({
+      data: {
+        userId: du.id,
+        vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2021, vehicleColor: 'Yellow',
+        licensePlate: `SW${nanoid(5)}`,
+        driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
+        isOnline: true, isAvailable: true, documentsVerified: true,
+        rideClass: 'ECONOMY' as never,
+        currentLat: FIELD.lat + 0.002, currentLng: FIELD.lng,
+        lastLocationUpdate: new Date(), locationSessionId: otherSession.id,
+      },
+    });
+    driverIds.push(other.id);
+    await scanSupplyWatches(app.prisma, dispatch, notifications);
+    expect((await app.prisma.supplyWatch.findFirstOrThrow({ where: { customerId: me.id } })).notifiedAt).not.toBeNull();
+    expect(await app.prisma.notification.count({ where: { userId: me.id } })).toBe(1);
   });
 });
 

@@ -355,6 +355,13 @@ describe('the scan', () => {
   it('never counts the queued customer’s OWN driver profile as supply', async () => {
     const FIELD = { lat: 5.1751, lng: -59.4802 }; // Kaieteur: a field no other suite uses
     const dual = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'CUSTOMER');
+    // 1) Customer mode, nobody online: they join the queue.
+    const joined = await join(dual.token, { pickup: FIELD, pickupAddress: 'Kaieteur airstrip', dropoff: { lat: 5.1851, lng: -59.4902 } });
+    expect(joined.statusCode).toBe(201);
+    // 2) The same account switches to driver mode and goes online right at
+    //    the pickup — exactly what makeDriver's real drivers look like
+    //    (activeRole MOVER, fresh fix, bound location session).
+    await app.prisma.user.update({ where: { id: dual.userId }, data: { activeRole: 'MOVER' } });
     const own = await app.prisma.driver.create({
       data: {
         userId: dual.userId,
@@ -364,8 +371,11 @@ describe('the scan', () => {
         lastLocationUpdate: new Date(), locationSessionId: dual.sessionId,
       } as never,
     });
-    const joined = await join(dual.token, { pickup: FIELD, pickupAddress: 'Kaieteur airstrip', dropoff: { lat: 5.1851, lng: -59.4902 } });
-    expect(joined.statusCode).toBe(201);
+    // Precondition (keeps the test honest): that car IS live supply to anyone
+    // else — the anonymous area read counts it.
+    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: dual.userId }, select: { tenantId: true } });
+    const area = await runWithoutTenant(() => scanDeps().dispatch.getAvailability('DRIVER', FIELD, 0, tenantId));
+    expect(area.level).not.toBe('NONE');
 
     const result = await runScan();
     const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: dual.userId } });
