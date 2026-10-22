@@ -45,7 +45,9 @@ function actionsFor(o: VendorOrder) {
   } else if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
-    out.push({ label: 'Start preparing', kind: 'preparing' });
+    // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order's one step is "Paid by MMG" (below);
+    // the server refuses Start preparing for it (MMG_PAYMENT_PENDING).
+    if (!(o.paymentMethod === 'MOBILE_MONEY' && !mmgMoneyMoved(o.paymentStatus))) out.push({ label: 'Start preparing', kind: 'preparing' });
   } else if (s === 'PREPARING') {
     out.push({ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', kind: 'ready' });
   } else if (COURIER_ACTIVE.includes(s)) {

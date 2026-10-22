@@ -41,6 +41,9 @@ function statusActions(order: any): { label: string; action: VendorOrderActionKi
     return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
   // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
+  // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order moves only after "Paid by MMG" (the server
+  // refuses Start preparing with MMG_PAYMENT_PENDING), so that is its one step, on the card's MMG block.
+  if ((s === 'ACCEPTED' || s === 'CONFIRMED') && order?.paymentMethod === 'MOBILE_MONEY' && !['CAPTURED', 'CLAIMED'].includes(order?.paymentStatus)) return [];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
   // [STORE-DASH · owner 22 Oct 2026] The button names the next step in the owner's words: ready for pickup or for delivery.
   if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', action: 'ready' }];

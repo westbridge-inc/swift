@@ -121,3 +121,26 @@ describe('[STORE-DASH] the order window opens at once', () => {
     expect(await screen.findByText(/Could not load this order/)).toBeTruthy();
   });
 });
+
+describe('[STORE-DASH · REVIEW-F S4-1 on #2024] an unpaid MMG order\'s one step is "Paid by MMG"', () => {
+  const mmg = (paymentStatus: string, id = 'o-mmg', orderNumber = 'SW-8006') => wireVendorOrder({ id, orderNumber, status: 'ACCEPTED', paymentMethod: 'MOBILE_MONEY', paymentStatus });
+
+  it('accepted, money not in yet: no "Start preparing" on the card or in the window; the MMG step is there', async () => {
+    api([mmg('PENDING')]);
+    const view = renderWithQuery(<OrdersPage />);
+    const c = await card('SW-8006');
+    expect(within(c).queryByRole('button', { name: 'Start preparing' })).toBeNull();
+    await view.user.click(within(c).getByRole('button', { name: 'Confirm MMG payment' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByRole('button', { name: 'Paid by MMG' })).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: 'Start preparing' })).toBeNull();
+  });
+
+  it('control: money moved (captured, or the store\'s own report) or cash: "Start preparing" stays', async () => {
+    api([mmg('CAPTURED', 'o-cap', 'SW-8007'), mmg('CLAIMED', 'o-clm', 'SW-8008'), wireVendorOrder({ id: 'o-cash', orderNumber: 'SW-8009', status: 'ACCEPTED' })]);
+    renderWithQuery(<OrdersPage />);
+    for (const n of ['SW-8007', 'SW-8008', 'SW-8009']) {
+      expect(within(await card(n)).getByRole('button', { name: 'Start preparing' })).toBeTruthy();
+    }
+  });
+});
