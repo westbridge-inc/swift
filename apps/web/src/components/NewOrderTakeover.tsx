@@ -40,6 +40,21 @@ function chime(ctx: AudioContext) {
   }
 }
 
+/** [STORE-DASH] PENDING, not paused, and its answer clock (if the server sent one) still running. */
+function stillWaiting(o: VendorOrder): boolean {
+  if ((o.status || '').toUpperCase() !== 'PENDING' || mmgDisputePaused(o)) return false;
+  const by = o.respondBy ? Date.parse(o.respondBy) : NaN;
+  return !Number.isFinite(by) || by > Date.now();
+}
+
+/** The page's one sound context, made on first need; null where the browser has none. */
+function audioContext(ref: { current: AudioContext | null }): AudioContext | null {
+  if (ref.current) return ref.current;
+  if (typeof AudioContext === 'undefined') return null;
+  try { ref.current = new AudioContext(); } catch { return null; }
+  return ref.current;
+}
+
 export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: VendorOrder[]; onOpenOrder?: (_id: string) => void }) {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
@@ -56,7 +71,12 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
   const [error, setError] = useState<string | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const titleRef = useRef<string | null>(null);
+  // [STORE-DASH] A browser keeps a page's sound off until the page is pressed
+  // once (a reload starts silent). The takeover says so and offers the press.
+  const [soundOff, setSoundOff] = useState(false);
   const currentBooking = queue[0]?.fulfillment === 'APPOINTMENT';
+  // [STORE-DASH] Orders still waiting for an answer, for the tab title.
+  const waiting = orders.filter(stillWaiting).length;
 
   // Detect unseen PENDING orders between polls. The FIRST poll only baselines —
   // a dashboard opened onto an old queue must not scream about stale orders.
@@ -64,7 +84,12 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
     // [Item 10] A disputed MMG order is paused: nothing to accept, no chime.
     const pending = orders.filter((o) => (o.status || '').toUpperCase() === 'PENDING' && !mmgDisputePaused(o));
     if (seen === null) {
+      // [STORE-DASH · owner 22 Oct "impossible to miss"] An order still waiting
+      // for an answer when the page opens is an open decision, not an old one:
+      // it takes the screen too. Only an order whose answer clock already ran
+      // out (the server is closing it) stays quiet on the board.
       setSeen(new Set(pending.map((o) => o.id)));
+      setQueue(pending.filter(stillWaiting));
       return;
     }
     const fresh = pending.filter((o) => !seen.has(o.id));
@@ -83,27 +108,57 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
     setQueue((q) => (q.some((o) => settled.has(o.id)) ? q.filter((o) => !settled.has(o.id)) : q));
   }, [orders]);
 
-  // Chime + tab flash while the takeover is up.
+  // [STORE-DASH] The page's first press or key wakes the sound, so the next
+  // order is heard even after a reload.
+  useEffect(() => {
+    const wake = () => {
+      const ctx = audioContext(audioRef);
+      if (ctx?.state === 'suspended') void ctx.resume?.().catch(() => {});
+    };
+    window.addEventListener('pointerdown', wake);
+    window.addEventListener('keydown', wake);
+    return () => {
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+  }, []);
+
+  // Chime while the takeover is up.
   useEffect(() => {
     if (queue.length === 0) return;
-    audioRef.current ??= new AudioContext();
-    const ctx = audioRef.current;
+    const ctx = audioContext(audioRef);
+    if (!ctx) return;
+    const blocked = () => setSoundOff(ctx.state === 'suspended');
+    blocked();
+    ctx.onstatechange = blocked;
     chime(ctx);
     const soundTimer = setInterval(() => chime(ctx), 5000);
-
-    titleRef.current ??= document.title;
-    let flash = false;
-    const titleTimer = setInterval(() => {
-      flash = !flash;
-      document.title = flash ? `(${queue.length}) NEW ${currentBooking ? 'BOOKING' : 'ORDER'} — Swift` : titleRef.current!;
-    }, 1000);
-
     return () => {
       clearInterval(soundTimer);
-      clearInterval(titleTimer);
-      if (titleRef.current) document.title = titleRef.current;
+      ctx.onstatechange = null;
     };
-  }, [queue.length, currentBooking]);
+  }, [queue.length]);
+
+  // The tab title: flashes while the takeover is up; afterwards it keeps the
+  // count of orders still waiting (View later included), so a background tab
+  // always says an order is waiting.
+  useEffect(() => {
+    titleRef.current ??= document.title;
+    const base = titleRef.current;
+    if (queue.length > 0) {
+      let flash = false;
+      const titleTimer = setInterval(() => {
+        flash = !flash;
+        document.title = flash ? `(${queue.length}) NEW ${currentBooking ? 'BOOKING' : 'ORDER'} — Swift` : base;
+      }, 1000);
+      return () => { clearInterval(titleTimer); document.title = base; };
+    }
+    if (waiting > 0) {
+      document.title = `(${waiting}) ${waiting === 1 ? 'order waiting' : 'orders waiting'} — ${base}`;
+      return () => { document.title = base; };
+    }
+    return undefined;
+  }, [queue.length, currentBooking, waiting]);
 
   const done = (id: string) => {
     setQueue((q) => q.filter((o) => o.id !== id));
@@ -189,6 +244,15 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
     >
       <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-4 text-center shadow-2xl min-[400px]:p-8">
         <BellRing aria-hidden="true" className="mx-auto h-10 w-10 text-[var(--swift-red)]" />
+        {soundOff && (
+          <button
+            type="button"
+            onClick={() => { const ctx = audioRef.current; if (ctx) void ctx.resume().then(() => chime(ctx)).catch(() => {}); }}
+            className="mx-auto mt-2 flex min-h-11 items-center justify-center rounded-xl bg-[var(--swift-red)]/10 px-4 text-sm font-bold text-[var(--swift-red)]"
+          >
+            Sound is off — tap to hear new orders
+          </button>
+        )}
         <h2 id="new-order-title" className="mt-2 text-3xl font-extrabold text-[var(--swift-red)]">
           {current.fulfillment === 'APPOINTMENT' ? 'NEW BOOKING' : queue.length > 1 ? `${queue.length} NEW ORDERS` : 'NEW ORDER'}
         </h2>

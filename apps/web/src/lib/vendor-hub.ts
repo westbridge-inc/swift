@@ -30,12 +30,13 @@ export function statusActions(order: any): { label: string; action: VendorOrderA
   // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
-  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
+  // [STORE-DASH · owner 22 Oct 2026] The button names the next step in the owner's words: ready for pickup or for delivery.
+  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', action: 'ready' }];
   // A rider claimed the order before the kitchen tapped anything (the normal
   // case when movers are close) — the buttons keep working via timestamps.
   if (COURIER_ACTIVE.includes(s)) {
     if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
-    if (!order?.readyAt) return [{ label: 'Mark ready', action: 'ready' }];
+    if (!order?.readyAt) return [{ label: 'Ready for delivery', action: 'ready' }];
     return [];
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).

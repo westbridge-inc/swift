@@ -51,7 +51,7 @@ describe('the web board helpers are the app\'s, word for word', () => {
   it('behaves like the app on a few known cases', () => {
     expect(orderActions({ status: 'PENDING' }).map((a) => a.label)).toEqual(['Accept', 'Reject']);
     expect(orderActions({ status: 'PREPARING', fulfillment: 'PICKUP' }).map((a) => a.label)).toEqual(['Ready for pickup']);
-    expect(orderActions({ status: 'RIDER_ASSIGNED', preparingAt: '2026-10-11T10:00:00Z' }).map((a) => a.label)).toEqual(['Mark ready']);
+    expect(orderActions({ status: 'RIDER_ASSIGNED', preparingAt: '2026-10-11T10:00:00Z' }).map((a) => a.label)).toEqual(['Ready for delivery']);
     expect(hoursSummary(DAY_LABELS.map((_, dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })))).toBe('Daily · 8:00 AM–10:00 PM');
     expect(hoursSummary([])).toBeNull();
     expect(storeStatusEyebrow({ isCurrentlyOpen: false }, false).label).toBe('CLOSED');
