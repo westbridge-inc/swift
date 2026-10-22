@@ -49,6 +49,20 @@ const fake = vi.hoisted(() => {
   return provider;
 });
 
+/** [REVIEW-G P5] Makes the store-hold check fail, as a database error would. */
+const failingCheck = vi.hoisted(() => ({ on: false, calls: 0 }));
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../modules/compliance/prohibited-gate')>();
+  return {
+    ...real,
+    storeHiddenFromCustomers: (...args: Parameters<typeof real.storeHiddenFromCustomers>) => {
+      failingCheck.calls += 1;
+      if (failingCheck.on) throw new Error('the check could not be made');
+      return real.storeHiddenFromCustomers(...args);
+    },
+  };
+});
+
 vi.mock('../providers/storage/storage-provider', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../providers/storage/storage-provider')>()),
   getStorageProvider: () => fake,
@@ -358,8 +372,49 @@ describe('only a photo a visible store still shows; nothing else in the bucket',
     await makeItem(s.id, key);
     expect((await get(`/${key}`)).statusCode).toBe(200);
     await app.prisma.vendor.update({ where: { id: s.id }, data: { status: 'SUSPENDED' } });
-    resetStorePhotoCachesForTests(); // the 30 s window, elapsed
+    // [REVIEW-G P6] Inside the window the decision already made stands; once 30 s pass it is made again.
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 31_000);
+      await refused(`/${key}`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a check that cannot be made is a refusal, never a pass', async () => {
+    const key = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    await makeItem(store.id, key);
+    failingCheck.on = true;
+    try {
+      await refused(`/${key}`);
+    } finally {
+      failingCheck.on = false;
+    }
+    resetStorePhotoCachesForTests();
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+  });
+
+  it('a menu section the store switched off does not publish its picture [REVIEW-M S4-1]', async () => {
+    const key = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    const section = await app.prisma.category.create({ data: { vendorId: store.id, name: `Off ${wordFreeTag(4)}`, imageUrl: key, isActive: false } });
     await refused(`/${key}`);
+    await app.prisma.category.update({ where: { id: section.id }, data: { isActive: true } });
+    resetStorePhotoCachesForTests();
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+  });
+
+  it('a name no row of the store shows is refused before the visibility reads [REVIEW-M S4-2]', async () => {
+    const unshown = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    const before = failingCheck.calls;
+    await refused(`/${unshown}`);
+    expect(failingCheck.calls).toBe(before);
+    expect(fake.stats.reads).toBe(0);
+    const shown = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    await makeItem(store.id, shown);
+    expect((await get(`/${shown}`)).statusCode).toBe(200);
+    expect(failingCheck.calls).toBe(before + 1);
   });
 
   it('a row holding a key that climbs out of the folder cannot climb: the address is refused before any read', async () => {
@@ -398,5 +453,137 @@ describe('only a photo a visible store still shows; nothing else in the bucket',
     const key = stash(`items/${store.id}/${photoName()}`, Buffer.from('%PDF-1.7 not a photo at all, padded to be long enough'));
     await makeItem(store.id, key);
     await refused(`/${key}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [IMAGES-E2E PR2] A store uploads its own logo and cover. Every store photo (menu
+// item, logo, cover) is kept REDRAWN: upright, at most 1600 px, no metadata at all.
+// The bucket here keeps exactly what the route hands it (it skips the storage seam's
+// own strip), so a clean stored object proves the route's redraw itself.
+// ---------------------------------------------------------------------------
+
+function multipartPhoto(bytes: Buffer, filename: string, type: string) {
+  const boundary = `----swift${nanoid(8)}`;
+  const payload = Buffer.concat([
+    Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${filename}"\r\ncontent-type: ${type}\r\n\r\n`),
+    bytes, Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  return { payload, headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } };
+}
+
+async function uploadTo(url: string, token: string, bytes: Buffer, filename = 'photo.jpg', type = 'image/jpeg') {
+  const { payload, headers } = multipartPhoto(bytes, filename, type);
+  return app.inject({ method: 'POST', url, payload, headers: { ...headers, authorization: `Bearer ${token}` } });
+}
+
+/** The stored object is a clean redraw: no EXIF/GPS/XMP/ICC/IPTC, none of the camera's words, long edge <= 1600. */
+async function expectCleanStored(key: string) {
+  const stored = fake.objects.get(key);
+  expect(stored).toBeDefined();
+  const meta = await sharp(stored!).metadata();
+  expect([meta.exif, meta.xmp, meta.icc, meta.iptc, meta.orientation]).toEqual([undefined, undefined, undefined, undefined, undefined]);
+  expect(Math.max(meta.width ?? 0, meta.height ?? 0)).toBeLessThanOrEqual(1600);
+  for (const secret of ['SecretMaker', 'SecretPhoneModel', 'Jane Private', XMP_PLACE, 'Exif\0\0']) {
+    expect(stored!.includes(Buffer.from(secret))).toBe(false);
+  }
+}
+
+describe('a store uploads its logo and cover; every store photo is kept redrawn', () => {
+  it('a store manager uploads a logo and a cover: kept clean in the store photo folder, and the door serves them', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    for (const [slot, field] of [['logo', 'logoUrl'], ['cover', 'coverImageUrl']] as const) {
+      const res = await uploadTo(`/api/v1/vendor/profile/${slot}`, o.token, await cameraJpeg());
+      expect(res.statusCode).toBe(200);
+      const key = res.json().data[field] as string;
+      expect(key).toMatch(new RegExp(`^items/${s.id}/[A-Za-z0-9_-]{16}\\.jpg$`));
+      expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } }))[field]).toBe(key);
+      await expectCleanStored(key);
+      const served = await get(`/${key}?w=320`);
+      expect(served.statusCode).toBe(200);
+      expect((await sharp(served.rawPayload).metadata()).width).toBe(320);
+    }
+  });
+
+  it('a PNG logo stays a PNG', async () => {
+    const o = await makeOwner();
+    await makeStore(o.ownerId);
+    const png = await sharp({ create: { width: 2400, height: 2400, channels: 4, background: { r: 0, g: 90, b: 200, alpha: 0.5 } } }).png().toBuffer();
+    const res = await uploadTo('/api/v1/vendor/profile/logo', o.token, png, 'logo.png', 'image/png');
+    expect(res.statusCode).toBe(200);
+    const key = res.json().data.logoUrl as string;
+    expect(key.endsWith('.png')).toBe(true);
+    const meta = await sharp(fake.objects.get(key)!).metadata();
+    expect(meta.format).toBe('png');
+    expect(meta.width).toBe(1600);
+  });
+
+  it('a menu item photo is kept redrawn the same way', async () => {
+    const item = await makeItem(store.id, null);
+    const res = await uploadTo(`/api/v1/vendor/items/${item.id}/image`, owner.token, await cameraJpeg());
+    expect(res.statusCode).toBe(200);
+    await expectCleanStored(res.json().data.imageUrl as string);
+  });
+
+  it('taking the logo down stops the door serving it', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const key = (await uploadTo('/api/v1/vendor/profile/logo', o.token, await cameraJpeg())).json().data.logoUrl as string;
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+    const down = await app.inject({ method: 'DELETE', url: '/api/v1/vendor/profile/logo', headers: { authorization: `Bearer ${o.token}` } });
+    expect(down.statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).logoUrl).toBeNull();
+    resetStorePhotoCachesForTests();
+    const gone = await get(`/${key}`);
+    expect(gone.statusCode).toBe(404);
+    expect(gone.headers['cache-control']).toBe('no-store');
+  });
+
+  it('a typed address cannot stand in for an uploaded photo; typed text may only take one down or repeat it', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const other = await makeStore((await makeOwner()).ownerId);
+    const key = (await uploadTo('/api/v1/vendor/profile/cover', o.token, await cameraJpeg())).json().data.coverImageUrl as string;
+    const put = (body: Record<string, unknown>) => app.inject({ method: 'PUT', url: '/api/v1/vendor/profile', payload: body, headers: { authorization: `Bearer ${o.token}` } });
+    for (const body of [
+      { logoUrl: 'https://elsewhere.example/a.jpg' },
+      { coverImageUrl: `items/${other.id}/${photoName()}` },
+      { logoUrl: `items/${s.id}/../../verification/${o.userId}/${photoName()}` },
+      { coverImageUrl: `/uploads/items/${s.id}/${photoName()}` },
+    ]) {
+      const res = await put(body);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error.code).toBe('STORE_PHOTO_UPLOAD_ONLY');
+    }
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).coverImageUrl).toBe(key);
+    expect((await put({ coverImageUrl: key })).statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).coverImageUrl).toBe(key);
+    expect((await put({ coverImageUrl: '' })).statusCode).toBe(200);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).coverImageUrl).toBeNull();
+  });
+
+  it('a file that is not a photo is refused, and someone who is not the store cannot change its logo', async () => {
+    const o = await makeOwner();
+    const s = await makeStore(o.ownerId);
+    const notPhoto = await uploadTo('/api/v1/vendor/profile/logo', o.token, Buffer.from('#!/bin/sh\necho hi\n'.repeat(4)), 'logo.png', 'image/png');
+    expect(notPhoto.statusCode).toBe(400);
+    expect(notPhoto.json().error.code).toBe('BAD_IMAGE');
+    const gif = await uploadTo('/api/v1/vendor/profile/logo', o.token, Buffer.from('GIF89a'), 'logo.gif', 'image/gif');
+    expect(gif.json().error.code).toBe('BAD_IMAGE_TYPE');
+    const user = await app.prisma.user.create({
+      data: { phone: testPhone(), firstName: 'Just', lastName: 'Customer', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', isPhoneVerified: true },
+    });
+    userIds.push(user.id);
+    const token = app.jwt.sign({ userId: user.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await app.prisma.session.create({
+      data: { userId: user.id, token, refreshToken: nanoid(48), deviceId: 'photo-test', deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+    });
+    const outsider = await uploadTo('/api/v1/vendor/profile/logo', token, await cameraJpeg());
+    expect(outsider.statusCode).toBeGreaterThanOrEqual(401);
+    expect(outsider.statusCode).toBeLessThan(500);
+    const outsiderDelete = await app.inject({ method: 'DELETE', url: '/api/v1/vendor/profile/cover', headers: { authorization: `Bearer ${token}` } });
+    expect(outsiderDelete.statusCode).toBeGreaterThanOrEqual(401);
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: s.id } })).logoUrl).toBeNull();
   });
 });

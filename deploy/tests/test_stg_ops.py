@@ -201,7 +201,7 @@ class StgCDoctorHealthDetail(unittest.TestCase):
         # containers are running with a restart policy, and the db queries
         # fail (warn, not FAIL). Keeps the doctor's container section from
         # failing on a test host that merely has no stack running.
-        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
+        sh_shim(self.bin, "docker", 'case "$*" in *"ps -q postgres"*|*"ps -q redis"*|*"ps -q clamd"*) echo "c0";; *" ps"*) exit 0;; *"{{.State.Status}}"*) echo "running";; *"{{.HostConfig.RestartPolicy.Name}}"*) echo "unless-stopped";; *"exec -T postgres"*) exit 1;; esac\nexit 0')
         # Pin the disk check at 57% so the doctor tests do not depend on the
         # host's free space.
         sh_shim(self.bin, "df", 'echo "Filesystem Size Used Avail Capacity Mounted"\necho "/dev/disk1 100Gi 43Gi 57Gi 57% /"')
@@ -1131,6 +1131,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": {"osrm": {}}}))
     else:
         services = {name: {} for name in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"},
                                        {"published": "443", "target": 443, "protocol": "tcp"}]}
         if "--profile" in argv and argv[argv.index("--profile") + 1] == "web":
@@ -1155,7 +1158,7 @@ class Q11PilotUpWebsite(unittest.TestCase):
         self.here = self.tmp / "repo" / "deploy"
         (self.here / "routing-data" / "osrm").mkdir(parents=True)
         (self.here / "routing-data" / "osrm" / "guyana-latest.osrm").write_text("")
-        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py",
+        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py", "check-upload-storage.py",
                      "Caddyfile", "docker-compose.yml", "docker-compose.routing.yml"):
             shutil.copy(DEPLOY / name, self.here / name)
         utils = self.tmp / "repo" / "apps" / "api" / "src" / "utils"
@@ -1859,6 +1862,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": {"osrm": {}}}))
     else:
         services = {name: {} for name in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"},
                                        {"published": "443", "target": 443, "protocol": "tcp"}]}
         for i, arg in enumerate(argv[:-1]):
@@ -1885,7 +1891,7 @@ class AdminConsolePilotUp(unittest.TestCase):
         self.here = self.tmp / "repo" / "deploy"
         (self.here / "routing-data" / "osrm").mkdir(parents=True)
         (self.here / "routing-data" / "osrm" / "guyana-latest.osrm").write_text("")
-        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py",
+        for name in ("pilot-up.sh", "secret-names.sh", "wait-for-migration.sh", "verify-journeys-isolation.py", "check-upload-storage.py",
                      "Caddyfile", "docker-compose.yml", "docker-compose.routing.yml"):
             shutil.copy(DEPLOY / name, self.here / name)
         utils = self.tmp / "repo" / "apps" / "api" / "src" / "utils"

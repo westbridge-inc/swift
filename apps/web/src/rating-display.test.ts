@@ -54,8 +54,9 @@ function stripComments(src: string): string {
  * not touch. It is listed rather than silently skipped so that the exemption is
  * a decision someone made, and so that this list can only shrink.
  */
-const RAW_MEAN_ALLOWED = new Set([
-  'app/dashboard/page.tsx',
+const RAW_MEAN_ALLOWED = new Set<string>([
+  // 'app/dashboard/page.tsx' left this list when the old Today page merged into
+  // the Orders home (PR A); the app's own standing read replaces it in Insights.
 ]);
 
 describe('the public star line comes from the rating mapper, never the raw mean [M-D6]', () => {

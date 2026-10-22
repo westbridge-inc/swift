@@ -194,6 +194,17 @@ the host:
     APPROVED_SHA='<full-40-character-origin-main-commit>'
     ./deploy/pilot-up.sh "$APPROVED_SHA"
 
+[Row 324] pilot-up.sh refuses a deploy whose API and worker do not share one
+durable upload store (`verify_upload_storage`, before anything is pulled,
+built or stopped). The first time a host deploys a revision that has this
+check, run it read-only first, outside the deploy window, so a refusal is
+never met mid-window. It prints `UPLOAD-STORAGE-OK` or `UPLOAD-STORAGE-REFUSED`,
+never a value:
+
+    cd /opt/swift
+    git fetch origin && git show "origin/main:deploy/check-upload-storage.py" > /tmp/check-upload-storage.py
+    docker compose --project-directory deploy -f deploy/docker-compose.yml config --format json | python3 /tmp/check-upload-storage.py; rm -f /tmp/check-upload-storage.py
+
 pilot-up.sh fetches origin/main, refuses a dirty checkout or a SHA outside
 current origin/main, switches to that exact commit, refuses a deploy/.env that
 declares a secret or a wired NAME_FILE whose name is not in the store,
@@ -206,6 +217,26 @@ container plus public HTTPS /ready success. A failed step exits nonzero. It
 never edits deploy-api.yml or launches production.
 VROOM and the geocoders are opt-in profiles; enable them only after their data
 and disk budget are reviewed. Their Compose file publishes no host ports.
+
+### The upload malware scanner (row 312)
+
+Every upload is scanned by the `clamd` service (ClamAV, pinned by tag and
+digest in docker-compose.yml) on the private network before it is stored; the
+API and worker reach it as `clamd:3310` and it publishes no port. pilot-up.sh
+starts it before anything is stopped, waits until it is healthy (signatures
+loaded; a first start on a new volume can take a few minutes) and proves, from
+the new API image on the private network, that the EICAR test string is refused
+and ordinary bytes pass. While clamd does not answer, every upload is refused
+(503) -- the shift liveness selfie included -- and the worker pages ops after
+two failed checks (two minutes apart). `./deploy/doctor.sh` reports it.
+
+Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
+a signature reload (freshclam checks 12 times a day); the service's ceiling is
+2.5 GB. Production refuses `MALWARE_SCAN` in deploy/.env unless it is unset or
+`clamd`; on staging `MALWARE_SCAN=off` takes the gate dark (uploads unscanned).
+
+    docker compose -f deploy/docker-compose.yml ps clamd
+    docker compose -f deploy/docker-compose.yml logs --tail=100 clamd
 
 Verify the exact revision and public entrance:
 
@@ -784,7 +815,7 @@ runbook authorizes a production cutover.
 
 ## 8. Pilot journeys on staging (private instance)
 
-The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 42
+The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 43
 launch-proof journeys over real HTTP: signups, orders, dispatch, taxi, courier,
 services, safety, money records and admin controls. It signs accounts in with
 the dev OTP code, so it runs ONLY against a private instance:

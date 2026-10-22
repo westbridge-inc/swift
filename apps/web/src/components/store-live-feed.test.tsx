@@ -72,6 +72,14 @@ describe('the dashboard shell\'s store feed', () => {
     expect(keys()).toEqual([storeKey('store-1', 'orders'), storeKey('store-1', 'order', 'o2')]);
   });
 
+  it("a Services booking made, moved or cancelled re-reads the Schedule's bookings only (the app's refreshBookings)", () => {
+    const { keys } = mount();
+    const ws = BrowserSocket.all[0]!;
+    ws.frame(frames['open']!); ws.frame(frames['connected']!); ws.frame(frames['authReady']!);
+    ws.frame('42["bookings:changed",{"itemId":"svc-1"}]');
+    expect(keys()).toEqual([storeKey('store-1', 'bookings')]);
+  });
+
   it('after a gap, the whole board once', () => {
     vi.useFakeTimers();
     try {
@@ -83,7 +91,7 @@ describe('the dashboard shell\'s store feed', () => {
       const again = BrowserSocket.all[1]!;
       invalidate.mockClear();
       again.frame(frames['open']!); again.frame(frames['connected']!); again.frame(frames['authReady']!);
-      expect(keys()).toEqual([storeKey('store-1', 'orders'), storeKey('store-1', 'order'), storeKey('store-1', 'overview')]);
+      expect(keys()).toEqual([storeKey('store-1', 'orders'), storeKey('store-1', 'order'), storeKey('store-1', 'overview'), storeKey('store-1', 'bookings')]);
     } finally {
       vi.useRealTimers();
     }

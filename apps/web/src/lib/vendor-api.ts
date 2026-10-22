@@ -95,6 +95,8 @@ export interface VendorOrder {
   mmgClaimMismatchAt?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
+  /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
+  respondBy?: string | null;
   acceptedAt?: string | null;
   preparingAt?: string | null;
   readyAt?: string | null;
@@ -220,6 +222,17 @@ function normalizeCatalogItem(raw: unknown): CatalogItem {
 export const getStores = () =>
   apiFetch(`${V}/stores`).then((r) => r.data as { stores: Store[]; selectedId: string; myRole: string });
 export const getProfile = () => apiFetch(`${V}/profile`).then((r) => r.data);
+// [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the API scans it and redraws
+// it without camera data, then serves it to customers), or taken down. Store managers only.
+type StorePhotoRow = { id: string; logoUrl: string | null; coverImageUrl: string | null };
+export const uploadStorePhoto = (slot: 'logo' | 'cover', file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch(`${V}/profile/${slot}`, { method: 'POST', body: form }).then((r) => r.data as StorePhotoRow);
+};
+export const removeStorePhoto = (slot: 'logo' | 'cover') =>
+  apiFetch(`${V}/profile/${slot}`, { method: 'DELETE' }).then((r) => r.data as StorePhotoRow);
+
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the
@@ -336,6 +349,11 @@ export const confirmImport = (csv: string) =>
 
 // ── Analytics + money ────────────────────────────────────────────────────────
 export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) => r.data);
+// The app's own reads for the board's revenue pulse and Manage tiles
+// (apps/mobile/src/services/api.ts vendorApi.analyticsRevenue / analyticsOps / qr).
+export const getRevenue = (days = 14) => apiFetch(`${V}/analytics/revenue?days=${days}`).then((r) => r.data);
+export const getOps = (days = 30) => apiFetch(`${V}/analytics/ops?days=${days}`).then((r) => r.data as { avgAcceptMinutes?: number | null } & Record<string, unknown>);
+export const getQr = () => apiFetch(`${V}/qr`).then((r) => r.data as { shortUrl?: string | null; status?: string | null } & Record<string, unknown>);
 export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((r) => r.data);
 // [W-26] A settlement confirmation carries the amount the confirmer says
 // changed hands. The server refuses any figure that is not the ledger's own, so

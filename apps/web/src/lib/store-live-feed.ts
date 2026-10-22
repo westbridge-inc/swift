@@ -28,8 +28,10 @@
 
 import { useSyncExternalStore } from 'react';
 
-/** The store-room events that change what the dashboard shows. */
-export const STORE_FEED_EVENTS = ['order:new', 'order:status_changed', 'order:prep_update', 'order:pick_state'] as const;
+/** The store-room events that change what the dashboard shows. bookings:changed
+ *  (a Services booking made, moved or cancelled; the app's vendorOrderFeed
+ *  refreshBookings) re-reads only the Schedule. */
+export const STORE_FEED_EVENTS = ['order:new', 'order:status_changed', 'order:prep_update', 'order:pick_state', 'bookings:changed'] as const;
 export type StoreFeedEvent = (typeof STORE_FEED_EVENTS)[number];
 
 /** Where the website opens the store socket (under the access cookie's Path). */
