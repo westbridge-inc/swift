@@ -36,6 +36,7 @@ import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { moverStatusLabel } from '../../../lib/orderStatus';
 import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -748,7 +749,8 @@ export function ActiveJobScreen({ navigation }: any) {
                   {job.orderNumber ? `ORDER #${job.orderNumber}` : 'CURRENT JOB'}
                 </T>
                 <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
-                  {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
+                  {/* [UI-SWEEP U73] the status in words, never the code */}
+                  {moverStatusLabel(job.status)}
                 </T>
               </View>
               <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>

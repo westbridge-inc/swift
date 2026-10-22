@@ -760,7 +760,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           label={isOwner ? 'My QR & number' : 'My QR'}
           detail={qrDetail}
           badge={qrQ.data?.status ? <TonePill label={qrStatusWords(qrQ.data.status)} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
-          badgeLabel={qrQ.data?.status ? `QR ${qrStatusWords(qrQ.data.status).toLowerCase()}` : undefined}
+          badgeLabel={qrQ.data?.status ? `QR: ${qrStatusWords(qrQ.data.status)}` : undefined}
           onPress={() => (isOwner ? setShareOpen(true) : navigation.navigate('VendorMyQr'))}
         />
         <ManageTile

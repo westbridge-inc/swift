@@ -10,7 +10,9 @@ import { describe, expect, it, vi } from 'vitest';
 // Returning ...) read as the code with spaces, and so did the order history
 // ("Rider en route pickup") and the customer's recent parcels.
 // Every value of each server enum is read from the API's schema, so a status
-// added there without words here fails this file.
+// added there without words here fails this file. The store's status words
+// are the map the web store console shares (@swift/types order-words), read
+// through lib/orderStatus, the phone's one status vocabulary.
 // ---------------------------------------------------------------------------
 
 vi.mock('react-native', () => ({ Pressable: () => null, TextInput: () => null, View: () => null }));
@@ -27,9 +29,10 @@ vi.mock('../../kit', () => ({
 }));
 vi.mock('../../components/onboarding/BackToSwiftButton', () => ({ BackToSwiftButton: () => null }));
 
-import { orderPaymentLine, paymentMethodWords, qrStatusWords, storeStatusWords, storeTimelineWords, subscriptionPillWords } from './storeWords';
+import { STORE_ORDER_STATUS_WORDS } from '@swift/types';
+import { orderPaymentLine, paymentMethodWords, qrStatusWords, subscriptionPillWords } from './storeWords';
 import { OrderStatusPill } from './shared';
-import { orderStatusLabel } from '../../lib/orderStatus';
+import { orderStatusLabel, storeStatusLabel, storeTimelineLabel } from '../../lib/orderStatus';
 
 const schema = readFileSync(join(__dirname, '../../../../api/prisma/schema.prisma'), 'utf8');
 function enumValues(name: string): string[] {
@@ -52,32 +55,39 @@ describe('[UI-SWEEP U72] every order status reads in words on the store side', (
   it('the pill and the history have words for every status the server can send', () => {
     expect(statuses.length).toBeGreaterThan(15);
     for (const s of statuses) {
-      words(storeStatusWords(s), s);
-      words(storeTimelineWords(s), s);
+      words(storeStatusLabel(s), s);
+      words(storeTimelineLabel(s), s);
+      expect(storeStatusLabel(s), `${s} has its own words`).not.toBe('Status unavailable');
     }
   });
 
-  it('the statuses the pill used to print as codes now read in words', () => {
-    expect(storeStatusWords('REFUNDED')).toBe('Refunded');
-    expect(storeStatusWords('RETURNING')).toBe('Returning to you');
-    expect(storeStatusWords('RETURNED')).toBe('Returned to you');
-    expect(storeTimelineWords('RIDER_EN_ROUTE_PICKUP')).toBe('Rider en route');
-    expect(storeTimelineWords('PENDING')).toBe('Placed');
+  it('the store side speaks the same words as the web store console', () => {
+    for (const s of statuses) expect(storeStatusLabel(s), s).toBe(STORE_ORDER_STATUS_WORDS[s as keyof typeof STORE_ORDER_STATUS_WORDS]);
   });
 
-  it('a status the phone has not been taught reads "In progress", never the code', () => {
-    expect(storeStatusWords('SOMETHING_NEW')).toBe('In progress');
-    expect(storeTimelineWords('SOMETHING_NEW')).toBe('In progress');
-    expect(storeStatusWords(undefined)).toBe('In progress');
+  it('the statuses the pill used to print as codes now read in words', () => {
+    expect(storeStatusLabel('REFUNDED')).toBe('Refunded');
+    expect(storeStatusLabel('RETURNING')).toBe('Returning');
+    expect(storeStatusLabel('RETURNED')).toBe('Returned');
+    expect(storeTimelineLabel('RIDER_EN_ROUTE_PICKUP')).toBe('Rider en route');
+    expect(storeTimelineLabel('PENDING')).toBe('Placed');
+    expect(storeTimelineLabel('PLACED')).toBe('Placed');
+  });
+
+  it('a status the phone has not been taught reads "Status unavailable", never the code', () => {
+    expect(storeStatusLabel('SOMETHING_NEW')).toBe('Status unavailable');
+    expect(storeTimelineLabel('SOMETHING_NEW')).toBe('Status unavailable');
+    expect(storeStatusLabel(undefined)).toBe('Status unavailable');
   });
 
   it('the store pill itself uses those words for every status', () => {
     for (const s of statuses) {
       const el = OrderStatusPill({ status: s }) as any;
+      expect(String(el.props.label), s).toBe(storeStatusLabel(s));
       words(String(el.props.label), s);
     }
-    expect((OrderStatusPill({ status: 'RETURNING' }) as any).props.label).toBe('Returning to you');
-    expect((OrderStatusPill({ status: 'SOMETHING_NEW' }) as any).props.label).toBe('In progress');
+    expect((OrderStatusPill({ status: 'RETURNING' }) as any).props.label).toBe('Returning');
+    expect((OrderStatusPill({ status: 'SOMETHING_NEW' }) as any).props.label).toBe('Status unavailable');
   });
 
   it("a parcel's status reads in the parcel's words, never the code", () => {
@@ -93,7 +103,7 @@ describe('[UI-SWEEP U72] payment method, weekly fee and QR in words', () => {
       words(orderPaymentLine(m), m);
     }
     expect(paymentMethodWords('MOBILE_MONEY')).toBe('MMG');
-    expect(orderPaymentLine('MOBILE_MONEY')).toMatch(/^MMG/);
+    expect(orderPaymentLine('MOBILE_MONEY')).toBe('MMG — the customer pays your store’s MMG account.');
     expect(orderPaymentLine('CASH')).toBe('Cash on handover — you keep 100% of the goods total.');
   });
 
@@ -111,10 +121,12 @@ describe('[UI-SWEEP U72] payment method, weekly fee and QR in words', () => {
     expect(subscriptionPillWords(undefined)).toBe('Status unavailable');
   });
 
-  it('every QR status has words', () => {
+  it("every QR status has the web store console's words (#1615 orders-home)", () => {
     for (const s of enumValues('QrStatus')) words(qrStatusWords(s), s);
-    expect(qrStatusWords('ACTIVE')).toBe('Live');
-    expect(qrStatusWords('SOMETHING_NEW')).toBe('Not live');
+    expect(qrStatusWords('ACTIVE')).toBe('Active');
+    expect(qrStatusWords('SUPERSEDED')).toBe('Replaced by a newer QR');
+    expect(qrStatusWords('DEACTIVATED')).toBe('Turned off');
+    expect(qrStatusWords('SOMETHING_NEW')).toBe('Status unavailable');
   });
 });
 
@@ -132,13 +144,19 @@ describe('[UI-SWEEP U72] the screens use the words, not the code', () => {
     expect(ops).toMatch(/<TonePill label=\{qrStatusWords\(qrQ\.data\.status\)\}/);
     expect(ops).toMatch(/<TonePill label=\{subscriptionPillWords\(sub\.status\)\}/);
     expect(ops).not.toMatch(/String\((qrQ\.data|sub)\.status[^)]*\)\.replace\(/);
+    // The tiles' spoken labels read like the web console's ("QR: Active", "Subscription: Free trial").
+    expect(ops).toMatch(/badgeLabel=\{qrQ\.data\?\.status \? `QR: \$\{qrStatusWords\(qrQ\.data\.status\)\}`/);
+    expect(ops).toMatch(/`Subscription: \$\{subscriptionPillWords\(sub\.status\)\}`/);
   });
 
   it('the store order screen uses the payment line and the history words', () => {
     const detail = src('screens/VendorOrderDetailScreen.tsx');
     expect(detail).toMatch(/\{orderPaymentLine\(order\.paymentMethod\)\}/);
-    expect(detail).toMatch(/\{storeTimelineWords\(entry\.status\)\}/);
+    expect(detail).toMatch(/\{storeTimelineLabel\(entry\.status\)\}/);
     expect(detail).not.toMatch(/String\(order\.paymentMethod/);
+    // The cancelled card: the shared words, never the raw reason.
+    expect(detail).toMatch(/\{cancellationReasonWords\(order\.cancellationReason, 'store'\)\}/);
+    expect(detail).not.toMatch(/\{order\.cancellationReason\}/);
   });
 
   it('no store screen and no parcel list turns a code into text by swapping underscores', () => {
