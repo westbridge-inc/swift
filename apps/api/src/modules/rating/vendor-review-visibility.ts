@@ -4,6 +4,7 @@ import { blockedAuthorIds } from '../moderation/user-block.service';
 import { processReviewText } from './review-scrub';
 import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 import { publicVendorReviewId, resolveVendorReviewId } from './vendor-review-id.service';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 export { publicVendorReviewId, resolveVendorReviewId } from './vendor-review-id.service';
 
 type VendorReviewDb = Pick<PrismaClient, 'rating' | 'userBlock' | '$queryRaw'>;
@@ -203,20 +204,17 @@ export async function respondToVendorReview(
             where: { id: input.vendorId },
             select: { name: true },
           });
-          const notification = await tx.notification.create({
+          const notification = await insertNoticeFor(tx, {
+            userId: rating.raterId,
+            type: 'RATING_RECEIVED',
+            title: `${vendor.name} replied to your review`,
+            body: vendorReviewResponseNotificationBody(processed.text),
             data: {
-              userId: rating.raterId,
-              type: 'RATING_RECEIVED',
-              title: `${vendor.name} replied to your review`,
-              body: vendorReviewResponseNotificationBody(processed.text),
-              data: {
-                kind: 'review_response',
-                ratingId: rating.id,
-                vendorId: input.vendorId,
-              },
-              dedupeKey: vendorReviewResponseDedupeKey(rating.id),
+              kind: 'review_response',
+              ratingId: rating.id,
+              vendorId: input.vendorId,
             },
-            select: { id: true },
+            dedupeKey: vendorReviewResponseDedupeKey(rating.id),
           });
           notificationId = notification.id;
         }

@@ -1,5 +1,6 @@
 import type { Prisma } from '@prisma/client';
 import { gpsEvidence } from '../cash/cash-rules.service';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 // ---------------------------------------------------------------------------
 // [Q8 · DS269 F1] A moved store pin leaves a trace. PUT /vendor/profile lets a
@@ -67,15 +68,12 @@ export async function recordStorePinMove(
   if (!ownerNotified) return null;
   const actor = await tx.user.findUnique({ where: { id: input.actorUserId }, select: { firstName: true, lastName: true } });
   const who = [actor?.firstName, actor?.lastName].filter(Boolean).join(' ') || 'A manager on your team';
-  const notice = await tx.notification.create({
-    data: {
-      userId: ownerUserId,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Your store pin was moved',
-      body: `${who} moved the map pin for ${before.name}. Riders and customers now go to the new spot. If that is wrong, open Account, Store location and move it back.`,
-      data: { kind: 'store_pin_moved', vendorId: input.vendorId, audience: 'business' },
-    },
-    select: { id: true },
+  const notice = await insertNoticeFor(tx, {
+    userId: ownerUserId,
+    type: 'SYSTEM_ANNOUNCEMENT',
+    title: 'Your store pin was moved',
+    body: `${who} moved the map pin for ${before.name}. Riders and customers now go to the new spot. If that is wrong, open Account, Store location and move it back.`,
+    data: { kind: 'store_pin_moved', vendorId: input.vendorId, audience: 'business' },
   });
   return notice.id;
 }
