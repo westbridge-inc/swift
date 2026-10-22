@@ -1838,7 +1838,7 @@ export class BillingService {
     // [PROD-PATH] No live way to pay: the fee is paused before the prepaid
     // spend and before the no-rail fall-through (which would record a
     // failure). billSubscription stops earlier; this is its second wall.
-    if (noLivePayPath()) return { ok: false, deferred: true };
+    if (await noLivePayPath(this.prisma)) return { ok: false, deferred: true };
     // Prepaid balance is money Swift already holds — spend it before pinging any
     // external rail. This is also what makes an admin top-up reinstate a CARD/MMG
     // sub: the recorded cash settles the fee instead of firing a fresh (and
@@ -3889,7 +3889,7 @@ export class BillingService {
    */
   private async finishExhaustedGrace(sub: SubWithRelations, now: Date): Promise<'pending' | 'suspended' | null> {
     // [PROD-PATH] Nothing suspends anyone while no partner can pay.
-    if (noLivePayPath()) return 'pending';
+    if (await noLivePayPath(this.prisma)) return 'pending';
     const result = await this.prisma.$transaction(async (tx) => {
       const authority = await this.lockPaymentOutcomeAuthority(tx, sub);
       const clock = await currentDunningClock(tx, sub.id, now);
