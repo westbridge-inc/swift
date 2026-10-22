@@ -69,6 +69,14 @@ async function fixture(status = 'ACTIVE') {
     // This privacy fixture has no global pause, repair rows or held clocks.
     // Preserve the tripwire for every unmodelled database delegate.
     platformConfig: { findUnique: async () => null, findMany: async () => [] },
+    // [#1541] The projection takes billing's payer -> subscriptions locks first. This double accepts exactly those two
+    // statements and nothing else; the database activation suite proves their order against settlement.
+    $queryRaw: vi.fn(async (parts: TemplateStringsArray) => {
+      const sql = parts.join('?').replace(/\s+/g, ' ').trim();
+      if (sql === 'SELECT "id" FROM "users" WHERE "id" = ? FOR NO KEY UPDATE /* vendor-activation-fee-payer */'
+        || sql === 'SELECT s."id" FROM "subscriptions" s JOIN "vendors" v ON v."id" = s."vendorId" JOIN "vendor_owners" o ON o."id" = v."ownerId" WHERE o."userId" = ? ORDER BY s."id" FOR UPDATE OF s /* vendor-activation-fee-subscriptions */') return [];
+      throw new Error(`Unexpected projection query: ${sql}`);
+    }),
     vendor: { findFirst: readVendor, findUnique: readVendor,
       update: vi.fn(async ({ data }: { data: Row }) => Object.assign(vendor, data)),
       updateMany: vi.fn(async ({ where, data }: { where: Row; data: Row }) => {

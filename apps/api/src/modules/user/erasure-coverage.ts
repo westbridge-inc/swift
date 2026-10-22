@@ -8,6 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION } from '../../utils/public-photo-deletion';
@@ -153,7 +154,10 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
  * was preserved for or sent to the authorities (a legal retention duty, Privacy Policy §6).
  */
 export async function deidentifyCaseRecords(db: PrismaClient, userId: string): Promise<void> {
-  await db.$transaction(async (tx) => {
+  // [item 20] On the system login: under the owner wall the support tickets below are visible only to their
+  // owner, so an admin's closure or the retry sweep would clear none of the person's ticket text. Its own
+  // transaction (it takes the client), never inside a caller's; with the walls off it runs as before.
+  await runAsSystem('account:erasure-case-records', () => db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return;
     await tx.strike.updateMany({ where: { userId, OR: [{ phone: { not: null } }, { addressKey: { not: null } }] }, data: { phone: null, addressKey: null } });
     await tx.enforcementAction.updateMany({
@@ -177,7 +181,7 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
       data: { detail: null, resolutionNote: null },
     });
     await tx.ratingReport.updateMany({ where: { reporterId: userId, status: { not: 'PENDING' }, note: { not: null } }, data: { note: null } });
-  });
+  }));
 }
 
 /**

@@ -1,4 +1,5 @@
 import { POLL } from '../lib/pollPolicy';
+import { prepareUploadImage } from '../lib/uploadImage';
 import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -715,6 +716,30 @@ export function useUploadItemImage() {
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
       return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] A menu section's own photo, sized on the phone first (a smaller upload on
+ *  a mobile network); the server checks, scans and redraws it without the camera's data. */
+export function useUploadCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const prepared = await prepareUploadImage(file);
+      const form = new FormData();
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadCategoryPhoto(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] Takes a menu section's photo down. */
+export function useRemoveCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }

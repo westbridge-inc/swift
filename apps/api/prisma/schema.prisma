@@ -2309,6 +2309,11 @@ model TaxiTripStop {
   legSeconds   Int?
   status       TaxiStopStatus @default(PENDING)
   arrivedAt    DateTime?
+  /// [TAXI multi-stop · COORD ruling 19 Oct, option A] Whether the arrival's
+  /// server-side fix supported it (the E19 arrival gate: a fresh fix within
+  /// 300 m of the stop). Only a verified arrival starts a billable wait; an
+  /// arrival is never refused for it. Null = no arrival yet.
+  arrivalVerified Boolean?
   departedAt   DateTime?
   skippedAt    DateTime?
   skipReason   String?

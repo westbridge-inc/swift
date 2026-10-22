@@ -195,7 +195,8 @@ describe('the gate — no fulfilment while MMG payment is PENDING', () => {
 
     const accept = await inject('PUT', `/api/v1/vendor/orders/${order.id}/accept`, vendorOwner.token, {}, vendorId);
     expect(accept.statusCode).toBe(200);
-    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('ACCEPTED');
+    // [O-3] Paid before the accept: the one tap goes on into preparation.
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).status).toBe('PREPARING');
   });
 
   it('every canonical fulfilment transition AFTER acceptance refuses while unpaid', async () => {
@@ -880,7 +881,7 @@ describe('[F-106-05] claim vs cancel, each COMMIT order forced (sequential, not 
 
     const fresh = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
     expect(cancel.statusCode, 'a claimed order cannot then be cancelled by the customer').toBe(409);
-    expect(fresh.status).toBe('ACCEPTED');
+    expect(fresh.status).toBe('PREPARING'); // [O-3] "Paid by MMG" on an accepted order starts preparation
     expect(fresh.paymentStatus).toBe('CLAIMED');
     expect(forbidden(fresh)).toBe(false);
     expect(await app.prisma.auditLog.count({ where: { entityId: order.id, action: 'VENDOR_CLAIMED_PAYMENT_RECEIVED' } }), 'the claim is on the record exactly once').toBe(1);

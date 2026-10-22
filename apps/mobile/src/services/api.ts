@@ -1289,6 +1289,14 @@ export const vendorApi = {
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
   updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
   deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
+  // [IMAGES-E2E PR4] A menu section's own photo: uploaded (the server checks it is a photo,
+  // scans it, redraws it without location or camera data and serves it to customers), or taken down.
+  uploadCategoryPhoto: (id: string, form: FormData) =>
+    api.post(`/vendor/categories/${id}/image`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeCategoryPhoto: (id: string) => api.delete(`/vendor/categories/${id}/image`),
   createItem: (
     data: VendorItemInput,
     session?: AuthSessionSnapshot,
