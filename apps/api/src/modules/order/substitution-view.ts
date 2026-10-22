@@ -70,7 +70,51 @@ type ViewLine = {
   substituteDecideBy?: Date | null;
   selectedOptions: readonly OptionSnapshot[];
 };
-type ViewOrder = Parameters<typeof assertMmgFulfilmentAllowed>[0] & { totalAmount: unknown };
+type ViewOrder = Parameters<typeof assertMmgFulfilmentAllowed>[0] & AdjustableOrder & { totalAmount: unknown };
+
+/** The order facts that decide whether its total may change in-app. Each one
+ *  is optional so an older projection still type-checks — and an MMG order
+ *  whose facts were not projected is never adjustable (fails closed). */
+export type AdjustableOrder = {
+  paymentMethod: string | null;
+  status?: string;
+  acceptedAt?: Date | null;
+  paymentStatus?: string;
+  mmgAttestedRef?: string | null;
+  customerMmgClaim?: string;
+  mmgPayUrlSnapshot?: string | null;
+  mmgClaimMismatchAt?: Date | null;
+};
+
+/**
+ * [O-4 · owner 22 Oct 2026] May this order's TOTAL change in-app — a line
+ * removed, a swap at another price? On cash (and every rail but MMG): yes, the
+ * handover collects the total the customer confirmed. On MMG the money goes
+ * straight to the store, so the total stays fixed in-app once any payment can
+ * exist (REPORT-006 F-006-02) — and it CAN'T exist yet before the store
+ * accepts: the store's MMG number is shown only after acceptance, so the total
+ * may change only while ALL of this holds: the order still waits for the store
+ * (PENDING, never accepted), no pay link was issued, nobody (store or
+ * customer) has said money moved, and no disagreement is open. Then the
+ * customer pays only the total they confirmed. Anything not projected = no.
+ */
+export function orderTotalAdjustable(order: AdjustableOrder): boolean {
+  if (order.paymentMethod !== 'MOBILE_MONEY') return true;
+  return order.status === 'PENDING'
+    && order.acceptedAt === null
+    && order.paymentStatus === 'PENDING'
+    && order.mmgAttestedRef === null
+    && order.customerMmgClaim === 'UNRECORDED'
+    && order.mmgPayUrlSnapshot === null
+    && order.mmgClaimMismatchAt === null;
+}
+
+/** [O-4] A store's "Out of stock" with no substitute, asked BEFORE it accepts:
+ *  an open question with nothing proposed — the customer continues without the
+ *  item (it comes off, the total goes down) or cancels the order. */
+export function isRemovalQuestion(line: { subStatus: string; substituteItemId: string | null; substituteName: string | null }): boolean {
+  return line.subStatus === 'PENDING' && line.substituteItemId === null && line.substituteName === null;
+}
 
 /**
  * [SUBSTITUTION · owner 17 Oct 2026] How long a store's swap question waits
@@ -91,44 +135,67 @@ export function substitutionDecideMinutes(raw: string | undefined = process.env[
  * MMG order's total can't change in-app, so there the question is WITHDRAWN and
  * the store settles the item with the customer directly; no money moves.
  */
-export function substitutionNoAnswer(order: { paymentMethod: string | null }): 'REMOVE' | 'WITHDRAW' {
-  return order.paymentMethod === 'MOBILE_MONEY' ? 'WITHDRAW' : 'REMOVE';
+export function substitutionNoAnswer(order: AdjustableOrder): 'REMOVE' | 'WITHDRAW' {
+  // [O-4] Before the store accepts and before any MMG payment can exist, an MMG
+  // total may still change, so no answer removes the item there too.
+  return order.paymentMethod === 'MOBILE_MONEY' && !orderTotalAdjustable(order) ? 'WITHDRAW' : 'REMOVE';
 }
 
 export function substitutionView(line: ViewLine, order: ViewOrder) {
   if (line.subStatus === 'NONE') return null;
   if (line.subStatus !== 'PENDING') return { state: line.subStatus, original: null, proposed: null, priceDelta: null, decisions: null, settlementGuidance: null, decideBy: null, ifNoAnswer: null };
   const delta = substitutionLineChange(line).delta;
-  const mmg = order.paymentMethod === 'MOBILE_MONEY';
+  // [O-4] On cash, and on MMG before the store accepts and before any payment
+  // can exist, the total may change; otherwise only a same-price swap may.
+  const adjustable = orderTotalAdjustable(order);
   // Use the existing approval guard verbatim: a proposal may outlive the
   // customer's payment denial. Required context prevents a missing projection
-  // from silently enabling a same-price swap on a disputed order.
+  // from silently enabling a same-price swap on a disputed order. [O-4] Before
+  // the store accepts, answering is part of the acceptance, not preparation.
   let approvalHold: string | null = null;
   try {
-    assertMmgFulfilmentAllowed(order, 'PREPARING');
+    assertMmgFulfilmentAllowed(order, order.status === 'PENDING' ? 'ACCEPTED' : 'PREPARING');
   } catch (error) {
     if (!(error instanceof AppError)) throw error;
     approvalHold = error.message;
   }
+  const original = {
+    name: line.name,
+    unitPrice: cents(Number(line.totalCustomer) / line.quantity),
+    options: chosenOptions(line.selectedOptions),
+  };
+  const decideBy = line.substituteDecideBy ? line.substituteDecideBy.toISOString() : null;
+  if (isRemovalQuestion(line)) {
+    // [O-4] Nothing is proposed: the customer continues without the item (the
+    // total goes down by the line, never below zero) or cancels the order.
+    return {
+      state: line.subStatus,
+      kind: 'REMOVAL' as const,
+      original,
+      proposed: null,
+      priceDelta: -Math.min(Number(line.totalCustomer), Number(order.totalAmount)),
+      decisions: { approve: !approvalHold && adjustable, reject: false },
+      settlementGuidance: approvalHold ?? (adjustable ? null : MMG_SWAP_SETTLES_DIRECTLY),
+      decideBy,
+      ifNoAnswer: substitutionNoAnswer(order),
+    };
+  }
   const negativeTotal = Number(order.totalAmount) + delta < 0;
   const settlementGuidance = approvalHold
-    ?? (mmg ? MMG_SWAP_SETTLES_DIRECTLY : negativeTotal
+    ?? (!adjustable ? MMG_SWAP_SETTLES_DIRECTLY : negativeTotal
       ? 'That substitute would drop the order total below zero — refund the line instead.' : null);
   return {
     state: line.subStatus,
-    original: {
-      name: line.name,
-      unitPrice: cents(Number(line.totalCustomer) / line.quantity),
-      options: chosenOptions(line.selectedOptions),
-    },
+    kind: 'SWAP' as const,
+    original,
     proposed: { itemId: line.substituteItemId, name: line.substituteName, unitPrice: Number(line.substitutePrice ?? 0) },
     priceDelta: delta,
-    decisions: { approve: !approvalHold && !negativeTotal && (!mmg || delta === 0), reject: !mmg },
+    decisions: { approve: !approvalHold && !negativeTotal && (adjustable || delta === 0), reject: adjustable },
     settlementGuidance,
     // [SUBSTITUTION] The wait is bounded and the customer is told how: answer
     // by decideBy, or ifNoAnswer happens (REMOVE = the item comes off and the
     // total drops; WITHDRAW = MMG, the store settles it with you directly).
-    decideBy: line.substituteDecideBy ? line.substituteDecideBy.toISOString() : null,
+    decideBy,
     ifNoAnswer: substitutionNoAnswer(order),
   };
 }
