@@ -70,7 +70,10 @@ async function fakeClamd() {
 /** Nothing listens here: the scanner is down. */
 const DOWN = { MALWARE_SCAN: 'clamd', CLAMD_HOST: '127.0.0.1', CLAMD_PORT: '1' } as Record<string, string | undefined>;
 const log = () => ({ warn: vi.fn(), error: vi.fn() });
-const ALL: UploadSurface[] = ['verification', 'liveness', 'avatar', 'vehicle-photo', 'chat', 'courier-proof', 'handover-proof', 'store-media', 'ads', 'admin', 'safety-evidence'];
+const ALL = ['verification', 'liveness', 'avatar', 'vehicle-photo', 'chat', 'courier-proof', 'handover-proof', 'store-media', 'provider-portfolio', 'ads', 'admin', 'safety-evidence'] as const satisfies readonly UploadSurface[];
+// A new UploadSurface missing from ALL is a type error here (the loops below would silently skip it).
+const ALL_IS_EVERY_SURFACE: Exclude<UploadSurface, (typeof ALL)[number]> extends never ? true : never = true;
+void ALL_IS_EVERY_SURFACE;
 
 describe('[Row 312] what an upload meets while the scanner is down', () => {
   it('safety evidence is accepted unscanned, never refused (bypass or not), and logged', async () => {

@@ -52,6 +52,7 @@ import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import { moverLocationAccepted } from '../../contracts/mover-location';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { refreshLegEta, cachedLegEta } from '../dispatch/live-eta';
+import { getMapsProvider } from '../../providers/maps/maps-provider';
 import { startOfDayGY, startOfWeekGY, startOfMonthGY } from '../../utils/time-gy';
 import { dailyEarnings } from '../order/daily-earnings';
 import {
@@ -71,7 +72,7 @@ import { requireStepUp } from '../auth/step-up';
 import { assertVelocity } from '../integrity/velocity';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { arrivalGate, ARRIVAL_GATE_COPY } from '../dispatch/arrival-evidence';
-import { DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
+import { DRIVER_PRE_CUSTODY_STATUSES, TERMINAL_ORDER_STATUSES } from '../order/order-status';
 import { requireFreshVehicleReview } from '../verification/vehicle-retirement';
 import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -892,6 +893,38 @@ export async function driverRoutes(app: FastifyInstance) {
     // collects on top of the route fare, the same number the freeze will take.
     const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
     return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...stopWait, ...waiting } : order };
+  });
+
+  // [TAXI route line · MAPS-CHECK G1] The road the driver follows through the
+  // ride's own points — the pickup, each stop not skipped (in the passenger's
+  // order), then the destination — to DRAW on the driver's map; never money.
+  // Only the ride's own driver, only while it is live. Without a routing
+  // engine, or when it fails, the answer is the points themselves ('straight')
+  // and the app keeps the straight heading line it has always drawn. Read once
+  // per ride and per skipped stop by the app (not polled); an app from before
+  // this never asks.
+  app.get('/rides/:id/route', { preHandler: [app.authenticate] }, async (request) => {
+    const driver = await getDriver(request.user.userId);
+    const { id } = request.params as { id: string };
+    const ride = await app.prisma.order.findFirst({
+      where: { id, driverId: driver.id, orderType: 'TAXI', status: { notIn: TERMINAL_ORDER_STATUSES } },
+      select: { id: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true },
+    });
+    if (!ride || ride.pickupLat == null || ride.pickupLng == null || ride.deliveryLat == null || ride.deliveryLng == null) {
+      throw new NotFoundError('Ride', id);
+    }
+    const stops = await app.prisma.taxiTripStop.findMany({
+      where: { orderId: ride.id, status: { not: 'SKIPPED' } },
+      select: { lat: true, lng: true },
+      orderBy: { sequence: 'asc' },
+    });
+    const points = [
+      { lat: Number(ride.pickupLat), lng: Number(ride.pickupLng) },
+      ...stops.map((s) => ({ lat: Number(s.lat), lng: Number(s.lng) })),
+      { lat: Number(ride.deliveryLat), lng: Number(ride.deliveryLng) },
+    ];
+    const road = await getMapsProvider().routeLine?.(points) ?? null;
+    return { success: true, data: road ? { source: 'road', points: road.points } : { source: 'straight', points } };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
