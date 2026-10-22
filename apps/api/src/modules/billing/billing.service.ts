@@ -371,8 +371,18 @@ function readRetierLower(value: unknown): { rate: number; tier: string; seenAt: 
 /** [R27] What one weekly re-tier pass did to one subscription. */
 type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
 
-/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
-export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. It names
+ *  no way to pay: the payment-failed notice's paying sentence (feePayLine) names the MMG checkout only
+ *  while it is live for the partner, otherwise the amount and when it is due. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off';
+
+/** [S1 · Option A · REVIEW-F S3-1] The ordinary payment-failed notice: `<reason>. <retry> <payLine>`.
+ *  A week that failed because the push rail is off promises no retry: a retry fails the same way and
+ *  can never collect, so the partner is told the fee was not collected and the way to pay today. */
+function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: string): string {
+  if (reason === MMG_PUSH_OFF_REASON) return `${MMG_PUSH_OFF_REASON}, so this week's fee was not collected. ${payLine}`;
+  return `${reason}. ${retrySentence} ${payLine}`;
+}
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -3973,7 +3983,7 @@ export class BillingService {
         userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
         title: final ? 'Final warning — payment needed' : 'Subscription payment failed',
         body: final ? `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`
-          : `${reason}. We will retry after the remaining retry interval. ${payLine}`,
+          : failedFeeNoticeBody(reason, 'We will retry after the remaining retry interval.', payLine),
         data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id, ...(final ? { suspendsAt: gracePeriodEnd.toISOString() } : {}) },
         feeStageKey: `${final ? 'final-warning' : 'failed'}:a${attempts}`,
         ...(final ? { feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}` } : {}),
@@ -4020,7 +4030,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${payLine}`,
+      body: failedFeeNoticeBody(reason, `We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}).`, payLine),
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
       feeStageKey: `failed:a${attempts}`,
