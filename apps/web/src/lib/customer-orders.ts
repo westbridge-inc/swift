@@ -5,7 +5,33 @@
 // the orders pages use them.
 import { apiFetch } from './auth';
 
-export async function getOrders(): Promise<any[]> { return (await apiFetch('/api/v1/customer/orders')).data as any[]; }
+
+// [UI-SWEEP U13] The phone's two reads (hooks/customer.ts useLiveOrders /
+// useOrdersInfinite). History is placedAt DESC and pages at 20, so filtering the
+// newest page for live orders misses an older order still in progress, and older
+// history was unreachable. Live orders are asked for as such, in one generous
+// page whose server total is kept; history is paged.
+export const LIVE_ORDERS_LIMIT = 50;
+export interface LiveOrders { items: any[]; total: number | null }
+export async function getLiveOrders(): Promise<LiveOrders> {
+  const body = await apiFetch(`/api/v1/customer/orders?live=true&limit=${LIVE_ORDERS_LIMIT}`);
+  return { items: Array.isArray(body?.data) ? body.data : [], total: typeof body?.meta?.total === 'number' ? body.meta.total : null };
+}
+export interface HistoryPage { items: any[]; page: number; totalPages: number; total: number | null }
+export async function getOrderHistoryPage(page: number): Promise<HistoryPage> {
+  const body = await apiFetch(`/api/v1/customer/orders?live=false&page=${page}`);
+  const meta = body?.meta ?? {};
+  return {
+    items: Array.isArray(body?.data) ? body.data : [],
+    page: typeof meta.page === 'number' ? meta.page : page,
+    totalPages: typeof meta.totalPages === 'number' ? meta.totalPages : page,
+    total: typeof meta.total === 'number' ? meta.total : null,
+  };
+}
+/** [UI-SWEEP U17] Put a finished store order's lines back in the cart (the phone's Reorder). */
+export async function reorder(id: string): Promise<{ unavailableItems?: number | null; needsOptions?: string[] | null; message?: string | null } | null> {
+  return ((await apiFetch(`/api/v1/customer/orders/${id}/reorder`, { method: 'POST', body: '{}' })).data ?? null);
+}
 // [SUBSTITUTION · owner 17 Oct 2026] The web renders the server's swap view (its
 // permitted answers and deadline), so it opts in to swap decisions.
 export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}?swapDecisions=v1`)).data; }

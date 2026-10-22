@@ -902,6 +902,14 @@ export const servicesApi = {
     data: { trade: string; bio?: string; portfolioPhotos?: string[] },
     session?: AuthSessionSnapshot,
   ) => api.post('/services/providers', data, capturedAuthConfig(session)),
+  // [IMAGES-E2E] Photos of the provider's own work: uploaded (the server scans each one and
+  // redraws it without location or camera data), or taken down by file name.
+  uploadPortfolioPhoto: (form: FormData) =>
+    api.post('/services/providers/me/portfolio', form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
       type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
@@ -1172,6 +1180,9 @@ export const driverApi = {
   stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
   stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
   stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
+  // [TAXI route line] The road through the ride's own points, for the map
+  // ({ source: 'road' | 'straight', points }); a server from before it answers 404.
+  rideRoute: (id: string) => api.get(`/driver/rides/${id}/route`),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
@@ -1225,8 +1236,9 @@ export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
-  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
-  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
+  toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
+  toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
@@ -1340,6 +1352,14 @@ export const vendorApi = {
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
+  // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
+  // redraws it without location or camera data, and serves it to customers), or taken down.
+  uploadStorePhoto: (slot: 'logo' | 'cover', form: FormData) =>
+    api.post(`/vendor/profile/${slot}`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeStorePhoto: (slot: 'logo' | 'cover') => api.delete(`/vendor/profile/${slot}`),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
   // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.

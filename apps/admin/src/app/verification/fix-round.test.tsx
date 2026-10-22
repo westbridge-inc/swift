@@ -50,7 +50,7 @@ describe('coordinator screenshot fixes', () => {
     await review(user);
     const pane = screen.getByRole('navigation', { name: 'Applicant documents' }).parentElement!;
     pane.scrollTop = 800;
-    await user.click(screen.getByRole('button', { name: /Driver's licence.*PENDING/ }));
+    await user.click(screen.getByRole('button', { name: /Driver's licence.*Waiting for review/ }));
     expect(pane.scrollTop).toBe(0);
   });
   it('offers a missing-file rejection using the existing unreadable contract and no operator upload instruction', async () => {

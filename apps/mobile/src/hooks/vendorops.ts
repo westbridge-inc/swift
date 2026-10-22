@@ -25,6 +25,7 @@ import {
 } from '../stores/authStore';
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
@@ -328,6 +329,7 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
       onNew,
       refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
       refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
     }, { serverAdmits: ownsStore });
   }, [vendorId, ownsStore, qc, previewType]);
 
@@ -445,13 +447,33 @@ export function useSetOrderFulfillmentMode() {
   });
 }
 
+/** [PERF row 562] lib/storeOpenSwitch: the screen shows the tapped state while
+ *  this is out; the server's answer (both flags) goes into the store at once and
+ *  the re-read runs on its own. An answer it cannot place keeps the switch on
+ *  the tapped state until the re-read (the old wait); a failure re-reads too, so
+ *  the switch goes back to what the server holds. */
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)),
+    // The store this request is for: the header carries the selected store, and
+    // a store switch before the send refuses it (useVendorMutation).
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _open: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after === before) return reread();
+      qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+      return undefined;
+    },
+    onError: () => { void reread(); },
+  });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
@@ -706,7 +728,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;

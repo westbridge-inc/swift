@@ -6,6 +6,8 @@ import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from '../order/checkout-outbox';
 import { lockTaxiOrderForCustodyDecision } from './passenger-custody';
 import { taxiNotificationData } from './taxi-notification';
+import { ownerWallSystem } from '../../lib/owner-rls';
+import { upsertNoticeFor } from '../../lib/owner-wall-notices';
 
 export const DRIVER_PICKUP_NOTICE_KIND = 'driver-pickup-notice';
 type PickupStatus = 'DRIVER_EN_ROUTE' | 'DRIVER_ARRIVED';
@@ -35,13 +37,14 @@ export async function advanceDriverPickup(prisma: PrismaClient, input: {
     const id = checkoutOutboxId(dedupeKey);
     const notificationId = `${id}_inbox`;
     const arrived = input.target === 'DRIVER_ARRIVED';
-    await tx.notification.upsert({ where: { id: notificationId }, update: {}, create: {
+    // [item 20] The passenger's inbox row, written in the driver's transaction: the one notice helper.
+    await upsertNoticeFor(tx, {
       id: notificationId, userId: current.customerId, dedupeKey, type: 'ORDER_UPDATE',
       title: arrived ? 'Driver Arrived' : 'Driver En Route',
       body: arrived ? 'Your driver has arrived. Please share your ride PIN to begin the trip.'
         : input.etaMinutes ? `Your driver is on the way. Arriving in ~${input.etaMinutes} minutes.` : 'Your driver is on the way to pick you up.',
       data: taxiNotificationData(current.id, { status: input.target, ...(!arrived && input.etaMinutes != null ? { eta: input.etaMinutes } : {}) }) as Prisma.InputJsonValue,
-    } });
+    });
     await tx.orderOutbox.upsert({ where: { id }, update: {}, create: {
       id, dedupeKey, orderId: current.id, tenantId: current.tenantId, kind: DRIVER_PICKUP_NOTICE_KIND, queue: 'notification',
       payload: { orderId: current.id, notificationId, driverId: input.driverId, assignmentVersion: current.driverAssignmentVersion, status: input.target, customerId: current.customerId },
@@ -79,9 +82,10 @@ export async function drainDriverPickupNotices(
           });
           if (!order || order.driverId !== payload['driverId'] || order.driverAssignmentVersion !== payload['assignmentVersion']
               || order.status !== payload['status'] || order.customerId !== payload['customerId']) return 'obsolete';
-          const notice = await deps.prisma.notification.findFirst({ where: {
+          // [item 20] The passenger's notice, read by the job bound to the order's tenant: the named capability under the owner wall.
+          const notice = await ownerWallSystem('driver-pickup:passenger-notice', () => deps.prisma.notification.findFirst({ where: {
             id: payload['notificationId'] as string, userId: order.customerId, user: { tenantId: row.tenantId }, dedupeKey: row.dedupeKey,
-          }, select: { id: true } });
+          }, select: { id: true } }));
           return notice && await deps.notifications.publishPersisted(notice.id, { requirePush: true }) ? 'delivered' : 'pending';
         });
       }

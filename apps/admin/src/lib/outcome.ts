@@ -79,6 +79,15 @@ function byCode(code: string, ctx: OutcomeContext): Copy | null {
         next: 'Nothing has changed yet. A different admin must approve it in Approvals; once they do, you apply it from there. Do not send it again — that would ask twice.',
         link: { label: 'Open Approvals', href: APPROVALS_HREF },
       };
+    case 'APPROVAL_ALREADY_OPEN':
+      // [U06] The server refused a second ask for an act that is already waiting: nothing new was
+      // asked, and the earlier ask is named. Shown as the queued answer it is, never as a failure.
+      return {
+        tone: 'queued',
+        title: "Already waiting for a second admin's approval",
+        next: 'Nothing new was asked. The earlier request is in Approvals: a different admin approves it there, then you apply it. To ask for something different, cancel that request first.',
+        link: { label: 'Open Approvals', href: APPROVALS_HREF },
+      };
     case 'CHECKLIST_INCOMPLETE':
       return {
         tone: 'refused',
@@ -272,6 +281,20 @@ export function outcomeOf(error: unknown, ctx: OutcomeContext = {}): Outcome {
   const approvalId = copy.tone === 'queued' && typeof details?.['approvalId'] === 'string' ? details['approvalId'] as string : undefined;
 
   const outcome: Outcome = { ...copy };
+  if (code === 'APPROVAL_ALREADY_OPEN') {
+    // Only the admin who asked can apply (or withdraw) an ask, so another
+    // admin is told whose it is rather than told to act on it.
+    const approved = details?.['approvalStatus'] === 'APPROVED';
+    if (details?.['askedByYou'] === false) {
+      outcome.title = 'Another admin already asked for this';
+      outcome.next = approved
+        ? 'Nothing new was asked. It is approved and waiting for the admin who asked to apply it from Approvals.'
+        : 'Nothing new was asked. Their request is waiting in Approvals, where a different admin can approve it.';
+    } else if (approved) {
+      outcome.title = 'Already approved and waiting for you to apply it';
+      outcome.next = 'Nothing new was asked. Open Approvals and apply the approved request; do not ask again.';
+    }
+  }
   if (serverMessage && serverMessage !== copy.title) outcome.serverMessage = serverMessage;
   if (code) outcome.code = code;
   if (status !== undefined) outcome.status = status;

@@ -1,7 +1,6 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
-import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -57,7 +56,7 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -718,6 +717,31 @@ function storeMoneySurfaceView(row: {
 function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
   const payBy = mmgAcceptedPayBy(order);
   return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
+}
+
+/**
+ * [IMAGES-E2E] What PUT /profile may do with the logo and cover addresses. They are
+ * photos the store uploads (POST /profile/logo|cover), so typed text may only take
+ * one down ('' = none) or send back the value already there (a client that echoes
+ * the profile). Anything else (an outside address, another store's key, a path into
+ * another folder) is refused: it would skip the scan and the redraw. undefined =
+ * leave the field as it is.
+ */
+export async function storePhotoFieldsForWrite(
+  app: FastifyInstance,
+  vendorId: string,
+  logoUrl: string | undefined,
+  coverImageUrl: string | undefined,
+): Promise<{ logoUrl?: string | null; coverImageUrl?: string | null }> {
+  if (logoUrl === undefined && coverImageUrl === undefined) return {};
+  const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { logoUrl: true, coverImageUrl: true } });
+  const one = (sent: string | undefined, now: string | null | undefined): string | null | undefined => {
+    if (sent === undefined) return undefined;
+    if (sent.trim() === '') return null;
+    if (sent === (now ?? '')) return undefined;
+    throw new AppError(400, 'STORE_PHOTO_UPLOAD_ONLY', 'Add the store\'s logo or cover by uploading a photo');
+  };
+  return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
 }
 
 export async function vendorRoutes(app: FastifyInstance) {
@@ -1418,6 +1442,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
     if (body.refundRule !== undefined) requireRole(access, 'OWNER');
     const refundRule = refundRuleForWrite(body.refundRule);
+    // [IMAGES-E2E] The logo and cover are photos the store UPLOADS (POST /profile/logo|cover:
+    // scanned, redrawn without metadata, kept where the public door serves them). Typed
+    // text may only take one down ('' = none) or repeat what is already there.
+    const photoFields = await storePhotoFieldsForWrite(app, vendorId, body.logoUrl, body.coverImageUrl);
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1437,8 +1465,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.region !== undefined && { region: body.region }),
           ...(body.latitude !== undefined && { latitude: body.latitude }),
           ...(body.longitude !== undefined && { longitude: body.longitude }),
-          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(photoFields.logoUrl !== undefined && { logoUrl: photoFields.logoUrl }),
+          ...(photoFields.coverImageUrl !== undefined && { coverImageUrl: photoFields.coverImageUrl }),
           ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
           ...(body.tags !== undefined && { tags: body.tags }),
           ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
@@ -1538,10 +1566,29 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 2. VENDOR MANAGEMENT — Toggle open / accepting orders
   // =========================================================================
 
+  /** [owner 21 Oct · COORD 03:15Z] The state a store switch should END in, when the client says so.
+   *  The switches used to FLIP whatever the server held and ignore the body: with the phone and the
+   *  website open at once, an owner closed the store on the phone and a manager's stale "Close" on the
+   *  website then OPENED it, and it took orders. A client that sends the desired state gets exactly
+   *  that state (asking for the state it is already in changes nothing). An older app that sends no
+   *  body (builds 9 and 11) still flips. */
+  const desiredSwitch = (body: unknown, field: 'isCurrentlyOpen' | 'acceptingOrders'): boolean | undefined => {
+    if (body === null || body === undefined || typeof body !== 'object') return undefined;
+    const value = (body as Record<string, unknown>)[field];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') throw new AppError(400, 'VALIDATION_ERROR', `${field} must be true or false.`);
+    return value;
+  };
+
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'isCurrentlyOpen');
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.isCurrentlyOpen) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // [EV-ACT-14] OPENING needs a live store: a suspended/pending business
     // flipping this switch is invisible to customers anyway (public browse
@@ -1586,8 +1633,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
   app.put('/vendor/toggle-orders', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'acceptingOrders');
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.acceptingOrders) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {
@@ -3109,30 +3161,55 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
+  /**
+   * [IMAGES-E2E] The one way a store's own photo (menu item, logo, cover) is kept:
+   * a JPEG/PNG/WebP whose bytes say so, scanned, then DRAWN AGAIN with the public
+   * door's own drawing (utils/public-store-photos renderStorePhoto: upright, sRGB,
+   * no metadata at all, EXIF/GPS/XMP/ICC included, long edge at most 1600 px), and
+   * kept in the store's photo folder `items/<store>/`, which is the only folder the
+   * public door serves. The storage seam strips again on the way in.
+   */
+  async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
+    return keepPublicPhoto(request, storage, `items/${vendorId}`, 'store-media');
+  }
+
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers).
+   *  [#1964 retry census] Registered with literal paths, so the census can read every route. */
+  const uploadStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const url = await storeOwnPhoto(request, vendorId);
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: url },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.post('/profile/logo', auth, uploadStorePhoto('logoUrl'));
+  app.post('/profile/cover', auth, uploadStorePhoto('coverImageUrl'));
+
+  /** DELETE /profile/logo, /profile/cover — take it down (the public door stops serving it once its 30-second decision window passes). */
+  const removeStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: null },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.delete('/profile/logo', auth, removeStorePhoto('logoUrl'));
+  app.delete('/profile/cover', auth, removeStorePhoto('coverImageUrl'));
+
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
-      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
-    }
-
-    const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
-      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    }
-
-    await scanUpload(buffer, { surface: 'store-media', log: request.log });
-    const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `items/${vendorId}`,
-    });
+    const url = await storeOwnPhoto(request, vendorId);
 
     const item = await app.prisma.item.update({
       where: { id: request.params.id, archivedAt: null },

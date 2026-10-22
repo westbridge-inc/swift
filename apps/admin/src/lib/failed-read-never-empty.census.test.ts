@@ -281,12 +281,7 @@ function sources(dir: string): string[] {
 const keyOf = (h: Hit) => `${h.file} | ${h.text.slice(0, 48)}`;
 
 /** Hits another lane is fixing right now: tolerated while present, never required. */
-const PENDING_ELSEWHERE: Record<string, string> = {
-  'app/approvals/page.tsx | Nothing is waiting on a second signature.': 'UI-FIX-ADMIN U26',
-  'app/approvals/page.tsx | Nothing in this view.': 'UI-FIX-ADMIN U26',
-  'app/cash/page.tsx | Nobody in this list.': 'UI-FIX-ADMIN U27',
-  'components/dashboard/LiveOrderFeed.tsx | No recent orders': 'UI-FIX-ADMIN U59',
-};
+const PENDING_ELSEWHERE: Record<string, string> = {};
 
 /** Reviewed: the message is true even when a read failed. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {};

@@ -81,7 +81,7 @@ describe('order list money controls', () => {
     let dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TARGET and record a refund owed?' });
     expect(dialog.textContent).toContain('This records that Target Store OWES the customer a refund.');
     expect(dialog.textContent).toContain('It does not mark anything refunded — settle it on the order page once the reference and the amount handed back are known.');
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Keep the order' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
 
     await user.click(refundButton);
@@ -120,7 +120,7 @@ describe('order list money controls', () => {
 
     const dialog = screen.getByRole('dialog', { name: 'Cancel order ORDER-TARGET?' });
     expect(dialog.textContent).toContain('MMG payment stays between customer and store. If paid, it is refunded by Target Store; Swift cannot refund it.');
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Keep the order' }));
     expect(requestsByMethod(fetchMock, 'PUT')).toHaveLength(0);
   });
 });

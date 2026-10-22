@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import ApprovalsPage from './page';
 import {
   API_ORIGIN,
@@ -79,8 +79,14 @@ describe('the approval card shows what executes', () => {
     expect(screen.getByText('Amount')).toBeTruthy();
     expect(screen.getByText('Subscription Id')).toBeTruthy();
 
+    // [U63] one click asks first: nothing runs until the panel is confirmed
     await user.click(screen.getByRole('button', { name: 'Execute the approved action' }));
+    const panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toMatch(/runs the approved request now/);
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    await user.click(within(panel).getByRole('button', { name: 'Execute it' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    expect(await screen.findByText('Executed.')).toBeTruthy();
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(String(url)).toBe(`${API_ORIGIN}/api/v1/admin/approvals/ap1/apply`);
     expect(init?.method).toBe('POST');
@@ -160,6 +166,12 @@ describe('[OWNER #13] solo approval on your own request', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: 'Cancel this request' }));
+    const panel = await screen.findByRole('dialog');
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+    // [REVIEW-F2 S4-2] never [Cancel] next to [Cancel the request]: the dismiss names what is kept
+    expect(within(panel).queryByRole('button', { name: 'Cancel' })).toBeNull();
+    expect(within(panel).getByRole('button', { name: 'Keep the request' })).toBeTruthy();
+    await user.click(within(panel).getByRole('button', { name: 'Cancel the request' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     expect(String(requestsByMethod(fetchMock, 'POST')[0]![0])).toBe(`${API_ORIGIN}/api/v1/admin/approvals/ap-solo/cancel`);
   });
@@ -244,5 +256,31 @@ describe('[DS1111] your own decided request does not tell you it needs a second 
     expect(await screen.findByRole('button', { name: 'Execute the approved action' })).toBeTruthy();
     expect(screen.getByText(/Approved in solo mode/)).toBeTruthy();
     expect(screen.queryByText(/needs a second person/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [U26] A failed read printed the raw error AND, right under it, "Nothing is
+// waiting on a second signature." — an outage read as an empty queue.
+// ---------------------------------------------------------------------------
+describe('[U26] a failed read is never an empty queue', () => {
+  it('says the read failed, offers Retry, and never says nothing is waiting', async () => {
+    let fail = true;
+    mockApi((request: ApiRequest) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/approvals') {
+        return fail
+          ? { status: 500, body: { success: false, error: { code: 'INTERNAL_ERROR', message: 'Something went wrong' } } }
+          : { body: { success: true, data: [] } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    const { user } = renderWithQuery(<ApprovalsPage />);
+    expect(await screen.findByText(/Couldn.t load/)).toBeTruthy();
+    expect(screen.queryByText(/Nothing is waiting on a second signature/)).toBeNull();
+    expect(screen.queryByText(/Nothing in this view/)).toBeNull();
+
+    fail = false;
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByText(/Nothing is waiting on a second signature|Nothing in this view/)).toBeTruthy();
   });
 });
