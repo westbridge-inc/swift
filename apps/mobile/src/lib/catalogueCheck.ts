@@ -24,3 +24,15 @@ export function importCheckSummary(result: { waitingForCheckCount?: number } | n
   const n = result?.waitingForCheckCount ?? 0;
   return n > 0 ? ` · ${n} waiting for a quick check` : '';
 }
+
+/** [IMAGES-E2E PR4] Imported rows whose photo address was not used (photos are uploaded, never
+ *  imported). Null when there are none, or from an older server that sends no notes. */
+export function importPhotoNotesLine(
+  result: { notes?: Array<{ row: number }>; notesCount?: number } | null | undefined,
+): string | null {
+  const n = result?.notesCount ?? 0;
+  if (n <= 0) return null;
+  const rows = (result?.notes ?? []).map((note) => note.row);
+  const listed = rows.length > 0 ? ` (row${n === 1 ? '' : 's'} ${rows.join(', ')}${n > rows.length ? '…' : ''})` : '';
+  return `${n === 1 ? '1 row was' : `${n} rows were`} imported without a photo${listed}. Add photos by uploading them on each item.`;
+}

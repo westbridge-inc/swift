@@ -9,6 +9,7 @@ import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '..
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused, withoutForwardWorkWhilePaused } from './order-dispute';
 import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
+import { storeStatusLabel } from '../../lib/orderStatus';
 
 export const GUTTER = space['2xl'];
 
@@ -124,11 +125,6 @@ export function formatSlot(iso?: string) {
   return formatAppointmentSlot(iso);
 }
 
-export function prettyStatus(status?: string) {
-  const s = (status || '').replace(/_/g, ' ').toLowerCase();
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 /**
  * The board's THREE deliberate pill treatments. An order walking the lane is
  * the one thing a vendor reads across the room, so each stage owns a different
@@ -165,20 +161,19 @@ function BoardPill({ label, treatment }: { label: string; treatment: keyof typeo
   );
 }
 
-/** Order status pill — "New" pops in solid brand; the rest are soft tints. */
+/** Order status pill — "New" pops in solid brand; the rest are soft tints.
+ *  [UI-SWEEP U72] Every label is the store's word from lib/orderStatus (the
+ *  map the web console shares), never the code; the pill keeps only its ink. */
 export function OrderStatusPill({ status }: { status: string }) {
   const s = (status || '').toUpperCase();
-  if (s === 'PENDING' || s === 'PLACED') return <BoardPill label="New" treatment="now" />;
-  if (s === 'ACCEPTED' || s === 'CONFIRMED') return <BoardPill label="Accepted" treatment="inHand" />;
-  if (s === 'PREPARING') return <BoardPill label="Preparing" treatment="inHand" />;
-  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <BoardPill label="Ready" treatment="done" />;
-  if (s === 'RIDER_ASSIGNED') return <TonePill label="Rider assigned" tone="brand" />;
-  if (s === 'RIDER_EN_ROUTE_PICKUP') return <TonePill label="Rider en route" tone="brand" />;
-  if (s === 'RIDER_ARRIVED_PICKUP') return <TonePill label="Rider at counter" tone="brand" />;
-  if (s === 'PICKED_UP' || s === 'EN_ROUTE_DELIVERY' || s === 'ARRIVED') return <TonePill label="Out for delivery" tone="neutral" />;
-  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={prettyStatus(s)} tone="success" />;
-  if (s === 'CANCELLED') return <TonePill label="Cancelled" tone="error" />;
-  return <TonePill label={s.replace(/_/g, ' ').toLowerCase()} tone="neutral" />;
+  const label = storeStatusLabel(s);
+  if (s === 'PENDING' || s === 'PLACED') return <BoardPill label={label} treatment="now" />;
+  if (s === 'ACCEPTED' || s === 'CONFIRMED' || s === 'PREPARING') return <BoardPill label={label} treatment="inHand" />;
+  if (s === 'READY' || s === 'READY_FOR_PICKUP') return <BoardPill label={label} treatment="done" />;
+  if (s === 'RIDER_ASSIGNED' || s === 'RIDER_EN_ROUTE_PICKUP' || s === 'RIDER_ARRIVED_PICKUP') return <TonePill label={label} tone="brand" />;
+  if (s === 'DELIVERED' || s === 'COMPLETED') return <TonePill label={label} tone="success" />;
+  if (s === 'CANCELLED') return <TonePill label={label} tone="error" />;
+  return <TonePill label={label} tone="neutral" />;
 }
 
 /** Small soft tag beside the order number (Takeaway / Appointment). */

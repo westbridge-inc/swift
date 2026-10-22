@@ -103,6 +103,8 @@ vi.mock('../../../hooks', async () => {
     useDriverAction: idle, useRiderAction: idle, useRateCustomer: idle,
     useCourierProof: idle, useCourierCollect: idle, useCourierPickupProof: idle, useCourierReturn: idle, useCourierReturnProof: idle,
     useRideSos: rides.useRideSos,
+    // [TAXI route line] No road: the map keeps its straight heading line.
+    useDriverRouteLine: () => ({ data: null }),
   };
 });
 vi.mock('../../../hooks/customer', () => ({ customerKeys: { homeAll: ['customer', 'home'] } }));
