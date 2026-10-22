@@ -18,7 +18,7 @@ import { wireVendorOrder, wireVendorOrderDetail } from '@/test/vendor-wire-fixtu
 const writes: Array<{ method: string; path: string }> = [];
 let holdDetail: Promise<{ body: unknown }> | null = null;
 
-function api(orders: unknown[], detail?: (path: string) => unknown) {
+function api(orders: unknown[], detail?: (_path: string) => unknown) {
   return mockApi((request: ApiRequest) => {
     const { method, url } = request;
     const path = url.pathname.replace('/api/v1', '');
@@ -90,7 +90,7 @@ describe('[STORE-DASH] a store-courier delivery is confirmed on the card', () =>
 describe('[STORE-DASH] the order window opens at once', () => {
   it('it shows the board\'s copy while its own read is out; shelf ticks wait for that read', async () => {
     const row = wireVendorOrder({ id: 'o-gro', orderNumber: 'SW-8004', status: 'PREPARING', vendor: { id: 'vendor-1', name: 'Test Grocer', vendorType: 'SUPERMARKET', selfDeliveryEnabled: false } });
-    let release: (v: { body: unknown }) => void = () => {};
+    let release: (_v: { body: unknown }) => void = () => {};
     api([row], () => wireVendorOrderDetail({ id: 'o-gro', orderNumber: 'SW-8004', status: 'PREPARING', vendor: { vendorType: 'SUPERMARKET', selfDeliveryEnabled: false } }));
     const view = renderWithQuery(<OrdersPage />);
     const c = await card('SW-8004');
