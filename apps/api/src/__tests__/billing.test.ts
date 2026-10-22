@@ -514,7 +514,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(stillOne).toBe(1);
   });
 
-  it('moves a vendor to the large tier from catalogue size — never from sales', async () => {
+  it('prices a vendor for the large tier from catalogue size — never from sales; the rise is held for the 14-day notice', async () => {
     const fixture = await makeVendorWithSub({
       rate: 15000,
       prepaid: 500000,
@@ -537,18 +537,26 @@ describe('Waivers, reminders, tier recalculation', () => {
 
     await billing.recalculateVendorTiers();
     let sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
-    expect(Number(sub.weeklyRate)).toBe(20000);
+    // [R27 · GUARDRAILS §7 standing rule 2] The large tier is a RISE: held (fee-rise-notice.ts), told
+    // 14 days ahead and applied from the first weekly fee after that, never written at once.
+    expect(Number(sub.weeklyRate)).toBe(15000);
+    const heldKey = `billing.fee_rise:${fixture.subId}`;
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ from: 15000, to: 20000, source: 'WEEKLY_RETIER' });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: fixture.subId, type: 'TIER_CHANGE' } })).toBe(0);
 
-    const tierEvent = await app.prisma.billingEvent.findFirst({
-      where: { subscriptionId: fixture.subId, type: 'TIER_CHANGE' },
-    });
-    expect(tierEvent).not.toBeNull();
-
-    // Shrink the catalogue back under the threshold
+    // Shrink the catalogue back under the threshold: the held rise no longer stands and is dropped.
     await app.prisma.item.updateMany({ where: { vendorId: fixture.vendorId }, data: { isAvailable: false } });
-    await billing.recalculateVendorTiers();
+    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count
+    // for 7 days, and the lower tier must then hold on two weekly passes before the rise is dropped.
+    const t = Date.now();
+    await billing.recalculateVendorTiers(new Date(t));
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    await billing.recalculateVendorTiers(new Date(t + 8 * DAY));
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    await billing.recalculateVendorTiers(new Date(t + 15 * DAY));
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(Number(sub.weeklyRate)).toBe(15000);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: heldKey } })).toBeNull();
   });
 });
 
