@@ -10,7 +10,7 @@
  * answers again, and a positive is moved to quarantine (out of every place that serves it) and paged.
  * A signature found is ALWAYS refused (422), bypass or not.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import net from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -22,14 +22,16 @@ vi.mock('../modules/ops/ops-page', () => ({
 }));
 
 import { pageOps } from '../modules/ops/ops-page';
-import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, scanUpload, type UploadSurface } from '../lib/malware-scan';
-import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, RESCAN_BATCH, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
+import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, memoryScannerCooldown, scanUpload, useScannerCooldown, type UploadSurface } from '../lib/malware-scan';
+import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, QUARANTINE_HELD_FOLDER, RESCAN_BATCH, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
 import { encryptBuffer, generateDek } from '../providers/storage/envelope';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { alertClassOf } from '../providers/notifications/alert-class';
 
 const EICAR_LIKE = Buffer.from('synthetic payload the fake scanner calls a virus');
 const servers: net.Server[] = [];
+// The payload-failure cool-down is module state: every test starts without one.
+beforeEach(() => useScannerCooldown(memoryScannerCooldown()));
 afterEach(async () => {
   vi.mocked(pageOps).mockClear();
   await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
@@ -94,8 +96,9 @@ describe('[Row 312] what an upload meets while the scanner is down', () => {
     }
     // Recorded as evidence (paged as evidence), with or without the bypass.
     const db = fakeDb();
-    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'handover-proof', fileKey: 'handover-proof/o/1', buffer: Buffer.from('p'), storage: fakeStorage() as never }, {});
-    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'courier-proof', fileKey: 'courier-proof/o/1', buffer: Buffer.from('p'), storage: fakeStorage() as never }, { MALWARE_SCAN_BYPASS: '1' });
+    // [COORD 22 Oct] stored in the held quarantine folder (heldFolder), never its normal folder.
+    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'handover-proof', fileKey: `${QUARANTINE_HELD_FOLDER}/handover-proof/o/1`, buffer: Buffer.from('p'), storage: fakeStorage() as never }, {});
+    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'courier-proof', fileKey: `/uploads/${QUARANTINE_HELD_FOLDER}/courier-proof/o/1`, buffer: Buffer.from('p'), storage: fakeStorage() as never }, { MALWARE_SCAN_BYPASS: '1' });
     expect(db.rows.map((r) => r['reason'])).toEqual(['evidence', 'evidence']);
   });
 
@@ -186,10 +189,10 @@ describe('[Row 312] the debt of an upload stored unscanned', () => {
     const db = fakeDb();
     const buffer = Buffer.from('a selfie');
     await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'liveness', fileKey: 'liveness/u/1', buffer, storage: fakeStorage() as never }, { MALWARE_SCAN_BYPASS: '1' });
-    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'safety-evidence', fileKey: 'evidence/1', buffer, sealed: true, storage: fakeStorage() as never }, {});
+    await recordUnscannedUpload(db as never, 'UNSCANNED', { surface: 'safety-evidence', fileKey: `${QUARANTINE_HELD_FOLDER}/evidence/1`, buffer, sealed: true, storage: fakeStorage() as never }, {});
     expect(db.rows.map((r) => [r['surface'], r['reason'], r['fileKey'], r['sealed'], r['sha256']])).toEqual([
       ['liveness', 'bypass', 'liveness/u/1', false, createHash('sha256').update(buffer).digest('hex')],
-      ['safety-evidence', 'evidence', 'evidence/1', true, createHash('sha256').update(buffer).digest('hex')],
+      ['safety-evidence', 'evidence', `${QUARANTINE_HELD_FOLDER}/evidence/1`, true, createHash('sha256').update(buffer).digest('hex')],
     ]);
     expect(JSON.stringify(db.rows)).not.toContain('a selfie');
   });
@@ -344,7 +347,7 @@ describe('[Row 312] every upload that can be stored unscanned records its debt',
     expect(missing).toEqual([]);
   });
 
-  it('each evidence site stores a QUARANTINE outcome in the held quarantine folder (heldFolder), never its normal folder', () => {
+  it('[COORD 22 Oct] each evidence site stores anything not scanned CLEAN (unreachable or failing) in the held quarantine folder (heldFolder), never its normal folder', () => {
     const missing: string[] = [];
     let sites = 0;
     for (const file of walk(MODULES)) {
@@ -364,6 +367,6 @@ describe('[Row 312] every upload that can be stored unscanned records its debt',
 
   it('the rescan is a registered, replay-safe job, and its page is an ops-class alert', () => {
     expect(JOB_RECOVERY['upload-rescan']).toMatchObject({ policy: 'SAFE_REPLAY' });
-    for (const kind of ['ops_upload_quarantined', 'ops_malware_scan_bypass', 'ops_evidence_unscanned']) expect(alertClassOf(kind), kind).toBe(alertClassOf('ops_backup_stale'));
+    for (const kind of ['ops_upload_quarantined', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held']) expect(alertClassOf(kind), kind).toBe(alertClassOf('ops_backup_stale'));
   });
 });

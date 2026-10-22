@@ -1,6 +1,6 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
-import { releaseHeldUpload } from '../../lib/upload-scan-debt';
+import { retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -7164,16 +7164,17 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { queue, id, retried: true } };
   });
 
-  // [Row 312 · COORD 21 Oct] Evidence the malware scanner was UP but could not scan (an error or a
-  // timeout on the file itself) is stored straight into quarantine, served to no one, and paged. A
-  // platform admin lists it here and releases each after a manual check. Rows hold no person id and
-  // no content: the object key, the digest, the surface.
+  // [Row 312 · COORD 21-22 Oct] Evidence that could not be scanned (the scanner was up but failed on the
+  // file itself, or its rescans ran out) is HELD in the quarantine: served to no one, admitted as proof by
+  // no claim, and paged. A platform admin lists it here and retries its scan; it leaves the quarantine
+  // ONLY on a CLEAN answer (never on a person's word), a signature quarantines it like any positive.
+  // Rows hold no person id and no content: the object key, the digest, the surface.
   app.get('/upload-scan-debts/held', { preHandler: [platformControlGuard] }, async () => {
     const rows = await app.prisma.uploadScanDebt.findMany({
       where: { result: 'HELD', releasedAt: null },
       orderBy: { createdAt: 'asc' },
       take: 200,
-      select: { id: true, surface: true, fileKey: true, sha256: true, createdAt: true },
+      select: { id: true, surface: true, fileKey: true, sha256: true, createdAt: true, attempts: true },
     });
     return { success: true, data: rows };
   });
@@ -7181,14 +7182,19 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/upload-scan-debts/:id/release', { preHandler: [platformControlGuard] }, async (request) => {
     const { id } = request.params as { id: string };
     const body = z.object({ reason: z.string().trim().min(3).max(500) }).parse(request.body ?? {});
-    const released = await app.prisma.$transaction(async (tx) => {
-      const ok = await releaseHeldUpload(tx, id);
-      if (!ok) throw new AppError(409, 'NOT_HELD', 'This upload is not held (already released, or never held).');
+    const outcome = await retryHeldEvidenceScan(
+      { prisma: app.prisma, redis: app.redis, notifications, storage: getStorageProvider() },
+      id,
       // The release and its trail commit together.
-      await auditIn(tx, request.user.userId, 'RELEASE_HELD_UPLOAD', 'UploadScanDebt', id, { reason: body.reason }, request);
-      return ok;
-    });
-    return { success: true, data: { id, released } };
+      (tx) => auditIn(tx, request.user.userId, 'RELEASE_HELD_UPLOAD', 'UploadScanDebt', id, { reason: body.reason }, request),
+    );
+    if (outcome.outcome === 'NOT_HELD') throw new AppError(409, 'NOT_HELD', 'This upload is not held (already released, or never held).');
+    if (outcome.outcome !== 'RELEASED') {
+      // Not released: the attempt is still on the record.
+      await auditIn(app.prisma, request.user.userId, 'RETRY_HELD_UPLOAD_SCAN', 'UploadScanDebt', id, { reason: body.reason, outcome: outcome.outcome }, request);
+    }
+    if (outcome.outcome === 'STILL_HELD') throw new AppError(409, 'STILL_HELD', `Still held: ${outcome.why}.`);
+    return { success: true, data: { id, outcome: outcome.outcome, released: outcome.outcome === 'RELEASED' } };
   });
 
   /** DELETE /dlq/:queue/:id — discard a dead job for good. */

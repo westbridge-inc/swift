@@ -3968,18 +3968,23 @@ model StorageOrphan {
   @@map("storage_orphans")
 }
 
-/// [Row 312 · COORD ruling 21 Oct] An upload stored WITHOUT a malware scan: safety evidence while the
-/// scanner was down, or a mover's upload under the MALWARE_SCAN_BYPASS=1 emergency switch
-/// (lib/upload-scan-debt.ts). The upload-rescan job scans it once clamd answers; a positive is moved to
-/// quarantine and paged. No person or tenant id and never the content: the object key (forgotten once
-/// closed clean), the file's sha256, and the outcome. Platform-wide, like the scanner itself.
+/// [Row 312 · COORD rulings 21-22 Oct] An upload stored WITHOUT a clean malware scan: evidence (safety
+/// evidence, delivery or handover proof: never refused, stored ONLY in the held quarantine folder) or a
+/// mover's upload under the MALWARE_SCAN_BYPASS=1 emergency switch (lib/upload-scan-debt.ts). The
+/// upload-rescan job scans it once clamd answers: a positive is moved to quarantine and paged; held
+/// evidence that scans clean is released (its bytes moved to their normal folder). No person or tenant
+/// id and never the content: the object key, the file's sha256, and the outcome. Platform-wide, like the
+/// scanner itself. NOTE: an object key is a storage path, and some embed an owner's id (e.g. a liveness
+/// selfie's folder): a bypass row forgets it when it closes clean; an evidence row keeps its key (order
+/// folders) because it maps the issued key to where the bytes now live.
 model UploadScanDebt {
   id            String    @id @default(cuid())
   /// The upload surface (lib/malware-scan.ts UploadSurface).
   surface       String
   /// 'evidence' (safety evidence, delivery or handover proof: never refused) | 'bypass' (MALWARE_SCAN_BYPASS=1).
   reason        String
-  /// The stored object; null once closed (a quarantined sealed one keeps it: its key row is found by it).
+  /// The stored object (for evidence: the held key every record was issued). A bypass row forgets it
+  /// once closed clean; a quarantined sealed one keeps it (its key row is found by it).
   fileKey       String?
   /// The stored bytes are envelope-encrypted (encrypted_objects row keyed by fileKey).
   sealed        Boolean   @default(false)
@@ -3988,17 +3993,20 @@ model UploadScanDebt {
   createdAt     DateTime  @default(now())
   rescannedAt   DateTime?
   /// CLEAN | FOUND | UNSCANNABLE | GONE (erased before the rescan) | SHREDDED (sealed, key shredded)
-  /// | HELD (evidence the scanner was up but could not scan: stored in quarantine, released by hand)
+  /// | HELD (evidence that could not be scanned: kept in the quarantine, never served or admitted,
+  /// paged until a platform admin retries its scan and it answers CLEAN)
   result        String?
   signature     String?
   quarantinedAt DateTime?
   quarantineKey String?
-  /// HELD evidence (stored straight into quarantine because the scanner could not scan it): released
-  /// by a platform admin after a manual check (audited).
+  /// Held evidence that scanned CLEAN left the quarantine at this time...
   releasedAt    DateTime?
+  /// ...and its bytes now live here (the records keep the issued fileKey and resolve it through this row).
+  releasedKey   String?
 
   @@index([rescannedAt, createdAt])
   @@index([reason, rescannedAt])
+  @@index([fileKey])
   @@map("upload_scan_debts")
 }
 

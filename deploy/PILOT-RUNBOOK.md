@@ -220,19 +220,26 @@ the new API image on the scanner network, that the EICAR test string is refused
 and ordinary bytes pass. While clamd does not answer, every upload is refused
 (503) and the worker pages ops after two failed checks (two minutes apart).
 `./deploy/doctor.sh` reports it. clamd is the container's main process, so a
-SHUTDOWN restarts the container. "Down" means the connection to clamd failed
-AND a fresh PING fails; then two exceptions store an upload UNSCANNED and owe
-it a rescan (upload_scan_debts; the worker rescans every five minutes once
-clamd answers, and a positive or unscannable file is quarantined and paged):
-evidence (safety evidence, delivery and handover proof) is never refused, and
-the production emergency switch `MALWARE_SCAN_BYPASS=1` in deploy/.env (then
-recreate api and worker) covers exactly the liveness selfies, onboarding documents and vehicle photos. Never a profile picture. While it is set, pilot-up, the doctor and
-the preflight shout and ops are paged every hour. Remove it as soon as clamd
-answers. If clamd is UP but fails on one file (an error or a timeout on the
-file itself), that file is refused, bypass or not; evidence is instead stored
-straight into the quarantine (served to no one) and paged, and a platform admin
-releases it after a manual check (`GET /admin/upload-scan-debts/held`, `POST
-/admin/upload-scan-debts/:id/release` with a reason; audited).
+SHUTDOWN restarts the container. Two kinds of upload are stored before a clean
+scan and owe one (upload_scan_debts; the worker rescans every five minutes once
+clamd answers, and a positive or unscannable file is quarantined and paged).
+Evidence (safety evidence, delivery and handover proof) is never refused, but it
+is stored only in the held quarantine folder: served to no one and admitted as
+proof by no claim until a scan answers CLEAN, which moves it to its normal
+folder (custody never waits: the delivery goes on). The production emergency
+switch `MALWARE_SCAN_BYPASS=1` in deploy/.env (then recreate api and worker)
+covers exactly the liveness selfies, onboarding documents and vehicle photos.
+Never a profile picture. They are stored unscanned in their normal folder only
+while clamd is UNREACHABLE (the connection fails AND a fresh PING fails) and no
+file has failed a scan in the last 30 minutes (a file that crashes clamd must
+not make the next upload look "down"; the cool-down is shared through Redis).
+While it is set, pilot-up, the doctor and the preflight shout and ops are paged
+every hour. Remove it as soon as clamd answers. If clamd is UP but fails on one
+file (an error or a timeout on the file itself), that file is refused, bypass or
+not; evidence is instead HELD in the quarantine and paged, and a platform admin
+retries its scan (`GET /admin/upload-scan-debts/held`, `POST
+/admin/upload-scan-debts/:id/release` with a reason; audited): it leaves the
+quarantine only on a CLEAN answer.
 
 Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
 a signature reload (freshclam checks 12 times a day); the service's ceiling is

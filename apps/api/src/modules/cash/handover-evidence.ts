@@ -1,6 +1,6 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { scanUpload } from '../../lib/malware-scan';
-import { heldFolder, recordUnscannedUpload } from '../../lib/upload-scan-debt';
+import { evidenceAdmissible, heldFolder, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { createHash } from 'node:crypto';
 import type { Order, Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -151,7 +151,10 @@ export async function admittedHandoverEvidence(db: Db, order: Order, claim: {
     && !!evidence!.actorSessionId && evidence!.actorSessionId === evidence!.locationSessionId
     && distanceKm != null && distanceKm <= evidence!.maxDistanceKm;
   const proof = evidence?.photoProofId ? await db.handoverPhotoProof.findUnique({ where: { id: evidence.photoProofId } }) : null;
-  const photo = bound && !!proof && !proof.invalidatedAt && proof.orderId === order.id
+  // [Row 312 · COORD 22 Oct] A photo stored before a clean malware scan is HELD in the quarantine: no
+  // claim or dispute admits it as proof until a clean scan released it (custody itself never waited).
+  const scannedClean = !!proof && await evidenceAdmissible(db, proof.objectKey);
+  const photo = bound && !!proof && scannedClean && !proof.invalidatedAt && proof.orderId === order.id
     && proof.tenantId === order.tenantId && proof.customerId === order.customerId
     && proof.actorId === evidence!.actorId && proof.riderId === order.riderId && proof.driverId === order.driverId
     && proof.purpose === 'HANDOVER' && (CUSTODY[order.orderType] ?? []).includes(proof.sourceStatus) && proof.bindingDigest === evidence!.bindingDigest
@@ -170,7 +173,9 @@ export async function admittedHandoverEvidence(db: Db, order: Order, claim: {
 }
 
 /** The canonical courier delivery seam applies this to every payment rail and
- * alias, while holding the order lock. SHARE serializes invalidation. */
+ * alias, while holding the order lock. SHARE serializes invalidation.
+ * [Row 312 · COORD 21-22 Oct] A photo HELD for its malware scan still lets custody proceed (the scanner
+ * never blocks a delivery); only a claim's admission (admittedHandoverEvidence) waits for a clean scan. */
 export async function admittedCourierPhoto(tx: Prisma.TransactionClient, source: Order, key: string | null): Promise<boolean> {
   if (!key || source.orderType !== 'COURIER' || !CUSTODY['COURIER']!.includes(source.status)) return false;
   await tx.$queryRaw`SELECT id FROM handover_photo_proofs WHERE "objectKey" = ${key} FOR SHARE`;

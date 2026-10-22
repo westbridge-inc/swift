@@ -253,8 +253,8 @@ console.log('─'.repeat(72));
 if (fileEnv['MALWARE_SCAN_BYPASS'] === '1') {
   console.log('  ✗✗✗ MALWARE_SCAN_BYPASS=1 — THE EMERGENCY BYPASS IS ON ✗✗✗');
   console.log('    While the scanner is down, liveness selfies, onboarding documents and vehicle photos');
-  console.log('    are stored WITHOUT a malware scan. Ops are paged');
-  console.log('    every hour it stays on. Remove the line once clamd answers again.');
+  console.log('    are stored WITHOUT a malware scan. Ops are paged every hour it stays on.');
+  console.log('    Remove the line once clamd answers again.');
 } else if (fileEnv['MALWARE_SCAN'] && fileEnv['MALWARE_SCAN'] !== 'clamd') {
   console.log(`  ✗ MALWARE_SCAN=${fileEnv['MALWARE_SCAN']}: uploads are stored unscanned (production refuses this).`);
 } else {
