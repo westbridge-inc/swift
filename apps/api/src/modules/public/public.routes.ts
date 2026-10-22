@@ -235,6 +235,8 @@ export async function publicRoutes(app: FastifyInstance) {
           select: {
             id: true,
             name: true,
+            // [IMAGES-E2E PR5] The section's own photo shows on the store page (only a kept one is handed out).
+            imageUrl: true,
             items: {
               // The public menu shows what a customer could order right now.
               where: { isAvailable: true },
@@ -294,6 +296,7 @@ export async function publicRoutes(app: FastifyInstance) {
         categories: vendor.categories
           .map((c) => ({
             ...c,
+            imageUrl: servedPhotoAddress(c.imageUrl),
             items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice), imageUrl: servedPhotoAddress(i.imageUrl) })),
           }))
           // An empty category is vendor housekeeping, not a public menu section.
