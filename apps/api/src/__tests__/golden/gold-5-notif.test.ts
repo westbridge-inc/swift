@@ -349,12 +349,17 @@ describe('GOLD-5 · NOTIF-01 — push register and inbox', () => {
     const logout = await call('DELETE', '/api/v1/customer/notifications/devices', alice.token, { token: aliceToken });
     expect(logout.statusCode).toBe(200);
     expect((await sys(() => app.prisma.deviceToken.findUniqueOrThrow({ where: { token: aliceToken } }))).isActive).toBe(false);
+    // [O-3] Accept already started preparation: an older build's "Start preparing" tap is a 200 no-op that tells
+    // nobody anything. The next real event is "ready".
     const preparing = await call('PUT', `/api/v1/vendor/orders/${order.orderId}/preparing`, owner.token, {});
     expect(preparing.statusCode, preparing.body).toBe(200);
+    expect(await sys(() => app.prisma.notification.count({ where: { userId: alice.userId } }))).toBe(1);
+    const ready = await call('PUT', `/api/v1/vendor/orders/${order.orderId}/ready`, owner.token, {});
+    expect(ready.statusCode, ready.body).toBe(200);
     const rows = await sys(() => app.prisma.notification.findMany({ where: { userId: alice.userId }, orderBy: { createdAt: 'asc' } }));
     expect(rows.map((r) => ({ title: r.title, data: r.data, isRead: r.isRead }))).toEqual([
       { title: 'Order Accepted!', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'ACCEPTED' }, isRead: true },
-      { title: 'Being Prepared', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'PREPARING' }, isRead: false },
+      { title: 'Food Ready!', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'READY_FOR_PICKUP' }, isRead: false },
     ]);
     expect(pushesTo(aliceToken).map((p) => p.title)).toEqual(['Order Accepted!']);
   });
