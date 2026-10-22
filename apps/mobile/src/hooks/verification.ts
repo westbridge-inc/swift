@@ -15,6 +15,7 @@ import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import { verificationRefetchInterval } from './verificationPolling';
 import type { MutationGuard } from './useStepUp';
+import type { WeeklyFeeAck } from '../lib/partnerPricing';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -53,6 +54,8 @@ export function useBecomePartner() {
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
       /** [DCR-1] The role-agreement checkbox, recorded in the consent ledger. */
       acceptAgreement?: boolean;
+      /** [Row 628] The "I understand the weekly fee" tick: the words' version and the fee on screen. */
+      weeklyFeeAck?: WeeklyFeeAck;
       business?: {
         name: string;
         vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';

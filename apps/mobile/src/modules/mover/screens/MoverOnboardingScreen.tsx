@@ -9,13 +9,14 @@ import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboardin
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { TAXI_TWO_LICENCES } from '../../../components/onboarding/taxiDocumentCopy';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
+import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
 import { taxiPlateMessage } from '../../../lib/taxiPlate';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -145,6 +146,13 @@ export function VehicleSetup({
   useEffect(() => {
     if (stale) void refetchPricing();
   }, [stale, refetchPricing]);
+  // [Row 628] The weekly fee, said before the vehicle is saved (join only — a change does not
+  // re-ask): the server's words and the amount above, and the tick given to exactly that amount,
+  // so a new vehicle or a new price clears it. An API with no words asks nothing and gets nothing.
+  const fee = needsAgreement ? feeTick(pricing.data, gate.ok ? gate.quote.rate : null) : ({ kind: 'none' } as const);
+  const [feeTickedFor, setFeeTickedFor] = useState<string | null>(null);
+  const feeTicked = fee.kind === 'tick' && feeTickedFor === fee.key;
+  const feeAsk = fee.kind === 'invalid' ? FEE_TICK_COPY.invalid : fee.kind === 'tick' && !feeTicked ? FEE_TICK_COPY.ask : null;
   // Only the vehicles Swift takes on today (the price list's `offered`, else the launch list).
   const offered = VTYPES.filter((v) => vehicleOffered(v.key, pricing.data));
   useEffect(() => {
@@ -153,17 +161,22 @@ export function VehicleSetup({
   }, [vt, pricing.data, offered, setVt]);
   const saveError = saving.error instanceof StepUpDismissed
     ? null
-    : ((saving.error as any)?.response?.data?.error?.message as string | undefined) ?? (saving.isError ? 'Couldn’t save. Try again.' : null);
+    : feeTickError(saving.error) ?? ((saving.error as any)?.response?.data?.error?.message as string | undefined) ?? (saving.isError ? 'Couldn’t save. Try again.' : null);
 
   const submit = () => {
     if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
     if (!vehicleOffered(vt, pricing.data)) return; // the picker lists only offered vehicles; restated for the same reason
+    if (feeAsk) return; // the weekly-fee tick, restated for the same reason
     const vehicle = needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined;
     if (mode === 'change') {
       changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });
       return;
     }
-    become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });
+    become.mutate(
+      { role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) },
+      // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
+      { onSuccess: () => onDone(true), onError: (e) => { if (feeTickError(e)) void refetchPricing(); } },
+    );
   };
 
   return (
@@ -193,6 +206,7 @@ export function VehicleSetup({
           ) : null}
         </View>
       ) : null}
+      <WeeklyFeeTerms fee={fee} ticked={feeTicked} onToggle={() => fee.kind === 'tick' && setFeeTickedFor(feeTicked ? null : fee.key)} />
       {needsAgreement ? (
       <Pressable
         accessibilityRole="checkbox"
@@ -228,11 +242,13 @@ export function VehicleSetup({
           ? QUOTE_GATE_COPY[gate.why]
           : !valid
             ? 'Fill in the vehicle details'
-            : needsAgreement && !agree
-              ? 'Agree to the Mover Agreement first'
-              : mode === 'change' ? VEHICLE_COPY.saveNew : 'Save vehicle'}
+            : feeAsk
+              ? feeAsk
+              : needsAgreement && !agree
+                ? 'Agree to the Mover Agreement first'
+                : mode === 'change' ? VEHICLE_COPY.saveNew : 'Save vehicle'}
         loading={saving.isPending}
-        disabled={!gate.ok || !valid || (needsAgreement && !agree) || sameAsSaved}
+        disabled={!gate.ok || !valid || feeAsk !== null || (needsAgreement && !agree) || sameAsSaved}
         style={{ marginTop: space.md }}
         onPress={submit}
       />
