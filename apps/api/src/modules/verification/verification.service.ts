@@ -918,7 +918,8 @@ export class VerificationService {
    * (revokeDocument → back to L1). No face match, and no selfie at all: [ROLE-DOCS · owner 21 Oct
    * 2026] a customer never gives a photo (owner 16 Oct), so the selfie store build 9 still sends is
    * dropped by the route before it reaches this method — never resolved, read, stored or linked
-   * (its upload stays an unclaimed object, erased with the account). A document processor that reads
+   * (the route erases that upload right after the intake when it is the caller's own: REVIEW-F S3-1,
+   * user/upload-erasure discardUnusedCustomerSelfie). A document processor that reads
    * documents can still reject (an auto-reject stands) or refer the document to a person.
    */
   async submitIdentity(
