@@ -124,7 +124,12 @@ afterAll(async () => {
   await app.prisma.notification.deleteMany({ where: { data: { path: ['sessionId'], string_contains: '' }, title: { contains: 'not delivered' } } }).catch(() => {});
   delete process.env['GUARDIAN_AUTONOTIFY_CONTACTS'];
   await app.prisma.tripSafetySession.deleteMany({ where: { orderId: { in: orderIds } } });
-  await app.prisma.sosAlert.deleteMany({ where: { OR: [{ actorUserId: { in: userIds } }, { counterpartyUserId: { in: userIds } }] } });
+  const sosWhere = { OR: [{ actorUserId: { in: userIds } }, { counterpartyUserId: { in: userIds } }] };
+  // Every "I need help" here pages ops; an open page left behind heads the oldest-first
+  // escalation sweep (ops-alert.ts) and crowds out another suite's page. Pages go first.
+  const sosIds = (await app.prisma.sosAlert.findMany({ where: sosWhere, select: { id: true } })).map((s) => s.id);
+  await app.prisma.opsAlert.deleteMany({ where: { sosAlertId: { in: sosIds } } });
+  await app.prisma.sosAlert.deleteMany({ where: sosWhere });
   await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
   await app.prisma.driver.deleteMany({ where: { userId: { in: userIds } } });
   await app.prisma.emergencyContact.deleteMany({ where: { userId: { in: userIds } } });
