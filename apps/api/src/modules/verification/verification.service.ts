@@ -1,8 +1,10 @@
+import { accountErasedUnderLock } from '../user/account-closure';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { Prisma, type PrismaClient, type VerificationDocument, type UserRole, type VehicleType } from '@prisma/client';
 import { promoteIfRegistered } from '../vendor/vendor-tier';
 import type { DocState, ReviewQueue } from '@prisma/client';
 import { hopDocState } from './doc-state';
+import { EXPIRABLE_DOC_STATES, ExpirySweepReport } from './expiry-sweep-report';
 import { DOCUMENT_REPLACED, isReplacedNote, replacedNoteFor, supersedeAwaitingCopies } from './replace-pending';
 import { resolveSubject, linkedAccountIds, normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 import { AUTO_APPROVE_EXPIRY_DAYS, BUCKET_OF, CERTIFICATE_YEAR_DOC_TYPES, isNeverAcceptedDocType, POLICE_CLEARANCE_DOC_TYPE, REGISTRATION_DOC_TYPES, registryCode, type RegistrationKind } from './doc-registry';
@@ -14,6 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -44,12 +47,15 @@ import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../bill
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
+import { assertClaimableUpload } from './upload-window';
 import { liveDuplicateHolders } from './duplicate-holders';
 import {
   projectProviderVerificationLocked,
   reconcileProviderVerifications,
   refreshProviderVerification,
 } from '../services/services.service';
+import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -119,6 +125,31 @@ export function identityFaceMatchLeg(docType: string, env: Record<string, string
  */
 export async function isPoliceCleared(db: Prisma.TransactionClient | PrismaClient, userId: string, now = new Date()): Promise<boolean> {
   return (await approvedEvidenceFor(db, userId, [POLICE_CLEARANCE_DOC_TYPE], now)).length > 0;
+}
+
+/** A mover's saved vehicle from rows already read: the side they use now, else the side they
+ *  last chose (while they still hold that role), else the Rider-first fallback of legacy
+ *  profiles. The one rule for getMoverVehicleType and getStatus. */
+function moverVehicleFrom(
+  user: { activeRole: string | null; lastMoverRole: string | null; roles: readonly string[] } | null,
+  rider: { vehicleType: VehicleType } | null,
+  driver: { vehicleType: VehicleType } | null,
+): VehicleType | null {
+  if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
+  if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
+  if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
+    if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
+    if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
+  }
+  // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
+  return rider?.vehicleType ?? driver?.vehicleType ?? null;
+}
+
+/** A read started before it is known to be needed: marked handled at once, so a failure while an
+ *  earlier step throws never becomes an unhandled rejection. Awaiting it still throws. */
+function startedEarly<T>(read: Promise<T>): Promise<T> {
+  read.catch(() => undefined);
+  return read;
 }
 
 /** The KYC engines whose identity check compares the document's face with the
@@ -531,7 +562,9 @@ export class VerificationService {
           }
         }
       }
-      await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId });
+      // [Row 249] Under the person's lock (FOR SHARE/UPDATE, which the unclaimed-upload sweep's FOR UPDATE waits on):
+      // an upload past the claim window is refused, so a document never claims one the sweep is about to erase.
+      assertClaimableUpload(await resolveVerificationObject(tx, { fileKey: data.fileUrl, userId: data.userId }));
       // [DOC-1 P5-1] Every submission walks the machine from CAPTURED (T1): the row
       // is born PENDING/CAPTURED and the verdict is REACHED by transitions the trigger
       // judges. The ledger lands first, so T8's guard (no blocking FAIL) and T17's
@@ -609,10 +642,11 @@ export class VerificationService {
 
   /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
   private async pageBreakerOnce(profileCode: string, rate: number): Promise<void> {
-    const recent = await this.prisma.notification.findFirst({
+    // [item 20] Any admin's page, read from whoever's extraction tripped the breaker: the named capability under the owner wall.
+    const recent = await ownerWallSystem('verification:breaker-page-once', () => this.prisma.notification.findFirst({
       where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, createdAt: { gt: new Date(Date.now() - 6 * 3_600_000) }, body: { contains: profileCode } },
       select: { id: true },
-    });
+    }));
     if (recent) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: null,
@@ -696,7 +730,8 @@ export class VerificationService {
     const authority = roleKey === 'MOVER' && BUCKET_OF[docType] === 'VEHICLE'
       ? await captureSubmissionAuthority(this.prisma, userId, authenticatedRole) : undefined;
     if (authority && authority.userUpdatedAt.getTime() !== user.updatedAt.getTime()) throw moverAuthorityChanged();
-    await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId });
+    // [Row 249] Refused up front with its own words; the creation transaction checks it again under the lock.
+    assertClaimableUpload(await resolveVerificationObject(this.prisma, { fileKey: fileUrl, userId }));
 
     // Movers (riders + taxi drivers) may submit any doc required for a vehicle
     // class they actually hold; other roles validate against their named
@@ -901,7 +936,9 @@ export class VerificationService {
       throw new AppError(409, 'ALREADY_VERIFIED', 'Your ID is already on file.');
     }
     const object = await resolveVerificationObject(this.prisma, { fileKey: idDocumentUrl, userId });
-    if (selfieUrl !== undefined) await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId });
+    assertClaimableUpload(object);
+    // [Row 249] The selfie is checked, never linked: an old one may be gone with the unclaimed-upload sweep.
+    if (selfieUrl !== undefined) assertClaimableUpload(await resolveVerificationObject(this.prisma, { fileKey: selfieUrl, userId }));
 
     // [DGP-1 · DOC-1 §2] the ID check sends the national ID — same gate as any document.
     assertExternalProcessingPermitted(await this.externalProcessingSubject(user.countryCode, 'national_id'), this.kyc.engine);
@@ -1161,10 +1198,10 @@ export class VerificationService {
           documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
         } });
       }
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
         data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1230,10 +1267,10 @@ export class VerificationService {
     }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
       // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
         data: { kind: 'verification_rejected' },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1780,14 +1817,7 @@ export class VerificationService {
       db.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
       db.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
     ]);
-    if (user?.activeRole === 'RIDER' && rider) return rider.vehicleType;
-    if (user?.activeRole === 'DRIVER' && driver) return driver.vehicleType;
-    if (user?.lastMoverRole && user.roles.includes(user.lastMoverRole)) {
-      if (user.lastMoverRole === 'RIDER' && rider) return rider.vehicleType;
-      if (user.lastMoverRole === 'DRIVER' && driver) return driver.vehicleType;
-    }
-    // Legacy profiles without a remembered choice follow the partner surface's Rider-first fallback.
-    return rider?.vehicleType ?? driver?.vehicleType ?? null;
+    return moverVehicleFrom(user, rider, driver);
   }
 
   /**
@@ -1854,16 +1884,57 @@ export class VerificationService {
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
+    // [PERF C2] A mover's app shows a spinner until this answers (MoverRoot gates Home on it), so
+    // the reads that do not depend on each other run together: the account first (an unknown
+    // account is refused before anything else is read), then the mover's rows once (vehicle and
+    // trial role), then both lists beside the trial preview, then the documents. A mover's police
+    // clearance starts beside the mover's rows. About ten round trips in a row became four.
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { countryCode: true, trustLevel: true },
+      select: { countryCode: true, trustLevel: true, activeRole: true, lastMoverRole: true, roles: true },
     });
     if (!user) throw new NotFoundError('User', userId);
 
+    const { previewTrial } = await import('../integrity/enforcement');
+    // The mover's saved vehicle (null until they provision one) — lets the
+    // onboarding screen initialise its selector and know whether to re-prompt.
+    let vehicleType: VehicleType | null = null;
+    // Trial-integrity Part 4: told BEFORE they commit — what activation will
+    // do for this human (copy #2/#3). Read-only preview: no side effects; the
+    // apps render `trial.message` verbatim when present. Vendor checklists are
+    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
+    let trialRole = 'VENDOR';
+    // [VERIFY-DOCS] Police clearance is on every mover's optional list; it is used below only
+    // when this person's lists name it, exactly as before.
+    let policeClearedEarly: Promise<boolean> | undefined;
+    if (roleKey === 'MOVER') {
+      policeClearedEarly = startedEarly(isPoliceCleared(this.prisma, userId));
+      const [rider, driver] = await Promise.all([
+        this.prisma.rider.findUnique({ where: { userId }, select: { vehicleType: true } }),
+        this.prisma.driver.findUnique({ where: { userId }, select: { vehicleType: true } }),
+      ]);
+      vehicleType = moverVehicleFrom(user, rider, driver);
+      trialRole = driver ? 'DRIVER' : 'RIDER';
+    }
+    const trialRead = previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+
     // `gate`: what this role must hold to go live — roleVerified reads it alone.
-    const gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
-    // [VERIFY-DOCS] What the person MAY add. Older apps read only `checklist` and ignore this.
-    let optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    // [VERIFY-DOCS] `optional`: what the person MAY add. Older apps read only `checklist` and ignore it.
+    // A mover's two lists use the same vehicle rule as the gates (the preview's hint, else the saved
+    // vehicle, else a motorcycle), and a mover's optional list does not read `gate`, so the two are
+    // read together. Every other role's optional list is cut from its checklist, so it waits for it.
+    let gate: string[];
+    let optional: string[];
+    if (roleKey === 'MOVER') {
+      const listVehicle = vehicleHint ?? vehicleType ?? 'MOTORCYCLE';
+      [gate, optional] = await Promise.all([
+        this.checklistFor(userId, user.countryCode, roleKey, listVehicle),
+        this.optionalFor(userId, user.countryCode, roleKey, [], listVehicle),
+      ]);
+    } else {
+      gate = await this.checklistFor(userId, user.countryCode, roleKey, vehicleHint);
+      optional = await this.optionalFor(userId, user.countryCode, roleKey, gate, vehicleHint);
+    }
     // [VERIFY-DOCS · ruling 6 Oct ~21:25] A service business that offers home visits is SHOWN the
     // police clearance in its checklist — build 9 uploads only what `checklist` names — but the
     // store's gate is unchanged: only its home-visit bookings wait for the clearance.
@@ -1871,7 +1942,8 @@ export class VerificationService {
     let homeVisits: { offered: boolean; cleared: boolean } | undefined;
     if (roleKey === 'SERVICE') {
       const { homeVisitsCleared, ownerOffersHomeVisits } = await import('./home-visits');
-      homeVisits = { offered: await ownerOffersHomeVisits(this.prisma, userId), cleared: await homeVisitsCleared(this.prisma, userId) };
+      const [offered, cleared] = await Promise.all([ownerOffersHomeVisits(this.prisma, userId), homeVisitsCleared(this.prisma, userId)]);
+      homeVisits = { offered, cleared };
       if (homeVisits.offered && !checklist.includes(POLICE_CLEARANCE_DOC_TYPE)) {
         checklist = [...checklist, POLICE_CLEARANCE_DOC_TYPE];
         optional = optional.filter((docType) => docType !== POLICE_CLEARANCE_DOC_TYPE);
@@ -1881,10 +1953,17 @@ export class VerificationService {
     // replaced it, or [VEHICLES] it was about a vehicle the mover no longer has. It keeps
     // its legacy APPROVED status (a supersession does not rewrite history), so it is left
     // out here, or the checklist would show an approval GO no longer counts.
-    const rows = await this.prisma.verificationDocument.findMany({
-      where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
-      orderBy: { createdAt: 'desc' },
-    });
+    // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
+    // the one evidence rule, so the flag survives the image being deleted after review.
+    // Only asked where this person's lists name the document at all. Read beside the documents.
+    const namesPoliceClearance = [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE);
+    const [rows, policeCleared] = await Promise.all([
+      this.prisma.verificationDocument.findMany({
+        where: { userId, docType: { in: [...checklist, ...optional, IDENTITY_DOC_TYPE] } },
+        orderBy: { createdAt: 'desc' },
+      }),
+      namesPoliceClearance ? (policeClearedEarly ?? isPoliceCleared(this.prisma, userId)) : false,
+    ]);
     // [REPLACE-PENDING] A copy waiting for review that replaced an earlier waiting copy says so
     // ("Replaced — waiting for review"). Additive field; older apps ignore it.
     // "Replaced" belongs to the copy that did the replacing (named in the replaced copy's note), never to a later copy.
@@ -1908,21 +1987,7 @@ export class VerificationService {
     // done: a driver without them sees each one still to upload (`missing`).
     const missing = checklist.filter((docType) => !approved.has(docType));
     const gateMissing = gate.filter((docType) => !approved.has(docType));
-
-    // The mover's saved vehicle (null until they provision one) — lets the
-    // onboarding screen initialise its selector and know whether to re-prompt.
-    const vehicleType = roleKey === 'MOVER' ? await this.getMoverVehicleType(userId) : null;
-
-    // Trial-integrity Part 4: told BEFORE they commit — what activation will
-    // do for this human (copy #2/#3). Read-only preview: no side effects; the
-    // apps render `trial.message` verbatim when present. Vendor checklists are
-    // keyed by vendor TYPE; the trial role for all of them is VENDOR.
-    const { previewTrial } = await import('../integrity/enforcement');
-    const trialRole =
-      roleKey === 'MOVER'
-        ? (await this.prisma.driver.findUnique({ where: { userId }, select: { id: true } })) ? 'DRIVER' : 'RIDER'
-        : 'VENDOR';
-    const trial = await previewTrial(this.prisma, userId, trialRole, 'swift-default').catch(() => null);
+    const trial = await trialRead;
 
     // [Owner, 1 Oct · truth] The checklist documents this server compares with
     // the profile selfie right now: the submit path's face-match leg, run by an
@@ -1946,10 +2011,8 @@ export class VerificationService {
       categoryUnavailable: roleKey === 'SERVICE_PROVIDER' && gate.length === 0,
       trial,
       faceMatchDocTypes,
-      // [VERIFY-DOCS · rulings 1–2] "Police-cleared": an approved, current police clearance —
-      // the one evidence rule, so the flag survives the image being deleted after review.
-      // Only asked where this person's lists name the document at all.
-      policeCleared: [...checklist, ...optional].includes(POLICE_CLEARANCE_DOC_TYPE) && await isPoliceCleared(this.prisma, userId),
+      // [VERIFY-DOCS · rulings 1–2] Police-cleared (read beside the documents, above).
+      policeCleared,
       // [VERIFY-DOCS] Service businesses only: whether a listing comes to the customer, and whether
       // the owner's clearance lets those visits be booked.
       ...(homeVisits ? { homeVisits } : {}),
@@ -2207,6 +2270,10 @@ export class VerificationService {
     // transaction client has no `$transaction`, and a client this service is already projecting through is
     // registered in projectionNotices — so the projection can never re-enter itself, whatever the client shape.
     if ('$transaction' in db && !this.projectionNotices.has(db)) return this.projectionTransaction(async (tx) => {
+      // [#1879 S3-3 · REVIEW-G R1] An erased account's stores are projected nothing (no flags, no promotion, no
+      // trial): the person's row is locked after the identity lock (the activation order), so an erasure either
+      // commits first and is seen here, or waits and winds down what this wrote.
+      if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
     // [#1541] Settlement's payer -> subscriptions locks before any fee read or store write (billing-access.ts).
@@ -2230,13 +2297,13 @@ export class VerificationService {
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      const notice = await db.notification.create({ data: {
+      const notice = await insertNoticeFor(db, {
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your store is now a registered seller',
         body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
         data: { kind: 'vendor_tier_promoted', vendorId },
-      } });
+      });
       this.projectionNotices.get(db)?.push(notice.id);
     });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
@@ -2296,19 +2363,22 @@ export class VerificationService {
     userId: string,
     vendor: { id: string; name: string },
   ): Promise<void> {
-    const already = await db.notification.findFirst({
-      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
-      select: { id: true },
-    });
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const already = ownerRlsBindEnabled()
+      ? await publicPhoneAsked(db, userId, vendor.id)
+      : await db.notification.findFirst({
+        where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+        select: { id: true },
+      });
     if (already) return;
-    const notice = await db.notification.create({ data: {
+    const notice = await insertNoticeFor(db, {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Add the number customers can call',
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
-    } });
+    });
     this.projectionNotices.get(db)?.push(notice.id);
   }
 
@@ -2406,13 +2476,27 @@ export class VerificationService {
   // Expiry automation (daily job)
   // -------------------------------------------------------------------------
 
-  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend. */
+  /** APPROVED/PENDING docs past their expiry lapse; dependent listings suspend.
+   *  [Expiry isolation] One document never stops the sweep. A lapsed row in a state the document machine does
+   *  not let expire is HELD as it is, for a person (no gate accepts an expired record, so it grants
+   *  nothing); a row whose expiry fails stays lapsed and is retried on the next run; a failed heal or
+   *  follow-up is reported. The admins are told once per run, and the reminders, retention reaper and
+   *  licence sweep after this in the daily job always run. */
   async expireLapsedDocuments(): Promise<number> {
+    const report = new ExpirySweepReport();
     // Reconcile first so a prior process failure after marking EXPIRED cannot
     // remain invisible forever merely because the next query skips terminal rows.
-    await reconcileProviderVerifications(this.prisma);
+    try {
+      await reconcileProviderVerifications(this.prisma);
+    } catch (err) {
+      report.add('provider_reconcile', null, err);
+    }
     // [STRAND-2 belt] Vendor projections ride the same daily heal.
-    await this.reconcileVendorActivations();
+    try {
+      await this.reconcileVendorActivations();
+    } catch (err) {
+      report.add('vendor_reconcile', null, err);
+    }
     const now = new Date();
     const lapsed = await this.prisma.verificationDocument.findMany({
       where: { status: { in: ['APPROVED', 'PENDING'] }, expiresAt: { lt: now } },
@@ -2420,65 +2504,80 @@ export class VerificationService {
 
     let expired = 0;
     for (const doc of lapsed) {
-      const transitioned = await this.projectionTransaction(async (tx) => {
-        const users = await tx.$queryRaw<Array<{ id: string }>>`
-          SELECT "id" FROM "users"
-          WHERE "id" = ${doc.userId}
-          FOR UPDATE /* verification-document-expiry-authority */
-        `;
-        if (!users[0]) return false;
-        const won = await tx.verificationDocument.updateMany({
-          where: {
-            id: doc.id,
-            userId: doc.userId,
-            status: { in: ['APPROVED', 'PENDING'] },
-            expiresAt: { lt: now },
-          },
-          data: { status: 'EXPIRED' },
+      if (doc.state && !EXPIRABLE_DOC_STATES.has(doc.state)) {
+        report.add('not_expirable', doc.id);
+        continue;
+      }
+      let transitioned: boolean;
+      try {
+        transitioned = await this.projectionTransaction(async (tx) => {
+          const users = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id" FROM "users"
+            WHERE "id" = ${doc.userId}
+            FOR UPDATE /* verification-document-expiry-authority */
+          `;
+          if (!users[0]) return false;
+          const won = await tx.verificationDocument.updateMany({
+            where: {
+              id: doc.id,
+              userId: doc.userId,
+              status: { in: ['APPROVED', 'PENDING'] },
+              expiresAt: { lt: now },
+            },
+            data: { status: 'EXPIRED' },
+          });
+          // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
+          if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
+          if (won.count !== 1) return false;
+          await projectProviderVerificationLocked(tx, doc.userId);
+          // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
+          // transaction — document truth and the derived vendor flags are one
+          // generation, not "EXPIRED now, store closes at some later sweep".
+          await this.projectVendorActivation(tx, doc.userId);
+          return true;
         });
-        // [DOC-1 §9.3 · P4-7] The schedule records the suspension with the expiry.
-        if (won.count === 1) await tx.renewalSchedule.updateMany({ where: { documentId: doc.id, suspendedAt: null }, data: { suspendedAt: now } });
-        if (won.count !== 1) return false;
-        await projectProviderVerificationLocked(tx, doc.userId);
-        // [REPORT-012 F-012-05] The vendor projection rides the SAME expiry
-        // transaction — document truth and the derived vendor flags are one
-        // generation, not "EXPIRED now, store closes at some later sweep".
-        await this.projectVendorActivation(tx, doc.userId);
-        return true;
-      });
+      } catch (err) {
+        report.add('expiry_failed', doc.id, err);
+        continue;
+      }
       if (!transitioned) continue;
       expired += 1;
 
-      // L2 is permanent once earned — an expired ID does not demote the user
-      if (doc.docType === IDENTITY_DOC_TYPE) continue;
+      try {
+        // L2 is permanent once earned — an expired ID does not demote the user
+        if (doc.docType === IDENTITY_DOC_TYPE) continue;
 
-      // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
-      // and a mover whose live-operation status broke is pulled offline now —
-      // not "after they next toggle" (an uninsured taxi must stop getting jobs).
-      if (doc.role === 'MOVER') {
-        await this.forceMoverOfflineIfNotLive(doc.userId);
-      } else {
-        await this.suspendListingsIfUnverified(doc.userId);
+        // A lapsed document takes effect IMMEDIATELY: vendors' listings go dark,
+        // and a mover whose live-operation status broke is pulled offline now —
+        // not "after they next toggle" (an uninsured taxi must stop getting jobs).
+        if (doc.role === 'MOVER') {
+          await this.forceMoverOfflineIfNotLive(doc.userId);
+        } else {
+          await this.suspendListingsIfUnverified(doc.userId);
+        }
+        // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
+        await this.propagateVehicleLapse(doc, 'expired');
+        // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
+        // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
+        const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
+        await this.notifications.send({
+          userId: doc.userId,
+          type: 'SYSTEM_ANNOUNCEMENT',
+          title: 'Document expired',
+          body: optional
+            ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
+            : doc.docType === HIRE_PERMIT_DOC_TYPE
+              ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
+              : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
+          audience: audienceForRole(doc.role),
+          data: { kind: 'verification_expired', docId: doc.id },
+        });
+      } catch (err) {
+        report.add('effects_failed', doc.id, err);
       }
-      // [DOC-1 §3.11 · P3-4] A vehicle's lapse reaches every driver assigned to it.
-      await this.propagateVehicleLapse(doc, 'expired');
-      // [VERIFY-DOCS] An optional document's lapse costs the person nothing but the police-cleared
-      // flag — say so. No screen shows a badge yet, so the notice never promises one (GUARDRAILS §4).
-      const optional = await this.isOptionalMoverDocument(doc.userId, doc.role, doc.docType);
-      await this.notifications.send({
-        userId: doc.userId,
-        type: 'SYSTEM_ANNOUNCEMENT',
-        title: 'Document expired',
-        body: optional
-          ? `Your ${doc.docType.replace(/_/g, ' ')} has expired.${doc.docType === POLICE_CLEARANCE_DOC_TYPE ? ' You are no longer recorded as police-cleared until you upload a current one.' : ''} It is optional: you can keep working, and upload a new one any time.`
-          : doc.docType === HIRE_PERMIT_DOC_TYPE
-            ? `Your hire-car permit has expired. ${hireLicenceUploadWords(HIRE_SPLIT_DOC_TYPES)} in Documents to go online.`
-            : `Your ${doc.docType.replace(/_/g, ' ')} has expired. Upload a new one to keep operating.`,
-        audience: audienceForRole(doc.role),
-        data: { kind: 'verification_expired', docId: doc.id },
-      });
     }
 
+    await report.report(this.prisma, this.notifications, expired);
     return expired;
   }
 
@@ -2734,6 +2833,143 @@ export class VerificationService {
   }
 
   /**
+   * [Row 249 · COORD ruling option A] The abandoned-application sweep (abandoned-application.ts): a notice at
+   * day 76 of the applicant's inactivity, the documents through purgeDocumentNow at day 90 (never sooner than 14
+   * days after the notice), never while anything of theirs waits on Swift, never for a role they were ever
+   * verified for. Daily, before the reaper. One person failing never stops the others.
+   */
+  async sweepAbandonedApplications(now = new Date(), page = 500): Promise<{ noticed: number; purged: number; failed: number }> {
+    // The cheap exclusions are in the query (synthetic, erased, anything waiting on Swift, nothing old enough), and every
+    // run walks ALL candidates a page at a time (keyset on userId), so people the per-person checks exclude (a verified
+    // role, an AML record) can never fill every page and starve the people behind them (COORD security review).
+    const total = { noticed: 0, purged: 0, failed: 0 };
+    for (let after: string | undefined; ;) {
+      const people = await this.prisma.verificationDocument.findMany({
+        where: {
+          AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null,
+          createdAt: { lt: new Date(now.getTime() - ABANDON_NOTICE_DAYS * DAY_MS) },
+          ...(after ? { userId: { gt: after } } : {}),
+          user: { isSynthetic: false, NOT: { phone: { startsWith: 'deleted:' } }, verificationDocuments: { none: WAITING_ON_SWIFT_WHERE } },
+        },
+        distinct: ['userId'], select: { userId: true }, orderBy: { userId: 'asc' }, take: page,
+      });
+      if (!people.length) break;
+      after = people[people.length - 1]!.userId;
+      for (const { userId } of people) {
+        // [REVIEW-M S3-1] One person who cannot be processed (any error) is counted and left for the next run; it
+        // never stops the people behind them. Their documents stay: a failure only ever keeps.
+        try {
+          const r = await this.abandonedApplicationStep(userId, now);
+          total.noticed += r.noticed; total.purged += r.purged;
+        } catch (err) {
+          total.failed += 1;
+          log().error({ errName: err instanceof Error ? err.name : typeof err, userId }, 'abandoned-application step failed; left for the next run');
+        }
+      }
+    }
+    return total;
+  }
+
+  /** [Row 249] The daily unclaimed-upload sweep (user/upload-erasure.ts), on this service's database and storage. */
+  async sweepStaleUnclaimedUploads(log?: NonNullable<Parameters<typeof import('../user/upload-erasure').sweepStaleUnclaimedUploads>[2]>['log']) {
+    const { sweepStaleUnclaimedUploads } = await import('../user/upload-erasure');
+    return sweepStaleUnclaimedUploads(this.prisma, getStorageProvider(), { log });
+  }
+
+  /**
+   * [Row 249 · COORD 16:50Z + security review] Was this role's FULL required checklist approved at any time? Every
+   * required type needs a document Swift approved (approved, committed, expired since, or its image purged after review).
+   * Fails toward keeping: no person, an empty checklist or any error reads as complete, so nothing is swept.
+   */
+  private async everCompletedChecklist(userId: string, roleKey: ChecklistRole): Promise<boolean> {
+    try {
+      const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
+      if (!user) return true;
+      const checklist = await this.checklistFor(userId, user.countryCode, roleKey);
+      if (checklist.length === 0) return true;
+      const roles: UserRole[] = roleKey === 'MOVER' ? [...MOVER_ROLES] : [this.roleKeyToUserRole(roleKey)];
+      const approved = await this.prisma.verificationDocument.findMany({
+        where: { userId, role: { in: roles }, docType: { in: checklist }, ...EVER_APPROVED_WHERE },
+        distinct: ['docType'], select: { docType: true },
+      });
+      const have = new Set(approved.map((d) => d.docType));
+      return checklist.every((t) => have.has(t));
+    } catch {
+      return true;
+    }
+  }
+
+  private async abandonedApplicationStep(userId: string, now: Date): Promise<{ noticed: number; purged: number }> {
+    const none = { noticed: 0, purged: 0 };
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, isSynthetic: true, countryCode: true, tenantId: true } });
+    if (!user || user.isSynthetic || user.phone === `deleted:${userId}`) return none;
+    // Anything waiting on Swift: never abandoned.
+    if (await this.prisma.verificationDocument.count({ where: { userId, ...WAITING_ON_SWIFT_WHERE } }) > 0) return none;
+    // The applicant's last activity: a submission, a decision of ours, an upload.
+    const [docs, upload] = await Promise.all([
+      this.prisma.verificationDocument.findMany({ where: { userId }, select: { createdAt: true, reviewedAt: true } }),
+      this.prisma.encryptedObject.findFirst({ where: { createdBy: userId }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
+    ]);
+    let last = upload?.createdAt.getTime() ?? 0;
+    for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);
+    const lastActivityAt = new Date(last);
+    if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
+    // [REVIEW-M S4-3 · COORD] An open fraud, safety, compliance or dispute case keeps the documents, like a hold:
+    // no notice (it would not be true), nothing deleted, until it closes.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
+    // The application's documents: partner documents of a role never verified, not held, not an AML record.
+    const verified = await everVerifiedRoles(this.prisma, userId, (roleKey) => this.everCompletedChecklist(userId, roleKey));
+    const config = await this.countryConfig.getByCode(user.countryCode);
+    const candidates = [];
+    for (const d of await this.prisma.verificationDocument.findMany({
+      where: { userId, AND: [PARTNER_DOCUMENT_WHERE], purgedAt: null, legalHoldId: null },
+      select: { id: true, userId: true, fileUrl: true, docType: true, role: true },
+      orderBy: { id: 'asc' },
+    })) {
+      if (verified.has(d.role)) continue;
+      const ruling = await retentionDaysFor(this.prisma, { countryCode: user.countryCode, docType: d.docType, role: d.role, countryDefaultDays: config.dataRetentionDays });
+      if (ruling.amlRecord) continue;
+      candidates.push({ ...d, user: { tenantId: user.tenantId } });
+    }
+    if (!candidates.length) return none;
+    // The notice about THIS inactivity (one written after the last activity); activity since voids an older one.
+    const notice = await this.prisma.auditLog.findFirst({
+      where: { userId, action: ABANDON_NOTICE_ACTION, createdAt: { gt: lastActivityAt } },
+      orderBy: { createdAt: 'asc' }, select: { createdAt: true },
+    });
+    if (!notice) {
+      // [REVIEW-M S4-1] The in-app notice is the inbox row; whether a push also reached a phone is recorded with it,
+      // never assumed.
+      const reach = await this.notifications.sendReach({
+        userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
+        // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
+        ...(candidates.some((d) => d.role === 'VENDOR_OWNER') ? { audience: 'business' as const }
+          : candidates.some((d) => d.role !== 'CUSTOMER') ? { audience: 'earner' as const } : {}),
+        data: { kind: 'verification_application_abandoned' },
+        dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
+      });
+      // [REVIEW-G S3-2] sendReach answers a failed inbox write with no id (it never throws, for its other callers). No
+      // inbox row = no notice: throw, so no notice record starts the purge clock; the person is counted as failed and
+      // noticed on the next run.
+      if (!reach.id) throw new Error('abandoned-application notice not written to the inbox');
+      await this.prisma.auditLog.create({ data: {
+        userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
+        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length, notificationId: reach.id, pushed: reach.pushed },
+      } });
+      return { noticed: 1, purged: 0 };
+    }
+    if (now.getTime() < abandonPurgeDueAt(lastActivityAt, notice.createdAt).getTime()) return none;
+    // [COORD 18:5xZ] Checked AGAIN immediately before the purge: a case opened after the notice still keeps everything.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
+    let purged = 0;
+    for (const doc of candidates) {
+      const outcome = await this.purgeDocumentNow(doc, ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, now, still: stillAbandoned(lastActivityAt) });
+      if (outcome === 'PURGED') purged += 1;
+    }
+    return { noticed: 0, purged };
+  }
+
+  /**
    * The one purge of one document: delete the bytes, shred the key, PROBE
    * (DOC-INV-7 — a receipt without a passing probe is not a receipt), then the
    * compare-and-set under the person's row lock, the receipt in the same
@@ -2745,14 +2981,17 @@ export class VerificationService {
   async purgeDocumentNow(
     doc: { id: string; userId: string; fileUrl: string; docType: string; user: { tenantId: string } },
     deletedBy: string,
-    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date },
+    opts: { requireRetentionElapsed: boolean; shredFields: boolean; now?: Date; still?: Prisma.VerificationDocumentWhereInput },
   ): Promise<'PURGED' | 'PROBE_FAILED' | 'NOT_PURGED'> {
     const now = opts.now ?? new Date();
     const storage = getStorageProvider();
+    // [Row 249] A caller's own condition (the abandoned-application sweep: still abandoned) is re-checked
+    // under the person's lock at both steps, with the hold and the retention clock.
+    const still: Prisma.VerificationDocumentWhereInput = opts.still ?? {};
     // [Row 243] The bytes are destroyed only under the person's lock and only while still unheld.
     const evidence = doc.fileUrl
       ? await shredUnlessHeld(this.prisma, storage, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id },
-        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) })
+        { purgedAt: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still })
       : NOTHING_STORED;
     if (!evidence) return 'NOT_PURGED';
     const receipt = { submissionId: doc.id, subjectId: doc.userId, tenantId: doc.user.tenantId, docTypeCode: doc.docType, deletedBy, evidence };
@@ -2768,7 +3007,7 @@ export class VerificationService {
       `;
       if (!users[0]) return false;
       const won = await tx.verificationDocument.updateMany({
-        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}) },
+        where: { id: doc.id, userId: doc.userId, purgedAt: null, legalHoldId: null, ...(opts.requireRetentionElapsed ? { retentionExpiresAt: { lt: now } } : {}), ...still },
         data: { purgedAt: new Date(), fileUrl: '' },
       });
       if (won.count !== 1) return false;

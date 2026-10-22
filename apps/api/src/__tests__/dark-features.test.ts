@@ -1,8 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { DARK_FEATURES, darkFeatureStatus, darkFeaturesOff } from '../modules/ops/dark-features';
+import { DARK_FEATURES, darkFeatureMisconfigurations, darkFeatureStatus, darkFeaturesOff } from '../modules/ops/dark-features';
 import { moverPushRequired } from '../modules/notification/mover-push-authority';
+import { carDeliveriesEnabled } from '../config/vehicle-classes';
+import { taxiMaxStops } from '../modules/rides/taxi-stops-flag';
+import { taxiWaitingEnabled } from '../modules/rides/taxi-waiting';
+import { adsEnabled } from '../modules/ads/ads-enabled';
+import { ownerRlsBindEnabled } from '../lib/owner-rls';
+import { mmgCheckoutEnabled } from '../providers/mmg/mmg-checkout';
+import { webTaxiBookingEnabled } from '../modules/rides/web-taxi-booking';
 
 // ---------------------------------------------------------------------------
 // A capability may ship switched off. It may not ship switched off SILENTLY.
@@ -128,8 +135,17 @@ describe('[dark features] the registry matches the code that reads the switch', 
       read('apps/api/src/modules/ads/checkout.service.ts'),
       read('apps/api/src/modules/ads/refund.service.ts'),
       read('apps/api/src/utils/mmg-pay-url.ts'),
+      // [row 117] web taxi booking
+      read('apps/api/src/modules/rides/web-taxi-booking.ts'),
       // [row 312] the upload malware gate
       read('apps/api/src/lib/malware-scan.ts'),
+      // [SWITCHES fact-check 21 Oct] the launch switches that were missing
+      read('apps/api/src/config/vehicle-classes.ts'),
+      read('apps/api/src/modules/rides/taxi-stops-flag.ts'),
+      read('apps/api/src/modules/rides/taxi-waiting.ts'),
+      read('apps/api/src/modules/ads/ads-enabled.ts'),
+      read('apps/api/src/lib/owner-rls.ts'),
+      read('apps/api/src/providers/mmg/mmg-checkout.ts'),
     ].join('\n');
     expect(sources.length, 'could not read the sources — the check cannot run').toBeGreaterThan(500);
     for (const f of DARK_FEATURES) {
@@ -207,5 +223,51 @@ describe('[row 331 · CONFIG-GUARDS] every kill switch the API reads is in the r
     for (const setting of ['SOS_ESCALATION_WORKER_KILL', 'OPS_ALERT_ESCALATION_KILL', 'GUARDIAN_CHECKIN_DELIVERY_KILL', 'NOT_MY_DRIVER_AUTHORITY_KILL']) {
       expect(kills.find((f) => f.setting === setting)?.impact, setting).toBe('safety');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [SWITCHES fact-check, 21 Oct] Six launch switches were read by the code and named nowhere an operator
+// looks. Each is registered, read exactly as the code reads it, and written in the deploy template.
+// ---------------------------------------------------------------------------
+describe('[SWITCHES] the launch switches are registered and read exactly as the code reads them', () => {
+  const SWITCHES: Array<[string, (env: Record<string, string | undefined>) => boolean]> = [
+    ['CAR_DELIVERIES', (env) => carDeliveriesEnabled(env)],
+    ['TAXI_MAX_STOPS', (env) => taxiMaxStops(env) > 0],
+    ['TAXI_WAITING_CHARGE', (env) => taxiWaitingEnabled(env)],
+    ['ADS_ENABLED', (env) => adsEnabled(env)],
+    ['OWNER_RLS_BIND', (env) => ownerRlsBindEnabled(env)],
+    ['MMG_CHECKOUT_ENABLED', (env) => mmgCheckoutEnabled(env)],
+    ['WEB_TAXI_BOOKING', (env) => webTaxiBookingEnabled(env)],
+  ];
+  const VALUES = [undefined, '', '0', '1', ' 1', '1 ', '2', '3', '9', '01', 'true', 'TRUE', 'yes', '-1', '1.5'];
+
+  for (const [setting, code] of SWITCHES) {
+    it(`${setting}: registered, and ON exactly when the code is on`, () => {
+      const entry = DARK_FEATURES.find((f) => f.setting === setting);
+      expect(entry, `${setting} is in the register`).toBeTruthy();
+      expect(entry!.whileOff.length).toBeGreaterThan(60);
+      for (const value of VALUES) {
+        const env = value === undefined ? {} : { [setting]: value };
+        const row = darkFeatureStatus(env, {}).find((r) => r.setting === setting)!;
+        expect([setting, value, row.on]).toEqual([setting, value, code(env)]);
+      }
+    });
+  }
+
+  it('each is written in the deploy template an operator copies, and the production KYC rule is stated there', () => {
+    const template = read('deploy/.env.deploy.example');
+    for (const name of [...SWITCHES.map(([s]) => s), 'MALWARE_SCAN', 'CLAMD_HOST']) {
+      expect(template, `${name} appears in deploy/.env.deploy.example`).toMatch(new RegExp(`^#? ?${name}=`, 'm'));
+    }
+    expect(template).toMatch(/KYC_PROVIDER must be manual in production/);
+  });
+
+  it('the malware scan switched on with no scanner named is called out before a deploy: every upload would be refused', () => {
+    expect(darkFeatureMisconfigurations({ MALWARE_SCAN: 'clamd' }).join(' ')).toMatch(/CLAMD_HOST/);
+    expect(darkFeatureMisconfigurations({ MALWARE_SCAN: 'clamd', CLAMD_HOST: '  ' }).join(' ')).toMatch(/every upload is refused/);
+    expect(darkFeatureMisconfigurations({ MALWARE_SCAN: 'clamd', CLAMD_HOST: 'clamd' })).toEqual([]);
+    expect(darkFeatureMisconfigurations({})).toEqual([]);
+    expect(read('deploy/preflight.ts')).toContain('darkFeatureMisconfigurations(production)');
   });
 });

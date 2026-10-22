@@ -11,7 +11,7 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -35,6 +35,7 @@ import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_R
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -236,9 +237,20 @@ export function ActiveJobScreen({ navigation }: any) {
   }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
+    // [BUG-GUARDS C3] Until the job read answers (loading, or failed with nothing cached) this is not
+    // "No active job": a driver mid-trip must never be told they have none.
+    const unanswered = active.data === undefined && (active.isLoading || active.isError);
     return (
       <Screen>
-        <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        {unanswered && active.isError ? (
+          <ErrorState message="We couldn't load your job. Check your connection and try again." onRetry={() => void active.refetch()} />
+        ) : unanswered ? (
+          <View accessibilityLabel="Loading your job" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Spinner size="large" />
+          </View>
+        ) : (
+          <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        )}
         <View style={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
           <PillButton label="Back" variant="soft" onPress={() => navigation?.goBack?.()} />
         </View>
@@ -587,9 +599,12 @@ export function ActiveJobScreen({ navigation }: any) {
     }
   };
 
+  // [UI-SWEEP U04] The trip-complete popup closes in its own tick; Back waits
+  // for the modal's teardown (#910's law, kit/after-dismiss). Closing and going
+  // back in one tick can leave an invisible window over Home eating every tap.
   const closeRating = () => {
     setRatePopup(null);
-    navigation?.goBack?.();
+    afterDismiss(() => navigation?.goBack?.());
   };
 
   // The one big action at the bottom (reference "Arrived" button).

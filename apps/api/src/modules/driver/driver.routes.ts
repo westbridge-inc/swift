@@ -1,4 +1,5 @@
 import { advanceDriverPickup, drainDriverPickupNotices } from '../rides/driver-pickup';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingFor, shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
@@ -24,7 +25,10 @@ import { dispatchDeclinedKey } from '../dispatch/dispatch-generation-keys';
 import { TAXI_DEMAND_WINDOW_MIN } from '../dispatch/demand.service';
 import { coarsePoint } from '../dispatch/board-privacy';
 import { classesAtOrAbove, classesAtOrBelow } from '../rides/fare.service';
-import { loadTaxiStops, offerItinerary, readRideItinerary } from '../rides/taxi-stops-read';
+import { loadTaxiStops, offerItinerary, readRideItinerary, stopProgress } from '../rides/taxi-stops-read';
+import { declaresTaxiStops, stopWaitOf, type TaxiStopWait } from '../rides/taxi-stop-rules';
+import { moveTaxiStop, type TaxiStopAction } from '../rides/taxi-stop-progress';
+import { chatContentReason } from '../chat/content-filter';
 import { decorateRideWaiting, readFareBreakdown, type TaxiFareBreakdown } from '../rides/taxi-waiting';
 import { freshRidePinReset } from '../rides/ride-pin';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
@@ -100,6 +104,17 @@ const driverLocationSchema = z.object({
 });
 
 const driverGoOnlineSchema = driverLocationSchema.pick({ latitude: true, longitude: true });
+/** [TAXI multi-stop 4/8] What the app says it can run (CONTRACT §6.4). Absent
+ *  on every older app; a malformed list is read as nothing declared, never a
+ *  reason to keep a driver offline. */
+const driverCapabilitiesSchema = z.object({
+  capabilities: z.array(z.string().max(64)).max(16).optional().catch(undefined),
+});
+
+/** [TAXI multi-stop 4/8] A stop of the driver's ride: its number in the
+ *  passenger's order (1..3), and a skip's reason, which the passenger is told. */
+const stopParamsSchema = z.object({ id: z.string().min(1), seq: z.coerce.number().int().min(1).max(3) });
+const stopSkipSchema = z.object({ reason: z.string().trim().min(3).max(200) });
 
 const verifyPinSchema = z.object({
   // [REPORT-021 F-021-01] Every handover PIN is exactly 6 digits — a
@@ -132,7 +147,15 @@ function driverLinkView(link: { mmgPayUrl: string | null; mmgPayUrlPending: stri
   };
 }
 
+/** §6.3 `stopWait` on the wire: ISO times, or null. */
+function stopWaitView(wait: TaxiStopWait | null) {
+  return wait ? { sequence: wait.sequence, arrivedAt: wait.arrivedAt.toISOString(), noShowAvailableAt: wait.noShowAvailableAt.toISOString() } : null;
+}
+
 export async function driverRoutes(app: FastifyInstance) {
+  // [PERF item 3] Job-step taps answer without waiting for the customer's push (lib/push-after-response);
+  // shutdown waits for those pushes under the same cleanup deadline as in-flight requests.
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-29] The cash rail — the same one the rider's handover at the door uses.
@@ -403,6 +426,9 @@ export async function driverRoutes(app: FastifyInstance) {
     // §8.3 — an interim safety suspension blocks go-online until ops lifts it.
     assertNotSafetySuspended(driver);
     const location = driverGoOnlineSchema.parse(request.body ?? {});
+    // [TAXI multi-stop 4/8] Set on EVERY go-online from what this app declares:
+    // an older app going online after a newer one clears it again.
+    const taxiStopsCapable = declaresTaxiStops(driverCapabilitiesSchema.parse(request.body ?? {}).capabilities);
 
     // Serialize GO against role switching and compare the profile generation
     // captured before the slower verification gates. If an accept/offline/
@@ -457,6 +483,7 @@ export async function driverRoutes(app: FastifyInstance) {
         UPDATE drivers SET "isOnline" = true, "isAvailable" = ${!snapshot.currentRideId},
           "currentLat" = ${location.latitude}, "currentLng" = ${location.longitude},
           "lastLocationUpdate" = clock_timestamp(), "locationSessionId" = ${locationSessionId},
+          "taxiStopsCapable" = ${taxiStopsCapable},
           "updatedAt" = clock_timestamp()
         WHERE id = ${driver.id} AND ${documentDeadlineSql(liveGate)}
         RETURNING "isOnline", "isAvailable"`;
@@ -760,6 +787,9 @@ export async function driverRoutes(app: FastifyInstance) {
             { taxiPassengerCount: { lte: driver.vehicleCapacity ?? 4 } },
           ],
         }],
+        // [TAXI multi-stop 4/8] A ride with stops only to an app that declared
+        // it can run them (go-online); the claim refuses the rest too.
+        ...(driver.taxiStopsCapable ? {} : { taxiStopCount: null }),
       },
       include: {
         customer: { select: { id: true } },
@@ -852,16 +882,71 @@ export async function driverRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops: each with its progress, in order, and
     // the one the ride is heading for. A ride without them gains no key.
     const itinerary = order ? await readRideItinerary(app.prisma, order) : null;
+    // [TAXI multi-stop 4/8] The grace clock at the stop the car is waiting at
+    // (null while heading for one). Its key on a ride with stops is also how
+    // the app knows this server takes the stop actions; no key without stops.
+    const stopWait = itinerary ? { stopWait: stopWaitView(stopWaitOf(itinerary.stops)) } : null;
     // [TAXI waiting charge] From the arrival on, the live wait: what the driver
     // collects on top of the route fare, the same number the freeze will take.
     const waiting = order ? await decorateRideWaiting(app.prisma, order, itinerary?.stops ?? null) : {};
-    return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...waiting } : order };
+    return { success: true, data: order && (itinerary || waiting.waiting) ? { ...order, ...itinerary, ...stopWait, ...waiting } : order };
   });
 
   // ─── Ride Lifecycle ────────────────────────────────────────────────────
 
+  // [TAXI multi-stop 4/8] The stop actions (CONTRACT §6.4), each on the next
+  // open stop of the driver's ride in progress, on the server's clock. One
+  // seam (taxi-stop-progress.ts) decides; this tells the people in the ride.
+  // Never switched off: a ride booked with stops always finishes.
+  const moveStop = async (request: FastifyRequest, action: TaxiStopAction) => {
+    // Who is asking answers first (403 for a non-driver), then the shape.
+    const driver = await getDriver(request.user.userId);
+    const { id, seq } = stopParamsSchema.parse(request.params);
+    const reason = action === 'skip' ? stopSkipSchema.parse(request.body ?? {}).reason : undefined;
+    // The passenger is sent the reason word for word: never a phone number, a
+    // link or abuse (the chat's own rule; the rejected text is never logged).
+    const refusedFor = reason ? chatContentReason(reason) : undefined;
+    if (refusedFor) {
+      throw new AppError(400, 'SKIP_REASON_REFUSED',
+        'The passenger is sent this reason. Say why without a phone number, a link or rude words.', { reason: refusedFor });
+    }
+    const result = await moveTaxiStop(app.prisma, {
+      orderId: id, driverId: driver.id, sequence: seq, action, reason, actorUserId: request.user.userId,
+      fix: { lat: driver.currentLat, lng: driver.currentLng, at: driver.lastLocationUpdate },
+    });
+    if (result.changed) {
+      try {
+        await emitToOrderRoom(app.prisma, app.io, id, 'ride:stop_changed', {
+          orderId: id, sequence: result.stop.sequence, status: result.stop.status, nextStopSequence: result.nextStopSequence,
+        });
+      } catch (error) { request.log.warn({ err: error, orderId: id }, 'stop socket publication failed after commit'); }
+      if (result.stop.status === 'SKIPPED') {
+        await notifications.send({
+          userId: result.customerId,
+          type: 'ORDER_UPDATE',
+          title: `Stop ${result.stop.sequence} skipped`,
+          body: `Your driver skipped stop ${result.stop.sequence}: ${result.stop.skipReason ?? 'no reason given'}. Your trip fare stays the same.`,
+          data: taxiNotificationData(id, { status: 'RIDE_IN_PROGRESS' }),
+        }).catch((error) => request.log.warn({ err: error, orderId: id }, 'stop skip notice failed after commit'));
+      }
+    }
+    return {
+      success: true,
+      data: {
+        orderId: id,
+        stop: stopProgress([result.stop])[0],
+        nextStopSequence: result.nextStopSequence,
+        stopWait: stopWaitView(result.stopWait),
+      },
+      replayed: !result.changed,
+    };
+  };
+  app.put('/rides/:id/stops/:seq/arrived', { preHandler: [app.authenticate] }, (request) => moveStop(request, 'arrived'));
+  app.put('/rides/:id/stops/:seq/depart', { preHandler: [app.authenticate] }, (request) => moveStop(request, 'depart'));
+  app.post('/rides/:id/stops/:seq/skip', { preHandler: [app.authenticate] }, (request) => moveStop(request, 'skip'));
+
   // 1. Accept ride
-  app.post('/rides/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/rides/:id/accept', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A driver never sets the
     // price: base fee plus km, as booked. An older app's `fare` is read (never
@@ -1117,7 +1202,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 2. En route to pickup
-  app.put('/rides/:id/en-route', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/en-route', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
@@ -1148,7 +1233,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 3. Arrived at pickup
-  app.put('/rides/:id/arrived', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/arrived', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);
@@ -1276,7 +1361,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 5. Start ride
-  app.put('/rides/:id/start', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/start', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     await getDriverRide(driver.id, id); // fast ownership check; lock below is authoritative
@@ -1383,7 +1468,7 @@ export async function driverRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
-  app.post('/rides/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/rides/:id/handover', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id); // ownership before validation
@@ -1427,7 +1512,7 @@ export async function driverRoutes(app: FastifyInstance) {
   });
 
   // 7. Complete ride
-  app.put('/rides/:id/complete', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/rides/:id/complete', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const driver = await getDriver(request.user.userId);
     const order = await getDriverRide(driver.id, id);

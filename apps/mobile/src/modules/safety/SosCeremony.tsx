@@ -1,3 +1,6 @@
+import { OwnedSosActions } from './OwnedSosActions';
+import { recoveryIsNewer, useOwnedSosAlert } from '../../hooks/owned-safety';
+import { useAuthStore, requireAuthSessionForPrincipal } from '../../stores/authStore';
 import { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
@@ -90,12 +93,13 @@ function isSosNotCancellable(err: unknown): boolean {
     && (err.response.data as { error?: { code?: string } } | undefined)?.error?.code === 'SOS_NOT_CANCELLABLE';
 }
 
-export function SosCeremony({
+function SosCeremonyBody({
   visible,
   onClose,
   context,
   getCoords,
   recordNoun,
+  resumeAlertId,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -103,6 +107,7 @@ export function SosCeremony({
   /** MY coordinates, never the other party's — resolved at press time. */
   getCoords: () => { lat: number; lng: number; accuracyM?: number } | undefined;
   /** "order" | "job" — the record the alert attaches to, for the copy. */
+  resumeAlertId?: string;
   recordNoun: string;
 }) {
   const jobSos = useJobSos();
@@ -119,8 +124,18 @@ export function SosCeremony({
     : target.kind === 'serviceJob' ? svcSos
     : null;
 
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  const owner = { userId: user?.id ?? '', generation: sessionGeneration };
   const [alert, setAlert] = useState<SosRaised | null>(null);
+  // [#1955 S4-2] When the alert last changed HERE (raise, confirm, cancel): a recovery poll that
+  // started before that change carries the old status and must not put it back.
+  const localChangeAt = useRef(0);
+  const changeAlert = (next: SosRaised | null) => { localChangeAt.current = Date.now(); setAlert(next); };
+  const recovery = useOwnedSosAlert(resumeAlertId ?? alert?.id ?? '');
   const [tooLateToCancel, setTooLateToCancel] = useState(false);
+  useEffect(() => { setAlert(null); }, [owner.userId, owner.generation, resumeAlertId]);
+  useEffect(() => { if (recovery.data && !recovery.isError && recoveryIsNewer(recovery.dataUpdatedAt, localChangeAt.current)) setAlert(recovery.data); }, [resumeAlertId, recovery.data, recovery.isError, recovery.dataUpdatedAt]);
   const [graceLeft, setGraceLeft] = useState<number | null>(null);
   // [MOB-018] What the server did NOT say: an unreadable/failed confirm or
   // cancel is UNKNOWN, an unreachable server is OFFLINE. Never inferred ACTIVE.
@@ -190,6 +205,7 @@ export function SosCeremony({
   };
 
   const startRaise = () => {
+    if (resumeAlertId) return;
     // The market's VERIFIED number FIRST — Swift records evidence; it is not
     // the rescuer. An unverified candidate has its own "Dial" button above
     // and is never dialed silently; no number means the manual sheet.
@@ -202,7 +218,8 @@ export function SosCeremony({
     setAttached(band);
     const onError = (err: unknown) => { if (isOffline(err)) setOutcome('offline'); };
     const onSuccess = (raised: SosRaised) => {
-      setAlert(raised);
+      try { requireAuthSessionForPrincipal(owner); } catch { return; }
+      changeAlert(raised);
       announce(
         raised.status === 'ACTIVE'
           ? "Swift's safety team has been paged."
@@ -237,6 +254,7 @@ export function SosCeremony({
     setOutcome(null);
     confirm.mutate(alert.id, {
       onSuccess: (data) => {
+        try { requireAuthSessionForPrincipal(owner); } catch { return; }
         // The SERVER's status, never the one this button hoped for.
         const status = serverStatus(data);
         if (!status) {
@@ -245,7 +263,7 @@ export function SosCeremony({
           return;
         }
         if (status !== 'ACTIVE' && status !== 'ACKNOWLEDGED') recordSosTransition('ACTIVE', status);
-        setAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
+        changeAlert({ ...alert, status, graceEndsAt: status === 'TRIGGER_PENDING' ? alert.graceEndsAt : null });
         if (status === 'ACTIVE' || status === 'ACKNOWLEDGED') announce("Swift's safety team has been paged.");
       },
       onError: (err) => {
@@ -260,10 +278,11 @@ export function SosCeremony({
     setOutcome(null);
     cancel.mutate(alert.id, {
       onSuccess: (data) => {
+        try { requireAuthSessionForPrincipal(owner); } catch { return; }
         const status = serverStatus(data);
-        if (status === 'CANCELLED') { setAlert({ ...alert, status: 'CANCELLED' }); return; }
+        if (status === 'CANCELLED') { changeAlert({ ...alert, status: 'CANCELLED' }); return; }
         recordSosTransition('CANCELLED', status ?? 'UNKNOWN');
-        if (status) setAlert({ ...alert, status });
+        if (status) changeAlert({ ...alert, status });
         else setOutcome('cancel-unknown');
       },
       onError: (err) => {
@@ -271,7 +290,7 @@ export function SosCeremony({
         // clock — help is being reached. Anything else is not that.
         if (isSosNotCancellable(err)) {
           setTooLateToCancel(true);
-          setAlert({ ...alert, status: 'ACTIVE' });
+          changeAlert({ ...alert, status: 'ACTIVE' });
           return;
         }
         recordSosTransition('CANCELLED', isOffline(err) ? 'OFFLINE' : 'ERROR');
@@ -281,7 +300,7 @@ export function SosCeremony({
   };
 
   const live = alert && (alert.status === 'TRIGGER_PENDING' || alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED');
-  const paged = alert && alert.status !== 'TRIGGER_PENDING' && alert.status !== 'CANCELLED';
+  const paged = alert && (alert.status === 'ACTIVE' || alert.status === 'ACKNOWLEDGED');
 
   // ONE semantic PopupTitle per dialog (the popupSemantics gate) — the phase
   // changes its words, never its landmark.
@@ -291,7 +310,7 @@ export function SosCeremony({
       ? 'Alert saved'
       : paged
         ? "Swift's safety team has been paged"
-        : 'Alert cancelled';
+        : alert.status === 'RESOLVED' ? 'Alert resolved by the safety team' : 'Alert cancelled';
 
   // [AUD-L5b-009] Swift could not be told: the emergency call sits one tap
   // away beside the retry, never only behind it (an unverified number already
@@ -315,7 +334,7 @@ export function SosCeremony({
         {title}
       </PopupTitle>
 
-      {!alert ? (
+      {resumeAlertId && !alert ? <><T variant="body">{recovery.isError ? "Could not refresh your alert." : "Checking your alert…"}</T><PillButton label="Refresh my alert" onPress={() => { void recovery.refetch(); }} /></> : !alert ? (
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             {emergencyDialCopy(dial)} Swift will also alert its safety team and save
@@ -447,9 +466,10 @@ export function SosCeremony({
                     : 'Your position at the moment you pressed is on the alert. '}
             Keep your phone with you if you can.
           </T>
+          <OwnedSosActions key={alert.id} id={alert.id} />
           <PillButton label="Close" style={{ alignSelf: 'stretch', marginTop: space['2xl'] }} onPress={onClose} />
         </>
-      ) : (
+      ) : alert.status === 'RESOLVED' ? <><OwnedSosActions key={alert.id} id={alert.id} /><PillButton label="Close" onPress={onClose} /></> : (
         <>
           <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
             Nobody was paged. If anything changes, press the emergency button again.
@@ -467,4 +487,14 @@ export function SosCeremony({
       )}
     </PopupCard>
   );
+}
+
+/** Remount presentation at the principal or job boundary. Old callbacks can
+ * finish only against the unmounted owner; captured API sessions reject them. */
+export function SosCeremony(props: Parameters<typeof SosCeremonyBody>[0]) {
+  const user = useAuthStore((s) => s.user);
+  const sessionGeneration = useAuthStore((s) => s.sessionGeneration);
+  const target = sosTarget(props.context);
+  const contextId = target ? `${target.kind}:${target.id}` : 'none';
+  return <SosCeremonyBody key={`${user?.id ?? 'guest'}:${sessionGeneration}:${contextId}:${props.resumeAlertId ?? ''}`} {...props} />;
 }

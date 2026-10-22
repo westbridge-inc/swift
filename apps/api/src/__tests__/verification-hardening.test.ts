@@ -215,8 +215,9 @@ describe('electrician GEI gate (spec §3.5 — the one licensed trade)', () => {
       return '';
     });
     const failing = new VerificationService(app.prisma, notifications, getKycProvider());
-    await expect(failing.expireLapsedDocuments())
-      .rejects.toThrow('injected mover suspension failure');
+    // [Row 209] A failed follow-up no longer aborts the sweep: it is reported and the run finishes.
+    await expect(failing.expireLapsedDocuments()).resolves.toBeGreaterThanOrEqual(1);
+    expect(send.mock.calls.some(([payload]) => payload.userId === sparky.id)).toBe(true);
     expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: lapsed.id } })).status)
       .toBe('EXPIRED');
     expect((await app.prisma.serviceProvider.findUniqueOrThrow({ where: { userId: sparky.id } })).isVerified)

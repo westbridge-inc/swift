@@ -74,6 +74,7 @@ export default function OrdersPage() {
         <p>The customer and {store} are told the order is cancelled.</p>
       ),
       confirmLabel: refund ? 'Cancel and record refund owed' : 'Cancel order',
+      dismissLabel: 'Keep the order',
       reason: { hint: 'The customer is owed the real reason; it is kept on the permanent record.' },
       submit: ({ reason }) => cancelOrder(o.id, { refund }, reason),
       success: () => (refund ? `Order ${o.orderNumber} is cancelled; ${store} owes the customer a refund.` : `Order ${o.orderNumber} is cancelled.`),

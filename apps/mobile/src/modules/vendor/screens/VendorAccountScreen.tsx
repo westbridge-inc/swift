@@ -31,6 +31,8 @@ import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { RefundRuleCard } from '../../../components/RefundRuleCard';
 import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StorePhotosCard } from '../../../components/StorePhotosCard';
+import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
@@ -190,8 +192,12 @@ export function VendorAccountScreen() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Store identity */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+          <View style={{ width: 56, height: 56, borderRadius: 28, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            {storePhotoUrl(store?.logoUrl, 160) ? (
+              <Image source={{ uri: storePhotoUrl(store?.logoUrl, 160)! }} style={{ width: 56, height: 56 }} contentFit="cover" accessibilityLabel="Store logo" />
+            ) : (
+              <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+            )}
           </View>
           <View style={{ flex: 1 }}>
             <T variant="heading" numberOfLines={1}>
@@ -203,6 +209,9 @@ export function VendorAccountScreen() {
             </T>
           </View>
         </Card>
+
+        {/* [IMAGES-E2E] The store's own logo and cover (managers): uploaded, redrawn without camera data. */}
+        {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
 
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
@@ -469,6 +478,10 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
       <BillingStopControl
         sub={sub}
         who="store"
+        // [OWNER 21 Oct] This screen stacks its cards with marginBottom: the
+        // control keeps the same section gap below it, never flush on the
+        // "Your MMG number" card.
+        style={{ marginTop: 0, marginBottom: space.lg }}
         pending={setBilling.isPending}
         onStop={() => setBilling.mutate({ method: 'NONE' })}
         onResume={() =>
@@ -612,7 +625,14 @@ function PromosSection() {
             </View>
           );
         })}
-        {promos.length === 0 && !promosQ.isLoading ? (
+        {promosQ.isError && promos.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your promo codes.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => promosQ.refetch()} />
+          </View>
+        ) : promos.length === 0 && !promosQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No codes yet — run your first promotion and it shows on your storefront.
           </T>
@@ -757,7 +777,14 @@ function StaffSection() {
             </Pressable>
           </View>
         ))}
-        {members.length === 0 && !staffQ.isLoading ? (
+        {staffQ.isError && members.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your team.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => staffQ.refetch()} />
+          </View>
+        ) : members.length === 0 && !staffQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No team members yet — add your manager or floor staff by phone.
           </T>

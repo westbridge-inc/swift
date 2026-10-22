@@ -18,6 +18,7 @@ import {
   TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
 import {
@@ -358,14 +359,14 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
           index={1}
           label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
           detail={menuQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage && items.length === 0 ? (
         <BoardFirstRunRow
           index={1}
           label="Add your first item"
           detail={`Your ${catalogueMeta(store.vendorType).label.toLowerCase()} is empty — nothing to order yet`}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage ? (
         <BoardFirstRunRow
@@ -378,7 +379,7 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
               ? `All ${items.length} items have a photo`
               : `Photos missing on ${missingPhotos} of ${items.length} items`
           }
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : null}
       <BoardFirstRunRow
@@ -737,7 +738,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           detail={menuDetail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
         <ManageTile
           icon="chart-bar"
@@ -830,7 +831,7 @@ function VendorStaffAvailability({ navigation }: any) {
           detail={detail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       </View>
     </View>
@@ -1190,7 +1191,7 @@ export function VendorOps({ store, navigation }: any) {
           {surface.canToggleOpen ? (
             <Pressable
               disabled={inPreview || toggleOpen.isPending}
-              onPress={() => toggleOpen.mutate()}
+              onPress={() => toggleOpen.mutate(!open)}
               accessibilityRole="switch"
               accessibilityLabel="Store open to customers"
               accessibilityHint={open ? 'Close the store to new customers' : 'Open the store to new customers'}
@@ -1218,7 +1219,7 @@ export function VendorOps({ store, navigation }: any) {
               size="md"
               style={{ marginTop: space.md }}
               loading={toggleOrders.isPending}
-              onPress={() => toggleOrders.mutate()}
+              onPress={() => toggleOrders.mutate(!accepting)}
             />
           ) : null}
           {toggleOrders.isError ? (

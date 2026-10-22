@@ -110,6 +110,11 @@ if [ "$WALL" -eq 1 ]; then
       die "TENANT_RLS_BIND=1: deploy/.env must not set $wall_name; deploy/docker-compose.wall.yml wires the two runtime logins and keeps the owner's password away from the API and the worker"
   done
 fi
+# [item 20] The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is a separate,
+# later switch with its own staging journey run; Phase C switches the business
+# wall only. Production refuses the line until that switch is approved.
+[ "$PILOT_ENV" != production ] || [ -z "$(env_value OWNER_RLS_BIND)" ] ||
+  die "PILOT_ENV=production: deploy/.env sets OWNER_RLS_BIND, but the owner wall is switched separately (after its own staging journey run), never with Phase C; remove the line"
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
@@ -545,6 +550,16 @@ if "osrm" not in s or any(x.get("ports") for x in s.values()):
   fi
 }
 verify_private_ports
+
+# [Row 324] Uploads outlive the application: the API and the worker must declare ONE
+# durable store (the same bucket, or one external shared volume), never a container
+# disk. Checked on the rendered configuration before anything is pulled, built or
+# stopped. The checker prints a fixed verdict only, never a configuration value.
+verify_upload_storage() {
+  "${COMPOSE[@]}" config --format json | python3 "$HERE/check-upload-storage.py" >/dev/null ||
+    die "upload storage topology refused: the API and the worker must share one durable store (one bucket, or one external volume)"
+}
+verify_upload_storage
 
 # [PROD-PATH] The database-only stage never runs under a serving API: a
 # migration under a live old binary is exactly what the full deploy stops

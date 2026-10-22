@@ -97,7 +97,7 @@ vi.mock('../../kit/controls', () => ({ BrandSwitch: () => null }));
 vi.mock('../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), success: vi.fn() } }));
 vi.mock('../../lib/clipboard', () => ({ copyText: vi.fn() }));
 vi.mock('../../lib/analytics', () => ({ track: vi.fn() }));
-vi.mock('../../lib/images', () => ({ mediaUrl: () => null }));
+vi.mock('../../lib/images', () => ({ mediaUrl: () => null, storePhotoUrl: () => null }));
 vi.mock('../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: () => null }));
 vi.mock('../../components/onboarding/WentLive', () => ({ useWentLive: () => ({}), WentLivePopup: () => null }));
 vi.mock('../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: () => null }));
@@ -106,6 +106,7 @@ vi.mock('../../components/MmgNumberCard', () => ({ MmgNumberCard: () => null }))
 vi.mock('../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: () => null }));
 vi.mock('../../components/RefundRuleCard', () => ({ RefundRuleCard: () => null }));
 vi.mock('../../components/StoreLocationPicker', () => ({ StoreLocationPicker: () => null }));
+vi.mock('../../components/StorePhotosCard', () => ({ StorePhotosCard: () => null }));
 vi.mock('../../components/billing/BillingSurfaces', () => ({ BillingStopControl: () => null }));
 vi.mock('../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));
 vi.mock('../../hooks/verification', () => ({ useVerificationStatus: () => ({}) }));
@@ -344,6 +345,38 @@ describe('DS390 real cold notification router and delayed profile', () => {
   });
 });
 
+
+describe('[UI-SWEEP U10] a warm tap to a screen already in the stack goes BACK to it', () => {
+  const vendorRoots = () => navigation.getRootState().routes.filter((r) => r.name === 'VendorRoot').length;
+  it.each(['VendorMyQr', 'VendorOrderHistory'] as const)('from %s, a same-store Account tap leaves ONE business home and ONE new-order listener', async (above) => {
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await mount();
+      await act(async () => navigation.navigate(above));
+      expect(navigation.getCurrentRoute()?.name).toBe(above);
+      const socket = fx.sockets.at(-1)!;
+      expect(socket.listeners.get('order:new')?.size).toBe(1);
+      await act(async () => fx.listener!(response({ kind: 'store_pin_moved', vendorId: 'store-A' })));
+      await settleRouter();
+      expect(navigation.getCurrentRoute()?.name).toBe('Account');
+      expect(vendorRoots(), 'the stack went back to its business home; no second copy').toBe(1);
+      expect(navigation.getRootState().routes.map((r) => r.name)).toEqual(['VendorRoot']);
+      expect(socket.listeners.get('order:new')?.size, 'one live layer: the alarm sounds once').toBe(1);
+    } finally { uninstall(); }
+  });
+  it('a destination NOT in the stack is still pushed on top', async () => {
+    fx.profile.mockResolvedValue({ data: { data: profile } });
+    const uninstall = installNotificationTapRouter();
+    try {
+      await mount();
+      await act(async () => navigation.navigate('VendorMyQr'));
+      await act(async () => fx.listener!(response({ kind: 'vendor_tier_nudge', vendorId: 'store-A' })));
+      await settleRouter();
+      expect(navigation.getRootState().routes.map((r) => r.name)).toEqual(['VendorRoot', 'VendorMyQr', 'VendorTier']);
+    } finally { uninstall(); }
+  });
+});
 
 describe('DS390 vendor routing authority boundaries', () => {
   it.each([

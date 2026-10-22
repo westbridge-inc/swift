@@ -51,6 +51,8 @@ beforeEach(() => {
   opened = { location: { replace: vi.fn() }, close: vi.fn(), opener: {} };
   vi.stubGlobal('open', vi.fn(() => opened));
   vi.spyOn(orders, 'getOrder').mockResolvedValue(ORDER as never);
+  // [Row 117] Web taxi booking is off (the server's default) unless a case says otherwise.
+  vi.spyOn(rides, 'rideCapabilities').mockResolvedValue({ maxStops: 0 });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -182,6 +184,57 @@ describe('taxi safety continues in the mobile app', () => {
     render(<OrderDetailPage />);
     await payButton();
     expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+
+  it('a failed capabilities read keeps the app notice: nothing on the web claims ride safety', async () => {
+    vi.mocked(rides.rideCapabilities).mockRejectedValue(new Error('down'));
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_EN_ROUTE', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({ id: ORDER.id, ridePin: '482913', ridePinVerified: false } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue(null);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/Open the Swift app for your safety PIN and SOS/)).toBeTruthy();
+    expect(screen.queryByText('482913')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Emergency/ })).toBeNull();
+  });
+});
+
+describe('[Row 117] with web taxi booking on, the trip page carries the ride’s safety tools', () => {
+  beforeEach(() => {
+    vi.mocked(rides.rideCapabilities).mockResolvedValue({ maxStops: 0, webBooking: true });
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, orderType: 'TAXI', status: 'DRIVER_EN_ROUTE', paymentMethod: 'CASH', paymentAction: null } as never);
+    vi.spyOn(rides, 'getRide').mockResolvedValue({
+      id: ORDER.id, ridePin: '482913', ridePinVerified: false,
+      driver: { vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleColor: 'White', licensePlate: 'PXX 1234', user: { firstName: 'Dev' } },
+    } as never);
+    vi.spyOn(rides, 'activeRide').mockResolvedValue({ id: ORDER.id, driver: { currentLat: 6.81, currentLng: -58.16, user: { firstName: 'Dev', phone: '+5920000000' } } } as never);
+  });
+
+  it('shows the ride code, the driver’s position and SOS — and no "open the app" notice', async () => {
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('482913')).toBeTruthy();
+    // The driver's first name from the ride read, as the phone says it.
+    expect(screen.getByText(/It proves this is your ride — Dev types it to start\./)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Ride safety' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Your driver’s position' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Emergency — get help now' })).toBeTruthy();
+    expect(screen.queryByText(/Open the Swift app for your safety PIN and SOS/)).toBeNull();
+  });
+
+  it('the SOS pages Swift for THIS ride', async () => {
+    vi.spyOn(rides, 'rideSos').mockResolvedValue({ status: 'ACTIVE' });
+    const user = userEvent.setup();
+    render(<OrderDetailPage />);
+    await user.click(await screen.findByRole('button', { name: 'Emergency — get help now' }));
+    await user.click(screen.getByRole('button', { name: 'Alert Swift now' }));
+    await waitFor(() => expect(rides.rideSos).toHaveBeenCalledWith('order-1', null));
+  });
+
+  it('a delivery never asks whether web taxi booking is on', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(ORDER as never);
+    render(<OrderDetailPage />);
+    await payButton();
+    expect(rides.rideCapabilities).not.toHaveBeenCalled();
+    expect(screen.queryByRole('heading', { name: 'Ride safety' })).toBeNull();
   });
 });
 
@@ -324,6 +377,27 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(notice)).toBeTruthy();
   });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] The customer never reads a raw code.
+  it('a cancellation code the server writes reads as words, never as the code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'FOOD_TOO_OLD', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Your order was ready but no rider could be found, so it was cancelled rather than delivered cold.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('FOOD_TOO_OLD');
+  });
+
+  it('a cancellation code this build does not know says only that the order was cancelled', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'SOME_NEW_CODE', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('This order was cancelled.')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/SOME_NEW_CODE|some new code/i);
+  });
+
+  it('a reason the store typed is kept as written', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'Out of stock', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Out of stock')).toBeTruthy();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -395,4 +469,57 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v1');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U14 / U15 / U16] The status pill and the timeline printed codes in
+// lower case ("rider en route pickup"); the phone speaks by the order's own
+// vertical. At 360 px the no-wrap pill squeezed the title until it overlapped.
+// And there was no way to report a problem with the order (the help form
+// already takes ?orderId=).
+// ---------------------------------------------------------------------------
+describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a support door', () => {
+  const live = {
+    ...ORDER, status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', paymentAction: null,
+    timeline: [
+      { status: 'PENDING', timestamp: '2026-10-19T14:00:00.000Z', note: null },
+      { status: 'ACCEPTED', timestamp: '2026-10-19T14:02:00.000Z', note: null },
+      { status: 'RIDER_EN_ROUTE_PICKUP', timestamp: '2026-10-19T14:10:00.000Z', note: null },
+    ],
+  };
+
+  it('the pill and the timeline say the phone\'s words, never a code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const timeline = (await screen.findByRole('heading', { name: 'Order timeline' })).closest('section')!;
+    expect(timeline.textContent).toContain('Order accepted');
+    expect(timeline.textContent).toContain('Rider on the way to the store');
+    expect(screen.getAllByText('Rider on the way to the store').length).toBeGreaterThan(1);
+    expect(document.body.textContent?.toLowerCase()).not.toMatch(/rider en route pickup|rider_en_route/);
+  });
+
+  it('a parcel uses the parcel\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...live, orderType: 'COURIER', timeline: [] } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Rider on the way to collect')).toBeTruthy();
+  });
+
+  it('offers "Report a problem" tied to this order', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const link = await screen.findByRole('link', { name: 'Report a problem' });
+    expect(link.getAttribute('href')).toBe('/account/help?orderId=order-1');
+  });
+
+  it('the header wraps the pill under the copy on a narrow screen instead of squeezing the title', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    const rule = (name: string) => css.match(new RegExp(`\\n\\.${name}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    expect(rule('hero')).toMatch(/flex-wrap:\s*wrap;/);
+    expect(rule('heroCopy')).toMatch(/overflow-wrap:\s*anywhere;/);
+    expect(rule('heroCopy')).toMatch(/flex:\s*1 1 200px;/);
+    expect(rule('statusPill')).not.toMatch(/white-space:\s*nowrap|text-transform:\s*capitalize/);
+    expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
+  });
 });

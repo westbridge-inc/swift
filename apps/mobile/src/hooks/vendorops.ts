@@ -328,6 +328,7 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
       onNew,
       refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
       refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
     }, { serverAdmits: ownsStore });
   }, [vendorId, ownsStore, qc, previewType]);
 
@@ -447,11 +448,11 @@ export function useSetOrderFulfillmentMode() {
 
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
@@ -490,8 +491,28 @@ export function useOrderAction() {
       if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    // [PERF row 562] The server's confirmed answer lands at once: its status and clocks go into the
+    // order and the board right away, and the re-read runs on its own. The tap used to stay busy
+    // until that re-read came back (one more round trip). Nothing shows before the answer: dispatch
+    // and money never show success early.
+    onSuccess: (answer, vars) => {
+      applyConfirmedOrder(qc, vars.id, answer);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
   });
+}
+
+/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt'] as const;
+
+/** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
+export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {
+  const row = answer as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== 'object' || row['id'] !== id || typeof row['status'] !== 'string') return false;
+  const confirmed = Object.fromEntries(CONFIRMED_ORDER_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]));
+  qc.setQueryData(['vendor', 'orders', 'detail', id], (order: any) => (order ? { ...order, ...confirmed } : order));
+  qc.setQueryData(['vendor', 'orders'], (orders: any) => (Array.isArray(orders) ? orders.map((o) => (o?.id === id ? { ...o, ...confirmed } : o)) : orders));
+  return true;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the
@@ -686,7 +707,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;

@@ -81,6 +81,7 @@
   overflow: hidden;
   border-radius: var(--swift-radius-md);
   background: var(--swift-red-50);
+  --swift-muted: var(--swift-muted-on-subtle); /* grey text on a tint: 4.5:1 */
   color: var(--swift-red-600);
 }
 

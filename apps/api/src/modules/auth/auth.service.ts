@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { shownRatingTotals } from '../rating/rating-groups';
+import { revokeUserDevice, revokeUserDevices } from '../../lib/owner-rls';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
@@ -61,6 +62,7 @@ import {
   resetPasswordAttemptBudget,
 } from './password-attempts';
 import { requireStepUp } from './step-up';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 interface DeviceInfo {
   deviceId: string;
@@ -634,7 +636,8 @@ export class AuthService {
       // included. Push registrations belong to installs, not sessions, so every
       // one is retired here, as a reset does; this device re-registers its own
       // on its next launch.
-      await tx.deviceToken.updateMany({ where: { userId, isActive: true }, data: { isActive: false } });
+      // [item 20] One narrow SECURITY DEFINER action, so the owner wall can never make it silence nothing.
+      await revokeUserDevices(tx, userId);
 
       // This session continues under new credentials: the old access and
       // refresh tokens (and the previous refresh token's grace) are gone.
@@ -704,9 +707,7 @@ export class AuthService {
         });
       } else {
         // Inbox only: persisted, never fanned out to a push.
-        await this.app.prisma.notification.create({
-          data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } },
-        });
+        await insertNoticeFor(this.app.prisma, { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } });
       }
     } catch (error) {
       this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');
@@ -1155,10 +1156,8 @@ export class AuthService {
       cleanup,
     });
     if (pushToken) {
-      await tx.deviceToken.updateMany({
-        where: { token: pushToken, userId },
-        data: { isActive: false },
-      });
+      // [item 20] The session's own registration, through the narrow action (owner wall).
+      await revokeUserDevice(tx, userId, pushToken);
     }
     await tx.session.delete({ where: { id: sessionId } });
     return { ...cleanup, outboxId };
@@ -1294,10 +1293,8 @@ export class AuthService {
     // Global revocation (logout-all, password reset) must silence a lost or
     // stolen device as well as its API session. A future sign-in explicitly
     // re-registers and reactivates the token on the current account.
-    await tx.deviceToken.updateMany({
-      where: { userId, isActive: true },
-      data: { isActive: false },
-    });
+    // [item 20] Through the narrow action: an admin-forced reset acts for someone else (owner wall).
+    await revokeUserDevices(tx, userId);
     return { ...moverCleanup, outboxId };
   }
 

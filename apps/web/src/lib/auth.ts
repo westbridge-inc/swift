@@ -121,7 +121,8 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
     const known = sessionPrincipal !== null;
@@ -137,6 +138,10 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
       await endClosedDemo({ redirect: false });
       return forget();
     }
+    // [UI-SWEEP U23] A server failure says nothing about the session: it is
+    // "unreachable", never "signed out", and the principal is kept.
+    // [REVIEW-F2 #1968 S4-2] A timeout (408) or a rate limit (429) is the same: not an answer about the session.
+    if (res.status >= 500 || res.status === 408 || res.status === 429) return { ok: false, unreachable: true };
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
@@ -158,7 +163,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
-    return { ok: false };
+    return { ok: false, unreachable: true };
   }
 }
 
@@ -186,9 +191,11 @@ export function adoptSession(principal: string | null) {
  * every page load. The shell calls this only when a signed-in answer is
  * actually needed — a private page, or an action like adding to the cart.
  */
-export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
-  if (!(await tryRefresh())) return { ok: false };
+  const refresh = await tryRefresh();
+  if (refresh === 'unreachable') return { ok: false, unreachable: true };
+  if (refresh === 'signed-out') return { ok: false };
   return sessionProbe();
 }
 
@@ -279,20 +286,25 @@ export function subscribeSelectedStore(listener: () => void): () => void {
   };
 }
 
-let refreshFlight: Promise<boolean> | null = null;
+/** [REVIEW-F2 #1968 S4-4] What the refresh step learned. Only the server saying
+ *  no is a sign-out: a 5xx, a timeout (408), a rate limit (429 — refreshes are
+ *  limited per address) or a dropped connection says nothing about the session. */
+type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable';
+let refreshFlight: Promise<RefreshOutcome> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated
  *  refresh cookie is never replayed and the family is never revoked by us. */
-async function tryRefresh(): Promise<boolean> {
+async function tryRefresh(): Promise<RefreshOutcome> {
   if (!refreshFlight) {
     refreshFlight = (async () => {
       try {
         const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
           method: 'POST', credentials: 'include', headers: { ...clientHeaders },
         });
-        return res.ok;
+        if (res.ok) return 'refreshed';
+        return res.status >= 500 || res.status === 408 || res.status === 429 ? 'unreachable' : 'signed-out';
       } catch {
-        return false;
+        return 'unreachable';
       } finally {
         refreshFlight = null;
       }
@@ -336,8 +348,13 @@ export async function apiFetch(
 
   let res = await doFetch();
   if (res.status === 401) {
-    const refreshed = await tryRefresh();
-    if (refreshed && snapshotIsCurrent(requestSession)) res = await doFetch();
+    const refresh = await tryRefresh();
+    // [REVIEW-F2 #1968 S4-4] A refresh that could not reach Swift is not a
+    // sign-out: the session is kept, the page stays, and the caller sees an error.
+    if (refresh === 'unreachable') {
+      throw new ApiRequestError('Swift can\u2019t be reached right now. Check your connection and try again.', 503, 'UNREACHABLE');
+    }
+    if (refresh === 'refreshed' && snapshotIsCurrent(requestSession)) res = await doFetch();
     if (res.status === 401) {
       if (!snapshotIsCurrent(requestSession)) {
         throw new ApiRequestError('The signed-in account changed while this request was running. Try again.', 409, 'SESSION_CHANGED');

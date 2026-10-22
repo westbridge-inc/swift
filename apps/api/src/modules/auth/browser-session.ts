@@ -78,7 +78,7 @@ type RequestPosture = Pick<FastifyRequest, 'headers'> & { protocol?: string };
 
 /** The session cookie names and paths for this request's browser client under this transport. */
 export function sessionCookieNamesFor(request: RequestPosture, env: Env = process.env): SessionCookieNames {
-  return browserClientOf(request) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
+  return browserClientOf(request, env) === ADMIN_BROWSER_CLIENT && secureTransport(request, env) ? HOST_SESSION_COOKIES : PLAIN_SESSION_COOKIES;
 }
 
 /** Whether a request carries ITS OWN session pair (the browse gate's "this is a session: authenticate it").
@@ -90,10 +90,29 @@ export function carriesOwnSessionCookie(request: RequestPosture, env: Env = proc
   return Object.hasOwn(cookies, names.access) || Object.hasOwn(cookies, names.refresh);
 }
 
-export function browserClientOf(request: Pick<FastifyRequest, 'headers'>): string | null {
+/**
+ * The browser client a request names — and the console is that client only from
+ * the console's own origin. The CORS allowlist is ONE list for the website and the
+ * console, and both sit on the API's site, so a script on the website's origin
+ * could name itself `admin-web` and its requests would carry the console's
+ * SameSite=Strict `__Host-` pair. With the console's host configured
+ * (`ADMIN_HOST`, which deploy/pilot-up.sh also requires in CORS_ORIGIN), only
+ * `https://<ADMIN_HOST>` is `admin-web`; production without it serves no console,
+ * so nothing is; local development and tests keep the allowlist rule. A claim
+ * from elsewhere is no browser client at all: no cookie is read or written for it.
+ */
+export function browserClientOf(request: Pick<FastifyRequest, 'headers'>, env: Env = process.env): string | null {
   const raw = request.headers[BROWSER_CLIENT_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  return typeof value === 'string' && BROWSER_CLIENTS.has(value) ? value : null;
+  if (typeof value !== 'string' || !BROWSER_CLIENTS.has(value)) return null;
+  if (value === ADMIN_BROWSER_CLIENT && !isConsoleOrigin(originOf(request), env)) return null;
+  return value;
+}
+
+function isConsoleOrigin(origin: string | null, env: Env): boolean {
+  const host = (env['ADMIN_HOST'] ?? '').trim().toLowerCase();
+  if (host) return origin === `https://${host}`;
+  return !isProduction(env);
 }
 
 export function parseCookies(header: string | undefined): Record<string, string> {
@@ -142,10 +161,51 @@ export function bearerOrCookieToken(request: RequestPosture, env: Env = process.
   const cookies = parseCookies(request.headers['cookie']);
   const cookie = cookies[sessionCookieNamesFor(request, env).access];
   if (!cookie) return '';
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return ''; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return ''; }
   browserSessionCounter.labels('cookie_auth').inc();
+  return cookie;
+}
+
+/** The website's name for itself on a realtime socket handshake (`auth: { client: 'web' }`). */
+export const WEB_BROWSER_CLIENT = 'web';
+/** Where the website opens the store socket: under the access cookie's Path, so the browser sends it. */
+export const BROWSER_SOCKET_PATH = '/api/v1/socket.io/';
+
+/**
+ * [PERF row 8] The website's credential on a realtime socket handshake. The
+ * phone apps hand the socket their access token (`auth.token`); the website
+ * holds no token (W-01), so its socket presents the access cookie instead,
+ * behind this socket's version of the cookie gate:
+ *  - the handshake names the website (`auth.client === 'web'`). A browser
+ *    cannot set a custom header on a WebSocket, so the name travels in the
+ *    handshake payload, and it selects the website's pair ONLY: the names come
+ *    from sessionCookieNamesFor() for a 'web' client, never the console's
+ *    `__Host-` pair;
+ *  - the handshake's Origin is on the CORS allowlist (the same allowlist as
+ *    every cookie request). An Origin is REQUIRED: a browser always sends one
+ *    on a WebSocket, so a handshake without one is not a browser's, and the
+ *    Referer is never read here.
+ * What the cookie yields is the access token, verified exactly as a phone's
+ * (JWT, live session row by digest, account, recheck, expiry). '' = none.
+ */
+export function browserSocketCredentialOf(
+  handshake: { headers: Record<string, string | string[] | undefined>; auth?: unknown },
+  env: Env = process.env,
+): string {
+  const auth = (handshake.auth ?? {}) as Record<string, unknown>;
+  if (auth['client'] !== WEB_BROWSER_CLIENT) return '';
+  const cookieHeader = handshake.headers['cookie'];
+  const posture = { headers: { [BROWSER_CLIENT_HEADER]: WEB_BROWSER_CLIENT, cookie: typeof cookieHeader === 'string' ? cookieHeader : undefined } };
+  const cookie = parseCookies(posture.headers.cookie)[sessionCookieNamesFor(posture, env).access];
+  if (!cookie) return '';
+  const origin = handshake.headers['origin'];
+  if (typeof origin !== 'string' || !origin || !allowedBrowserOrigins().has(origin.toLowerCase())) {
+    browserSessionCounter.labels('socket_cookie_rejected_origin').inc();
+    return '';
+  }
+  browserSessionCounter.labels('socket_cookie_auth').inc();
   return cookie;
 }
 
@@ -172,7 +232,7 @@ export function refreshCredentialOf(request: RequestPosture & Pick<FastifyReques
   if (typeof body.refreshToken === 'string' && body.refreshToken) return body.refreshToken;
   const cookie = parseCookies(request.headers['cookie'])[sessionCookieNamesFor(request, env).refresh];
   if (!cookie) return null;
-  if (!browserClientOf(request)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
+  if (!browserClientOf(request, env)) { browserSessionCounter.labels('cookie_rejected_header').inc(); return null; }
   const origin = originOf(request);
   if (!origin || !allowedBrowserOrigins().has(origin)) { browserSessionCounter.labels('cookie_rejected_origin').inc(); return null; }
   return cookie;

@@ -648,8 +648,12 @@ export const safetyApi = {
   revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
-  monitoringPreference: () => api.get('/safety/monitoring-preference'),
-  setMonitoringPreference: (enabled: boolean) => api.put('/safety/monitoring-preference', { enabled }),
+  monitoringPreference: (session?: AuthSessionSnapshot) => api.get('/safety/monitoring-preference', capturedAuthConfig(session)),
+  setMonitoringPreference: (enabled: boolean, session?: AuthSessionSnapshot) => api.put('/safety/monitoring-preference', { enabled }, capturedAuthConfig(session)),
+  /** [73] The caller's own live alerts (recovered after a restart), one alert, and "I'm safe now". */
+  ownedActiveSos: (cursor: string | null, session?: AuthSessionSnapshot) => api.get('/safety/sos/owned-active', capturedAuthConfig(session, { params: cursor ? { cursor } : {} })),
+  getSos: (id: string, session?: AuthSessionSnapshot) => api.get(`/safety/sos/${id}`, capturedAuthConfig(session)),
+  markSafeSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/mark-safe`, {}, capturedAuthConfig(session)),
   listEmergencyContacts: () => api.get('/safety/emergency-contacts'),
   addEmergencyContact: (data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
     api.post('/safety/emergency-contacts', data),
@@ -717,13 +721,13 @@ export const safetyApi = {
     lng?: number;
     accuracyM?: number;
     clientIdempotencyKey: string;
-  }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
+  }, session?: AuthSessionSnapshot) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }, capturedAuthConfig(session)),
   /** [REPORT-035 F-035-01] TRIGGER_PENDING → ACTIVE now — "I need help NOW".
    *  The raise opens a short server-side cancel grace; this is the owner's way
    *  to skip the wait instead of depending on the promotion worker. */
-  confirmSos: (id: string) => api.post(`/safety/sos/${id}/confirm`, {}),
+  confirmSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/confirm`, {}, capturedAuthConfig(session)),
   /** Slide-to-cancel during the grace window only; 409 after. */
-  cancelSos: (id: string) => api.post(`/safety/sos/${id}/cancel`, {}),
+  cancelSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/cancel`, {}, capturedAuthConfig(session)),
 };
 
 /** [B15/STORE-001] In-app UGC reporting — Apple 1.2 / Google UGC+CSAE launch
@@ -784,8 +788,8 @@ export const rideApi = {
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
   /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
   confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
-  sos: (id: string, coords?: { lat: number; lng: number }) =>
-    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
+  sos: (id: string, coords?: { lat: number; lng: number }, session?: AuthSessionSnapshot) =>
+    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}, capturedAuthConfig(session)),
 };
 
 // Places (mounted at /api/v1/places) — "Where to?" search behind the server-side
@@ -831,7 +835,11 @@ export const courierApi = {
     /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
      *  the job only at it (409 PRICE_CHANGED otherwise). */
     expectedFee?: number;
-  }) => api.post('/courier/order', data),
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    // [UI-SWEEP U01] The parcel intent's key (lib/courierRequestAttemptStore):
+    // the same on every retry of this parcel, so the server replays the parcel
+    // it already made instead of booking a second one.
+    api.post('/courier/order', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
@@ -1217,8 +1225,9 @@ export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
-  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
-  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
+  toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
+  toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
@@ -1332,6 +1341,14 @@ export const vendorApi = {
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
+  // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
+  // redraws it without location or camera data, and serves it to customers), or taken down.
+  uploadStorePhoto: (slot: 'logo' | 'cover', form: FormData) =>
+    api.post(`/vendor/profile/${slot}`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeStorePhoto: (slot: 'logo' | 'cover') => api.delete(`/vendor/profile/${slot}`),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
   // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.

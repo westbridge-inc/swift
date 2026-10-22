@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   safeNavigate: vi.fn((_screen: string, _params?: Record<string, unknown>) => true),
   notifications: { data: undefined as unknown, isLoading: false },
   stackRouteNames: [] as string[],
+  rootRouteNames: [] as string[],
 }));
 
 vi.mock('expo-notifications', () => ({
@@ -41,14 +42,17 @@ vi.mock('../../../hooks/customer', () => ({
   useNotifications: () => mocks.notifications,
 }));
 // The navigator this screen sits in, as React Navigation reports it:
-// CustomerStack, inside the root stack whose only route is `Main`.
+// CustomerStack, inside the root stack (Main, plus the public Storefront and
+// QrOutcome every role's root mounts: ROOT_STACK below, read from the file).
 vi.mock('@react-navigation/native', () => ({
   useNavigation: () => ({
     getState: () => ({ routeNames: mocks.stackRouteNames }),
-    getParent: () => ({ getState: () => ({ routeNames: ['Main'] }), getParent: () => undefined }),
+    getParent: () => ({ getState: () => ({ routeNames: mocks.rootRouteNames }), getParent: () => undefined }),
   }),
 }));
-vi.mock('react-native', () => ({ FlatList: 'FlatList', View: 'View' }));
+vi.mock('react-native', () => ({ FlatList: 'FlatList', View: 'View', RefreshControl: 'RefreshControl' }));
+// [UI-SWEEP U33] The inbox's pull to refresh (the hook is proven in hooks/usePullToRefresh tests).
+vi.mock('../../../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false, onRefresh: async () => {} }) }));
 // [Row 55] The invite card has its own suite (TeamInviteCards.test.ts).
 vi.mock('../components/TeamInviteCards', () => ({ TeamInviteCards: 'TeamInviteCards' }));
 vi.mock('@swift/ui', () => ({ color: { brand: {} }, space: {} }));
@@ -67,6 +71,13 @@ import { NotificationsScreen } from './NotificationsScreen';
 const CUSTOMER_STACK = [
   ...readFileSync(join(process.cwd(), 'src', 'navigation', 'CustomerStack.tsx'), 'utf8').matchAll(
     /\.Screen[^>]*?name="([A-Za-z0-9_]+)"/g,
+  ),
+].map((m) => m[1]!);
+
+/** Every screen the root stack registers (RootNavigator.tsx). */
+const ROOT_STACK = [
+  ...readFileSync(join(process.cwd(), 'src', 'navigation', 'RootNavigator.tsx'), 'utf8').matchAll(
+    /Stack\.Screen\s+name="([A-Za-z0-9_]+)"/g,
   ),
 ].map((m) => m[1]!);
 
@@ -135,9 +146,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.notifications = { data: [], isLoading: false };
   mocks.stackRouteNames = CUSTOMER_STACK;
+  mocks.rootRouteNames = ROOT_STACK;
 });
 
 describe('the stack this suite models', () => {
+  it('sits under the real root, which also mounts the public Storefront', () => {
+    expect(ROOT_STACK).toEqual(expect.arrayContaining(['Main', 'Storefront', 'QrOutcome']));
+  });
+
   it('is the one that mounts the inbox, and it has no store or driver screens', () => {
     expect(CUSTOMER_STACK).toContain('Notifications');
     expect(CUSTOMER_STACK).toContain('Delivery');
@@ -154,6 +170,9 @@ describe('an inbox row opens exactly where its push opens [E28]', () => {
     ['an order update', { orderId: 'o1', orderNumber: 'SW-1', status: 'ACCEPTED' }, 'Delivery'],
     ['a ride update', { kind: 'ride_queue_matched', orderId: 'o2', audience: 'customer' }, 'Taxi'],
     ['a service-job update', { kind: 'booking_confirmed', jobId: 'j1' }, 'ServiceJobs'],
+    // [73] the taxi watchdog's own payloads (pre-pickup release, in-custody warning)
+    ['a taxi watchdog release', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'PENDING' }, 'Taxi'],
+    ['a taxi watchdog custody warning', { orderType: 'TAXI', rideId: 'r1', orderId: 'r1', audience: 'customer', status: 'RIDE_IN_PROGRESS' }, 'Taxi'],
     // [PUSH-ROUTING] Rows that used to open nothing.
     ['an ID-on-file notice', { kind: 'verification_l2', audience: 'customer' }, 'IdentityVerification'],
     ['a store reply to their review', { kind: 'review_response', ratingId: 'r1', vendorId: 'v1' }, 'VendorReviews'],
@@ -206,6 +225,15 @@ describe('a row with nowhere to go is not a button [E28]', () => {
       expect(destinationFor(data as Record<string, unknown> | null)).toBeNull();
       expect(buttonsIn(renderRow(row(data)))).toEqual([]);
     }
+    expect(mocks.safeNavigate).not.toHaveBeenCalled();
+  });
+
+  it('[UI-SWEEP U31] a store team invite row is a plain card: its push opens THIS inbox', () => {
+    // The Accept / Decline card is right here; as a button the row pushed the
+    // public Storefront stack with a second, identical inbox on top.
+    const data = { kind: 'staff_invite', vendorId: 'v1' };
+    expect(destinationFor(data)).toEqual({ screen: 'Storefront', params: { screen: 'Notifications' } });
+    expect(buttonsIn(renderRow(row(data)))).toEqual([]);
     expect(mocks.safeNavigate).not.toHaveBeenCalled();
   });
 

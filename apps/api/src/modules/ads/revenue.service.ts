@@ -1,5 +1,5 @@
 import type { PrismaClient } from '@prisma/client';
-import { mondayOfDate } from './ads-weeks';
+import { elapsedWeekDays, mondayOfDate } from './ads-weeks';
 
 // Operator revenue + inventory reads (ads-platform spec §15.3/§15.8). The
 // dashboards law applies: every figure here is computed from the same rows
@@ -74,7 +74,8 @@ export class AdsRevenueService {
       if (b.status === 'REFUNDED') {
         r.refunded = round2(r.refunded + amount);
       } else {
-        const elapsedDays = Math.min(7, Math.max(0, Math.floor((now.getTime() - b.weekStart.getTime()) / DAY_MS)));
+        // Days of the week already served, from its real start (Monday 00:00 in Guyana).
+        const elapsedDays = elapsedWeekDays(b.weekStart, now);
         r.recognized = round2(r.recognized + (amount / 7) * elapsedDays);
       }
       r.bookedNet = round2(r.bookedGross - r.refunded);

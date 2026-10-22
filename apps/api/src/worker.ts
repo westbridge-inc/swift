@@ -11,7 +11,8 @@
  * unchanged — the API keeps running its own workers.
  *
  * Socket emits from jobs reach user/vendor/order rooms through the Socket.IO
- * Redis adapter (production), exactly like the in-process topology; the local
+ * Redis adapter (production, loadtest/staging, development: see
+ * utils/worker-socket-adapter.ts), exactly like the in-process topology; the local
  * io instance here is a broadcast-only handle with no HTTP listener.
  */
 // FIRST: secrets delivered as files (NAME_FILE) become NAME in this process
@@ -28,7 +29,7 @@ import { closeResourcesBounded, idempotentAsync, positiveDurationMs, withTimeout
 import { resolveDatabaseUrl } from './utils/db-pool';
 import { installProcessLifecycle } from './utils/process-lifecycle';
 import { setAppLogger } from './utils/logger';
-import { isProduction } from './utils/runtime-mode';
+import { attachWorkerSocketAdapter } from './utils/worker-socket-adapter';
 import { createScopedProcessClient } from './plugins/prisma';
 import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
@@ -145,21 +146,8 @@ async function main() {
     await attestSystemLoginAtBoot(prisma, log);
     const startupTimeoutMs = positiveDurationMs(process.env['QUEUE_STARTUP_TIMEOUT_MS'], 15_000);
     await withTimeout(redis.ping(), startupTimeoutMs, 'Worker Redis startup');
-    if (isProduction()) {
-      const { createAdapter } = await import('@socket.io/redis-adapter');
-      const pub = redis.duplicate();
-      const sub = redis.duplicate();
-      adapterConns.push(pub, sub);
-      for (const [kind, connection] of [['publish', pub], ['subscribe', sub]] as const) {
-        connection.on('error', (err) => log.error({ err, kind }, 'Socket.IO Redis adapter error'));
-      }
-      await withTimeout(
-        Promise.all(adapterConns.map((connection) => connection.ping())),
-        startupTimeoutMs,
-        'Socket.IO Redis adapter startup',
-      );
-      io.adapter(createAdapter(pub, sub));
-    }
+    // Production, loadtest (staging) and development: job emits reach the API's sockets through Redis.
+    await attachWorkerSocketAdapter({ io, redis, log, startupTimeoutMs }, adapterConns);
 
     runtime = await initializeJobRuntime({ prisma, io, redis, log }, { runWorkers: true });
     log.info(

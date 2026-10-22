@@ -16,6 +16,7 @@ import { AppError } from '../../utils/errors';
 import { guyanaDayKey, startOfGuyanaDay } from '../../utils/guyana-day';
 import { approvedEvidenceFor } from './evidence';
 import { POLICE_CLEARANCE_DOC_TYPE } from './doc-registry';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 type Db = Prisma.TransactionClient | PrismaClient;
 
@@ -65,10 +66,11 @@ export async function tellOwnerHomeVisitsPaused(
   vendorName: string,
   now: Date = new Date(),
 ): Promise<boolean> {
-  const already = await db.notification.findFirst({
+  // [item 20] The store owner's notice, looked up from a customer's checkout: the named capability under the owner wall.
+  const already = await ownerWallSystem('home-visits:owner-told-today', () => db.notification.findFirst({
     where: { userId: ownerUserId, title: HOME_VISITS_PAUSED_TITLE, createdAt: { gte: startOfGuyanaDay(guyanaDayKey(now)) } },
     select: { id: true },
-  });
+  }));
   if (already) return false;
   await notifications.send({
     userId: ownerUserId,

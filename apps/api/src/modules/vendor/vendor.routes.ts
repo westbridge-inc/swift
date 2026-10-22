@@ -1,4 +1,5 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
@@ -57,6 +58,7 @@ import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { renderStorePhoto } from '../../utils/public-store-photos';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -719,8 +721,37 @@ function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayB
   return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
 }
 
+/**
+ * [IMAGES-E2E] What PUT /profile may do with the logo and cover addresses. They are
+ * photos the store uploads (POST /profile/logo|cover), so typed text may only take
+ * one down ('' = none) or send back the value already there (a client that echoes
+ * the profile). Anything else (an outside address, another store's key, a path into
+ * another folder) is refused: it would skip the scan and the redraw. undefined =
+ * leave the field as it is.
+ */
+export async function storePhotoFieldsForWrite(
+  app: FastifyInstance,
+  vendorId: string,
+  logoUrl: string | undefined,
+  coverImageUrl: string | undefined,
+): Promise<{ logoUrl?: string | null; coverImageUrl?: string | null }> {
+  if (logoUrl === undefined && coverImageUrl === undefined) return {};
+  const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { logoUrl: true, coverImageUrl: true } });
+  const one = (sent: string | undefined, now: string | null | undefined): string | null | undefined => {
+    if (sent === undefined) return undefined;
+    if (sent.trim() === '') return null;
+    if (sent === (now ?? '')) return undefined;
+    throw new AppError(400, 'STORE_PHOTO_UPLOAD_ONLY', 'Add the store\'s logo or cover by uploading a photo');
+  };
+  return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
+  // [PERF item 3] A store's order taps answer without waiting for the push to the customer's
+  // phone (lib/push-after-response): the inbox row and socket events stay in the request.
+  const tap = { ...auth, onRequest: pushAfterResponse };
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
@@ -1413,6 +1444,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
     if (body.refundRule !== undefined) requireRole(access, 'OWNER');
     const refundRule = refundRuleForWrite(body.refundRule);
+    // [IMAGES-E2E] The logo and cover are photos the store UPLOADS (POST /profile/logo|cover:
+    // scanned, redrawn without metadata, kept where the public door serves them). Typed
+    // text may only take one down ('' = none) or repeat what is already there.
+    const photoFields = await storePhotoFieldsForWrite(app, vendorId, body.logoUrl, body.coverImageUrl);
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
@@ -1432,8 +1467,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.region !== undefined && { region: body.region }),
           ...(body.latitude !== undefined && { latitude: body.latitude }),
           ...(body.longitude !== undefined && { longitude: body.longitude }),
-          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(photoFields.logoUrl !== undefined && { logoUrl: photoFields.logoUrl }),
+          ...(photoFields.coverImageUrl !== undefined && { coverImageUrl: photoFields.coverImageUrl }),
           ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
           ...(body.tags !== undefined && { tags: body.tags }),
           ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
@@ -1533,10 +1568,29 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 2. VENDOR MANAGEMENT — Toggle open / accepting orders
   // =========================================================================
 
+  /** [owner 21 Oct · COORD 03:15Z] The state a store switch should END in, when the client says so.
+   *  The switches used to FLIP whatever the server held and ignore the body: with the phone and the
+   *  website open at once, an owner closed the store on the phone and a manager's stale "Close" on the
+   *  website then OPENED it, and it took orders. A client that sends the desired state gets exactly
+   *  that state (asking for the state it is already in changes nothing). An older app that sends no
+   *  body (builds 9 and 11) still flips. */
+  const desiredSwitch = (body: unknown, field: 'isCurrentlyOpen' | 'acceptingOrders'): boolean | undefined => {
+    if (body === null || body === undefined || typeof body !== 'object') return undefined;
+    const value = (body as Record<string, unknown>)[field];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') throw new AppError(400, 'VALIDATION_ERROR', `${field} must be true or false.`);
+    return value;
+  };
+
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'isCurrentlyOpen');
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.isCurrentlyOpen) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // [EV-ACT-14] OPENING needs a live store: a suspended/pending business
     // flipping this switch is invisible to customers anyway (public browse
@@ -1581,8 +1635,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
   app.put('/vendor/toggle-orders', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'acceptingOrders');
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.acceptingOrders) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {
@@ -1825,7 +1884,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
-  app.put<{ Params: IdParam }>('/orders/:id/accept', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
@@ -1991,7 +2050,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
-  app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
@@ -2014,7 +2073,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
-  app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
@@ -2100,6 +2159,11 @@ export async function vendorRoutes(app: FastifyInstance) {
           fulfillmentMode: true,
           fulfillmentModeVersion: true,
           riderId: true,
+          // [#1875 · REVIEW-G/M S4] the MMG dispatch gate is judged on THIS locked row, not the route's pre-read
+          paymentMethod: true,
+          orderType: true,
+          paymentStatus: true,
+          mmgClaimMismatchAt: true,
         },
       });
       if (live.fulfillment !== 'DELIVERY') {
@@ -2132,7 +2196,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
     if (mode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
-    } else if (!committed.riderId) {
+    } else if (!committed.riderId && !mmgDispatchBlocked(committed)) {
+      // [#1848 follow-up · REVIEW-M S4-1] Like acceptance: an MMG order not yet "Paid by MMG" arms no
+      // dispatch here — "Paid by MMG" arms it. Decided on the committed row (the locked read, or the row the
+      // switch wrote), so a "Paid by MMG" that landed while the switch waited for the lock is seen.
       await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };
@@ -2457,7 +2524,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
@@ -2477,7 +2544,7 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
@@ -2504,7 +2571,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  mode check is the barrier that keeps it out of the platform-rider lane:
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
-  app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
@@ -2526,7 +2593,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
-  app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
@@ -3096,12 +3163,15 @@ export async function vendorRoutes(app: FastifyInstance) {
     };
   });
 
-  /** POST /items/:id/image — upload behind the StorageProvider interface */
-  app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
-    const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
-    if (!existing) throw new NotFoundError('Item', request.params.id);
-
+  /**
+   * [IMAGES-E2E] The one way a store's own photo (menu item, logo, cover) is kept:
+   * a JPEG/PNG/WebP whose bytes say so, scanned, then DRAWN AGAIN with the public
+   * door's own drawing (utils/public-store-photos renderStorePhoto: upright, sRGB,
+   * no metadata at all, EXIF/GPS/XMP/ICC included, long edge at most 1600 px), and
+   * kept in the store's photo folder `items/<store>/`, which is the only folder the
+   * public door serves. The storage seam strips again on the way in.
+   */
+  async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
     const file = await request.file();
     if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
     if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
@@ -3114,12 +3184,55 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     await scanUpload(buffer, { surface: 'store-media', log: request.log });
+    const drawn = await renderStorePhoto(buffer, null);
+    if (!drawn) throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
+    const ext = drawn.type === 'image/png' ? '.png' : drawn.type === 'image/webp' ? '.webp' : '.jpg';
     const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
+      buffer: drawn.body,
+      filename: `photo${ext}`,
+      mimeType: drawn.type,
       folder: `items/${vendorId}`,
     });
+    return url;
+  }
+
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers).
+   *  [#1964 retry census] Registered with literal paths, so the census can read every route. */
+  const uploadStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const url = await storeOwnPhoto(request, vendorId);
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: url },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.post('/profile/logo', auth, uploadStorePhoto('logoUrl'));
+  app.post('/profile/cover', auth, uploadStorePhoto('coverImageUrl'));
+
+  /** DELETE /profile/logo, /profile/cover — take it down (the public door stops serving it once its 30-second decision window passes). */
+  const removeStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const vendor = await app.prisma.vendor.update({
+      where: { id: vendorId },
+      data: { [field]: null },
+      select: { id: true, logoUrl: true, coverImageUrl: true },
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.delete('/profile/logo', auth, removeStorePhoto('logoUrl'));
+  app.delete('/profile/cover', auth, removeStorePhoto('coverImageUrl'));
+
+  /** POST /items/:id/image — upload behind the StorageProvider interface */
+  app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
+    if (!existing) throw new NotFoundError('Item', request.params.id);
+
+    const url = await storeOwnPhoto(request, vendorId);
 
     const item = await app.prisma.item.update({
       where: { id: request.params.id, archivedAt: null },

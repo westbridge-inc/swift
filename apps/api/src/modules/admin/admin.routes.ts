@@ -45,7 +45,7 @@ import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
 import {
   APPROVAL_HEADER, approvalRefusalMessage, approvalSubjectOf, decideApproval, fillRouteTemplate,
-  fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
+  alreadyOpenMessage, fingerprintOf, queryStringOf, requiresApproval, resolveApproval,
   type ApprovalSnapshotRow,
 } from './admin-approval';
 import { ABSENT, snapshot, type EntitySnapshot } from './audit-change';
@@ -78,6 +78,7 @@ import {
 } from '../rides/fare-zones';
 import { PRICING_KINDS, PRICING_SCHEMA_VERSION, PRICING_UNITS, readPricingConfig, rollbackPricingConfig, validatePricingConfig, writePricingConfig, type PricingKind } from '../country/pricing-config';
 import { readFareBreakdown } from '../rides/taxi-waiting';
+import { readAdminItinerary } from '../rides/taxi-stops-read';
 import { createHash } from 'node:crypto';
 import { adminAuditCounter, adminApprovalCounter, adminCapabilityCounter, adminReasonCounter, sensitiveReadCounter, billingTopupMissingKeyCounter, ratingReportTenancyCounter, returnRefundCounter, orderRefundCounter } from '../../plugins/observability';
 import { isUsableTopUpKey, TOPUP_KEY_MAX, TOPUP_KEY_MIN } from '../billing/billing.service';
@@ -89,7 +90,8 @@ import { csaeClosureProblems } from '../moderation/csae-closure';
 import { isDateOnly, startOfGuyanaDay, endOfGuyanaDay } from '../../utils/guyana-day';
 import { zMoneyWhole } from '../../utils/money-schema';
 import { transitionUserStatusAuthority } from '../mover-authority';
-import { beginRequestTenantContext, getTenantId } from '../../plugins/tenant-context';
+import { beginRequestTenantContext, getTenantId, runAsSystem } from '../../plugins/tenant-context';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 import { platformStats } from './platform-stats';
 import { vendorActivationNext, vendorActivationRefusal, feeOperable, OPERABILITY_SELECT } from './vendor-activation';
 import { readFeePause } from '../billing/mmg-pause';
@@ -846,6 +848,13 @@ export async function adminRoutes(app: FastifyInstance) {
         },
       });
     }
+    if (outcome.outcome === 'already-open') {
+      // [U06] A second press, or a second admin, asking for an act that is
+      // already waiting: nothing was written, and the earlier ask is named.
+      adminApprovalCounter.labels('already_open', authority.cls).inc();
+      throw new AppError(409, 'APPROVAL_ALREADY_OPEN', alreadyOpenMessage(outcome.status, outcome.askedByYou),
+        { approvalId: outcome.approvalId, approvalStatus: outcome.status, askedByYou: outcome.askedByYou });
+    }
     if (outcome.outcome === 'refused') {
       adminApprovalCounter.labels(outcome.code, authority.cls).inc();
       throw new ForbiddenError(approvalRefusalMessage(outcome.code));
@@ -1211,6 +1220,9 @@ export async function adminRoutes(app: FastifyInstance) {
     city: true,
   } as const;
 
+  /** [item 20] The one system capability that reads another person's saved addresses for an admin. */
+  const ADMIN_USER_ADDRESSES_CAPABILITY = 'admin:user-detail-addresses';
+
   app.get('/users/:id', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
 
@@ -1221,7 +1233,6 @@ export async function adminRoutes(app: FastifyInstance) {
         rider: { select: ADMIN_USER_MOVER_SELECT },
         driver: { select: ADMIN_USER_MOVER_SELECT },
         vendorOwner: { select: { vendors: { select: ADMIN_USER_VENDOR_SELECT } } },
-        addresses: true,
         // The trust story + the paper trail the operator acts on.
         strikes: { orderBy: { createdAt: 'desc' }, take: 20 },
         orders: {
@@ -1234,10 +1245,28 @@ export async function adminRoutes(app: FastifyInstance) {
     });
     if (!user) throw new NotFoundError('User', id);
 
+    // [item 20 · owner wall] A person's saved addresses are walled to that
+    // person. Support keeps them here (delivery disputes, COORD 18 Oct) through
+    // ONE named system capability, and every such read leaves its own audit
+    // row first: who read whose addresses, and why. No row, no read.
+    const actorUserId = (request.user as { userId?: string } | undefined)?.userId;
+    if (!actorUserId) throw new AppError(401, 'UNAUTHORIZED', 'Sign in again');
+    await app.prisma.sensitiveReadLog.create({ data: {
+      actorUserId, action: 'READ addresses (GET /users/:id)', capability: ADMIN_USER_ADDRESSES_CAPABILITY,
+      subjectId: id, purpose: 'saved addresses on the admin user detail (support: delivery disputes)',
+    } });
+    const addresses = await runAsSystem(ADMIN_USER_ADDRESSES_CAPABILITY, () => app.prisma.address.findMany({ where: { userId: id } }));
+    // [item 20 · notifications] The inbox count (a number, never a notice) is
+    // walled to its person too: with the wall on it is counted through the
+    // named capability, so support sees the same number it always did.
+    if (ownerRlsBindEnabled()) {
+      user._count.notifications = await ownerWallSystem('admin:user-detail-notice-count', () => app.prisma.notification.count({ where: { userId: id } }));
+    }
+
     // [S1 response-shaping] passwordHash / failedLoginAttempts / lockedUntil /
     // lastKnownLat / lastKnownLng never leave the API on a user object — the
     // ONE shared deny-list every auth response already uses.
-    return { success: true, data: sanitizeUser(user) };
+    return { success: true, data: sanitizeUser({ ...user, addresses }) };
   });
 
   /** GET /users/:id/risk — one deterministic number from existing signals
@@ -2645,8 +2674,12 @@ export async function adminRoutes(app: FastifyInstance) {
     // itemised and read-only (route fare + waiting = total). Any other order
     // gains no key.
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops: each stop in order with its
+    // progress and the arrival's evidence note, and the one the ride is
+    // heading for. Any other order gains no key.
+    const itinerary = order.orderType === 'TAXI' ? await readAdminItinerary(app.prisma, order) : null;
 
-    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}) } };
+    return { success: true, data: { ...order, sla, handover: handoverStatus(handoverRow ?? {}), canCloseStoreRefund, ...(fareBreakdown ? { fareBreakdown } : {}), ...(itinerary ?? {}) } };
   });
 
   /**

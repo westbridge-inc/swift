@@ -347,13 +347,23 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     for (const name of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET'] as const) {
       if (!env[name]) throw new Error(`FATAL: ${name} is required when MMG_DRIVER=live. Refusing to start.`);
     }
-    if (env['MMG_REFERENCE_ROUNDTRIP_VERIFIED'] !== '1') {
-      throw new Error('FATAL: MMG_REFERENCE_ROUNDTRIP_VERIFIED must be exactly 1 after sandbox UAT proves the merchant reference in lookup and history. Refusing to start.');
-    }
+    // [S1 · SWITCHES 21 Oct, Option A] Live MMG here means the checkout page, its lookup and
+    // reversals: none of them depends on the merchant reference round trip
+    // (MMG_REFERENCE_ROUNDTRIP_VERIFIED). That flag only proves the PUSH rail, which production
+    // refuses outright below, so it is no longer a condition of booting live.
     const mmgUrl = env['MMG_API_URL'];
     if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
       throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
     }
+  }
+
+  // [S1 · SWITCHES 21 Oct, Option A] The MMG push rail (Swift sending a charge request to a
+  // partner's phone) is refused in production for now: the weekly fee is paid on the MMG checkout
+  // page only (GUARDRAILS §1), and the push rail's reference round trip is unproven. Only unset,
+  // empty or 0 boots; any other value of the switch is refused, whatever the driver.
+  const pushSwitch = env['MMG_PUSH_RAIL_ON'];
+  if (pushSwitch !== undefined && pushSwitch !== '' && pushSwitch !== '0') {
+    throw new Error('FATAL: MMG_PUSH_RAIL_ON must be unset or 0 in production: the MMG push rail (automatic charge requests to a partner\'s phone) is not allowed; the weekly fee is paid on the MMG checkout page. Refusing to start.');
   }
 
   // SWIFT-012: the 'dev' notification provider logs OTP SMS to the console

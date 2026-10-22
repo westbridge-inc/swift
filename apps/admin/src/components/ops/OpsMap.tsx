@@ -4,6 +4,7 @@ import { MapContainer, TileLayer, Marker, Popup, Polyline } from 'react-leaflet'
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import type { LiveOps } from '@/lib/api';
+import { label } from '@/lib/labels';
 
 // Georgetown — the launch market's center of gravity.
 const CENTER: [number, number] = [6.8013, -58.1551];
@@ -50,7 +51,7 @@ export function OpsMap({ data }: { data?: LiveOps }) {
         o.pickupLat != null ? (
           <Marker key={`p-${o.id}`} position={[o.pickupLat, o.pickupLng as number]} icon={ICONS.pickup}>
             <Popup>
-              <span style={{ fontFamily: 'monospace' }}>#{o.orderNumber}</span> · {o.status}
+              <span style={{ fontFamily: 'monospace' }}>#{o.orderNumber}</span> · {label('OrderStatus', o.status)}
               <br />
               {o.vendorName ?? ''}
               <br />
@@ -66,8 +67,8 @@ export function OpsMap({ data }: { data?: LiveOps }) {
           icon={ICONS[`${m.kind}${m.busy ? 'Busy' : 'Free'}` as keyof typeof ICONS]}
         >
           <Popup>
-            {m.name || (m.kind === 'rider' ? 'Rider' : 'Driver')} · {m.kind}
-            {m.rideClass ? ` (${m.rideClass})` : ''}
+            {m.name ? `${m.name} · ` : ''}{m.kind === 'rider' ? 'Rider' : 'Driver'}
+            {m.rideClass ? ` (${label('RideClass', m.rideClass)})` : ''}
             <br />
             {m.busy ? 'on a job' : 'available'}
             <br />
