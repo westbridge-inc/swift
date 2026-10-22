@@ -29,12 +29,12 @@ export interface ErasureLedgerShipping {
 export async function checkErasureLedgerShipping(prisma: PrismaClient): Promise<ErasureLedgerShipping> {
   // Ages are measured by the database clock that stamped the entries (createdAt is the session's
   // now()), never this process's clock.
-  const [row] = await prisma.$queryRawUnsafe<Array<{ late: bigint; oldest: number | null }>>(
-    `SELECT count(*) FILTER (WHERE e."createdAt" < now()::timestamp(3) - make_interval(mins => $1::int)) AS late,
-            extract(epoch FROM now()::timestamp(3) - min(e."createdAt")) / 60 AS oldest
-       FROM erasure_ledger_entry e
-      WHERE NOT EXISTS (SELECT 1 FROM erasure_ledger_shipment s WHERE s."entryId" = e.id)`,
-    ERASURE_LEDGER_MAX_UNSHIPPED_MINUTES);
+  // A tagged template (bound parameter), never the Unsafe form (sql-safety-surface).
+  const [row] = await prisma.$queryRaw<Array<{ late: bigint; oldest: number | null }>>`
+    SELECT count(*) FILTER (WHERE e."createdAt" < now()::timestamp(3) - make_interval(mins => ${ERASURE_LEDGER_MAX_UNSHIPPED_MINUTES}::int)) AS late,
+           extract(epoch FROM now()::timestamp(3) - min(e."createdAt")) / 60 AS oldest
+      FROM erasure_ledger_entry e
+     WHERE NOT EXISTS (SELECT 1 FROM erasure_ledger_shipment s WHERE s."entryId" = e.id)`;
   const unshipped = Number(row?.late ?? 0);
   const oldestMinutes = row?.oldest === null || row?.oldest === undefined ? null : Math.floor(Number(row.oldest));
   if (unshipped === 0) {
