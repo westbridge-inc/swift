@@ -15,6 +15,8 @@
  *    the held notice is still seen, so nothing is re-sent;
  *  - the harness is really walled: that same tenant-bound caller's plain read
  *    of the person's inbox sees nothing.
+ * The same holds for the OF-33 pickup nudge (its read of the rider's inbox):
+ * one nudge, never re-sent while held, released one window later.
  * The order world (people, store, the real routes, the aged clock) is built on
  * the unwalled test login (helpers/order-walk-world.ts); only the sweep ticks
  * run walled, with the switches set around each tick.
@@ -30,6 +32,7 @@ import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createScopedProcessClient, setSystemPrismaClient, systemPrismaClient } from '../plugins/prisma';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { RIDERLESS_TOLD_OUTCOME, riderlessCutoffNoticeKey, sweepFoodAge } from '../modules/dispatch/rescue';
+import { pickupNudgeKey, sweepPickupOverdue } from '../modules/dispatch/pickup-overdue';
 import { NotificationService, type NotificationPayload } from '../modules/notification/notification.service';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, and grants the owner wall to one, by raw DDL.
@@ -151,5 +154,85 @@ describe('[OF-01 · #1890 wall ON] the riderless cutoff sees its own notice thro
     expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
     expect(notices.sends).toBe(1);
     expect(await heldNotices()).toBe(1);
+  }, 300_000);
+});
+
+
+// [OF-33] The rider's own path, through the real doors (as pickup-overdue.test.ts).
+const PICKUP_TRAVEL_MIN = 20;
+const PICKUP_NUDGE_MIN = 10;
+const PICKUP_RELEASE_MIN = 20;
+
+/** Online, then the rider takes the order through the real board-grab door. */
+async function riderTakes(cast: Cast, orderId: string, r = cast.riders[0]!) {
+  expect((await call(w, 'POST', '/api/v1/rider/go-online', r.token, { latitude: r.lat, longitude: r.lng })).statusCode).toBe(200);
+  const res = await call(w, 'POST', `/api/v1/rider/orders/${orderId}/accept`, r.token);
+  expect(res.statusCode, res.body).toBe(200);
+}
+
+/** A ready order (the store's whole path), so pickup is due at accept + travel. */
+async function readyOrder(cast: Cast): Promise<string> {
+  const { orderId } = await placeCashOrder(w, cast);
+  const id = orderId!;
+  expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+  expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/preparing`, cast.vendorOwner.token)).statusCode).toBe(200);
+  expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/ready`, cast.vendorOwner.token)).statusCode).toBe(200);
+  return id;
+}
+
+/** Age the world to `atMin` minutes (+1 s) after the rider's accept (its log row ages with the world). */
+async function ageToAfterAccept(orderId: string, atMin: number) {
+  const log = await w.app.prisma.orderStatusLog.findFirstOrThrow({
+    where: { orderId, status: 'RIDER_ASSIGNED' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true },
+  });
+  const ms = atMin * MIN - (Date.now() - log.createdAt.getTime()) + 1_000;
+  if (ms > 0) await ageWorld(w, ms);
+}
+
+describe('[OF-33 · #1890 wall ON] the pickup nudge sees its own held nudge through the owner wall', () => {
+  it('as its job runs it: nudged once, never re-sent while held, released one window later; a tenant-bound tick re-sends nothing either', async () => {
+    const cast = await castWalk(w, 1);
+    const id = await readyOrder(cast);
+    await riderTakes(cast, id);
+    const r = cast.riders[0]!;
+    const order = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: order.status, riderId: order.riderId }).toEqual({ status: 'RIDER_ASSIGNED', riderId: r.riderId });
+    const notices = new CountingNotices(walledClient, w.app.io, 'pickup_overdue');
+    const deps = { prisma: walledClient, redis: w.app.redis, io: w.app.io, notifications: notices };
+    const enqueued: string[] = [];
+    const enqueue = async (orderId: string) => { enqueued.push(orderId); };
+    const heldNudges = () => owner.notification.count({
+      where: { userId: r.userId, dedupeKey: pickupNudgeKey(id, order.riderAssignmentVersion) },
+    });
+    const due = PICKUP_TRAVEL_MIN; // ready already: due = accept + travel
+
+    // At the nudge time, walled, as the job: the nudge is sent once.
+    await ageToAfterAccept(id, due + PICKUP_NUDGE_MIN);
+    await walled(() => asJob(() => sweepPickupOverdue(deps, enqueue)));
+    expect(notices.sends).toBe(1);
+    expect(await heldNudges()).toBe(1);
+
+    // Inside the window, walled, as the job: the held nudge is SEEN, so it is not re-sent.
+    await ageToAfterAccept(id, due + PICKUP_NUDGE_MIN + 3);
+    await walled(() => asJob(() => sweepPickupOverdue(deps, enqueue)));
+    expect(notices.sends).toBe(1);
+
+    // The harness is really walled: a caller bound to a tenant only reads none of the rider's notices plainly...
+    const blindCount = await walled(() => runWithTenant(order.tenantId, () => walledClient.notification.count({ where: { userId: r.userId } })));
+    expect(blindCount).toBe(0);
+    // ...yet the nudge's own read names its system capability: from that caller the held nudge is still seen.
+    await ageToAfterAccept(id, due + PICKUP_NUDGE_MIN + 6);
+    await walled(() => runWithTenant(order.tenantId, () => sweepPickupOverdue(deps, enqueue)));
+    expect(notices.sends).toBe(1);
+    expect((await owner.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
+
+    // At the release time, walled, as the job: back to dispatch (never cancelled); still exactly one nudge.
+    await ageToAfterAccept(id, due + PICKUP_RELEASE_MIN);
+    await walled(() => asJob(() => sweepPickupOverdue(deps, enqueue)));
+    const row = await owner.order.findUniqueOrThrow({ where: { id } });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'READY_FOR_PICKUP', riderId: null });
+    expect(enqueued).toContain(id);
+    expect(notices.sends).toBe(1);
+    expect(await heldNudges()).toBe(1);
   }, 300_000);
 });
