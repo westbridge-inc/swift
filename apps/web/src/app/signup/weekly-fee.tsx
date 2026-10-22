@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { formatAmount } from '@/lib/money';
-import { FEE_ASK, feeQuote, feeTermsOf, fetchSignupPricing, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
+import { FEE_ASK, FEE_LADDER, feeQuote, feeSteps, feeTermsOf, fetchSignupPricing, type FeeChoice, type FeeState, type SignupPricing } from '@/lib/signup-fee';
 import styles from '../auth-flow.module.css';
 
 /**
@@ -36,14 +36,15 @@ export function WeeklyFee({ role, type, onChange }: {
     if (rate === null) return { state: { ask: FEE_ASK.missing } as FeeState };
     const terms = feeTermsOf(pricing);
     const amount = `${formatAmount(rate, pricing.currencySymbol)}/week`;
-    if (terms === 'invalid') return { amount, state: { ask: FEE_ASK.invalid } as FeeState };
+    const steps = feeSteps(pricing, choice);
+    if (terms === 'invalid') return { amount, steps, state: { ask: FEE_ASK.invalid } as FeeState };
     // An API older than the tick serves no words: the amount is shown, nothing is ticked or sent.
-    if (terms === null) return { amount, state: { ask: null } as FeeState };
+    if (terms === null) return { amount, steps, state: { ask: null } as FeeState };
     const key = `${terms.version}|${pricing.currencyCode}|${rate}`;
     const state: FeeState = tickedFor === key
       ? { ask: null, ack: { version: terms.version, amount: rate, currencyCode: pricing.currencyCode } }
       : { ask: FEE_ASK.tick };
-    return { amount, terms, key, state };
+    return { amount, steps, terms, key, state };
   }, [pricing, role, type, tickedFor]);
   useEffect(() => { onChange(view.state); }, [onChange, view.state]);
 
@@ -59,6 +60,7 @@ export function WeeklyFee({ role, type, onChange }: {
   return (
     <section aria-label="Your weekly fee" className={styles.stackTight}>
       <p className={styles.bodyCopy}><strong>Your weekly fee: {view.amount}</strong></p>
+      {view.steps ? <p className={styles.smallCopy}>{FEE_LADDER}</p> : null}
       {terms ? terms.items.map((item) => (
         <p key={item.heading} className={styles.smallCopy}><strong>{item.heading}:</strong> {item.text}</p>
       )) : null}

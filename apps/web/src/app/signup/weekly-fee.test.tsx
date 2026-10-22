@@ -13,11 +13,11 @@ import { FEE_TERMS_V1, SIGNUP_PRICING } from '@/test/weekly-fee-fixture';
 // the fee changed reads the price again and clears the tick. Nobody pays here.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn(), fetch: vi.fn() }));
+const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn(), fetch: vi.fn(), api: vi.fn(), search: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
-vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
+vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: fx.api }));
 vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
-vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
+vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: fx.search, placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
 
 const served = (data: unknown) => Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, data }) });
@@ -109,6 +109,48 @@ describe('[row 628] the weekly fee is on the page before a partner signs up', ()
     fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
     expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).toContain('$7,000/week');
     expect(button('Create business').disabled).toBe(true);
+  });
+
+  it('[REVIEW-F S3-2] a catalogue store is told, beside the amount, that it is the starting rate; a services business is not', async () => {
+    const LADDER = 'This is the starting rate; it steps up as you list more items.';
+    await throughName(/Put my business on Swift/);
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).toContain(`Your weekly fee: $9,000/week${LADDER}`);
+    fireEvent.change(screen.getByLabelText('Business type'), { target: { value: 'SERVICE' } });
+    expect(screen.getByRole('region', { name: 'Your weekly fee' }).textContent).not.toContain(LADDER);
+  });
+
+  it('[REVIEW-F S3-2] a price list with one catalogue step has nothing to step up to, and a rider has no catalogue', async () => {
+    fx.fetch.mockImplementation(() => served({ ...SIGNUP_PRICING, vendors: { service: 7000, catalogue: [{ minItems: 0, rate: 9000 }] } }));
+    await throughName(/Put my business on Swift/);
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).not.toMatch(/starting rate/);
+  });
+
+  it('[REVIEW-F S3-2] a rider sees no catalogue line', async () => {
+    await throughName(/Deliver with Swift/);
+    expect((await screen.findByRole('region', { name: 'Your weekly fee' })).textContent).not.toMatch(/starting rate/);
+  });
+
+  it('[REVIEW-F S4-1] with everything else done, "Create business" waits for the fee tick alone, then sends it', async () => {
+    const DOOR = { placeId: 'door', primary: '12 Regent Street', secondary: 'Georgetown', lat: 6.812, lng: -58.163 };
+    fx.search.mockResolvedValue([DOOR]);
+    fx.api.mockResolvedValue({ data: { address: 'Store entrance, Georgetown' } });
+    const user = await throughName(/Put my business on Swift/);
+    fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
+    for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ }));
+    const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+    await user.click(button('Place your store on the map'));
+    await user.click(await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ }));
+    loadMap();
+    await user.click(button('Confirm store location'));
+    const box = await feeBox();
+    expect(button('Create business').disabled).toBe(true);
+    await user.click(box);
+    expect(button('Create business').disabled).toBe(false);
+    await user.click(button('Create business'));
+    expect(fx.become.mock.calls[0]![0]).toMatchObject({ role: 'VENDOR', acceptAgreement: true, weeklyFeeAck: ACK(9000) });
   });
 
   it('a price that does not load says so, keeps the button waiting, and can be tried again', async () => {

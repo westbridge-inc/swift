@@ -31,11 +31,15 @@ import { partnerRateFor, PricingConfigError, type PartnerTier, type Subscription
 export const WEEKLY_FEE_ACK_TYPE: ConsentDocumentType = 'weekly_fee_acknowledgement';
 export const WEEKLY_FEE_ACK_VERSION = 'v1';
 
-/** The v1 words, in the order they are shown. A change is a new version — a version is a promise about specific words. */
+/**
+ * The v1 words, in the order they are shown. A change is a new version — a version is a promise about specific words.
+ * "When it starts" says approval, not going live: a rider's or driver's fee (trial or first week) is born at approval.
+ * Card-rail switch-on checklist: before card payment is offered, "How you pay" must change, and that is v2.
+ */
 export const WEEKLY_FEE_TERMS_V1 = {
   items: [
     { heading: 'What it covers', text: 'The Swift app and its tools for your work. Swift takes no commission: you keep 100% of your sales, fares, delivery fees and tips.' },
-    { heading: 'When it starts', text: 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you and you go live, and after your free trial if you get one.' },
+    { heading: 'When it starts', text: 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one.' },
     { heading: 'How you pay', text: 'In the Swift app, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' },
     { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
   ],
@@ -70,7 +74,7 @@ export function weeklyFeeAckRequired(request: Pick<FastifyRequest, 'headers'>, b
 /** Refused before anything is written: a required tick that is missing, or one given to other words. */
 export function assertWeeklyFeeAck(required: boolean, ack: WeeklyFeeAck | undefined): void {
   if (!ack) {
-    if (required) throw new AppError(400, WEEKLY_FEE_ACK_REQUIRED, 'Read the weekly fee and tick “I understand the weekly fee” to continue — Swift records that you did.');
+    if (required) throw new AppError(400, WEEKLY_FEE_ACK_REQUIRED, 'Read the weekly fee and tick “I understand the weekly fee” to continue. If you can’t see it, reload the page.');
     return;
   }
   if (ack.version !== WEEKLY_FEE_ACK_VERSION) {

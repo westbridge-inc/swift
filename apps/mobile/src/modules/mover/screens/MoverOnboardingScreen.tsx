@@ -213,7 +213,7 @@ export function VehicleSetup({
         accessibilityState={{ checked: agree }}
         accessibilityLabel="I agree to the Mover Agreement"
         onPress={() => setAgree((v) => !v)}
-        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, minHeight: 48 }}
       >
         <MaterialCommunityIcons
           name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}

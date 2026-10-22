@@ -50,6 +50,14 @@ export const FEE_ASK = {
   tick: 'Tick “I understand the weekly fee” to continue.',
 } as const;
 
+/** Beside a catalogue store's amount when the price list has more steps (the phone's price card says the same). */
+export const FEE_LADDER = 'This is the starting rate; it steps up as you list more items.';
+
+/** True when this choice starts on a catalogue step the price list goes beyond. */
+export function feeSteps(pricing: SignupPricing, choice: FeeChoice): boolean {
+  return choice.role === 'VENDOR' && choice.vendorType !== 'SERVICE' && (pricing.vendors?.catalogue?.length ?? 0) > 1;
+}
+
 /** The server's refusals of the tick: the form reads the price again when it sees one. */
 export const FEE_TICK_ERRORS: readonly string[] = ['WEEKLY_FEE_ACK_REQUIRED', 'WEEKLY_FEE_CHANGED', 'WEEKLY_FEE_TERMS_CHANGED'];
 

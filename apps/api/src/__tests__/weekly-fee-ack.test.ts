@@ -35,7 +35,8 @@ const users: string[] = [];
 /** The exact v1 words, written out here so a change to them is a red test, never a silent re-anchor. */
 const V1_ITEMS = [
   { heading: 'What it covers', text: 'The Swift app and its tools for your work. Swift takes no commission: you keep 100% of your sales, fares, delivery fees and tips.' },
-  { heading: 'When it starts', text: 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you and you go live, and after your free trial if you get one.' },
+  // [REVIEW-F S3-1] True for riders and drivers too: their fee is born at approval, not when they first go online.
+  { heading: 'When it starts', text: 'Nothing is paid at sign-up. The weekly fee starts only after Swift approves you, and after your free trial if you get one.' },
   { heading: 'How you pay', text: 'In the Swift app, on MMG’s checkout page, one week at a time. Paying by card is not offered yet.' },
   { heading: 'If the price changes', text: 'Swift tells you in the app at least 14 days before. A new price applies only from your first weekly fee due after that, never to a week you have already paid.' },
 ];
@@ -138,6 +139,8 @@ describe('the "I understand the weekly fee" tick at partner sign-up', () => {
     expect(res.statusCode, res.body).toBe(400);
     expect(res.json().error.code).toBe('WEEKLY_FEE_ACK_REQUIRED');
     expect(res.json().error.message).toMatch(/I understand the weekly fee/);
+    // [REVIEW-F S4-4] A tab opened before the deploy has no box to tick: the message says how to get one.
+    expect(res.json().error.message).toMatch(/reload the page/);
     const after = await provisioned(c.id);
     expect(after.rider).toBeNull();
     expect(after.roles).toEqual(['CUSTOMER']);

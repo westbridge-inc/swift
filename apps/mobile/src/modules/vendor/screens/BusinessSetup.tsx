@@ -269,7 +269,7 @@ export function BusinessSetup() {
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
           onPress={() => edit((draft) => ({ agree: !draft.agree }))}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, minHeight: 48 }}
         >
           <MaterialCommunityIcons
             name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}

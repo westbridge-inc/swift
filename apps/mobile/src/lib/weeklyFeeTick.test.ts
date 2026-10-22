@@ -94,6 +94,8 @@ describe('WeeklyFeeTerms — the amount, the server’s words and an unticked ti
     const box = find(tree, (n) => n.props?.['accessibilityRole'] === 'checkbox')!;
     expect(box.props['accessibilityLabel']).toBe('I understand the weekly fee.');
     expect(box.props['accessibilityState']).toEqual({ checked: false });
+    // [REVIEW-F S4-2] One quick tap always lands: the whole row is at least 48 tall.
+    expect(box.props['style']).toMatchObject({ minHeight: 48 });
     (box.props['onPress'] as () => void)();
     expect(onToggle).toHaveBeenCalledTimes(1);
     expect((find(WeeklyFeeTerms({ fee, ticked: true, onToggle }), (n) => n.props?.['accessibilityRole'] === 'checkbox')!.props['accessibilityState'])).toEqual({ checked: true });
@@ -119,6 +121,8 @@ describe('[row 628] both sign-up screens show the fee block and wait for the tic
     // The block sits with the agreement tick, the button waits for it, and the submit restates it.
     expect(s).toContain('<WeeklyFeeTerms fee={fee} ticked={feeTicked}');
     expect(s).toMatch(disabled);
+    // [REVIEW-F S4-2] The partner-agreement tick row beside it is at least 48 tall too.
+    expect(s).toMatch(/accessibilityLabel="I agree to the (Mover|Business) Agreement"\s+onPress=\{[^\n]+\}\s+style=\{\{[^}]*minHeight: 48/);
     expect(s).toContain('if (feeAsk) return;');
     // Sign-up sends the tick only when the server asked for it, with the amount on screen.
     expect(s).toContain("...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack })");

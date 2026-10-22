@@ -634,7 +634,9 @@ describe('the List-your-business form keeps what was typed', () => {
         longitude: -58.3045,
       },
       acceptAgreement: true,
-    });
+    // [Row 628] The payload is exactly the form (this API fixture serves no fee words, so no tick is sent);
+    // the second argument only re-reads the price when the server refuses a fee tick.
+    }, { onError: expect.any(Function) });
   });
 
   it('control: sign-out, another account and a later session each start from a blank form', async () => {

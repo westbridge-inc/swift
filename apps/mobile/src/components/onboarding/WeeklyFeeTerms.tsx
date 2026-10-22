@@ -34,7 +34,7 @@ export function WeeklyFeeTerms({ fee, ticked, onToggle }: {
         accessibilityState={{ checked: ticked }}
         accessibilityLabel={terms.tick}
         onPress={onToggle}
-        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xs }}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xs, minHeight: 48 }}
       >
         <MaterialCommunityIcons
           name={ticked ? 'checkbox-marked' : 'checkbox-blank-outline'}
