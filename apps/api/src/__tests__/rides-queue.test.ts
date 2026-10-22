@@ -465,6 +465,16 @@ describe('the scan', () => {
     await exhausted(at(181_000), null);
     expect((await active()).noDriverFound).toBe(true);
 
+    // (e) [REVIEW-G #2030 S4-1] A SECOND driver takes it and drops it: the
+    // boundary is the LATEST claim, so that 181 s empty search no longer
+    // counts (an earliest-claim rule would still count it)...
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'DRIVER_ASSIGNED', changedBy: 'test-driver-2', note: 'Mover accepted the job', createdAt: at(240_000) } });
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'PENDING', changedBy: 'test-driver-2', note: 'Driver cancelled: test', createdAt: at(300_000) } });
+    expect((await active()).noDriverFound).toBe(false);
+    // ...until the search after that comes back empty.
+    await exhausted(at(301_000), null);
+    expect((await active()).noDriverFound).toBe(true);
+
     // [REVIEW-F S4-3] A ride recorded as paid by MMG is HELD for a person at
     // the wait limit, never released on its own: no release time is promised.
     expect(typeof (await active()).searchReleaseAt).toBe('string');
