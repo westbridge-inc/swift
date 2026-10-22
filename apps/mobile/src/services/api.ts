@@ -902,6 +902,14 @@ export const servicesApi = {
     data: { trade: string; bio?: string; portfolioPhotos?: string[] },
     session?: AuthSessionSnapshot,
   ) => api.post('/services/providers', data, capturedAuthConfig(session)),
+  // [IMAGES-E2E] Photos of the provider's own work: uploaded (the server scans each one and
+  // redraws it without location or camera data), or taken down by file name.
+  uploadPortfolioPhoto: (form: FormData) =>
+    api.post('/services/providers/me/portfolio', form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
       type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
@@ -1172,6 +1180,9 @@ export const driverApi = {
   stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
   stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
   stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
+  // [TAXI route line] The road through the ride's own points, for the map
+  // ({ source: 'road' | 'straight', points }); a server from before it answers 404.
+  rideRoute: (id: string) => api.get(`/driver/rides/${id}/route`),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /

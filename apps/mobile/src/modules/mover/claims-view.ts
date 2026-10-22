@@ -15,7 +15,8 @@ export function claimStatus(status: string): { label: string; tone: 'brand' | 's
     case 'PAID': return { label: 'Paid', tone: 'success' };
     case 'PENDING_REVIEW': return { label: 'Under review', tone: 'brand' };
     case 'REJECTED': return { label: 'Not covered', tone: 'error' };
-    default: return { label: status.toLowerCase().replace(/_/g, ' '), tone: 'neutral' };
+    // [UI-SWEEP U73] A status this file has not been taught: words, never the code.
+    default: return { label: 'Being processed', tone: 'neutral' };
   }
 }
 
@@ -28,7 +29,7 @@ const EVIDENCE_LABEL: Record<string, string> = {
   cart_snapshot: 'Order contents on file',
 };
 export function evidenceLine(item: { key: string; present: boolean; required: boolean }): { label: string; state: 'ok' | 'missing' | 'optional' } {
-  const label = EVIDENCE_LABEL[item.key] ?? item.key.replace(/_/g, ' ');
+  const label = EVIDENCE_LABEL[item.key] ?? 'Other evidence';
   if (item.present) return { label, state: 'ok' };
   return { label, state: item.required ? 'missing' : 'optional' };
 }
@@ -50,5 +51,5 @@ export function flagHint(flag: string): string | null {
 }
 
 export function reasonLabel(reason: string): string {
-  return reason === 'no_show' ? 'Customer did not show' : reason === 'refused' ? 'Customer refused to pay' : reason.replace(/_/g, ' ');
+  return reason === 'no_show' ? 'Customer did not show' : reason === 'refused' ? 'Customer refused to pay' : 'Other reason';
 }
