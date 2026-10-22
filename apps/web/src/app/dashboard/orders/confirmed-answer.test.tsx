@@ -15,14 +15,16 @@ import { wireVendorOrderDetail } from '@/test/vendor-wire-fixtures';
 // ---------------------------------------------------------------------------
 
 type Reply = { status?: number; body: unknown };
-const gate = { holdReads: false, reads: [] as Array<() => void>, puts: [] as Array<(_reply?: Reply) => void> };
+const gate = { holdReads: false, holdList: false, reads: [] as Array<() => void>, puts: [] as Array<(_reply?: Reply) => void> };
 
 function handler(detail: Record<string, unknown>) {
   const server = { ...detail };
   return (request: ApiRequest) => {
     const path = request.url.pathname;
     if (request.method === 'GET' && path === '/api/v1/vendor/orders') {
-      return { body: { success: true, data: [server], meta: { total: 1 } } };
+      const list = { body: { success: true, data: [{ ...server }], meta: { total: 1 } } };
+      if (!gate.holdList) return list;
+      return new Promise<Reply>((resolve) => { gate.reads.push(() => resolve(list)); });
     }
     if (request.method === 'GET' && path === '/api/v1/vendor/orders/order-live') {
       const snapshot = { body: { success: true, data: { ...server } } };
@@ -65,6 +67,7 @@ async function openDetail(detail = wireVendorOrderDetail()) {
 beforeEach(() => { stubAudioContext(); });
 afterEach(() => {
   gate.holdReads = false;
+  gate.holdList = false;
   gate.reads.splice(0).forEach((release) => release());
   gate.puts.splice(0).forEach((release) => release({ status: 503, body: { success: false, error: { message: 'teardown' } } }));
 });
@@ -108,5 +111,28 @@ describe('a store tap shows the server\'s confirmed answer as soon as it lands',
     await act(async () => { gate.reads[0]!(); await new Promise((resolve) => { setTimeout(resolve, 50); }); });
     expect(within(dialog()).getByRole('button', { name: 'Mark ready' })).toBeTruthy();
     expect(within(dialog()).queryByRole('button', { name: 'Start preparing' })).toBeNull();
+  });
+});
+
+// [#1615 · PERF row 562] The Orders home's cards carry the app's buttons too:
+// the same rule as the order window. Nothing moves before the answer; the
+// server's confirmed answer shows on the card at once, before any re-read.
+describe('a card on the Orders home shows the server\'s confirmed answer as soon as it lands', () => {
+  it('Accept on a card: nothing before the answer, then Start preparing before the board is re-read', async () => {
+    mockApi(handler(wireVendorOrderDetail()));
+    const { user } = renderWithQuery(<OrdersPage />);
+    const later = await screen.findByText(/View later/).catch(() => null);
+    if (later) await user.click(later);
+    const card = await screen.findByRole('article', { name: 'Order SW-1001' });
+    await user.click(within(card).getByRole('button', { name: 'Accept' }));
+    expect(within(card).queryByRole('button', { name: 'Start preparing' })).toBeNull(); // dispatch: never before the server says so
+
+    gate.holdList = true; // the board's re-read after the answer waits
+    gate.holdReads = true;
+    await act(async () => { gate.puts[0]!(); });
+    const fresh = () => screen.getByRole('article', { name: 'Order SW-1001' });
+    await waitFor(() => expect(within(fresh()).getByRole('button', { name: 'Start preparing' })).toBeTruthy());
+    expect(within(fresh()).queryByRole('button', { name: 'Accept' })).toBeNull(); // no second Accept to tap
+    expect(gate.reads.length).toBeGreaterThanOrEqual(1);
   });
 });

@@ -5,7 +5,11 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BellRing } from 'lucide-react';
 import { acceptOrder, money, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
+// The app's own clock wording (plain file, imported as is).
+import { acceptClockLabel } from '../../../mobile/src/modules/vendor/acceptClock';
 import { formatAppointmentSlot } from '@/lib/appointmentTime';
+import { acceptHeldForPayment, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
+import { canAttestPayment } from '@/lib/vendor-hub';
 import { mmgDisputePaused } from '@/lib/mmg-dispute';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { focusableIn } from '@/components/modal';
@@ -36,7 +40,7 @@ function chime(ctx: AudioContext) {
   }
 }
 
-export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) {
+export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: VendorOrder[]; onOpenOrder?: (_id: string) => void }) {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
   const [seen, setSeen] = useState<Set<string> | null>(null); // null until first poll
@@ -120,6 +124,22 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
     onError: (e) => setError((e as Error).message),
   });
 
+  // The draining accept clock, as in the app: the server's own deadline
+  // (`respondBy`), recomputed from the wall clock every second, and drawn only
+  // while the decision is open.
+  const head = queue[0];
+  const respondByMs = head?.respondBy ? Date.parse(head.respondBy) : NaN;
+  const clockOpen = (head?.status || '').toUpperCase() === 'PENDING' && Number.isFinite(respondByMs);
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  // As in the app, the clock is drawn only until the deadline passes.
+  const clockActive = clockOpen && respondByMs > nowTs;
+  useEffect(() => {
+    if (!clockOpen) return;
+    setNowTs(Date.now());
+    const t = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [clockOpen, respondByMs]);
+
   const current = queue[0];
   const currentId = current?.id;
   // A different order on top starts at the first step again.
@@ -147,6 +167,13 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
   };
 
   if (!current) return null;
+  const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
+  // Payment-first, the one rule every Accept on the web follows (lib/mmg-pay-words):
+  // an unpaid MMG order offers the store's confirmation (in the order window), not Accept.
+  const held = acceptHeldForPayment(current);
+  const attestable = held && canAttestPayment(current.paymentStatus);
+  const canConfirm = attestable && current.canConfirmPayment === true;
+  const heldReason = held && !attestable ? mmgPayBlockedReason(current.paymentStatus) : null;
   const booking = current.fulfillment === 'APPOINTMENT';
   const busy = accept.isPending || reject.isPending;
   const customer = [current.customer?.firstName, current.customer?.lastName].filter(Boolean).join(' ') || 'Customer';
@@ -180,8 +207,29 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
             </p>
           ))}
         </div>
+        {clockActive && (
+          <p className="mt-3 text-sm text-[var(--swift-muted)]">
+            Accept within <b className="text-[var(--swift-ink)]">{acceptClockLabel(remainSecs)}</b> — the customer is watching this clock too.
+          </p>
+        )}
 
+        {held && (
+          <p className="mt-3 text-sm font-semibold text-[var(--swift-warning)]">
+            {heldReason ?? 'Awaiting MMG payment'}
+            {attestable && !canConfirm && <span className="mt-1 block font-normal text-[var(--swift-muted)]">Only the owner or a manager can confirm MMG payments.</span>}
+          </p>
+        )}
         <div className="mt-5 flex flex-col items-stretch gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-center">
+          {held ? (
+            canConfirm ? (
+              <button
+                onClick={() => { setQueue((q) => q.filter((o) => o.id !== current.id)); onOpenOrder?.(current.id); }}
+                className="min-h-11 w-full rounded-xl bg-green-600 px-8 py-3 text-lg font-extrabold text-white min-[400px]:w-auto"
+              >
+                Confirm MMG payment
+              </button>
+            ) : null
+          ) : <>
           {!booking && <select
             value={prepTime}
             onChange={(e) => setPrepTime(Number(e.target.value))}
@@ -200,6 +248,7 @@ export default function NewOrderTakeover({ orders }: { orders: VendorOrder[] }) 
           >
             Accept
           </button>
+          </>}
           {!rejecting && (
             <button
               onClick={() => setRejecting(true)}

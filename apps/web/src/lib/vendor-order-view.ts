@@ -87,3 +87,14 @@ export function recoveryView(raw: unknown): RecoveryView | null {
 export function storeCanConfirmReturn(view: RecoveryView | null, o: VendorOrder): boolean {
   return !!view && view.state === 'RETURN_REQUIRED' && String(o.status).toUpperCase() === 'RETURNING' && o.orderType !== 'COURIER';
 }
+
+/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
+export const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt'] as const;
+
+/** The fields the server just confirmed for order `id` in a step's answer (the bare updated row),
+ *  or null when the answer is not that order's row. Nothing else is taken from it. */
+export function confirmedOrderFields(answer: unknown, id: string): Partial<VendorOrder> | null {
+  const row = (answer as { data?: Record<string, unknown> } | undefined)?.data;
+  if (!row || row['id'] !== id || typeof row['status'] !== 'string') return null;
+  return Object.fromEntries(CONFIRMED_ORDER_FIELDS.filter((key) => key in row).map((key) => [key, row[key]])) as Partial<VendorOrder>;
+}

@@ -81,7 +81,8 @@ const STOP_FAR = { lat: 4.28, lng: -58.72 }; // the passenger's stop, AWAY from 
 
 type StopSpec = { at: { lat: number; lng: number }; status?: 'PENDING' | 'ARRIVED' | 'DEPARTED'; arrivedAt?: Date; departedAt?: Date };
 
-async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDuration?: number; status?: 'RIDE_IN_PROGRESS' | 'DRIVER_EN_ROUTE' } = {}) {
+/** A ride booked with `stops`; `withoutStops` books a plain ride (no stop count, no stop rows: every ride today). */
+async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDuration?: number; status?: 'RIDE_IN_PROGRESS' | 'DRIVER_EN_ROUTE'; withoutStops?: boolean } = {}) {
   const passenger = await makeUser(['CUSTOMER']);
   const driver = await makeDriver();
   const order = await prisma.order.create({
@@ -98,13 +99,15 @@ async function makeRide(stops: StopSpec[], opts: { pickedUpAt?: Date; taxiDurati
       totalAmount: 2000, taxiFareTotal: 2000, paymentMethod: 'CASH',
       pickedUpAt: opts.pickedUpAt ?? new Date(),
       taxiDuration: opts.taxiDuration ?? 60,
-      taxiStopCount: stops.length,
-      taxiStops: {
-        create: stops.map((s, i) => ({
-          sequence: i + 1, lat: s.at.lat, lng: s.at.lng, address: `Stop ${i + 1}`,
-          status: s.status ?? 'PENDING', arrivedAt: s.arrivedAt ?? null, departedAt: s.departedAt ?? null,
-        })),
-      },
+      ...(opts.withoutStops ? {} : {
+        taxiStopCount: stops.length,
+        taxiStops: {
+          create: stops.map((s, i) => ({
+            sequence: i + 1, lat: s.at.lat, lng: s.at.lng, address: `Stop ${i + 1}`,
+            status: s.status ?? 'PENDING', arrivedAt: s.arrivedAt ?? null, departedAt: s.departedAt ?? null,
+          })),
+        },
+      }),
     },
   });
   orderIds.push(order.id);
@@ -128,7 +131,7 @@ const retire = async (orderId: string, at: Date) => {
 const setStop = (orderId: string, sequence: number, data: Record<string, unknown>) =>
   prisma.taxiTripStop.updateMany({ where: { orderId, sequence }, data });
 
-type DetectorState = { flags?: { deviation?: string; longStop?: string; overdue?: string }; targetKey?: string; completionFlag?: unknown; events?: Array<{ kind: string; detail?: Record<string, unknown> }> };
+type DetectorState = { flags?: { deviation?: string; longStop?: string; overdue?: string }; targetKey?: string; minDistToDestM?: number; divergingSinceMs?: number | null; completionFlag?: unknown; events?: Array<{ kind: string; detail?: Record<string, unknown> }> };
 const stateOf = async (orderId: string) => ((await prisma.tripSafetySession.findUniqueOrThrow({ where: { orderId } })).deviationState as DetectorState | null) ?? {};
 const flagsOf = async (orderId: string) => (await stateOf(orderId)).flags ?? {};
 
@@ -243,6 +246,38 @@ describe('Guardian aims at the next open stop', () => {
     expect(closed.status).toBe('CLOSED');
     expect((closed.deviationState as DetectorState).completionFlag).toBeUndefined();
     expect(await prisma.incidentCase.count({ where: { orderId: order.id, category: 'COMPLETION_ANOMALY' } })).toBe(0);
+  });
+});
+
+describe('a ride without stops is untouched', () => {
+  // REVIEW-G G4: a plain ride must never be given a target. If it were, its
+  // first tick after this release would write one and restart the divergence
+  // baseline, so a car already heading away would get a fresh clock.
+  it('keeps its divergence baseline across ticks, never gets a target, and still flags a sustained deviation on the clock it started', async () => {
+    const { order, driver } = await makeRide([], { withoutStops: true });
+    expect(order.taxiStopCount).toBeNull();
+    const t0 = Date.now();
+    await tick(driver.id, t0, 0, PICKUP); // ~3.1 km from the destination: the baseline
+    await tick(driver.id, t0, 30_000, { lat: 4.29, lng: -58.71 }); // ~4.7 km: heading away, the clock starts
+    const before = await stateOf(order.id);
+    expect(before.targetKey, 'no target for a ride without stops').toBeUndefined();
+    expect(before.divergingSinceMs).toBe(t0 + 30_000);
+
+    await tick(driver.id, t0, 60_000, { lat: 4.285, lng: -58.715 }); // further away, still inside the 90 s window
+    const after = await stateOf(order.id);
+    expect({ targetKey: after.targetKey, min: after.minDistToDestM, since: after.divergingSinceMs }, 'the same baseline and the same clock')
+      .toEqual({ targetKey: undefined, min: before.minDistToDestM, since: t0 + 30_000 });
+    expect(after.events?.some((e) => e.kind === 'TARGET_CHANGED') ?? false).toBe(false);
+    expect(after.flags?.deviation).toBeUndefined();
+
+    // 90 s after the clock started (not after any restart): flagged, naming no target.
+    emits.length = 0;
+    await tick(driver.id, t0, 120_000, { lat: 4.28, lng: -58.72 });
+    expect((await flagsOf(order.id)).deviation).toBeTruthy();
+    const flag = emits.find((e) => e.event === 'guardian:flag')?.payload;
+    expect(flag).toMatchObject({ kind: 'deviation', sustainedS: 90 });
+    expect(flag).not.toHaveProperty('target');
+    await retire(order.id, new Date(t0 + 130_000));
   });
 });
 
