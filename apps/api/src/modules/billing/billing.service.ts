@@ -4957,7 +4957,8 @@ export class BillingService {
    * can no longer leave a changed bill with no audit row. The rate write is a
    * compare-and-set on the rate this run read: two runs racing over the same
    * subscription (the weekly job and an operator's manual run) move it once
-   * and write one event — the loser matches nothing and writes nothing.
+   * and write one event — the loser matches nothing and writes nothing. It
+   * also requires no negotiated rate and no waived fee [G S4-2].
    *
    * Key policy: `tier:<subscription>:<n>:<from>-><to>` — the n-th tier
    * change of this subscription, counted under the row lock the CAS above
@@ -4975,8 +4976,11 @@ export class BillingService {
     const from = Number(sub.weeklyRate);
     const apply = async (tx: Prisma.TransactionClient) => {
       await lockSubscriptionPayer(tx, sub.id);
+      // [G S4-2] A negotiated rate or a waived fee is a human decision: one set after the caller read
+      // the plan (an operator's waive, the USD migration's customRate) leaves weeklyRate as it was, so
+      // the compare-and-set checks both too and the move loses.
       const won = await tx.subscription.updateMany({
-        where: { id: sub.id, weeklyRate: sub.weeklyRate },
+        where: { id: sub.id, weeklyRate: sub.weeklyRate, customRate: null, feeWaived: false },
         data: { weeklyRate: target.rate },
       });
       if (won.count === 0) return false;

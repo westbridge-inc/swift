@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { docId } from './search-scope';
 /**
  * `ItemHit` — THE shape an item takes when it is listed outside its own store.
@@ -97,7 +98,7 @@ export function toItemHit(row: ItemHitRow): ItemHit {
     id: row.id,
     name: row.name,
     basePrice: Number(row.basePrice),
-    imageUrl: row.imageUrl,
+    imageUrl: servedPhotoAddress(row.imageUrl), // [IMAGES-E2E PR4] never an outside host
     vendorId: row.vendorId,
     vendorName: row.vendor?.name ?? '',
     categoryName: row.category?.name ?? null,
@@ -178,7 +179,7 @@ export function toItemSearchDoc(row: ItemDocRow, categories: string[]): ItemSear
     vendorName: row.vendor.name,
     categoryName: row.category.name,
     basePrice: Number(row.basePrice),
-    imageUrl: row.imageUrl,
+    imageUrl: servedPhotoAddress(row.imageUrl),
     createdAt: new Date(row.createdAt).getTime(),
     isAvailable: row.isAvailable,
     isPopular: row.isPopular,
@@ -206,7 +207,8 @@ export function itemHitFromSearchDoc(h: Record<string, unknown>): ItemHit {
     id: String(h['entityId'] ?? h['id']),
     name: String(h['name']),
     basePrice: Number(h['basePrice'] ?? 0),
-    imageUrl: (h['imageUrl'] as string | null) ?? null,
+    // An older search document may still carry an outside address: never handed out.
+    imageUrl: servedPhotoAddress(h['imageUrl'] as string | null),
     vendorId: String(h['vendorId']),
     vendorName: String(h['vendorName'] ?? ''),
     categoryName: (h['categoryName'] as string | null) ?? null,

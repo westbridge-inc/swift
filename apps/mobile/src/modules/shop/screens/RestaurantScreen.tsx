@@ -16,6 +16,7 @@ import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
+import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import { STORE_PICKS_TITLE } from '../../../lib/storePick';
@@ -743,7 +744,7 @@ function RestaurantStore() {
             .map((cat: any) =>
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
-                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <SectionPhotoHeader title={cat.name} imageUrl={cat.imageUrl} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
                   <View
                     style={{
                       marginHorizontal: GUTTER,
