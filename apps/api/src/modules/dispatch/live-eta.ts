@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { getMapsProvider } from '../../providers/maps/maps-provider';
+import { TAXI_STOP_OPEN_STATUSES, TAXI_STOP_PARENT_STATUS } from '../order/order-status';
 
 // ---------------------------------------------------------------------------
 // Live ETA for a mover's ACTIVE leg [SWIFT-UG-RT-01].
@@ -47,18 +48,30 @@ export async function computeActiveLegEta(
 ): Promise<number | null> {
   const order = await app.prisma.order.findUnique({
     where: { id: orderId },
-    select: { status: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true },
+    select: { status: true, pickupLat: true, pickupLng: true, deliveryLat: true, deliveryLng: true, taxiStopCount: true },
   });
   if (!order) return null;
 
   const toPickup = PICKUP_LEG.has(order.status);
-  const target = toPickup
-    ? order.pickupLat != null && order.pickupLng != null
-      ? { lat: Number(order.pickupLat), lng: Number(order.pickupLng) }
-      : null
-    : order.deliveryLat != null && order.deliveryLng != null
-      ? { lat: Number(order.deliveryLat), lng: Number(order.deliveryLng) }
-      : null;
+  // [TAXI multi-stop 5/8] During the trip, a ride with stops is heading for
+  // its next open stop (the passenger's order); after the last one, the
+  // destination as before. One more read, only for a ride with stops.
+  const stop = order.taxiStopCount != null && order.status === TAXI_STOP_PARENT_STATUS
+    ? await app.prisma.taxiTripStop.findFirst({
+      where: { orderId, status: { in: TAXI_STOP_OPEN_STATUSES } },
+      orderBy: { sequence: 'asc' },
+      select: { lat: true, lng: true },
+    })
+    : null;
+  const target = stop
+    ? { lat: stop.lat, lng: stop.lng }
+    : toPickup
+      ? order.pickupLat != null && order.pickupLng != null
+        ? { lat: Number(order.pickupLat), lng: Number(order.pickupLng) }
+        : null
+      : order.deliveryLat != null && order.deliveryLng != null
+        ? { lat: Number(order.deliveryLat), lng: Number(order.deliveryLng) }
+        : null;
   if (!target) return null;
 
   const [eta] = await getMapsProvider().etaMinutes(mover, [target]);

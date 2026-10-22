@@ -43,10 +43,10 @@ describe('the order context bar', () => {
 
   it('[owner, staging] on Home it is the one place control: the delivery address in the pill, changed from the sheet; none in pickup', async () => {
     render(<OrderingContextBar inline deliverTo="12 Main St" addressHref="/order/location" />);
-    const trigger = screen.getByRole('button', { name: /^Delivery to 12 Main St, as soon as possible\. Change delivery or pickup/ });
+    const trigger = screen.getByRole('button', { name: /^Delivery 12 Main St ASAP ?\. Change delivery or pickup/ });
     expect(trigger.textContent).toContain('12 Main St'); expect(trigger.textContent).not.toContain('address at checkout');
     // On a phone the row is narrow: the pill shows the address itself, "Delivery" and "ASAP" from the wide layout up.
-    for (const word of ['Delivery', '· ASAP']) expect(within(trigger).getByText(word).className.split(/\s+/)).toEqual(expect.arrayContaining(['hidden', 'wide:inline']));
+    for (const word of ['Delivery', 'ASAP']) expect(within(trigger).getByText(word, { exact: false, selector: 'span.font-semibold, span.flex-none' }).className.split(/\s+/)).toEqual(expect.arrayContaining(['sr-only', 'wide:not-sr-only']));
     fireEvent.click(trigger);
     const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
     expect(within(sheet).getByRole('link', { name: 'Change delivery address' }).getAttribute('href')).toBe('/order/location');
@@ -60,11 +60,11 @@ describe('the order context bar', () => {
   it('on Home a guest finds the stores near them from the same sheet', async () => {
     const find = vi.fn();
     render(<OrderingContextBar inline nearMe={{ busy: false, on: false, find }} />);
-    const trigger = screen.getByRole('button', { name: /^Delivery, address at checkout/ });
+    const trigger = screen.getByRole('button', { name: /^Delivery address at checkout ASAP/ });
     // [staging screenshot, 390 px] Beside the menu and Sign in, the phone pill says just "Delivery";
-    // "address at checkout" and "ASAP" are in its spoken name and show from the wide layout up.
-    expect(within(trigger).getByText('Delivery').className.split(/\s+/)).not.toContain('hidden');
-    for (const words of ['address at checkout', '· ASAP']) expect(within(trigger).getByText(words).className.split(/\s+/)).toEqual(expect.arrayContaining(['hidden', 'wide:inline']));
+    // "address at checkout" and "ASAP" are in its spoken name (visually hidden) and show from the wide layout up.
+    expect(within(trigger).getByText('Delivery').className.split(/\s+/)).not.toContain('sr-only');
+    for (const words of ['address at checkout', 'ASAP']) expect(within(trigger).getByText(words, { exact: false, selector: 'span.truncate, span.flex-none' }).className.split(/\s+/)).toEqual(expect.arrayContaining(['sr-only', 'wide:not-sr-only']));
     fireEvent.click(trigger);
     const sheet = await screen.findByRole('dialog', { name: 'Delivery or pickup' });
     fireEvent.click(within(sheet).getByRole('button', { name: 'Show stores near me' }));

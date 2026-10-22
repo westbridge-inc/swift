@@ -28,6 +28,9 @@ export function SafetyCheckClient() {
 
   useEffect(() => {
     setLink(parseSafetyCheckLink(window.location.hash));
+    // [REVIEW-F S4-1] The secret leaves the address bar once read: not in the
+    // history list, a bookmark or a screenshot of the URL.
+    if (window.location.hash) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   }, []);
 
   async function send(response: 'OK' | 'NEED_HELP') {

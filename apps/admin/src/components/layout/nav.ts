@@ -94,7 +94,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { label: 'Zones', href: '/zones', icon: Map, blurb: 'Delivery zones and fares', keywords: 'fares areas' },
       { label: 'Config', href: '/config', icon: Settings, blurb: 'Platform settings', keywords: 'settings' },
       { label: 'Discovery', href: '/discovery', icon: Compass, blurb: 'Categories customers browse by', keywords: 'categories tags' },
-      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'Signals that two accounts are one person', keywords: 'fraud identity trial' },
+      { label: 'Integrity', href: '/integrity', icon: Fingerprint, blurb: 'The detection algorithms\' decision log, for review', keywords: 'fraud identity trial algorithm detection' },
       { label: 'Ads review', href: '/ads', icon: AdsIcon, blurb: 'Advertisers and creatives (ads are off at launch)', keywords: 'advertising' },
     ],
   },

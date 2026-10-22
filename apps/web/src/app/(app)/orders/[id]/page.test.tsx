@@ -379,6 +379,27 @@ describe("[PAYMENT-SIMPLIFY] the store's MMG number on the order page", () => {
     render(<OrderDetailPage />);
     expect(await screen.findByText(notice)).toBeTruthy();
   });
+
+  // [UI-SWEEP U14 · COORD ruling 21 Oct] The customer never reads a raw code.
+  it('a cancellation code the server writes reads as words, never as the code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'FOOD_TOO_OLD', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Your order was ready but no rider could be found, so it was cancelled rather than delivered cold.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('FOOD_TOO_OLD');
+  });
+
+  it('a cancellation code this build does not know says only that the order was cancelled', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'SOME_NEW_CODE', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('This order was cancelled.')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/SOME_NEW_CODE|some new code/i);
+  });
+
+  it('a reason the store typed is kept as written', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...ORDER, status: 'CANCELLED', paymentAction: null, mmgPayment: null, cancellationReason: 'Out of stock', cancellationNotice: null } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Out of stock')).toBeTruthy();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -488,5 +509,58 @@ describe('the waiting charge on the trip page', () => {
     expect(screen.getByText('Trip').nextSibling?.textContent).toBe('$2,800');
     expect(screen.getByText('Waiting 13 min').nextSibling?.textContent).toBe('$300');
     expect(screen.getByText('Total').nextSibling?.textContent).toBe('$3,100');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U14 / U15 / U16] The status pill and the timeline printed codes in
+// lower case ("rider en route pickup"); the phone speaks by the order's own
+// vertical. At 360 px the no-wrap pill squeezed the title until it overlapped.
+// And there was no way to report a problem with the order (the help form
+// already takes ?orderId=).
+// ---------------------------------------------------------------------------
+describe('[U14 / U15 / U16] the order page speaks the phone\'s words and has a support door', () => {
+  const live = {
+    ...ORDER, status: 'RIDER_EN_ROUTE_PICKUP', orderType: 'FOOD_DELIVERY', paymentMethod: 'CASH', paymentAction: null,
+    timeline: [
+      { status: 'PENDING', timestamp: '2026-10-19T14:00:00.000Z', note: null },
+      { status: 'ACCEPTED', timestamp: '2026-10-19T14:02:00.000Z', note: null },
+      { status: 'RIDER_EN_ROUTE_PICKUP', timestamp: '2026-10-19T14:10:00.000Z', note: null },
+    ],
+  };
+
+  it('the pill and the timeline say the phone\'s words, never a code', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const timeline = (await screen.findByRole('heading', { name: 'Order timeline' })).closest('section')!;
+    expect(timeline.textContent).toContain('Order accepted');
+    expect(timeline.textContent).toContain('Rider on the way to the store');
+    expect(screen.getAllByText('Rider on the way to the store').length).toBeGreaterThan(1);
+    expect(document.body.textContent?.toLowerCase()).not.toMatch(/rider en route pickup|rider_en_route/);
+  });
+
+  it('a parcel uses the parcel\'s words', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue({ ...live, orderType: 'COURIER', timeline: [] } as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByText('Rider on the way to collect')).toBeTruthy();
+  });
+
+  it('offers "Report a problem" tied to this order', async () => {
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(live as never);
+    render(<OrderDetailPage />);
+    const link = await screen.findByRole('link', { name: 'Report a problem' });
+    expect(link.getAttribute('href')).toBe('/account/help?orderId=order-1');
+  });
+
+  it('the header wraps the pill under the copy on a narrow screen instead of squeezing the title', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const css = readFileSync(join(process.cwd(), 'src/app/(app)/orders/[id]/tracking.module.css'), 'utf8');
+    const rule = (name: string) => css.match(new RegExp(`\\n\\.${name}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+    expect(rule('hero')).toMatch(/flex-wrap:\s*wrap;/);
+    expect(rule('heroCopy')).toMatch(/overflow-wrap:\s*anywhere;/);
+    expect(rule('heroCopy')).toMatch(/flex:\s*1 1 200px;/);
+    expect(rule('statusPill')).not.toMatch(/white-space:\s*nowrap|text-transform:\s*capitalize/);
+    expect(rule('statusPill')).toMatch(/max-width:\s*100%;/);
   });
 });

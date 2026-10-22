@@ -10,7 +10,7 @@ import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
-import { boardPaused } from '../../../lib/moverBoard';
+import { boardPaused, recentBoard } from '../../../lib/moverBoard';
 import {
   useMoverKind,
   useMoverStats,
@@ -505,7 +505,8 @@ export function MoverHomeScreen({ navigation }: any) {
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
   // While the board rests, its last answer is not shown (no stale pins on the map).
-  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : available.data ?? [];
+  // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
+  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
   // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
   // 428 wants a selfie check (there's a screen for that now); 423 means only

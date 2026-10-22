@@ -25,6 +25,8 @@ export const POLL = {
   chatMessages: () => adaptivePollInterval(4000, 15000),
   vendorOrders: () => (vendorOrderFeedLive() ? adaptivePollInterval : slowNetworkPollInterval)(12000, 30000),
   vendorOrder: () => (vendorOrderFeedLive() ? adaptivePollInterval : slowNetworkPollInterval)(15000, 30000),
+  // [PERF partner #6] The store overview: 30 s, or 120 s while the store feed refreshes it on order events.
+  vendorAnalytics: () => (vendorOrderFeedLive() ? adaptivePollInterval : slowNetworkPollInterval)(30000, 120000),
   vendorProfile: () => slowNetworkPollInterval(20000, 30000),
   moverDemand: () => slowNetworkPollInterval(20_000, 30000),
   moverAvailable: () => slowNetworkPollInterval(10000, 30000),
