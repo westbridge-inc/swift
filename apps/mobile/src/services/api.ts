@@ -1341,6 +1341,14 @@ export const vendorApi = {
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
+  // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
+  // redraws it without location or camera data, and serves it to customers), or taken down.
+  uploadStorePhoto: (slot: 'logo' | 'cover', form: FormData) =>
+    api.post(`/vendor/profile/${slot}`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeStorePhoto: (slot: 'logo' | 'cover') => api.delete(`/vendor/profile/${slot}`),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
   // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.
