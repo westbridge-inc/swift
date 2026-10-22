@@ -228,7 +228,9 @@ describe('[O-3 · owner 22 Oct] one store tap: Accept = Preparing, every store t
     expect(accepted[0]!.changedBy).toBe(diner.owner.userId);
     expect(preparing[0]!.changedBy).toBe(diner.owner.userId);
     // Never a tie: the newest row names the status the order is in, and the timeline reads in order.
-    expect(preparing[0]!.createdAt.getTime()).toBeGreaterThan(accepted[0]!.createdAt.getTime());
+    // The tie-break is exact: the first row at the walk's instant, the next one millisecond after.
+    expect(accepted[0]!.createdAt.getTime()).toBe(row.acceptedAt!.getTime());
+    expect(preparing[0]!.createdAt.getTime()).toBe(row.acceptedAt!.getTime() + 1);
     expect(logs.at(-1)!.status).toBe('PREPARING');
 
     // One push, not two: the accept's words already say it is being prepared.
