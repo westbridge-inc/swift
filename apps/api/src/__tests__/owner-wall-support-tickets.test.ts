@@ -280,9 +280,9 @@ describe('[item 20 · REVIEW-G N6] an account closure request, completed by the 
     // Its own tenant's: read and closed through the named capability, the erasure run end to end.
     const done = await complete(own.ticketId);
     expect(done.statusCode, done.body).toBe(200);
-    // (The erasure's own report is not this test's subject: on this suite's tenant-walled request login its global avatar
-    // census refuses a row-security-filtered view and reports the erasure pending, which the retry job, as system, finishes.)
-    expect(done.json().data, done.body).toMatchObject({ ticketId: own.ticketId, outcome: expect.objectContaining({ deleted: expect.any(Boolean) }) });
+    // The erasure's censuses run on the system login (#1953 avatar, #1971 uploads/mover objects), so a walled admin
+    // request gets the whole erasure done, not "pending".
+    expect(done.json().data, done.body).toMatchObject({ ticketId: own.ticketId, outcome: expect.objectContaining({ deleted: true }) });
     expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: own.ticketId } }))
       .toMatchObject({ status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: ids.admin });
     expect(await owner.user.findUniqueOrThrow({ where: { id: closer } })).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${closer}` });
