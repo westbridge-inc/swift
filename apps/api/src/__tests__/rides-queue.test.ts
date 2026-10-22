@@ -442,8 +442,14 @@ describe('the scan', () => {
     // assigned -> the honest card stays up (no flicker between re-sweeps).
     await exhausted(at(1_000), 'RETRIED');
     await exhausted(at(61_000), null);
+    // Any other status record (here a later PENDING note) is not a driver
+    // taking the ride: it moves no boundary.
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'PENDING', changedBy: 'system', note: 'test: not an assignment', createdAt: at(90_000) } });
     const before = await active();
     expect(before.noDriverFound).toBe(true);
+    // A search that STARTED before the driver took the ride and ended empty
+    // after (exhaustedAt 130 s) belongs to the old search, not the new one.
+    await exhausted(at(110_000), 'RETRIED');
 
     // (a) A driver then TOOK the ride (the claim's append-only record) and
     // dropped it (back to PENDING, no driver). The old empty searches say
@@ -468,6 +474,9 @@ describe('the scan', () => {
     expect(held.searchReleaseAt ?? null).toBeNull();
     expect(held.noDriverFound).toBe(true);
 
+    // Cleanup: back to the unpaid cash ride it was (a paid-MMG cancel needs a
+    // refund obligation, rightly refused by the database).
+    await app.prisma.order.update({ where: { id: ride.id }, data: { paymentMethod: ride.paymentMethod, paymentStatus: ride.paymentStatus } as never });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: ride.id } });
     await app.prisma.order.updateMany({ where: { customerId: c.userId }, data: { status: 'CANCELLED' } });
   });
