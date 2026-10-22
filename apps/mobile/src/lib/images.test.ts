@@ -90,6 +90,10 @@ describe('store photos reach the screen at a size made for it [IMAGES-E2E]', () 
     expect(vendorPhoto({ logoUrl: key })).toBe(`https://api.test/${key}?w=640`);
   });
 
+  it("a provider's portfolio photo is sized the same way", () => {
+    expect(storePhotoUrl('portfolio/cmprov01/AbCdEfGhIjKlMnOp.jpg', 320)).toBe('https://api.test/portfolio/cmprov01/AbCdEfGhIjKlMnOp.jpg?w=320');
+  });
+
   it('a whole-screen photo asks for the large copy', () => {
     expect(vendorPhoto({ coverImageUrl: key }, HERO_PHOTO_WIDTH)).toBe(`https://api.test/${key}?w=1280`);
     expect(itemPhoto({ imageUrl: key }, HERO_PHOTO_WIDTH)).toBe(`https://api.test/${key}?w=1280`);

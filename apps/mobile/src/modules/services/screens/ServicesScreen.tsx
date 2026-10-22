@@ -1,6 +1,8 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
 import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Image } from 'expo-image';
+import { storePhotoUrl } from '../../../lib/images';
 import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
@@ -263,6 +265,23 @@ export function ServicesScreen({ navigation }: any) {
                     <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: space.md }}>
                       {p.bio}
                     </T>
+                  ) : null}
+                  {/* [IMAGES-E2E] Photos of the provider's own work (uploaded, redrawn without camera data). */}
+                  {p.portfolioPhotos?.length ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md }} contentContainerStyle={{ gap: space.sm }}>
+                      {p.portfolioPhotos.slice(0, 6).map((photo) => {
+                        const uri = storePhotoUrl(photo, 320);
+                        return uri ? (
+                          <Image
+                            key={photo}
+                            source={{ uri }}
+                            style={{ width: 96, height: 72, borderRadius: radius.md, backgroundColor: color.surface.subtle }}
+                            contentFit="cover"
+                            accessibilityLabel={`Work by ${p.tradeLabel.toLowerCase()}`}
+                          />
+                        ) : null;
+                      })}
+                    </ScrollView>
                   ) : null}
                 </Card>
               );
