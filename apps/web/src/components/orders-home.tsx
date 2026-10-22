@@ -26,7 +26,7 @@ import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
-import { subscriptionWords } from '@/lib/weekly-fee';
+import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused } from '@/lib/mmg-dispute';
