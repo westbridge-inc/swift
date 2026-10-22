@@ -13,6 +13,7 @@
  */
 import type { PrismaClient } from '@prisma/client';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 export const HANDOVER_CLAIM_WINDOW_HOURS = Number(process.env['HANDOVER_CLAIM_WINDOW_HOURS'] ?? 24);
 
@@ -46,7 +47,8 @@ export async function reconcileHandoverClaims(
   } });
   if (unmatched.length > 0 && opts.notifications) {
     const today = now.toISOString().slice(0, 10);
-    const already = await prisma.notification.findFirst({ where: { data: { path: ['kind'], equals: 'handover_claims_unmatched' }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } }, select: { id: true } });
+    // [item 20] Any admin's page today, looked up by the nightly job: the named capability under the owner wall.
+    const already = await ownerWallSystem('handover-claims:paged-today', () => prisma.notification.findFirst({ where: { data: { path: ['kind'], equals: 'handover_claims_unmatched' }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } }, select: { id: true } }));
     if (!already) {
       await notifyAdmins(prisma, opts.notifications, {
         tenantId: null,

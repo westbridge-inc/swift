@@ -55,10 +55,13 @@ vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChe
 vi.mock('../../../components/JobAlertSettingsRow', () => ({ JobAlertSettingsRow: 'JobAlertSettingsRow' }));
 vi.mock('../../../components/WithdrawStaffInvites', () => ({ WithdrawStaffInvites: 'WithdrawStaffInvites' }));
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
+// [IMAGES-E2E #1909] The real store-photo card is measured (it owns its spacing); its native pickers are not loaded.
+vi.mock('expo-image-picker', () => ({}));
+vi.mock('../../../lib/uploadImage', () => ({ prepareUploadImage: vi.fn() }));
 vi.mock('../../../components/RoleSwitcherSheet', () => ({ RoleSwitcherSheet: 'RoleSwitcherSheet' }));
 vi.mock('../../../hooks/useStepUp', () => ({ useStepUp: () => ({ withStepUp: (fn: unknown) => fn }) }));
 vi.mock('../../../lib/stepUp', () => ({ isStepUpDismissed: () => false, serverMessage: () => '', fmtWhen: () => null }));
-vi.mock('../../../lib/images', () => ({ mediaUrl: (u: string) => u }));
+vi.mock('../../../lib/images', () => ({ mediaUrl: (u: string) => u, storePhotoUrl: (u: string | null) => u }));
 vi.mock('../../../stores/authStore', () => ({ useAuthStore: (pick: (s: unknown) => unknown) => pick({ isAuthenticated: true, setIntent: vi.fn() }) }));
 vi.mock('../../../stores/vendorPreview', () => ({ useVendorPreview: (pick: (s: unknown) => unknown) => pick({ previewType: null, exitPreview: vi.fn() }) }));
 

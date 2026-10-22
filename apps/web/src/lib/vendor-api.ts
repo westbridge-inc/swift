@@ -222,6 +222,17 @@ function normalizeCatalogItem(raw: unknown): CatalogItem {
 export const getStores = () =>
   apiFetch(`${V}/stores`).then((r) => r.data as { stores: Store[]; selectedId: string; myRole: string });
 export const getProfile = () => apiFetch(`${V}/profile`).then((r) => r.data);
+// [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the API scans it and redraws
+// it without camera data, then serves it to customers), or taken down. Store managers only.
+type StorePhotoRow = { id: string; logoUrl: string | null; coverImageUrl: string | null };
+export const uploadStorePhoto = (slot: 'logo' | 'cover', file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch(`${V}/profile/${slot}`, { method: 'POST', body: form }).then((r) => r.data as StorePhotoRow);
+};
+export const removeStorePhoto = (slot: 'logo' | 'cover') =>
+  apiFetch(`${V}/profile/${slot}`, { method: 'DELETE' }).then((r) => r.data as StorePhotoRow);
+
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the

@@ -3,6 +3,8 @@ import type Redis from 'ioredis';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { guyanaDayKey } from '../../utils/guyana-day';
 import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { closeStaffInvitesOf, insertNoticeFor, pendingStaffInvitesOf, staffInviteesOf } from '../../lib/owner-wall-notices';
+import { ownerRlsBindEnabled } from '../../lib/owner-rls';
 
 // ---------------------------------------------------------------------------
 // [Row 55] Store team invites.
@@ -165,6 +167,13 @@ async function lockStaffInviteAccounts(tx: Prisma.TransactionClient, inviterId: 
 export async function closePendingStaffInvites(
   tx: Prisma.TransactionClient, vendorId: string, userId: string, now: Date, exceptId?: string,
 ) {
+  // [item 20] Often SOMEONE ELSE'S invites (the owner's withdrawal, a removal
+  // from the team), inside the caller's transaction: with the wall on, the
+  // narrow action (the same rows, the same read/readAt/state/decidedAt).
+  if (ownerRlsBindEnabled()) {
+    await closeStaffInvitesOf(tx, userId, vendorId, now, exceptId);
+    return;
+  }
   const rows = await tx.notification.findMany({
     where: inviteWhere(userId, vendorId), select: { id: true, data: true },
   });
@@ -210,9 +219,12 @@ export async function deliverStaffInvite(
       select: { id: true },
     });
     if (member) return { result: 'ALREADY_MEMBER' as const };
-    const live = await tx.notification.findMany({
-      where: inviteWhere(input.targetUserId, input.vendorId), select: { data: true },
-    });
+    // [item 20] The invitee's invites, read in the owner's transaction: with the wall on, the narrow action.
+    const live = ownerRlsBindEnabled()
+      ? await pendingStaffInvitesOf(tx, input.targetUserId, input.vendorId)
+      : await tx.notification.findMany({
+        where: inviteWhere(input.targetUserId, input.vendorId), select: { data: true },
+      });
     if (live.some((n) => {
       const d = readInvite(n.data);
       return d !== null && new Date(d.expiresAt).getTime() > input.now.getTime();
@@ -221,7 +233,7 @@ export async function deliverStaffInvite(
     const roleWords = input.role === 'MANAGER' ? 'a manager' : 'staff';
     // The invite must be persisted by the SAME transaction holding the grant
     // lock; sender.send would write through a separate client and fan out early.
-    const notification = await tx.notification.create({ data: {
+    const notification = await insertNoticeFor(tx, {
       userId: input.targetUserId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Team invite',
       body: `${vendor.name} invited you to join their team as ${roleWords}. Open your notifications to accept or decline. ${STAFF_INVITE_DATA_NOTICE}`,
       data: {
@@ -230,7 +242,7 @@ export async function deliverStaffInvite(
         expiresAt: new Date(input.now.getTime() + STAFF_INVITE_TTL_MS).toISOString(),
         state: 'PENDING', audience: 'customer',
       } satisfies InviteData,
-    }, select: { id: true } });
+    });
     return { result: 'SENT' as const, notificationId: notification.id };
   });
   if ('notificationId' in committed && committed.notificationId) {
@@ -277,18 +289,22 @@ export async function withdrawPendingStaffInvites(
     await tx.auditLog.create({ data: {
       userId: input.actorId, action: STAFF_INVITES_WITHDRAWN, entity: 'VendorStaffInvites', entityId: input.vendorId,
     } });
-    const rows = await tx.notification.findMany({
-      where: {
-        createdAt: { gte: new Date(input.now.getTime() - STAFF_INVITE_TTL_MS - 60 * 60 * 1000) },
-        AND: [
-          { data: { path: ['kind'], equals: STAFF_INVITE_KIND } },
-          { data: { path: ['state'], equals: 'PENDING' } },
-          { data: { path: ['vendorId'], equals: input.vendorId } },
-        ],
-      },
-      select: { userId: true },
-    });
-    for (const userId of [...new Set(rows.map((row) => row.userId))].sort()) {
+    const since = new Date(input.now.getTime() - STAFF_INVITE_TTL_MS - 60 * 60 * 1000);
+    // [item 20] Who holds this store's invites, read in the owner's transaction: with the wall on, the narrow action.
+    const invitees = ownerRlsBindEnabled()
+      ? await staffInviteesOf(tx, input.vendorId, since)
+      : (await tx.notification.findMany({
+        where: {
+          createdAt: { gte: since },
+          AND: [
+            { data: { path: ['kind'], equals: STAFF_INVITE_KIND } },
+            { data: { path: ['state'], equals: 'PENDING' } },
+            { data: { path: ['vendorId'], equals: input.vendorId } },
+          ],
+        },
+        select: { userId: true },
+      })).map((row) => row.userId);
+    for (const userId of [...new Set(invitees)].sort()) {
       await lockStaffInviteGrant(tx, input.vendorId, userId);
       await closePendingStaffInvites(tx, input.vendorId, userId, input.now);
     }
@@ -367,11 +383,11 @@ export async function decideStaffInvite(
       // The owner learns who joined only now, after the person said yes, and
       // only their first name. Written with the membership; sent after commit.
       const joiner = await tx.user.findUnique({ where: { id: input.userId }, select: { firstName: true } });
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: vendor.owner.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'New team member',
         body: `${joiner?.firstName?.trim() || 'Someone you invited'} joined ${vendor.name} as ${invite.role === 'MANAGER' ? 'a manager' : 'staff'}.`,
         data: { kind: 'staff_joined', vendorId: vendor.id, audience: 'business' },
-      }, select: { id: true } });
+      });
       ownerNoticeId = notice.id;
     }
     await closePendingStaffInvites(tx, vendor.id, input.userId, input.now, input.inviteId);

@@ -32,6 +32,8 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'app.ts': { sites: 1, role: 'INFRA' },
   // [item 20] The owner wall's boot attestation: catalogue reads only (role membership, row security, the policy).
   'lib/owner-rls.ts': { sites: 2, role: 'INFRA' },
+  // [item 20 · notifications] The idempotent notice write's read-back (a narrow SECURITY DEFINER action), in the caller's transaction or on its root client.
+  'lib/owner-wall-notices.ts': { sites: 1, role: 'SHARED' },
   'lib/rls-attestation.ts': { sites: 5, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },

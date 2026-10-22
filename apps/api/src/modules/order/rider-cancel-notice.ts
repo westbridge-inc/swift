@@ -2,6 +2,8 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
 import type { NotificationService } from '../notification/notification.service';
 import { checkoutOutboxId } from './checkout-outbox';
+import { ownerWallSystem } from '../../lib/owner-rls';
+import { upsertNoticeFor } from '../../lib/owner-wall-notices';
 
 export const RIDER_CANCEL_NOTICE_KIND = 'rider-cancel-notice';
 /** [L07 · Opus S3] How long an unconfirmed cancellation push is retried. A
@@ -21,16 +23,14 @@ export async function persistRiderCancellationNotice(
   const dedupeKey = `order:${order.id}:${RIDER_CANCEL_NOTICE_KIND}`;
   const id = checkoutOutboxId(dedupeKey);
   const notificationId = `${id}_inbox`;
-  await tx.notification.upsert({
-    where: { id: notificationId }, update: {},
-    create: {
-      id: notificationId, userId: rider.userId, dedupeKey,
-      type: 'ORDER_UPDATE', title: 'Delivery cancelled',
-      body: 'The customer cancelled this delivery. Stop travelling to its pickup and check your current jobs.',
-      // kind: the phone opens the mover dashboard on tap, never the customer
-      // order screen (a cross-app contract: mobile notification-router).
-      data: { kind: 'mover_job_cancelled', orderId: order.id, status: 'CANCELLED', audience: 'earner' },
-    },
+  // [item 20] The rider's inbox row, written in the customer's cancellation: the one notice helper.
+  await upsertNoticeFor(tx, {
+    id: notificationId, userId: rider.userId, dedupeKey,
+    type: 'ORDER_UPDATE', title: 'Delivery cancelled',
+    body: 'The customer cancelled this delivery. Stop travelling to its pickup and check your current jobs.',
+    // kind: the phone opens the mover dashboard on tap, never the customer
+    // order screen (a cross-app contract: mobile notification-router).
+    data: { kind: 'mover_job_cancelled', orderId: order.id, status: 'CANCELLED', audience: 'earner' },
   });
   await tx.orderOutbox.upsert({
     where: { id }, update: {},
@@ -81,10 +81,11 @@ export async function drainRiderCancellationNotices(
       const payload = row.payload as Record<string, unknown>;
       if (typeof payload['notificationId'] === 'string' && typeof payload['riderUserId'] === 'string' && payload['orderId'] === row.orderId) {
         sent = await runWithTenant(row.tenantId, async () => {
-          const notice = await deps.prisma.notification.findFirst({ where: {
+          // [item 20] The rider's notice, read by the job bound to the order's tenant: the named capability under the owner wall.
+          const notice = await ownerWallSystem('rider-cancel:rider-notice', () => deps.prisma.notification.findFirst({ where: {
             id: payload['notificationId'] as string, user: { tenantId: row.tenantId }, userId: payload['riderUserId'] as string,
             dedupeKey: row.dedupeKey,
-          }, select: { id: true } });
+          }, select: { id: true } }));
           return notice ? deps.notifications.publishPersisted(notice.id, { requirePush: true }) : false;
         });
       }
