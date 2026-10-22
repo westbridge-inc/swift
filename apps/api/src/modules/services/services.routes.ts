@@ -314,7 +314,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     if (!user) throw new NotFoundError('ServiceProvider');
     // [REVIEW-F S2-1] The photo's bytes are deleted, not just unlinked: the deletion row is
     // written with the pointer change, under the row's lock, and the object deleted after.
-    const { updated, orphanIds } = await app.prisma.$transaction(async (tx) => {
+    const { portfolio, orphanIds } = await app.prisma.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<Array<{ id: string; portfolioPhotos: string[] }>>`
         SELECT "id", "portfolioPhotos" FROM "service_providers" WHERE "userId" = ${userId}
         FOR UPDATE /* service-provider-portfolio-authority */
@@ -329,10 +329,11 @@ export async function servicesRoutes(app: FastifyInstance) {
         data: { portfolioPhotos: { set: provider.portfolioPhotos.filter((photo) => !removed.includes(photo)) } },
         select: { id: true, portfolioPhotos: true },
       });
-      return { updated: row, orphanIds: queued };
+      return { portfolio: row, orphanIds: queued };
     });
     await deleteQueuedPhotos(orphanIds);
-    return { success: true, data: updated };
+    // Only the photo list goes back (id + portfolioPhotos), never the provider's whole row.
+    return { success: true, data: portfolio };
   });
 
   app.get('/providers/me', auth, async (request) => {

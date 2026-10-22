@@ -6,6 +6,7 @@ import type {
 } from '@prisma/client';
 import { z } from 'zod';
 import { AppError } from '../../utils/errors';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 export interface ServiceJobTransitionNotice {
   userId: string;
@@ -121,16 +122,13 @@ export async function transitionServiceJob(
 
   const notificationIds: string[] = [];
   for (const notice of input.notices ?? []) {
-    const row = await tx.notification.create({
-      data: {
-        userId: notice.userId,
-        type: notice.type,
-        title: notice.title,
-        body: notice.body,
-        data: notice.data,
-        dedupeKey: `service-job:${input.jobId}:${transitionedAt.toISOString()}:${String(notice.data['kind'])}:${notice.userId}`,
-      },
-      select: { id: true },
+    const row = await insertNoticeFor(tx, {
+      userId: notice.userId,
+      type: notice.type,
+      title: notice.title,
+      body: notice.body,
+      data: notice.data,
+      dedupeKey: `service-job:${input.jobId}:${transitionedAt.toISOString()}:${String(notice.data['kind'])}:${notice.userId}`,
     });
     notificationIds.push(row.id);
   }
