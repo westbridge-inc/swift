@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { ownerWallSystem } from '../../lib/owner-rls';
@@ -543,7 +544,7 @@ async function buildCartResponse(
       id: ci.id,
       itemId: ci.itemId,
       name: ci.item.name,
-      imageUrl: ci.item.imageUrl,
+      imageUrl: servedPhotoAddress(ci.item.imageUrl), // [IMAGES-E2E PR4] never an outside host
       basePrice: line.basePrice,
       customerPrice: line.unitPrice,
       quantity: ci.quantity,
@@ -1268,7 +1269,7 @@ export async function customerRoutes(app: FastifyInstance) {
         return {
           ...enrichVendor(card, lat, lng, homeDeliveryRates),
           // [GUARDRAILS §8 · Opus S3-8] A section named for banned goods ("Beers & Wines") is not on a card either.
-          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
         };
@@ -1285,7 +1286,7 @@ export async function customerRoutes(app: FastifyInstance) {
         for (const c of (v.categories ?? [])) {
           // [GUARDRAILS §8] A section named for banned goods is not a Home chip.
           if (classifyText(c.name)) continue;
-          if (!categorySet.has(c.id)) categorySet.set(c.id, c);
+          if (!categorySet.has(c.id)) categorySet.set(c.id, { id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) });
         }
       }
 
@@ -1294,7 +1295,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const popularItems = popularItemRows.filter((it) => !hiddenPopular.has(it.id)).map((it) => ({
         id: it.id,
         name: it.name,
-        imageUrl: it.imageUrl,
+        imageUrl: servedPhotoAddress(it.imageUrl),
         price: Number(it.basePrice),
         vendorId: it.vendorId,
         vendorName: it.vendor?.name ?? '',

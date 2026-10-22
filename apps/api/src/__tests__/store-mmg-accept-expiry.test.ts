@@ -295,7 +295,7 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
         expect(row.mmgAttestedRef).toBeNull();
       } else {
         expect(tap.statusCode, tap.body).toBe(200);
-        expect(row.status).toBe('ACCEPTED');
+        expect(row.status).toBe('PREPARING'); // [O-3] "Paid by MMG" on an accepted order starts preparation
         expect(row.paymentStatus).toBe('CLAIMED');
       }
       expect((await statusLogs(orderId)).filter((l) => l.status === 'CANCELLED').length).toBe(cancelled ? 1 : 0);
@@ -373,12 +373,19 @@ describe('[owner 18 Oct · PAYMENT-SIMPLIFY] an accepted MMG order not marked "P
     await sys(() => app.prisma.order.update({ where: { id: pending }, data: { createdAt: new Date(Date.now() - 2 * 60 * MIN) } }));
     const cash = await placeOrder('CASH');
     await acceptedAgo(cash, 2 * 60 * MIN);
+    // [O-3] Accept now starts preparation, so a cash order the store accepts today is PREPARING. A cash order
+    // accepted before the one-tap accept still sits at ACCEPTED: the sweep must leave that one alone too.
+    const legacyCash = await placeOrder('CASH');
+    await sys(() => app.prisma.order.update({ where: { id: legacyCash }, data: { status: 'ACCEPTED', acceptedAt: new Date(Date.now() - 2 * 60 * MIN) } }));
     const swept = await sweep();
     expect(swept).not.toContain(pending);
     expect(swept).not.toContain(cash);
+    expect(swept).not.toContain(legacyCash);
     expect(await expireOne(cash)).toBe(false);
+    expect(await expireOne(legacyCash)).toBe(false);
     expect(await expireOne(pending)).toBe(false);
-    expect((await orderRow(cash)).status).toBe('ACCEPTED');
+    expect((await orderRow(cash)).status).toBe('PREPARING');
+    expect((await orderRow(legacyCash)).status).toBe('ACCEPTED');
     expect((await orderRow(pending)).status).not.toBe('CANCELLED');
     expect((await storeView(cash))['mmgPayBy']).toBeNull();
   });
