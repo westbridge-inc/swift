@@ -13,6 +13,15 @@
  * COUNTERPART_PHONES_TO_OLD_APPS=0 (launch checklist). From then on NO client
  * is sent a counterpart's personal number, whatever headers it sends.
  *
+ * The header is CLIENT-CONTROLLED: a client that omits it is served like an
+ * installed store build. Until the switch below is 0, any authenticated party
+ * to a live order can therefore still read the counterpart's number by leaving
+ * the header out. That is today's exposure, no wider (each route keeps its own
+ * party + liveness checks), and is the accepted back-compat window. The header
+ * only ever REMOVES numbers. There is no per-request build signal to tighten
+ * with: installed phones send no build number, app-version.ts is advice only,
+ * and the bridge reaches build 12 by OTA.
+ *
  * Not covered here, deliberately: a person's OWN number (profile, own store
  * team), the number a business PUBLISHED for customers (publishedStorePhoneOf,
  * the receipt's seller line), and the admin/ops desk (masked + audited reveal).
