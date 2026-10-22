@@ -141,7 +141,7 @@ export function feeDecreaseCopy(p: { from: number; to: number; currencyCode: str
   const money = (n: number) => formatMoney(n, p.currencyCode, { whole: true });
   return {
     title: 'Your weekly fee is going down',
-    body: `From your next weekly fee, your Swift weekly fee is ${money(p.to)} (it was ${money(p.from)}). A weekly fee already charged keeps its amount.`,
+    body: `From your next weekly fee, your Swift weekly fee will be ${money(p.to)} (it is ${money(p.from)} now). A weekly fee already charged keeps its amount.`,
   };
 }
 

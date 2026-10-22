@@ -370,7 +370,7 @@ describe('mover fee band — what a mover is actually charged', () => {
     expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).weeklyRate)).toBe(6000);
     const told = await app.prisma.notification.findMany({ where: { userId, title: 'Your weekly fee is going down' } });
     expect(told).toHaveLength(1);
-    expect(told[0]!.body).toBe('From your next weekly fee, your Swift weekly fee is GY$6,000 (it was GY$8,000). A weekly fee already charged keeps its amount.');
+    expect(told[0]!.body).toBe('From your next weekly fee, your Swift weekly fee will be GY$6,000 (it is GY$8,000 now). A weekly fee already charged keeps its amount.');
     expect(told[0]!.data).toMatchObject({ kind: 'billing_rate_change', change: 'DECREASE', subscriptionId: sub.id, weeklyFee: 6000, previousWeeklyFee: 8000 });
     // The next pass has nothing to move and tells nothing more.
     await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
