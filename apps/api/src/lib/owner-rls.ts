@@ -28,7 +28,7 @@ type EnvLike = Record<string, string | undefined>;
 export const OWNER_WALL_ROLE = 'swift_owner_wall';
 export const OWNER_POLICY_NAME = 'owner_isolation';
 /** The owner-walled tables, each keyed by its owner column. */
-export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId', notifications: 'userId' };
+export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId', notifications: 'userId', support_tickets: 'userId' };
 
 /** The USING and WITH CHECK every owner policy carries (the migration writes
  *  exactly this; the boot attestation compares the stored policy with it). */
@@ -42,6 +42,8 @@ interface OwnerPolicyShape { name: string; cmd: '*' | 'r' | 'a' | 'w' | 'd'; usi
 /** [item 20 · notifications] Anyone may hand a person a notice (the INSERT
  *  policy checks nothing); only the person reads, updates or deletes it. */
 export const NOTICE_WRITE_POLICY_NAME = 'notice_write';
+/** [item 20 · support tickets] A case may be opened FOR a person; only the person reads, updates or deletes it. */
+export const TICKET_WRITE_POLICY_NAME = 'ticket_write';
 const OWNER_ALL: readonly OwnerPolicyShape[] = [{ name: OWNER_POLICY_NAME, cmd: '*', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT }];
 /** Exactly the permissive policies each owner-walled table carries (the
  *  migrations write these; any other permissive policy widens the wall). */
@@ -53,6 +55,12 @@ const OWNER_POLICY_LAYOUT: Readonly<Record<string, readonly OwnerPolicyShape[]>>
     { name: `${OWNER_POLICY_NAME}_update`, cmd: 'w', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT },
     { name: `${OWNER_POLICY_NAME}_delete`, cmd: 'd', using: OWNER_POLICY_CONTRACT, check: null },
     { name: NOTICE_WRITE_POLICY_NAME, cmd: 'a', using: null, check: 'true' },
+  ],
+  support_tickets: [
+    { name: OWNER_POLICY_NAME, cmd: 'r', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: `${OWNER_POLICY_NAME}_update`, cmd: 'w', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT },
+    { name: `${OWNER_POLICY_NAME}_delete`, cmd: 'd', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: TICKET_WRITE_POLICY_NAME, cmd: 'a', using: null, check: 'true' },
   ],
 };
 
