@@ -227,7 +227,9 @@ describe('[O-3 · owner 22 Oct] one store tap: Accept = Preparing, every store t
     expect(preparing).toHaveLength(1);
     expect(accepted[0]!.changedBy).toBe(diner.owner.userId);
     expect(preparing[0]!.changedBy).toBe(diner.owner.userId);
-    expect(preparing[0]!.createdAt.getTime()).toBeGreaterThanOrEqual(accepted[0]!.createdAt.getTime());
+    // Never a tie: the newest row names the status the order is in, and the timeline reads in order.
+    expect(preparing[0]!.createdAt.getTime()).toBeGreaterThan(accepted[0]!.createdAt.getTime());
+    expect(logs.at(-1)!.status).toBe('PREPARING');
 
     // One push, not two: the accept's words already say it is being prepared.
     const pushes = await kitchenPushes(orderId);
@@ -238,7 +240,9 @@ describe('[O-3 · owner 22 Oct] one store tap: Accept = Preparing, every store t
     const view = await call('GET', `/api/v1/customer/orders/${orderId}`, customer.token);
     expect(view.statusCode, view.body).toBe(200);
     expect(view.json().data.status).toBe('PREPARING');
-    expect((view.json().data.timeline as Array<{ status: string }>).map((t) => t.status)).toEqual(expect.arrayContaining(['ACCEPTED', 'PREPARING']));
+    const timeline = (view.json().data.timeline as Array<{ status: string }>).map((t) => t.status);
+    expect(timeline.indexOf('ACCEPTED')).toBeGreaterThan(-1);
+    expect(timeline.indexOf('PREPARING')).toBeGreaterThan(timeline.indexOf('ACCEPTED'));
   });
 
   it('a grocery order too (the pick list lives inside PREPARING)', async () => {
@@ -369,7 +373,7 @@ describe('[O-3] the seam: the walk shares one commit, every gate of its next hop
       data: {
         orderNumber: `SAP-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'APPOINTMENT', status: 'PENDING',
         customerId: customer.userId, vendorId: diner.vendorId, tenantId: template.tenantId,
-        placedAt: new Date(), subtotalBase: 2500, subtotalMarkup: 0, subtotalCustomer: 2500, deliveryFee: 0, totalAmount: 2500,
+        placedAt: new Date(), deliveryAddress: 'At the provider', deliveryLat: STORE.lat, deliveryLng: STORE.lng, subtotalBase: 2500, subtotalMarkup: 0, subtotalCustomer: 2500, deliveryFee: 0, totalAmount: 2500,
         paymentMethod: 'CASH',
       } as never,
     })) as Order;

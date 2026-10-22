@@ -2489,6 +2489,11 @@ export class OrderService {
     const mmgUnattestedTerminal = operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && source.paymentStatus === 'PENDING';
+    // [O-3] A walk writes two rows in one commit. Their order must never be a
+    // tie the timeline (and "the newest row names the status") reads by luck:
+    // the first hop's row is stamped at the walk's instant, the next hop's one
+    // millisecond after it. Every other transition keeps the default stamp.
+    const walkLogAt = input.continueTo ? now : input.at ? new Date(input.at.getTime() + 1) : undefined;
     await tx.orderStatusLog.create({
       data: {
         orderId: input.orderId,
@@ -2497,6 +2502,7 @@ export class OrderService {
         note: mmgUnattestedTerminal
           ? `${input.note ?? 'Cancelled'} — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly`
           : input.note,
+        ...(walkLogAt ? { createdAt: walkLogAt } : {}),
       },
     });
 
