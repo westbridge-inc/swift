@@ -87,6 +87,8 @@ describe('actual phone weekly fee element tree', () => {
       const card = findByTestId(tree, `fee-receipt-${n}`);
       expect(card, `receipt ${n} is on screen`).toBeTruthy();
       expect(lines(card), `receipt ${n}, line by line, in the server's order`).toEqual(receiptLines(n));
+      // [owner legal plan R11] Westbridge Inc. is not VAT-registered: no line names VAT except "Not a VAT invoice".
+      expect(lines(card).filter((l) => /\bVAT\b/.test(l)), `receipt ${n} has no VAT line`).toEqual(['Not a VAT invoice']);
     }
     expect(rendered.match(/Not a VAT invoice/g)).toHaveLength(2);
     expect(rendered).not.toContain('No receipts yet.');
