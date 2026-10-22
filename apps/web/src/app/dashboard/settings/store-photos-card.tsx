@@ -51,6 +51,8 @@ export function StorePhotosCard({ storeId }: { storeId: string | null }) {
   });
   if (!store) return null;
   const working = (slot: Slot) => (upload.isPending && upload.variables?.slot === slot) || (remove.isPending && remove.variables === slot);
+  // One photo request at a time: while either slot uploads or removes, no press on the card sends another.
+  const sending = upload.isPending || remove.isPending;
 
   return (
     <div className="sw-card p-6">
@@ -74,13 +76,13 @@ export function StorePhotosCard({ storeId }: { storeId: string | null }) {
                   <button
                     type="button"
                     className="font-semibold text-[var(--swift-brand,#0a7d4f)] disabled:opacity-50"
-                    disabled={working(slot)}
+                    disabled={sending}
                     onClick={() => inputs.current[slot]?.click()}
                   >
                     {working(slot) ? 'Working…' : current ? 'Change' : 'Add photo'}
                   </button>
                   {current && !working(slot) ? (
-                    <button type="button" className="text-[var(--swift-muted)]" onClick={() => remove.mutate(slot)}>
+                    <button type="button" className="text-[var(--swift-muted)] disabled:opacity-50" disabled={sending} onClick={() => { if (remove.isPending || upload.isPending) return; remove.mutate(slot); }}>
                       Remove
                     </button>
                   ) : null}
@@ -94,7 +96,8 @@ export function StorePhotosCard({ storeId }: { storeId: string | null }) {
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     event.target.value = '';
-                    if (file) upload.mutate({ slot, file });
+                    if (!file || upload.isPending || remove.isPending) return;
+                    upload.mutate({ slot, file });
                   }}
                 />
               </div>

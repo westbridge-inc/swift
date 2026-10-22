@@ -41,6 +41,25 @@ describe('[IMAGES-E2E] the store photos card', () => {
     await waitFor(() => expect(remove).toHaveBeenCalledWith('logo'));
   });
 
+  it('one photo request at a time: while the cover uploads, no press on either slot sends another', async () => {
+    vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile(KEY, null) as never);
+    let finish: (_v: never) => void = () => undefined;
+    const upload = vi.spyOn(vendorApi, 'uploadStorePhoto').mockImplementation(() => new Promise((r) => { finish = r as never; }));
+    const remove = vi.spyOn(vendorApi, 'removeStorePhoto').mockResolvedValue({ id: 'store-1', logoUrl: null, coverImageUrl: null });
+    renderWithQuery(<StorePhotosCard storeId="store-1" />);
+    const file = new File([new Uint8Array([0xff, 0xd8, 0xff])], 'front.jpg', { type: 'image/jpeg' });
+    await userEvent.upload(await screen.findByLabelText('Cover photo file'), file);
+    await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+    // The logo's Change and Remove are held, and a second file chosen meanwhile is not sent.
+    expect((screen.getByRole('button', { name: 'Change' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(true);
+    await userEvent.upload(screen.getByLabelText('Logo file'), new File(['y'], 'logo.jpg', { type: 'image/jpeg' }));
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(remove).not.toHaveBeenCalled();
+    finish({ id: 'store-1', logoUrl: KEY, coverImageUrl: KEY } as never);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Remove' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('a refusal is shown in the API’s own words', async () => {
     vi.spyOn(vendorApi, 'getProfile').mockResolvedValue(profile(null, null) as never);
     vi.spyOn(vendorApi, 'uploadStorePhoto').mockRejectedValue(new Error('File content does not match an image format'));
