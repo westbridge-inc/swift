@@ -11,6 +11,8 @@
  *  - The name a person checked cannot be changed in the app; the owner can switch back to a business registration.
  *  - A service business (never asked for a registration) and a company never use this path.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -25,8 +27,6 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { partnerRoutes } from '../modules/partner/partner.routes';
 import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, storeNameIsOwnName } from '../modules/vendor/own-name';
-import { OWN_NAME_DECLARATION_V1 as MOBILE_WORDS } from '../../../mobile/src/lib/ownNameCopy';
-import { OWN_NAME_DECLARATION_WEB as WEB_WORDS } from '../../../web/src/lib/own-name-copy';
 import { VerificationService } from '../modules/verification/verification.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { ManualReviewKycProvider, SandboxKycProvider } from '../providers/kyc/kyc-provider';
@@ -35,6 +35,16 @@ import { DEFAULT_DOCUMENT_CHECKLISTS } from '../modules/ops/platform-config';
 import { ALWAYS_REVIEW_LEGACY_CODES, OWN_NAME_DOC_TYPE, seedDocRegistry } from '../modules/verification/doc-registry';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { wordFreeTag } from './helpers/fixture-ids';
+
+// The phone's and the site's copies are read as TEXT: an API test cannot import another app's source (tsc rootDir).
+const ROOT = join(process.cwd(), '../..');
+function wordsIn(file: string, name: string): string {
+  const m = new RegExp(`export const ${name} = \`([^\`]*)\`;`).exec(readFileSync(join(ROOT, file), 'utf8'));
+  if (!m) throw new Error(`${name} not found in ${file}`);
+  return m[1]!;
+}
+const MOBILE_WORDS = wordsIn('apps/mobile/src/lib/ownNameCopy.ts', 'OWN_NAME_DECLARATION_V1');
+const WEB_WORDS = wordsIn('apps/web/src/lib/own-name-copy.ts', 'OWN_NAME_DECLARATION_WEB');
 
 const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-6);
