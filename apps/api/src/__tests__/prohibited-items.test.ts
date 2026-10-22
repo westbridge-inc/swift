@@ -885,7 +885,7 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     expect(await statusOf(removed.id)).toBe('CANCELLED');
     const ordinary = await placed('PENDING', [control]);
     expect((await inject('PUT', `/api/v1/vendor/orders/${ordinary.id}/accept`, vendor.token, {})).statusCode).toBe(200);
-    expect(await statusOf(ordinary.id)).toBe('ACCEPTED');
+    expect(await statusOf(ordinary.id)).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     // A word a person approved (the catalogue check above approved this rum line's words) goes ahead.
     const approvedWords = await placed('PENDING', [legacy.cake]);
     expect((await inject('PUT', `/api/v1/vendor/orders/${approvedWords.id}/accept`, vendor.token, {})).statusCode).toBe(200);
