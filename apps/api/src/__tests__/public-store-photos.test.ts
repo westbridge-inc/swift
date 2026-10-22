@@ -49,6 +49,20 @@ const fake = vi.hoisted(() => {
   return provider;
 });
 
+/** [REVIEW-G P5] Makes the store-hold check fail, as a database error would. */
+const failingCheck = vi.hoisted(() => ({ on: false, calls: 0 }));
+vi.mock('../modules/compliance/prohibited-gate', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../modules/compliance/prohibited-gate')>();
+  return {
+    ...real,
+    storeHiddenFromCustomers: (...args: Parameters<typeof real.storeHiddenFromCustomers>) => {
+      failingCheck.calls += 1;
+      if (failingCheck.on) throw new Error('the check could not be made');
+      return real.storeHiddenFromCustomers(...args);
+    },
+  };
+});
+
 vi.mock('../providers/storage/storage-provider', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../providers/storage/storage-provider')>()),
   getStorageProvider: () => fake,
@@ -358,8 +372,49 @@ describe('only a photo a visible store still shows; nothing else in the bucket',
     await makeItem(s.id, key);
     expect((await get(`/${key}`)).statusCode).toBe(200);
     await app.prisma.vendor.update({ where: { id: s.id }, data: { status: 'SUSPENDED' } });
-    resetStorePhotoCachesForTests(); // the 30 s window, elapsed
+    // [REVIEW-G P6] Inside the window the decision already made stands; once 30 s pass it is made again.
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 31_000);
+      await refused(`/${key}`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a check that cannot be made is a refusal, never a pass', async () => {
+    const key = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    await makeItem(store.id, key);
+    failingCheck.on = true;
+    try {
+      await refused(`/${key}`);
+    } finally {
+      failingCheck.on = false;
+    }
+    resetStorePhotoCachesForTests();
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+  });
+
+  it('a menu section the store switched off does not publish its picture [REVIEW-M S4-1]', async () => {
+    const key = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    const section = await app.prisma.category.create({ data: { vendorId: store.id, name: `Off ${wordFreeTag(4)}`, imageUrl: key, isActive: false } });
     await refused(`/${key}`);
+    await app.prisma.category.update({ where: { id: section.id }, data: { isActive: true } });
+    resetStorePhotoCachesForTests();
+    expect((await get(`/${key}`)).statusCode).toBe(200);
+  });
+
+  it('a name no row of the store shows is refused before the visibility reads [REVIEW-M S4-2]', async () => {
+    const unshown = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    const before = failingCheck.calls;
+    await refused(`/${unshown}`);
+    expect(failingCheck.calls).toBe(before);
+    expect(fake.stats.reads).toBe(0);
+    const shown = stash(`items/${store.id}/${photoName()}`, await cameraJpeg());
+    await makeItem(store.id, shown);
+    expect((await get(`/${shown}`)).statusCode).toBe(200);
+    expect(failingCheck.calls).toBe(before + 1);
   });
 
   it('a row holding a key that climbs out of the folder cannot climb: the address is refused before any read', async () => {

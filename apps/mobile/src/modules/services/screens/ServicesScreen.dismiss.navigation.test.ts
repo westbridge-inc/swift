@@ -32,6 +32,9 @@ vi.mock('react-native', async () => {
   };
 });
 vi.mock('@expo/vector-icons', () => ({ Feather: () => null, MaterialCommunityIcons: () => null }));
+// [IMAGES-E2E #1918] The provider card shows photos of the provider's work; the native image view is not loaded here.
+vi.mock('expo-image', () => ({ Image: () => null }));
+vi.mock('../../../lib/images', () => ({ storePhotoUrl: () => null }));
 vi.mock('../../../kit', async () => {
   const R = await import('react');
   const h = R.createElement;
