@@ -460,7 +460,7 @@ export const WITHHELD: Readonly<Record<string, { readonly reason: WithheldReason
  * them is red in account-export-register.test until it is exported through its parent or named here.
  */
 export const PLACES_NOT_EXPORTED: Readonly<Record<string, string>> = {
-  Vendor: 'a store’s own record: the business’s address and map pin, which its customers and riders are shown (receipts, pickups), not a record about the person; the person’s link to the store is in storeOwnership',
+  Vendor: 'a store’s own record (its name, contact and map pin, shown to its customers and riders); the owner sees and edits it in the store dashboard; not yet exported through storeOwnership (follow-up owed)',
 };
 
 /** Person links whose rows are already in a category through another column of the same row. */
