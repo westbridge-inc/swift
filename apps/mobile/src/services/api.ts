@@ -1172,6 +1172,9 @@ export const driverApi = {
   stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
   stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
   stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
+  // [TAXI route line] The road through the ride's own points, for the map
+  // ({ source: 'road' | 'straight', points }); a server from before it answers 404.
+  rideRoute: (id: string) => api.get(`/driver/rides/${id}/route`),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
