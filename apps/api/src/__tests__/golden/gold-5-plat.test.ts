@@ -447,7 +447,7 @@ describe('GOLD-5 · PLAT-01 — tenant isolation and the IDOR denial matrix', ()
 
   it('SELF-OWN: a rider cannot take the delivery of an order placed by their own account', async () => {
     const before = await orderFacts(selfOrder);
-    expect(before.status).toBe('ACCEPTED');
+    expect(before.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     expect(before.riderId).toBeNull();
     const grab = await call('POST', `/api/v1/rider/orders/${selfOrder}/accept`, rider.token, {});
     expect(grab.statusCode).toBe(409);

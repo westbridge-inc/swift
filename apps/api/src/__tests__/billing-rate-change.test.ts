@@ -378,6 +378,52 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
       expect(Number(events[0]!.amount)).toBe(15000);
     }
   });
+
+  it('[R27 · G S4-2] a rate agreed or a fee waived while the pass runs is never overwritten by a lower tier', async () => {
+    const due = new Date(Date.now() + 3 * DAY);
+    const negotiated = await makeVendorSub({ due, status: 'ACTIVE' });
+    const waived = await makeVendorSub({ due, status: 'ACTIVE' });
+    // The first weekly pass sees the lower tier (no listings: 15,000) and moves nothing yet.
+    const t = Date.now();
+    await billing.recalculateVendorTiers(new Date(t));
+    expect(await rate(negotiated.subId)).toBe(20000);
+    expect(await rate(waived.subId)).toBe(20000);
+
+    // The next weekly pass reads every vendor plan first, then moves each one in its own transaction.
+    // Between the two, a person agrees a rate at today's fee (the USD migration writes the same) and
+    // another waives a fee. Neither changes weeklyRate, so only the move's own write can see them.
+    const human = new Map<string, () => Promise<unknown>>([
+      [negotiated.subId, () => app.prisma.subscription.update({ where: { id: negotiated.subId }, data: { customRate: 20000 } })],
+      [waived.subId, () => app.prisma.subscription.update({ where: { id: waived.subId }, data: { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } })],
+    ]);
+    let moving: string | null = null;
+    const racing = new Proxy(app.prisma, {
+      get(target, prop) {
+        if (prop === '$transaction') {
+          return async (...args: unknown[]) => {
+            const decide = moving ? human.get(moving) : undefined;
+            if (decide) { human.delete(moving!); await decide(); }
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const racingBilling = new BillingService(racing, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    const seam = racingBilling as unknown as { retierTarget: (id: string, ...rest: unknown[]) => unknown };
+    const realTarget = seam.retierTarget.bind(racingBilling);
+    seam.retierTarget = (id, ...rest) => { moving = id; return realTarget(id, ...rest); };
+
+    await racingBilling.recalculateVendorTiers(new Date(t + WEEK));
+    expect(human.size).toBe(0); // both decisions landed between the read and the move
+
+    const neg = await app.prisma.subscription.findUniqueOrThrow({ where: { id: negotiated.subId } });
+    expect({ weeklyRate: Number(neg.weeklyRate), customRate: Number(neg.customRate) }).toEqual({ weeklyRate: 20000, customRate: 20000 });
+    expect(await retierEvents(negotiated.subId)).toHaveLength(0);
+    expect(await rate(waived.subId)).toBe(20000);
+    expect(await retierEvents(waived.subId)).toHaveLength(0);
+  });
 });
 
 describe('AX332 F2: due now is the charge already issued', () => {
