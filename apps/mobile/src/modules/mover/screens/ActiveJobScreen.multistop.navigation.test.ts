@@ -25,6 +25,9 @@ const fx = vi.hoisted(() => ({
   driverAct: { mutate: vi.fn(), isPending: false, isError: false },
   rate: { mutate: vi.fn(), isPending: false },
   navigate: vi.fn(),
+  // [TAXI route line] What useDriverRouteLine answers, and every Polyline drawn (props).
+  roadLine: null as unknown,
+  polylines: [] as any[],
 }));
 
 vi.mock('react-native', async () => {
@@ -53,7 +56,7 @@ vi.mock('react-native-maps', async () => {
     __esModule: true,
     default: (p: any) => h('div', { 'data-map': '' }, p.children),
     Marker: (p: any) => h('div', { 'data-marker': p.title ?? '' }),
-    Polyline: (p: any) => h('div', { 'data-polyline': JSON.stringify(p.coordinates) }),
+    Polyline: (p: any) => { fx.polylines.push(p); return h('div', { 'data-polyline': JSON.stringify(p.coordinates) }); },
     PROVIDER_DEFAULT: 'default',
   };
 });
@@ -93,6 +96,7 @@ vi.mock('../../../hooks', () => ({
   useCourierReturn: () => ({ mutate: vi.fn(), isPending: false }),
   useCourierReturnProof: () => ({ mutate: vi.fn(), isPending: false }),
   useRideSos: () => ({ mutate: vi.fn(), isPending: false }),
+  useDriverRouteLine: () => ({ data: fx.roadLine }),
 }));
 vi.mock('../../../hooks/mover', () => ({ uploadHandoverPhoto: vi.fn(), useTaxiStopAction: () => fx.stopAction }));
 vi.mock('../../safety/SosCeremony', () => ({ SosCeremony: () => null }));
@@ -131,6 +135,8 @@ async function click(el: Element | null) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fx.roadLine = null;
+  fx.polylines.length = 0;
   fx.platform.OS = 'ios';
   fx.openURL.mockImplementation(async () => true);
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
@@ -393,5 +399,48 @@ describe('[UI-SWEEP U04] the trip-complete popup closes before the screen goes b
     expect(navigation.goBack).not.toHaveBeenCalled();
     await runFrames();
     expect(navigation.goBack).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('[TAXI route line] the driver’s map draws the road when the server has one', () => {
+  const STRAIGHT_WITH_STOPS = [
+    { latitude: 6.8013, longitude: -58.1553 }, { latitude: 6.8143, longitude: -58.1443 },
+    { latitude: 6.825, longitude: -58.15 }, { latitude: 6.82, longitude: -58.16 },
+  ];
+  const ROAD = { source: 'road', points: [
+    { lat: 6.8013, lng: -58.1553 }, { lat: 6.8077, lng: -58.1502 }, { lat: 6.8143, lng: -58.1443 },
+    { lat: 6.8199, lng: -58.1468 }, { lat: 6.825, lng: -58.15 }, { lat: 6.8221, lng: -58.1561 }, { lat: 6.82, lng: -58.16 },
+  ] };
+  const drawn = () => fx.polylines.slice(-2);
+
+  it('a ride with stops: both strokes follow the road through the stops, not a geodesic heading', async () => {
+    fx.roadLine = ROAD;
+    await render(driverRideWithStops());
+    const [halo, stroke] = drawn();
+    const road = ROAD.points.map(({ lat, lng }) => ({ latitude: lat, longitude: lng }));
+    expect(halo?.coordinates).toEqual(road);
+    expect(stroke?.coordinates).toEqual(road);
+    expect([halo?.geodesic, stroke?.geodesic]).toEqual([false, false]);
+  });
+
+  it('a ride without stops: the road from the pickup to the drop-off', async () => {
+    fx.roadLine = { source: 'road', points: [{ lat: 6.8013, lng: -58.1553 }, { lat: 6.811, lng: -58.158 }, { lat: 6.82, lng: -58.16 }] };
+    await render(riderRideWithoutStops({ customer: { firstName: 'Asha' }, paymentMethod: 'CASH' }));
+    expect(drawn().map((p) => p.coordinates)).toEqual([0, 1].map(() => [
+      { latitude: 6.8013, longitude: -58.1553 }, { latitude: 6.811, longitude: -58.158 }, { latitude: 6.82, longitude: -58.16 },
+    ]));
+  });
+
+  it.each([
+    ['no answer (a server from before the route read, or a failed read)', null],
+    ['a straight answer (no routing engine)', { source: 'straight', points: [] }],
+    ['a malformed road', { source: 'road', points: [{ lat: 6.8013, lng: -58.1553 }, { lat: 'x', lng: -58.16 }] }],
+  ])('%s: the straight geodesic heading through the stops, exactly as before', async (_name, answer) => {
+    fx.roadLine = answer;
+    await render(driverRideWithStops());
+    const [halo, stroke] = drawn();
+    expect(halo?.coordinates).toEqual(STRAIGHT_WITH_STOPS);
+    expect(stroke?.coordinates).toEqual(STRAIGHT_WITH_STOPS);
+    expect([halo?.geodesic, stroke?.geodesic]).toEqual([true, true]);
   });
 });
