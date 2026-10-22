@@ -10,8 +10,16 @@ import { describePlacesFailure, PlacesProviderError, type PlacesFailure, type Pl
 // every /ready hit would bill the owner's key for a load-balancer poll). The
 // launch smoke (places-smoke.ts) is the active check, run once at deploy.
 //
+// Only PROVIDER-side failures count (auth, quota, upstream, timeout, network,
+// bad_response). A 'rejected' request (Google refused that caller's own input)
+// is the caller's "no matches": it is counted and logged at warn, but it never
+// changes the status, never counts toward a page and never pages, so nobody
+// can page ops or flip /ready by sending malformed searches.
+//
 // Paging: PLACES_ALERT_FAILURES failures inside PLACES_ALERT_WINDOW_MS (answers
-// in between do not hide an intermittent failure) open ONE platform page
+// in between do not hide an intermittent failure) from at least
+// PLACES_ALERT_MIN_CALLERS different callers (one account alone, say one that
+// burned the quota itself, never pages) open ONE platform page
 // through the durable ops path (ops-page.ts: an OpsAlert row, push + on-call
 // SMS, ACK deadline, escalation; one open page per title; a delivered page
 // holds its Redis key for PLACES_PAGE_WINDOW_SECONDS). This process retries a
@@ -21,7 +29,10 @@ import { describePlacesFailure, PlacesProviderError, type PlacesFailure, type Pl
 // ---------------------------------------------------------------------------
 
 export const PLACES_ALERT_FAILURES = 5;
+export const PLACES_ALERT_MIN_CALLERS = 2;
 export const PLACES_ALERT_WINDOW_MS = 10 * 60_000;
+/** The most callers remembered (each by its last failure time); the oldest is forgotten first. */
+const PLACES_CALLERS_TRACKED = 16;
 export const PLACES_PAGE_RETRY_MS = 5 * 60_000;
 export const PLACES_PAGE_WINDOW_SECONDS = 3600;
 export const PLACES_PAGE_TITLE = 'Address search is failing';
@@ -43,10 +54,17 @@ export interface PlacesHealthDetail extends PlacesReadiness {
   lastFailureAt: string | null;
   lastFailure: (PlacesFailure & { op: PlacesOp }) | null;
   failuresInWindow: number;
-  alertThreshold: { failures: number; windowMinutes: number };
+  /** How many different callers failed inside the window: a count, never who. */
+  callersInWindow: number;
+  alertThreshold: { failures: number; callers: number; windowMinutes: number };
 }
 
 const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+
+/** Google refused the caller's own request: the caller's problem, never the provider's health. */
+export function isCallerCaused(failure: PlacesFailure): boolean {
+  return failure.reason === 'rejected';
+}
 
 export class PlacesHealth {
   private status: PlacesStatus = 'unknown';
@@ -56,6 +74,8 @@ export class PlacesHealth {
   private lastFailure: (PlacesFailure & { op: PlacesOp }) | null = null;
   /** The most recent failure times, at most PLACES_ALERT_FAILURES of them (bounded memory). */
   private recent: number[] = [];
+  /** Caller -> its last failure time, at most PLACES_CALLERS_TRACKED of them. In memory only, never reported. */
+  private callers = new Map<string, number>();
   private lastPageAttemptAt: number | null = null;
   private pageOpen = false;
 
@@ -63,6 +83,17 @@ export class PlacesHealth {
 
   private inWindow(t: number): number {
     return this.recent.filter((x) => t - x < PLACES_ALERT_WINDOW_MS).length;
+  }
+
+  private callersInWindow(t: number): number {
+    let n = 0;
+    for (const at of this.callers.values()) if (t - at < PLACES_ALERT_WINDOW_MS) n += 1;
+    return n;
+  }
+
+  /** The page condition: enough provider failures, from enough different callers, inside the window. */
+  private thresholdHeld(t: number): boolean {
+    return this.inWindow(t) >= PLACES_ALERT_FAILURES && this.callersInWindow(t) >= PLACES_ALERT_MIN_CALLERS;
   }
 
   /** The provider answered (with results or with none). `resolve`: close the open page now. */
@@ -73,7 +104,7 @@ export class PlacesHealth {
       this.since = t;
     }
     this.lastOkAt = t;
-    if (this.pageOpen && this.inWindow(t) < PLACES_ALERT_FAILURES) {
+    if (this.pageOpen && !this.thresholdHeld(t)) {
       this.pageOpen = false;
       this.lastPageAttemptAt = null;
       return { resolve: true };
@@ -81,9 +112,11 @@ export class PlacesHealth {
     return { resolve: false };
   }
 
-  /** The provider failed. `page`: the threshold is crossed and a page attempt is due now. */
-  recordFailure(op: PlacesOp, failure: PlacesFailure): { page: boolean; failuresInWindow: number } {
+  /** The provider failed for `caller`. `page`: the threshold is crossed and a page attempt is due now.
+   *  A caller-caused rejection is ignored here (defence in depth: the route never sends one). */
+  recordFailure(op: PlacesOp, failure: PlacesFailure, caller: string): { page: boolean; failuresInWindow: number } {
     const t = this.now();
+    if (isCallerCaused(failure)) return { page: false, failuresInWindow: this.inWindow(t) };
     if (this.status !== 'failing') {
       this.status = 'failing';
       this.since = t;
@@ -92,8 +125,11 @@ export class PlacesHealth {
     this.lastFailure = { op, ...failure };
     this.recent.push(t);
     if (this.recent.length > PLACES_ALERT_FAILURES) this.recent.shift();
+    this.callers.delete(caller);
+    this.callers.set(caller, t); // re-inserted: the Map's first key is the longest-quiet caller
+    if (this.callers.size > PLACES_CALLERS_TRACKED) this.callers.delete(this.callers.keys().next().value as string);
     const failuresInWindow = this.inWindow(t);
-    const due = failuresInWindow >= PLACES_ALERT_FAILURES
+    const due = this.thresholdHeld(t)
       && (this.lastPageAttemptAt === null || t - this.lastPageAttemptAt >= PLACES_PAGE_RETRY_MS);
     if (due) {
       this.lastPageAttemptAt = t;
@@ -113,7 +149,12 @@ export class PlacesHealth {
       lastFailureAt: iso(this.lastFailureAt),
       lastFailure: this.lastFailure,
       failuresInWindow: this.inWindow(this.now()),
-      alertThreshold: { failures: PLACES_ALERT_FAILURES, windowMinutes: PLACES_ALERT_WINDOW_MS / 60_000 },
+      callersInWindow: this.callersInWindow(this.now()),
+      alertThreshold: {
+        failures: PLACES_ALERT_FAILURES,
+        callers: PLACES_ALERT_MIN_CALLERS,
+        windowMinutes: PLACES_ALERT_WINDOW_MS / 60_000,
+      },
     };
   }
 }
@@ -152,9 +193,11 @@ export type PlacesCallResult<T> = { ok: true; value: T } | { ok: false; failure:
 
 export interface PlacesObserver {
   provider: string;
+  /** Who is calling (the authenticated user id): kept in memory to count distinct callers, never logged or paged. */
+  caller: string;
   health: PlacesHealth;
   pager: PlacesPager;
-  log: { error: (obj: object, msg: string) => void };
+  log: { error: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void };
 }
 
 function pageInput(provider: string, op: PlacesOp, failure: PlacesFailure, failures: number): PlacesPageInput {
@@ -189,6 +232,10 @@ function pageInput(provider: string, op: PlacesOp, failure: PlacesFailure, failu
  * 503; any other error (a database error from the local provider) is not an
  * address-search failure and is rethrown untouched. Paging is fire-and-caught:
  * it never slows or breaks the answer the customer gets.
+ *
+ * A caller-caused rejection (Google refused this caller's own input) answers
+ * `empty` (the caller's "no matches"), is counted as 'rejected' and logged at
+ * warn, and never touches the health tracker: it cannot page or flip /ready.
  */
 export async function observePlacesCall<T>(
   ctx: PlacesObserver,
@@ -196,6 +243,7 @@ export async function observePlacesCall<T>(
   meta: { queryLength?: number },
   call: () => Promise<T>,
   isEmpty: (value: T) => boolean,
+  empty: T,
 ): Promise<PlacesCallResult<T>> {
   let value: T;
   try {
@@ -204,8 +252,12 @@ export async function observePlacesCall<T>(
     if (!(err instanceof PlacesProviderError)) throw err;
     const failure = err.failure;
     placesCallsCounter.labels(ctx.provider, op, failure.reason).inc();
+    if (isCallerCaused(failure)) {
+      ctx.log.warn({ places: { provider: ctx.provider, op, ...failure, ...meta } }, 'places request rejected');
+      return { ok: true, value: empty };
+    }
     ctx.log.error({ places: { provider: ctx.provider, op, ...failure, ...meta } }, 'places provider failure');
-    const { page, failuresInWindow } = ctx.health.recordFailure(op, failure);
+    const { page, failuresInWindow } = ctx.health.recordFailure(op, failure, ctx.caller);
     if (page) {
       void Promise.resolve()
         .then(() => ctx.pager.page(pageInput(ctx.provider, op, failure, failuresInWindow)))

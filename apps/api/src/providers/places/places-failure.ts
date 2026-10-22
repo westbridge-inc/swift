@@ -22,7 +22,8 @@ export type PlacesOp = 'autocomplete' | 'details' | 'reverse';
  * auth         the key was refused: invalid, restricted (app/referrer/IP/API),
  *              the API not enabled, billing off (401/403, API_KEY_*, ...)
  * quota        over a rate or daily quota (429, RESOURCE_EXHAUSTED, OVER_QUERY_LIMIT)
- * rejected     Google refused the request itself (another 4xx, INVALID_ARGUMENT)
+ * rejected     Google refused the request itself (another 4xx, INVALID_ARGUMENT): the
+ *              caller's own input, answered as "no matches", never paged (places-health.ts)
  * upstream     Google failed (5xx, UNAVAILABLE, UNKNOWN_ERROR)
  * timeout      no answer within the provider's timeout
  * network      the request never got an HTTP answer
@@ -122,9 +123,9 @@ export function classifyGeocodeStatus(httpStatus: number, status: unknown): Plac
   const googleStatus = token(status);
   let reason: PlacesFailureReason;
   switch (googleStatus) {
-    case 'REQUEST_DENIED':
     // OVER_DAILY_LIMIT is Google's word for a missing/invalid key, billing off, an exhausted
     // self-imposed cap or a lapsed payment method: an account problem, not a burst.
+    case 'REQUEST_DENIED':
     case 'OVER_DAILY_LIMIT':
       reason = 'auth';
       break;
