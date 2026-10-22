@@ -182,9 +182,12 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
+          {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+              beside the tile; squeezed into 64pt it broke across lines. */}
           <Photo
             uri={itemPhoto(item)}
             label={item.name}
+            showLabel={false}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />

@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { Card, PillButton, T } from '../../../kit';
 import { PressableScale } from '../../../kit/pressable-scale';
+import { touchTarget } from '../../../kit/touch-target';
 import { toast } from '../../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../../hooks/vendorops';
 import { importCheckSummary } from '../../../lib/catalogueCheck';
@@ -127,7 +128,8 @@ export function VendorBulkImportScreen({ navigation }: any) {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top']}>
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.lg, paddingVertical: space.sm }}>
-        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <PressableScale onPress={() => navigation?.goBack?.()} hitSlop={8} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </PressableScale>
         <T variant="body" weight="bold" style={{ marginLeft: space.md }}>Bulk import</T>
