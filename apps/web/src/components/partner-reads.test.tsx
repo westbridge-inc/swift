@@ -16,6 +16,16 @@ describe('partner read views and controls', () => {
     expect(link.getAttribute('href')).toBe('/advertiser/campaigns/a1/c1');
     expect(link.textContent).toContain('$2,500');
     expect(screen.queryByRole('button', { name: /New campaign/ })).toBeNull();
+    // [BUG-GUARDS C5] status words, never the server's codes.
+    expect(link.textContent).toContain('Draft');
+    expect(screen.getByText('Approved')).toBeTruthy();
+  });
+  it('names the account role in words on the account page (BUG-GUARDS C5)', async () => {
+    mockApi(() => ({ body: { success: true, data: [{ id: 'a1', companyName: 'Test shop', status: 'PENDING_REVIEW', memberRole: 'OWNER' }] } }));
+    renderWithQuery(<AdvertiserCampaigns account />);
+    expect(await screen.findByText('Your access: Owner')).toBeTruthy();
+    expect(screen.getByText('In review')).toBeTruthy();
+    expect(screen.queryByText(/pending review|owner$/)).toBeNull();
   });
   it('shows payment-record currency and no invented zero campaign price', async () => {
     mockApi(() => ({ body: { success: true, data: [{ ...campaign, totalAmount: null }] } }));
@@ -48,6 +58,8 @@ describe('partner read views and controls', () => {
     renderWithQuery(<CampaignRead advertiserId="a1" campaignId="c1" />);
     await screen.findByText('Booked weeks');
     expect(screen.getByText(/Georgetown · 12 Oct 2026/)).toBeTruthy();
+    expect(screen.getByText('Held for you')).toBeTruthy();
+    expect(screen.queryByText(/reserved/i)).toBeNull();
     } finally {
       if (zone === undefined) delete process.env['TZ']; else process.env['TZ'] = zone;
     }

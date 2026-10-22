@@ -1232,8 +1232,9 @@ export const vendorApi = {
   signOwnName: () => api.post('/vendor/onboarding/own-name', { accept: true, attestationVersion: OWN_NAME_DECLARATION_VERSION }),
   /** [ROLE-DOCS] Use a registered business name instead: the store asks for its registration again. */
   dropOwnName: () => api.delete('/vendor/onboarding/own-name'),
-  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
-  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
+  toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
+  toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),

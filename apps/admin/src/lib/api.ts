@@ -797,8 +797,11 @@ function identity(row: Pick<DeadLetter, 'name' | 'finishedOn'>): string {
   return `?${params.toString()}`;
 }
 
-export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}`, { method: 'POST' });
+/** [U58] `acknowledgedReconciled`: the operator has checked what a RECONCILE_FIRST
+ *  job's failed run already did, so one fresh run cannot repeat it (the server
+ *  refuses that class without it). */
+export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>, acknowledgedReconciled = false) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}${acknowledgedReconciled ? '&acknowledgedReconciled=true' : ''}`, { method: 'POST' });
 export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>, reason: string) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE', reason });
 

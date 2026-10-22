@@ -1637,10 +1637,29 @@ export async function vendorRoutes(app: FastifyInstance) {
   // 2. VENDOR MANAGEMENT — Toggle open / accepting orders
   // =========================================================================
 
+  /** [owner 21 Oct · COORD 03:15Z] The state a store switch should END in, when the client says so.
+   *  The switches used to FLIP whatever the server held and ignore the body: with the phone and the
+   *  website open at once, an owner closed the store on the phone and a manager's stale "Close" on the
+   *  website then OPENED it, and it took orders. A client that sends the desired state gets exactly
+   *  that state (asking for the state it is already in changes nothing). An older app that sends no
+   *  body (builds 9 and 11) still flips. */
+  const desiredSwitch = (body: unknown, field: 'isCurrentlyOpen' | 'acceptingOrders'): boolean | undefined => {
+    if (body === null || body === undefined || typeof body !== 'object') return undefined;
+    const value = (body as Record<string, unknown>)[field];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') throw new AppError(400, 'VALIDATION_ERROR', `${field} must be true or false.`);
+    return value;
+  };
+
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'isCurrentlyOpen');
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.isCurrentlyOpen) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // [EV-ACT-14] OPENING needs a live store: a suspended/pending business
     // flipping this switch is invisible to customers anyway (public browse
@@ -1685,8 +1704,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
   app.put('/vendor/toggle-orders', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'acceptingOrders');
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.acceptingOrders) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {

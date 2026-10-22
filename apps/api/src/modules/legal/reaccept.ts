@@ -33,6 +33,14 @@ export const MATERIAL_CHANGES: ReadonlyArray<{ version: string; summary: readonl
       'Privacy: a business or mover handling your order sees your first name and phone number, only to reach you about that order, never your last name.',
     ],
   },
+  {
+    // [Owner rulings 21 Oct 2026: taxi waiting charge ON at launch; phone crash reports ON · research E4 + B8]
+    version: '2026-10-21',
+    summary: [
+      'Taxi: a waiting charge of GY$300 for each full 10 minutes the car waits for you, shown before you book. It counts from when your driver arrives at the pickup, never at your final destination; the app shows it as it runs and your receipt lists it separately.',
+      'Privacy: if the Swift app crashes, it sends a crash report (phone model, app version and the error; never your messages or location) to Swift’s own server. Crash and error reports are kept for 90 days.',
+    ],
+  },
 ];
 
 /**
@@ -47,8 +55,8 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     why: 'Privacy section 6 now says a customer\u2019s own ID is kept while the account is open and deleted with the account, which is what already happens; it takes nothing from anyone.',
   },
   {
-    // [ROLE-DOCS · owner 21 Oct 2026; classed non-material by the builder, COORD to confirm; pre-launch]
-    version: '2026-10-21',
+    // [ROLE-DOCS · owner 21 Oct 2026; COORD ruling 21 Oct: NON-material, on top of the material 2026-10-21]
+    version: '2026-10-21.1',
     why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
   },
 ];

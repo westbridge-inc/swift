@@ -86,11 +86,11 @@ export default function IntegrityPage() {
         <span className="text-[10px] font-semibold tracking-widest text-[var(--muted)]/70 w-16">
           ALGORITHM
         </span>
-        <button onClick={() => setAlgo(null)} className={chip(algo === null)}>
+        <button type="button" onClick={() => setAlgo(null)} aria-pressed={algo === null} className={chip(algo === null)}>
           All
         </button>
         {ALGOS.map((a) => (
-          <button key={a} onClick={() => setAlgo(a)} className={chip(algo === a)}>
+          <button key={a} type="button" onClick={() => setAlgo(a)} aria-pressed={algo === a} className={chip(algo === a)}>
             {a}
           </button>
         ))}
@@ -100,11 +100,11 @@ export default function IntegrityPage() {
         <span className="text-[10px] font-semibold tracking-widest text-[var(--muted)]/70 w-16">
           SUBJECT
         </span>
-        <button onClick={() => setSubjectType(null)} className={chip(subjectType === null)}>
+        <button type="button" onClick={() => setSubjectType(null)} aria-pressed={subjectType === null} className={chip(subjectType === null)}>
           All
         </button>
         {SUBJECT_TYPES.map((s) => (
-          <button key={s} onClick={() => setSubjectType(s)} className={chip(subjectType === s)}>
+          <button key={s} type="button" onClick={() => setSubjectType(s)} aria-pressed={subjectType === s} className={chip(subjectType === s)}>
             {s}
           </button>
         ))}
@@ -115,7 +115,7 @@ export default function IntegrityPage() {
           WINDOW
         </span>
         {WINDOWS.map((w) => (
-          <button key={w} onClick={() => setDays(w)} className={chip(days === w)}>
+          <button key={w} type="button" onClick={() => setDays(w)} aria-pressed={days === w} className={chip(days === w)}>
             {w} days
           </button>
         ))}

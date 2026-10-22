@@ -195,9 +195,14 @@ export function BillingStopControl({
   onStop,
   onResume,
   pending,
+  style,
 }: {
   sub: any;
   who: 'store' | 'driver' | 'rider';
+  /** [OWNER 21 Oct] The space around the control is the SCREEN's section
+   *  gap: a screen that stacks its cards with marginBottom passes it here,
+   *  or the button sits flush on the card below ("Your MMG number"). */
+  style?: ViewStyle;
   onStop: () => void;
   onResume: () => void;
   pending?: boolean;
@@ -228,6 +233,7 @@ export function BillingStopControl({
             borderColor: withAlpha(color.brand[500], 0.25),
             backgroundColor: color.surface.base,
             padding: space.lg,
+            ...style,
           }}
         >
           <Feather name="pause-circle" size={18} color={color.brand[500]} />
@@ -246,7 +252,8 @@ export function BillingStopControl({
           label="Stop weekly billing"
           variant="outline"
           size="md"
-          style={{ alignSelf: 'stretch', marginTop: space.md }}
+          // PillButton spreads its style into an object: pass one object.
+          style={{ alignSelf: 'stretch', marginTop: space.md, ...style }}
           onPress={() => setConfirmOpen(true)}
         />
       )}

@@ -67,6 +67,12 @@ export interface DarkFeature {
    * cleanly and says nothing, so it belongs here like any other silent OFF.
    */
   offWhen?: string;
+  /**
+   * [SWITCHES fact-check] For switches the code reads TRIMMED, or as a number: the entry is on only
+   * when the trimmed env value matches this pattern (TAXI_MAX_STOPS above 0, TAXI_WAITING_CHARGE and
+   * WEB_TAXI_BOOKING at '1' with blanks ignored). Each is pinned against the code's own reader.
+   */
+  enabledWhenPattern?: RegExp;
 }
 
 export const DARK_FEATURES: DarkFeature[] = [
@@ -160,7 +166,8 @@ export const DARK_FEATURES: DarkFeature[] = [
     key: 'web_taxi_booking',
     setting: 'WEB_TAXI_BOOKING',
     source: 'env',
-    enabledWhen: '1',
+    // The code ignores surrounding blanks (web-taxi-booking.ts): ' 1' is ON there, so it is ON here.
+    enabledWhenPattern: /^1$/,
     title: 'Taxi booking on the website',
     whileOff:
       "The website's Taxi page shows real fare estimates and says 'Book a taxi in the Swift app'; a ride request from a browser session is refused (TAXI_MOBILE_APP_REQUIRED) and the ride page points to the app for the safety PIN and SOS. Phone booking is unchanged. Kept OFF until web booking passes the app's safety bar and a staging run, then the owner decides (16 Oct 2026).",
@@ -289,6 +296,67 @@ export const DARK_FEATURES: DarkFeature[] = [
       'An advertiser owed a refund gets nothing back: the refund is recorded as owed, but bookings, inventory, the credit balance and the invoice stay as they were until it is released.',
     impact: 'money',
   },
+  // ── [SWITCHES fact-check, 21 Oct] launch switches the code reads that no register named.
+  {
+    key: 'car_deliveries',
+    setting: 'CAR_DELIVERIES',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Deliveries by taxi cars (H-plate cars, wagons, buses)',
+    whileOff:
+      "Taxi cars carry passengers only (owner ruling, 15 Oct 2026, until counsel confirms the hire-car licence covers goods): a driver sees no store delivery or parcel offers, cannot grab or claim one, and every store delivery and parcel goes to riders. Passenger rides are unchanged.",
+    impact: 'product',
+  },
+  {
+    key: 'taxi_multi_stop',
+    setting: 'TAXI_MAX_STOPS',
+    source: 'env',
+    enabledWhenPattern: /^\d*[1-9]\d*$/,
+    title: 'Stops on a taxi ride (TAXI_MAX_STOPS, 1 to 3)',
+    whileOff:
+      "A passenger cannot add a stop to a taxi ride: the app offers none, and a ride sent with stops is refused (MULTI_STOP_UNAVAILABLE, 'Stops are not available yet'). A ride without stops is exactly as before.",
+    impact: 'product',
+  },
+  {
+    key: 'taxi_waiting_charge',
+    setting: 'TAXI_WAITING_CHARGE',
+    source: 'env',
+    enabledWhenPattern: /^1$/,
+    title: 'Taxi waiting charge',
+    whileOff:
+      'A taxi driver who waits for a late passenger is paid nothing for the wait, and a passenger is never shown or charged waiting terms: no estimate shows them and no ride booked while it is off is ever charged for waiting.',
+    impact: 'money',
+  },
+  {
+    key: 'ads',
+    setting: 'ADS_ENABLED',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Advertising (advertiser accounts, campaigns, sponsored placements)',
+    whileOff:
+      'Advertising is closed: no sponsored placement is shown to anyone, and the advertiser routes refuse every request. This is the launch lock (owner ruling, 13 Oct 2026): production refuses to start with it on until an attorney signs off.',
+    impact: 'growth',
+  },
+  {
+    key: 'owner_rls_bind',
+    setting: 'OWNER_RLS_BIND',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'The person wall in the database (saved addresses)',
+    whileOff:
+      "A person notices nothing: their saved addresses are guarded by the application's own checks only, and the database's per-person row security is not bound to requests. Switching it on needs TENANT_RLS_BIND=1 and the walled login (lib/owner-rls.ts says which part is missing).",
+    impact: 'safety',
+  },
+  {
+    key: 'mmg_checkout',
+    setting: 'MMG_CHECKOUT_ENABLED',
+    source: 'env',
+    enabledWhen: '1',
+    title: 'Weekly fee on the MMG checkout page',
+    whileOff:
+      "A partner cannot pay the weekly fee on MMG's hosted checkout page: no 'Pay with MMG' fee button is offered, and the checkout routes stay inert. The fee is still owed; how it is collected meanwhile follows MMG_DRIVER.",
+    impact: 'money',
+  },
   {
     key: 'upload_malware_scan',
     setting: 'MALWARE_SCAN',
@@ -318,6 +386,8 @@ export function darkFeatureStatus(
       : f.source === 'env'
         ? f.offWhen !== undefined
           ? env[f.setting] !== f.offWhen
+          : f.enabledWhenPattern !== undefined
+            ? f.enabledWhenPattern.test((env[f.setting] ?? '').trim())
           : f.enabledWhen !== undefined
             ? env[f.setting] === f.enabledWhen
             : Boolean(env[f.setting]?.trim())
@@ -326,3 +396,15 @@ export function darkFeatureStatus(
 }
 
 export const darkFeaturesOff = (rows: DarkFeatureStatus[]): DarkFeatureStatus[] => rows.filter((r) => !r.on);
+
+/**
+ * [SWITCHES fact-check] A switch set ON without what it needs is worse than OFF and just as quiet until
+ * a person meets it. The preflight prints these before a deploy.
+ */
+export function darkFeatureMisconfigurations(env: Record<string, string | undefined> = process.env): string[] {
+  const out: string[] = [];
+  if (env['MALWARE_SCAN'] === 'clamd' && !env['CLAMD_HOST']?.trim()) {
+    out.push('MALWARE_SCAN=clamd with no CLAMD_HOST: every upload is refused (UPLOAD_SCAN_UNAVAILABLE) until the scanner is named.');
+  }
+  return out;
+}

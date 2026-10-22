@@ -57,7 +57,8 @@ async function openDetail(detail = wireVendorOrderDetail()) {
   if (later) await user.click(later);
   await waitFor(() => expect(screen.queryByText(/View later/)).toBeNull());
   await user.click(row);
-  await waitFor(() => expect(screen.getByText('Total (Cash)')).toBeTruthy());
+  // The detail has loaded: the money card's payment line (U25, the phone's words) is drawn from it.
+  await waitFor(() => expect(screen.getByText('Cash on handover — you keep 100% of the goods total.')).toBeTruthy());
   return { user, queryClient, dialog: () => screen.getByRole('dialog', { name: 'Order details' }) };
 }
 
