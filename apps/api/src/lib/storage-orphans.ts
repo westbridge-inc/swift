@@ -6,6 +6,12 @@ import {
   resolveUnreferencedAvatarObject,
   resolveVerificationObject,
 } from '../modules/verification/object-authority';
+import {
+  PUBLIC_PHOTO_DELETE_REASONS,
+  parsePublicPhotoKey,
+  publicPhotoFolderOwner,
+  publicPhotoStillReferenced,
+} from '../utils/public-photo-deletion';
 
 /**
  * [F-026-02] The durable census of storage objects the platform still owes a
@@ -89,6 +95,44 @@ export async function openAvatarErasureObligationIds(
     `;
     return rows.filter((row) => isAvatarErasureObligation(row, userId)).map((row) => row.id);
   }));
+}
+
+/** [IMAGES-E2E · REVIEW-G S3-1 / DUP-AUDIT B-4 on #1918] This person's open public-photo
+ *  deletion obligations (store and portfolio photos), read the way the avatar census is: its
+ *  own transaction under runAsSystem (so under the wall it begins on the system login), on a
+ *  connection storageOrphanCensusSeesEveryRow PROVES sees every tenant's rows. Null when that
+ *  cannot be proven: the caller reports the erasure pending, never a blind "nothing owed". */
+export async function openPublicPhotoObligationIds(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+): Promise<string[] | null> {
+  return runAsSystem('account:erasure-public-photo-census', () => db.$transaction(async (tx) => {
+    if (!(await storageOrphanCensusSeesEveryRow(tx))) return null;
+    const rows = await tx.$queryRaw<Array<{ id: string; reason: string }>>`
+      SELECT "id", "reason"
+      FROM "storage_orphans"
+      WHERE "userId" = ${userId} AND "purgedAt" IS NULL
+      ORDER BY "createdAt" ASC, "id" ASC
+      /* public-photo-obligation-global-census */
+    `;
+    return rows.filter((row) => reasons.includes(row.reason)).map((row) => row.id);
+  }));
+}
+
+/** How many of this person's public-photo deletions are still owed after one retry pass
+ *  (at most 100, oldest first). Unproven (null census) counts as owed: never a false "deleted". */
+export async function owedPublicPhotoCount(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+  retry: (orphanId: string) => Promise<unknown>,
+): Promise<number> {
+  const owed = await openPublicPhotoObligationIds(db, userId, reasons);
+  if (owed === null) return 1;
+  for (const id of owed.slice(0, 100)) await retry(id);
+  const still = await openPublicPhotoObligationIds(db, userId, reasons);
+  return still === null ? 1 : still.length;
 }
 
 type RawTx = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
@@ -217,6 +261,33 @@ export async function retryStorageOrphan(
         const owner = await tx.user.findUnique({ where: { id: row.userId! }, select: { tenantId: true } });
         if (!owner || owner.tenantId !== row.tenantId) return false;
         await resolveUnreferencedAvatarObject(tx, { fileKey: row.key, userId: row.userId! });
+        if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
+        const closed = await tx.storageOrphan.updateMany({
+          where: {
+            id: row.id, key: row.key, reason: row.reason, userId: row.userId,
+            tenantId: row.tenantId, purgedAt: null,
+          },
+          data: { purgedAt: new Date() },
+        });
+        return closed.count === 1;
+      }
+
+      // [IMAGES-E2E · REVIEW-F S2-1] A photo customers were shown (a store's or a provider's
+      // portfolio). The reason alone grants nothing: the key must be one of the two public
+      // folders' exact shapes, the row's user must own that folder, and no row may still
+      // point at the photo when it is deleted.
+      if (PUBLIC_PHOTO_DELETE_REASONS.has(seed.reason)) {
+        if (!seed.userId || !parsePublicPhotoKey(seed.key)) return false;
+        const photoLock = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "storage_orphans" WHERE "id" = ${seed.id} AND "purgedAt" IS NULL
+          FOR UPDATE /* public-photo-orphan-row-authority */
+        `;
+        if (!photoLock[0]) return false;
+        const row = await tx.storageOrphan.findUnique({ where: { id: seed.id } });
+        if (!row || row.purgedAt || row.key !== seed.key || row.reason !== seed.reason
+          || row.userId !== seed.userId || row.tenantId !== seed.tenantId) return false;
+        if (await publicPhotoFolderOwner(tx, row.key) !== row.userId) return false;
+        if (await publicPhotoStillReferenced(tx, row.key)) return false;
         if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
         const closed = await tx.storageOrphan.updateMany({
           where: {

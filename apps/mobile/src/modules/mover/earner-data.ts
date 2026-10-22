@@ -128,9 +128,8 @@ const EARNING_LABELS: Record<string, string> = {
 export function earningLabel(value: unknown): string | undefined {
   const type = serverText(value)?.toUpperCase();
   if (!type) return undefined;
-  if (EARNING_LABELS[type]) return EARNING_LABELS[type];
-  const words = type.replace(/_/g, ' ').toLowerCase();
-  return words.charAt(0).toUpperCase() + words.slice(1);
+  // [UI-SWEEP U73] A kind of earning this file has not been taught: words, never the code.
+  return EARNING_LABELS[type] ?? 'Other earning';
 }
 
 export function isCompletedStatus(value: unknown): boolean {

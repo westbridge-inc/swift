@@ -124,6 +124,9 @@ case "${1:-up}" in
     docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Rebuilding the app image, migrating, restarting API + worker…"
     docker compose build api
+    # [Row 312] The upload malware scanner first (signatures loaded), so the
+    # restarted API and worker never scan against nothing.
+    docker compose up -d --wait clamd
     docker compose stop api worker
     docker compose up -d --force-recreate migrate
     MIGRATE_ID="$(docker compose ps -a -q migrate)"

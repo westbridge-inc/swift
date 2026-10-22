@@ -112,6 +112,7 @@ describe('the store feed client', () => {
     ws.frame(frames['statusChanged']!);
     ws.frame('42["order:prep_update",{"orderId":"o2"}]');
     ws.frame('42["order:pick_state",{"orderId":"o3","lineId":"l1"}]');
+    ws.frame('42["bookings:changed",{"itemId":"svc-1"}]');
     ws.frame('42["vendor:order_alert",{"orderId":"o4"}]');
     ws.frame('42["order:status_changed",{"orderId":7}]');
     expect(f.events).toEqual([
@@ -119,6 +120,7 @@ describe('the store feed client', () => {
       ['order:status_changed', { orderId: 'ord-fixture' }],
       ['order:prep_update', { orderId: 'o2' }],
       ['order:pick_state', { orderId: 'o3' }],
+      ['bookings:changed', {}],
       ['order:status_changed', {}],
     ]);
     f.close();
