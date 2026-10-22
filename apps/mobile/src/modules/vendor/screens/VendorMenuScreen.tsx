@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import { useState, useEffect } from 'react';
-import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { FlatList, Pressable, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
@@ -36,6 +36,7 @@ import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { inventorySummary } from '../../../lib/vendorInventory';
 import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
+import { MENU_LIST_WINDOW } from '../../../lib/listPerformance';
 
 /** [IMAGES-E2E PR4 · REVIEW-F S4-2 on #1965] A photo address saved before photos were uploaded: named for what it is. */
 export const OUTSIDE_PHOTO_NOTE = "Its old photo link isn't shown to customers. Upload the photo again.";
@@ -548,6 +549,29 @@ export function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean })
   );
 }
 
+/** [SPEED 22 Oct] A row of the store's Products/Menu list: a section's header, one
+ *  of its items, "No items yet." for an empty section, or the gap after a section
+ *  (the old per-section wrapper's bottom margin). */
+type MenuRow =
+  | { kind: 'section'; key: string; category: any }
+  | { kind: 'item'; key: string; item: any }
+  | { kind: 'noItems'; key: string }
+  | { kind: 'gap'; key: string };
+
+function menuRows(categories: any[]): MenuRow[] {
+  const rows: MenuRow[] = [];
+  for (const category of categories) {
+    rows.push({ kind: 'section', key: `section:${category.id}`, category });
+    const items: any[] = category.items ?? [];
+    if (items.length === 0) rows.push({ kind: 'noItems', key: `no-items:${category.id}` });
+    for (const item of items) rows.push({ kind: 'item', key: `item:${item.id}`, item });
+    rows.push({ kind: 'gap', key: `gap:${category.id}` });
+  }
+  return rows;
+}
+
+const menuRowKey = (row: MenuRow) => row.key;
+
 export function VendorMenuScreen({ navigation }: any) {
   const readOnly = !!useVendorPreview((state) => state.previewType);
   const menuQ = useVendorMenu();
@@ -560,15 +584,31 @@ export function VendorMenuScreen({ navigation }: any) {
   const [newCat, setNewCat] = useState('');
   const [addingCategory, setAddingCategory] = useState(false);
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
-  const categories: any[] = menuQ.data ?? [];
-  const catOptions = categories.map((c) => ({ id: c.id, name: c.name }));
+  const categories: any[] = useMemo(() => menuQ.data ?? [], [menuQ.data]);
+  const catOptions = useMemo(() => categories.map((c) => ({ id: c.id, name: c.name })), [categories]);
   const allItems = categories.flatMap((category) => category.items ?? []);
   const soldOutCount = allItems.filter((item: any) => item.isAvailable === false).length;
   const activeCount = Math.max(0, allItems.length - soldOutCount);
-  const visibleCategories = selectedCategoryId
-    ? categories.filter((category) => category.id === selectedCategoryId)
-    : categories;
+  const visibleCategories = useMemo(
+    () => (selectedCategoryId ? categories.filter((category) => category.id === selectedCategoryId) : categories),
+    [categories, selectedCategoryId],
+  );
   const selectedCategoryExists = !selectedCategoryId || categories.some((category) => category.id === selectedCategoryId);
+  // [SPEED 22 Oct] One flat list of rows (section header, its items, a gap) for a
+  // windowed list: the tab draws the first batch, not every item of every section.
+  const rows = useMemo(() => menuRows(visibleCategories), [visibleCategories]);
+  const renderRow = useCallback(({ item: row }: { item: MenuRow }) => {
+    if (row.kind === 'section') return <CategoryHeader cat={row.category} canEdit={canEdit} />;
+    if (row.kind === 'gap') return <View style={{ height: space.lg }} />;
+    if (row.kind === 'noItems') {
+      return (
+        <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
+          No items yet.
+        </T>
+      );
+    }
+    return <MenuItemRow item={row.item} navigation={navigation} categories={catOptions} canEdit={canEdit} />;
+  }, [canEdit, navigation, catOptions]);
 
   useEffect(() => {
     if (!selectedCategoryExists) setSelectedCategoryId(null);
@@ -597,11 +637,15 @@ export function VendorMenuScreen({ navigation }: any) {
       ) : menuQ.isError && !menuQ.data ? (
         <ErrorState message="We couldn't load your menu. Check your connection and try again." onRetry={() => menuQ.refetch()} />
       ) : (
-        <ScrollView
+        <FlatList
+          data={rows}
+          keyExtractor={menuRowKey}
+          renderItem={renderRow}
+          {...MENU_LIST_WINDOW}
           contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }}
           showsVerticalScrollIndicator={false}
           refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
-        >
+          ListHeaderComponent={<>
           {menuQ.isError && menuQ.data ? (
             <T variant="caption" tone="muted" style={{ marginBottom: space.md }}>
               Showing the menu from the last check. Check your connection and try again.
@@ -706,36 +750,15 @@ export function VendorMenuScreen({ navigation }: any) {
           ) : null}
 
           {canEdit ? <LowStockCard categories={categories} navigation={navigation} catOptions={catOptions} /> : null}
-
-          {categories.length === 0 ? (
+          </>}
+          ListEmptyComponent={categories.length === 0 ? (
             <EmptyState
               icon="book-open"
               title={canEdit ? `Build your ${cat.label.toLowerCase()}` : 'No items to update'}
               body={canEdit ? 'Add a section, then start adding items.' : 'A manager or owner needs to add the first item.'}
             />
-          ) : (
-            visibleCategories.map((category) => (
-              <View key={category.id} style={{ marginBottom: space.lg }}>
-                <CategoryHeader cat={category} canEdit={canEdit} />
-                {(category.items ?? []).length === 0 ? (
-                  <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
-                    No items yet.
-                  </T>
-                ) : (
-                  category.items.map((item: any) => (
-                    <MenuItemRow
-                      key={item.id}
-                      item={item}
-                      navigation={navigation}
-                      categories={catOptions}
-                      canEdit={canEdit}
-                    />
-                  ))
-                )}
-              </View>
-            ))
-          )}
-
+          ) : null}
+          ListFooterComponent={<>
           {/* [Wave 3 · ref 20] The reference's fuller promise, verified true
               before being written: proposeSubstitution (vendor) → the
               customer approves/rejects LIVE (hooks/customer.ts §5.3), with
@@ -748,7 +771,8 @@ export function VendorMenuScreen({ navigation }: any) {
               replacement or the item is marked for a refund. The business handles any money directly.
             </T>
           ) : null}
-        </ScrollView>
+          </>}
+        />
       )}
     </Screen>
   );
