@@ -129,8 +129,8 @@ export const LIST_PHOTO_WIDTH: StorePhotoWidth = 640;
 /** A photo across the whole screen (a store's or an item's own page). */
 export const HERO_PHOTO_WIDTH: StorePhotoWidth = 1280;
 
-/** A key in the stores' photo folder, exactly as the upload saves it in object storage. */
-const STORE_PHOTO_KEY = /^\/?items\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9_-]{1,16})?$/;
+/** A key in a public photo folder (stores' photos, providers' portfolios), exactly as the upload saves it in object storage. */
+const STORE_PHOTO_KEY = /^\/?(?:items|portfolio)\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9_-]{1,16})?$/;
 
 /** [IMAGES-E2E] A store photo sized for where it is drawn: a key in the stores' photo
  *  folder asks the server for that width (a list gets a small copy, not the full

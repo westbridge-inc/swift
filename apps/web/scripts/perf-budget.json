@@ -15,6 +15,7 @@
     "/dashboard/insights/page": 150,
     "/dashboard/weekly-fee/page": 159,
     "/dashboard/notifications/page": 154,
+    "/dashboard/schedule/page": 155,
     "/portal/page": 150,
     "/portal/history/page": 147,
     "/portal/documents/page": 149,
