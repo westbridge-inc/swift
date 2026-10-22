@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // stub it so these stay pure-logic tests.
 vi.mock('../services/api', () => ({ API_URL: 'https://api.test' }));
 
-import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto, categoryPhoto } from './images';
+import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto, categoryPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from './images';
 
 describe('mediaUrl', () => {
   it('returns null for empty input', () => {
@@ -36,8 +36,9 @@ describe('kindForVendor', () => {
 
 describe('vendorPhoto / itemPhoto — never invent a photograph [F-264]', () => {
   it('prefers the cover, then the logo', () => {
-    expect(vendorPhoto({ coverImageUrl: 'c.png', logoUrl: 'l.png' })).toBe('c.png');
-    expect(vendorPhoto({ logoUrl: 'l.png' })).toBe('l.png');
+    // A stored path gets the API origin like every other photo (it was handed out bare: no image view could load it).
+    expect(vendorPhoto({ coverImageUrl: 'c.png', logoUrl: 'l.png' })).toBe('https://api.test/c.png');
+    expect(vendorPhoto({ logoUrl: 'l.png' })).toBe('https://api.test/l.png');
   });
 
   it('returns NULL rather than a stock photo when there is none', () => {
@@ -77,5 +78,28 @@ describe('categoryPhoto — the merchant\'s own picture or nothing [S8]', () => 
     for (const name of ['food', 'grocery', 'taxi', 'courier', 'shops', 'services']) {
       expect(categoryPhoto({ name, imageUrl: null }), `"${name}" must not resolve to stock imagery`).toBeNull();
     }
+  });
+});
+
+describe('store photos reach the screen at a size made for it [IMAGES-E2E]', () => {
+  const key = 'items/cmstore01/AbCdEfGhIjKlMnOp.jpg';
+
+  it("a store's photo kept in object storage loads from the API, as a list-size copy", () => {
+    expect(itemPhoto({ imageUrl: key })).toBe(`https://api.test/${key}?w=640`);
+    expect(vendorPhoto({ coverImageUrl: key })).toBe(`https://api.test/${key}?w=640`);
+    expect(vendorPhoto({ logoUrl: key })).toBe(`https://api.test/${key}?w=640`);
+  });
+
+  it('a whole-screen photo asks for the large copy', () => {
+    expect(vendorPhoto({ coverImageUrl: key }, HERO_PHOTO_WIDTH)).toBe(`https://api.test/${key}?w=1280`);
+    expect(itemPhoto({ imageUrl: key }, HERO_PHOTO_WIDTH)).toBe(`https://api.test/${key}?w=1280`);
+  });
+
+  it('only a key in the stores\' photo folder gets a width; every other address is left as it was', () => {
+    expect(storePhotoUrl('/uploads/items/cmstore01/AbCdEfGhIjKlMnOp.jpg')).toBe('https://api.test/uploads/items/cmstore01/AbCdEfGhIjKlMnOp.jpg');
+    expect(storePhotoUrl('https://cdn.example.com/x.jpg')).toBe('https://cdn.example.com/x.jpg');
+    expect(storePhotoUrl('items/cmstore01/../../verification/AbCdEfGhIjKlMnOp.jpg')).toBe('https://api.test/items/cmstore01/../../verification/AbCdEfGhIjKlMnOp.jpg');
+    expect(storePhotoUrl('avatars/u1/AbCdEfGhIjKlMnOp.jpg')).toBe('https://api.test/avatars/u1/AbCdEfGhIjKlMnOp.jpg');
+    expect(storePhotoUrl(null)).toBeNull();
   });
 });

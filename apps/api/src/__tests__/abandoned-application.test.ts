@@ -8,10 +8,10 @@
  *    that old (one day inside the window), so the sweep never races a claim.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { DocState, PrismaClient, UserRole } from '@prisma/client';
+import type { DocState, Prisma, PrismaClient, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { socketPlugin } from '../plugins/socket';
@@ -24,7 +24,8 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { sweepStaleUnclaimedUploads, UNCLAIMED_SWEEP_ACTOR } from '../modules/user/upload-erasure';
 import { assertClaimableUpload, UNCLAIMED_UPLOAD_DAYS, UPLOAD_CLAIM_DAYS } from '../modules/verification/upload-window';
 import {
-  ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_PURGE_ACTOR, ABANDON_PURGE_DAYS, stillAbandoned,
+  ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_PURGE_ACTOR, ABANDON_PURGE_DAYS, OPEN_CASE_CENSUS,
+  openCasesOf, stillAbandoned, type OpenCaseKind,
 } from '../modules/verification/abandoned-application';
 import type { KycProvider, KycVerificationResult } from '../providers/kyc/kyc-provider';
 import { signupSelfieFixture } from './helpers/verification-object';
@@ -37,6 +38,7 @@ const NUM = String(Date.now()).slice(-6);
 let app: FastifyInstance;
 const ids: string[] = [];
 const keys: string[] = [];
+const cleanups: Array<() => Promise<unknown>> = [];
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'abandoned-application-test');
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
@@ -66,6 +68,9 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await system(async () => {
+    await app.prisma.incidentCase.deleteMany({ where: { subjectUserId: { in: ids } } }).catch(() => undefined);
+    for (const undo of cleanups) await undo().catch(() => undefined);
+    await app.prisma.complianceReviewCase.deleteMany({ where: { userId: { in: ids } } }).catch(() => undefined);
     await app.prisma.verificationDocument.updateMany({ where: { userId: { in: ids } }, data: { legalHoldId: null } });
     await app.prisma.docLegalHold.deleteMany({ where: { subjectUserId: { in: ids } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: ids } } });
@@ -313,6 +318,179 @@ describe('[Row 249] an abandoned application: a notice at day 76, the documents 
     expect(outcome).toBe('NOT_PURGED');
     expect((await docOf(d.id)).purgedAt).toBeNull();
     expect(await stored(d.fileUrl)).toBe(true);
+  });
+});
+
+describe('[Row 249 · REVIEW-M S4-3 · COORD] an open fraud, safety, compliance or dispute case keeps the documents, like a hold', () => {
+  const incident = (userId: string) => system(() => app.prisma.incidentCase.create({ data: {
+    caseNumber: `INC-${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`, severity: 'S3', category: 'dispute', intake: 'OPS_CREATED',
+    subjectUserId: userId, summary: 'synthetic open case', slaAckBy: later(1), slaDecideBy: later(10),
+  } }));
+
+  it('an open safety case: no notice, nothing deleted; once it is closed (no hold) the 76/90-day clock runs and the documents go', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const c = await incident(u);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    await system(() => app.prisma.incidentCase.update({ where: { id: c.id }, data: { status: 'CLOSED', closedAt: new Date() } }));
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    // [REVIEW-M S4-1] the record says which inbox row the notice is, and whether a push reached a phone
+    const audit = await system(() => app.prisma.auditLog.findFirstOrThrow({ where: { userId: u, action: ABANDON_NOTICE_ACTION } }));
+    expect(audit.changes).toMatchObject({ pushed: false });
+    expect(typeof (audit.changes as { notificationId?: unknown }).notificationId).toBe('string');
+    expect(await sweep(later(14.01), u)).toMatchObject({ purged: 1 });
+    expect((await docOf(d.id)).purgedAt).not.toBeNull();
+  });
+
+  it('a case opened AFTER the notice still blocks the purge (checked again right before deleting)', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 1, purged: 0 });
+    const c = await incident(u);
+    expect(await sweep(later(14.01), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(40), u)).toMatchObject({ purged: 0 });
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+    await system(() => app.prisma.incidentCase.update({ where: { id: c.id }, data: { status: 'CLOSED', closedAt: new Date() } }));
+    expect(await sweep(later(41), u)).toMatchObject({ purged: 1 });
+  });
+
+  it('an unreadable case census reads as an open case: nothing is noticed or deleted', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const svc = service([u]);
+    const broken = new Proxy((svc as unknown as { prisma: object }).prisma, { get: (t, k) => (k === 'complianceReviewCase'
+      ? { count: async () => { throw new Error('synthetic census failure'); } } : Reflect.get(t, k)) });
+    (svc as unknown as { prisma: object }).prisma = broken;
+    expect(await system(() => svc.sweepAbandonedApplications(new Date()))).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
+  it('an open compliance review keeps them too', async () => {
+    const u = await person('DRIVER');
+    const d = await doc(u, 'DRIVER', 'REJECTED', 100);
+    await system(() => app.prisma.complianceReviewCase.create({ data: { userId: u, dueAt: later(5) } }));
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+  });
+
+  it('[REVIEW-G S3-2] an inbox notice that could not be written is no notice: no record, no purge clock, the person is counted and noticed on the next run', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    // sendReach logs a persist failure and answers with no id (best-effort for everyone else); here that must stop the step.
+    const unwritable = new Proxy(app.prisma, { get: (t, k) => (k === 'notification'
+      ? { create: async () => { throw new Error('synthetic inbox write failure'); } } : Reflect.get(t, k)) }) as PrismaClient;
+    const svc = new VerificationService(scoped([u]), new NotificationService(unwritable, app.io), new ApprovingKyc());
+    expect(await system(() => svc.sweepAbandonedApplications(new Date()))).toMatchObject({ noticed: 0, purged: 0, failed: 1 });
+    expect(await system(() => app.prisma.auditLog.count({ where: { userId: u, action: ABANDON_NOTICE_ACTION } }))).toBe(0);
+    expect(await notices(u)).toHaveLength(0);
+    // Fifteen days on, with the inbox writable again: noticed now, nothing deleted (the 14 days start at the real notice).
+    expect(await sweep(later(15), u)).toMatchObject({ noticed: 1, purged: 0, failed: 0 });
+    expect(await notices(u)).toHaveLength(1);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
+    expect(await stored(d.fileUrl)).toBe(true);
+  });
+});
+
+describe('[Row 249 · COORD security review] the open-case census: every case, report, dispute and hold that can name the person keeps', () => {
+  /** A fixture row written past its foreign keys (orders, rooms, clusters it names need not exist for a read-only census). */
+  const raw = <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) => system(() => app.prisma.$transaction(async (tx) => {
+    await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+    return fn(tx);
+  }));
+  const other = () => `other-${nanoid(8)}`;
+  const fixtures: Record<OpenCaseKind, (u: string, docId: string, riderId: string) => Promise<unknown>> = {
+    fraud_case: (u, docId) => raw((tx) => tx.fraudCase.create({ data: { subjectUserId: other(), submissionId: docId, caseId: randomUUID(), reasonCode: 'SYNTHETIC', confirmedBy: 'test', linkedAccountIds: [] } })
+      .then((r) => cleanups.push(() => raw((t) => t.fraudCase.delete({ where: { id: r.id } }))))),
+    identity_review_case: (u) => raw(async (tx) => {
+      const clusterId = `cl-${nanoid(8)}`;
+      await tx.identityClusterMember.create({ data: { accountId: u, clusterId, linkedVia: [] } });
+      const r = await tx.identityReviewCase.create({ data: { tenantId: 'swift-default', clusterId, snapshotDigest: nanoid(8), snapshot: {}, complete: true } });
+      cleanups.push(() => raw(async (t) => { await t.identityReviewCase.delete({ where: { id: r.id } }); await t.identityClusterMember.delete({ where: { accountId: u } }); }));
+    }),
+    enforcement_appeal: (u) => raw((tx) => tx.enforcementAction.create({ data: { accountId: u, level: 'REVIEW_FIRST', reasonCode: 'SYNTHETIC', signalsFired: {}, decidedBy: 'SYSTEM', appeal: 'OPEN' } })
+      .then((r) => cleanups.push(() => raw((t) => t.enforcementAction.delete({ where: { id: r.id } }))))),
+    incident_case: (u) => raw((tx) => tx.incidentCase.create({ data: {
+      caseNumber: `INC-${nanoid(8).toUpperCase().replace(/[^A-Z0-9]/g, '0')}`, severity: 'S3', category: 'dispute', intake: 'OPS_CREATED',
+      subjectUserId: other(), reporterUserId: u, summary: 'synthetic open case', slaAckBy: later(1), slaDecideBy: later(10),
+    } }).then((r) => cleanups.push(() => raw((t) => t.incidentCase.delete({ where: { id: r.id } }))))),
+    sos_alert: (u) => raw((tx) => tx.sosAlert.create({ data: { actorUserId: other(), counterpartyUserId: u, actorRole: 'CUSTOMER', status: 'ACKNOWLEDGED' } })
+      .then((r) => cleanups.push(() => raw((t) => t.sosAlert.delete({ where: { id: r.id } }))))),
+    safety_deletion_hold: (u) => raw((tx) => tx.safetyDeletionHold.create({ data: { userId: u, holdRefs: [], purpose: 'synthetic', ownerRole: 'OPS', reviewBy: later(5), purgeBy: later(50) } })
+      .then((r) => cleanups.push(() => raw((t) => t.safetyDeletionHold.delete({ where: { id: r.id } }))))),
+    doc_legal_hold: (u) => raw((tx) => tx.docLegalHold.create({ data: { subjectUserId: u, reason: 'synthetic', ownerId: other(), placedBy: other(), reviewBy: later(5) } })
+      .then((r) => cleanups.push(() => raw((t) => t.docLegalHold.delete({ where: { id: r.id } }))))),
+    compliance_review_case: (u) => raw((tx) => tx.complianceReviewCase.create({ data: { userId: u, dueAt: later(5) } })
+      .then((r) => cleanups.push(() => raw((t) => t.complianceReviewCase.delete({ where: { id: r.id } }))))),
+    compliance_violation: (u) => raw((tx) => tx.complianceViolation.create({ data: { userId: u, moverKind: 'RIDER', reason: 'synthetic', evidence: {} } })
+      .then((r) => cleanups.push(() => raw((t) => t.complianceViolation.delete({ where: { id: r.id } }))))),
+    review_case: (u, docId) => raw((tx) => tx.reviewCase.create({ data: { submissionId: docId, slaDueAt: later(1) } })
+      .then((r) => cleanups.push(() => raw((t) => t.reviewCase.delete({ where: { id: r.id } }))))),
+    rectification_request: (u, docId) => raw((tx) => tx.rectificationRequest.create({ data: { userId: other(), submissionId: docId, caseId: randomUUID(), fieldCode: 'name', note: 'synthetic' } })
+      .then((r) => cleanups.push(() => raw((t) => t.rectificationRequest.delete({ where: { id: r.id } }))))),
+    // The security review's gap (1): named only as the holder, through a RIDER id.
+    custody_recovery_case: (u, docId, riderId) => raw((tx) => tx.custodyRecoveryCase.create({ data: { orderId: `o-${nanoid(8)}`, reason: 'CRASH', holderRiderId: riderId, deadlineAt: later(1) } })
+      .then((r) => cleanups.push(() => raw((t) => t.custodyRecoveryCase.delete({ where: { id: r.id } }))))),
+    // The security review's gap (2): someone else reports a RATING this person wrote.
+    content_report: (u) => raw(async (tx) => {
+      const rating = await tx.rating.create({ data: { orderId: `o-${nanoid(8)}`, raterId: u, type: 'CUSTOMER_TO_RIDER', score: 1 } });
+      const r = await tx.contentReport.create({ data: { reporterId: other(), targetType: 'RATING', targetId: rating.id, reason: 'HARASSMENT' } });
+      cleanups.push(() => raw(async (t) => { await t.contentReport.delete({ where: { id: r.id } }); await t.rating.delete({ where: { id: rating.id } }); }));
+    }),
+    // ... and a rating report on a rating the person wrote, reported by someone else.
+    rating_report: (u) => raw(async (tx) => {
+      const rating = await tx.rating.create({ data: { orderId: `o-${nanoid(8)}`, raterId: u, type: 'CUSTOMER_TO_RIDER', score: 1 } });
+      const r = await tx.ratingReport.create({ data: { ratingId: rating.id, reporterId: other(), reason: 'unfair' } });
+      cleanups.push(() => raw(async (t) => { await t.ratingReport.delete({ where: { id: r.id } }); await t.rating.delete({ where: { id: rating.id } }); }));
+    }),
+    reimbursement_claim: (u, docId, riderId) => raw((tx) => tx.reimbursementClaim.create({ data: { orderId: `o-${nanoid(8)}`, customerId: other(), riderId, amount: 100, reason: 'synthetic', gpsLat: 6.8, gpsLng: -58.1 } })
+      .then((r) => cleanups.push(() => raw((t) => t.reimbursementClaim.delete({ where: { id: r.id } }))))),
+    support_ticket: (u) => raw((tx) => tx.supportTicket.create({ data: { userId: u, category: 'ORDER_ISSUE', subject: 'synthetic', message: 'synthetic' } })
+      .then((r) => cleanups.push(() => raw((t) => t.supportTicket.delete({ where: { id: r.id } }))))),
+    payment_confirmation_hold: (u, docId, riderId) => raw(async (tx) => {
+      const sub = await tx.subscription.create({ data: { riderId, type: 'DELIVERY_RIDER', weeklyRate: 1000, currentPeriodStart: new Date(), currentPeriodEnd: later(7), nextBillingDate: later(7) } });
+      const r = await tx.paymentConfirmationHold.create({ data: { tenantId: 'swift-default', subscriptionId: sub.id, clockId: `c-${nanoid(6)}`, sourceEpoch: 1, paymentId: `p-${nanoid(8)}`, reason: 'synthetic', beganAt: new Date(), reviewDueAt: later(2) } });
+      cleanups.push(() => raw(async (t) => { await t.paymentConfirmationHold.delete({ where: { id: r.id } }); }));
+    }),
+  };
+
+  it('the census names every kind, and each kind has a fixture here', () => {
+    expect(Object.keys(fixtures).sort()).toEqual([...OPEN_CASE_CENSUS].sort());
+  });
+
+  for (const kind of OPEN_CASE_CENSUS) {
+    it(`${kind}: found for the person, and the documents are kept (no notice, nothing deleted)`, async () => {
+      const u = await person('RIDER');
+      const riderId = (await riderOf(u, 'MOTORCYCLE')).id;
+      const d = await doc(u, 'RIDER', 'REJECTED', 100);
+      expect(await system(() => openCasesOf(app.prisma, u))).toEqual([]);
+      await fixtures[kind](u, d.id, riderId);
+      expect(await system(() => openCasesOf(app.prisma, u))).toEqual([kind]);
+      expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+      expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+      expect((await docOf(d.id)).purgedAt).toBeNull();
+    });
+  }
+
+  it('[REVIEW-G S3-1] fraud_case: a confirmed case naming the person only as a LINKED account (founder decision pending) keeps their documents', async () => {
+    const u = await person('RIDER');
+    const d = await doc(u, 'RIDER', 'REJECTED', 100);
+    const fraud = (linked: string[]) => raw((tx) => tx.fraudCase.create({ data: {
+      subjectUserId: other(), submissionId: `sub-${nanoid(8)}`, caseId: randomUUID(), reasonCode: 'SYNTHETIC', confirmedBy: 'test', linkedAccountIds: linked,
+    } }).then((r) => cleanups.push(() => raw((t) => t.fraudCase.delete({ where: { id: r.id } })))));
+    await fraud([other(), other()]);
+    expect(await system(() => openCasesOf(app.prisma, u))).toEqual([]);
+    await fraud([other(), u]);
+    expect(await system(() => openCasesOf(app.prisma, u))).toEqual(['fraud_case']);
+    expect(await sweep(new Date(), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await sweep(later(30), u)).toMatchObject({ noticed: 0, purged: 0 });
+    expect(await notices(u)).toHaveLength(0);
+    expect((await docOf(d.id)).purgedAt).toBeNull();
   });
 });
 

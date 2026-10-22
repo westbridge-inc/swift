@@ -17,7 +17,7 @@ vi.mock('../../../mobile/src/hooks/customer', () => ({
   useItemSlots: () => state.slots,
 }));
 vi.mock('../../../mobile/src/stores/bookingStore', () => ({ useBookingStore: (select: any) => select({ setAppointment: vi.fn() }) }));
-vi.mock('../../../mobile/src/lib/images', () => ({ itemPhoto: () => null }));
+vi.mock('../../../mobile/src/lib/images', () => ({ itemPhoto: () => null, HERO_PHOTO_WIDTH: 1280 }));
 vi.mock('../../../mobile/src/kit/after-dismiss', () => ({ afterDismiss: (fn: () => void) => fn() }));
 vi.mock('../../../mobile/node_modules/react-native', () => ({ Dimensions: { get: () => ({ width: 390 }) }, ScrollView: ({ children }: any) => <div>{children}</div>, View: ({ children }: any) => <div>{children}</div> }));
 vi.mock('../../../mobile/node_modules/@expo/vector-icons', () => ({ Feather: () => null }));

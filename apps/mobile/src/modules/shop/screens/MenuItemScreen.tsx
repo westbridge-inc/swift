@@ -9,7 +9,7 @@ import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { requestAuthContinuation, type MenuItemAddDraft } from '../../../navigation/authContinuation';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
-import { itemPhoto } from '../../../lib/images';
+import { HERO_PHOTO_WIDTH, itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
 import {
@@ -234,7 +234,7 @@ export function MenuItemScreen() {
         {/* Hero + floating header */}
         <View>
           <Photo
-            uri={itemPhoto(item)}
+            uri={itemPhoto(item, HERO_PHOTO_WIDTH)}
             label={item.name}
             transition={200}
             style={{ width: SCREEN_W, height: 340 }}
