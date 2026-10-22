@@ -31,7 +31,7 @@ import { getAuthSessionSnapshot, requireAuthSessionForPrincipal, requireAuthSess
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { money, moneyExact } from '../../../lib/money';
-import { mediaUrl } from '../../../lib/images';
+import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
 import {
   captureVendorCashSettlementConfirmation,
   requireCurrentCashSettlementConfirmation,
@@ -159,9 +159,9 @@ function TopItemsCard({ items, sample }: { items: any[]; sample: boolean }) {
             <T variant="numM" tone="muted" style={{ width: space['2xl'] }}>
               {i + 1}
             </T>
-            {item.imageUrl ? (
+            {isKeptPhoto(item.imageUrl) ? (
               <Image
-                source={{ uri: mediaUrl(item.imageUrl)! }}
+                source={{ uri: storePhotoUrl(item.imageUrl, 160)! }}
                 style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.sm }}
                 contentFit="cover"
                 accessibilityLabel={`${item.name} photo`}

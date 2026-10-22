@@ -40,7 +40,8 @@ describe('GOLD-7 · CUST-04 — rate, report and tip refusal', () => {
     expect(premature.json().error.code).toBe('ORDER_NOT_COMPLETE');
     // LIFECYCLE_V2's hold is a separate journey, as in GOLD-6 CUST-05.
     await h.sys(() => h.app.prisma.order.update({ where: { id }, data: { holdExpiresAt: null } }));
-    for (const [step, status] of [['accept', 'ACCEPTED'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
+    // [O-3] Accept starts preparation; an older build's "Start preparing" tap is a 200 no-op.
+    for (const [step, status] of [['accept', 'PREPARING'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
       const next = await h.call('PUT', `/api/v1/vendor/orders/${id}/${step}`, owner.token, undefined, { 'x-vendor-id': store.vendorId });
       expect(next.statusCode, next.json().error?.code).toBe(200);
       expect(next.json().data.status).toBe(status);
