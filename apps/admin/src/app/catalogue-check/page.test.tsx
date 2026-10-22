@@ -153,6 +153,9 @@ describe('the catalogue check', () => {
     expect(row.textContent).toContain('Cakes and pastries');
     expect(row.textContent).toContain('Bakery');
     expect(screen.queryByText('Nothing waiting for a check.')).toBeNull();
+    // [BUG-GUARDS C5] the store's status in words, never its code.
+    expect(within(row).getByText('Store · Live')).toBeTruthy();
+    expect(row.textContent).not.toContain('ACTIVE');
   });
 
   it('approves exactly the store words seen, with the reviewer’s own reason', async () => {

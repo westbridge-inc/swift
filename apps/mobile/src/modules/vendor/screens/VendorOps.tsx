@@ -21,6 +21,7 @@ import { afterDismiss } from '../../../kit/after-dismiss';
 import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
+import { paymentMethodWords, qrStatusWords, subscriptionPillWords } from '../storeWords';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -63,6 +64,7 @@ import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { canAttestPayment, paymentAttestBlockedReason } from '../../../lib/orderStatus';
 import { vendorSurfaceForRole } from '../../../lib/vendorRbac';
+import { shownStoreOpen } from '../../../lib/storeOpenSwitch';
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import {
   TYPES,
@@ -153,7 +155,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         <T variant="caption" tone="muted">
           {fmtWhen(order.placedAt)}
           {items ? ` · ${items} item${items === 1 ? '' : 's'}` : ''}
-          {` · ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}
+          {paymentMethodWords(order.paymentMethod) ? ` · ${paymentMethodWords(order.paymentMethod)}` : ''}
         </T>
       </View>
       {/* What to make — the kitchen reads this off the card */}
@@ -758,8 +760,8 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           icon="qrcode-scan"
           label={isOwner ? 'My QR & number' : 'My QR'}
           detail={qrDetail}
-          badge={qrQ.data?.status ? <TonePill label={String(qrQ.data.status).replace(/_/g, ' ')} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
-          badgeLabel={qrQ.data?.status ? `QR ${String(qrQ.data.status).replace(/_/g, ' ').toLowerCase()}` : undefined}
+          badge={qrQ.data?.status ? <TonePill label={qrStatusWords(qrQ.data.status)} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
+          badgeLabel={qrQ.data?.status ? `QR: ${qrStatusWords(qrQ.data.status)}` : undefined}
           onPress={() => (isOwner ? setShareOpen(true) : navigation.navigate('VendorMyQr'))}
         />
         <ManageTile
@@ -772,8 +774,8 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           icon={isOwner ? 'cash-check' : 'account-cog-outline'}
           label={isOwner ? 'Billing' : 'Account'}
           detail={isOwner ? (subQ.isError && !sub ? 'Billing unavailable' : `${billingSummary(sub)}${subStale ? ' · last loaded' : ''}`) : 'Store settings & promos'}
-          badge={isOwner && sub ? <TonePill label={String(sub.status ?? 'Subscription').replace(/_/g, ' ')} tone={subscriptionTone(sub)} /> : undefined}
-          badgeLabel={isOwner && sub ? `Subscription ${String(sub.status ?? '').replace(/_/g, ' ').toLowerCase()}` : undefined}
+          badge={isOwner && sub ? <TonePill label={subscriptionPillWords(sub.status)} tone={subscriptionTone(sub)} /> : undefined}
+          badgeLabel={isOwner && sub ? `Subscription: ${subscriptionPillWords(sub.status)}` : undefined}
           onPress={() => navigation.navigate('Account')}
         />
       </View>
@@ -893,7 +895,9 @@ export function VendorOps({ store, navigation }: any) {
   const fetched: any[] = ordersQ.data ?? [];
   const boardLoading = ordersQ.isLoading && !ordersQ.data;
   const boardUnavailable = ordersQ.isError && !ordersQ.data;
-  const open = !!store.isCurrentlyOpen;
+  // [PERF row 562] The switch (and everything that reads it here) shows the
+  // state just tapped while its request is out — lib/storeOpenSwitch.
+  const open = shownStoreOpen(!!store.isCurrentlyOpen, toggleOpen.isPending, toggleOpen.variables);
   const accepting = !!store.acceptingOrders;
   const selfDelivery = !!store.selfDeliveryEnabled;
   const busy = orderAction.isPending;
@@ -915,7 +919,7 @@ export function VendorOps({ store, navigation }: any) {
   };
   const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
   const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
-  const status = storeStatusEyebrow(store, inPreview);
+  const status = storeStatusEyebrow({ ...store, isCurrentlyOpen: open }, inPreview);
   const storeStatusText = (
     <View style={{ flex: 1, paddingRight: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
@@ -1191,7 +1195,7 @@ export function VendorOps({ store, navigation }: any) {
           {surface.canToggleOpen ? (
             <Pressable
               disabled={inPreview || toggleOpen.isPending}
-              onPress={() => toggleOpen.mutate()}
+              onPress={() => toggleOpen.mutate(!open)}
               accessibilityRole="switch"
               accessibilityLabel="Store open to customers"
               accessibilityHint={open ? 'Close the store to new customers' : 'Open the store to new customers'}
@@ -1209,7 +1213,7 @@ export function VendorOps({ store, navigation }: any) {
           )}
           {toggleOpen.isError ? (
             <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-              Store status didn’t update — check your connection and try again.
+              {(toggleOpen.error as any)?.response?.data?.error?.message ?? 'Store status didn’t update — check your connection and try again.'}
             </T>
           ) : null}
           {!inPreview && canManage ? (
@@ -1219,7 +1223,7 @@ export function VendorOps({ store, navigation }: any) {
               size="md"
               style={{ marginTop: space.md }}
               loading={toggleOrders.isPending}
-              onPress={() => toggleOrders.mutate()}
+              onPress={() => toggleOrders.mutate(!accepting)}
             />
           ) : null}
           {toggleOrders.isError ? (

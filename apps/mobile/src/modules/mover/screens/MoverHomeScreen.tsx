@@ -10,6 +10,7 @@ import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
+import { boardPaused, recentBoard } from '../../../lib/moverBoard';
 import {
   useMoverKind,
   useMoverStats,
@@ -52,6 +53,7 @@ import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
 import { useJobRing } from '../../../hooks/useJobRing';
 import { PushOffStrip } from '../../../components/PushOffStrip';
+import { docLabel } from '../../../components/onboarding/docLabels';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -445,7 +447,8 @@ export function MoverHomeScreen({ navigation }: any) {
   // [B6] The run strip: server-computed, rendered as-is. Null unless stacked.
   const run = useActiveJobs(kind).run;
   const online = !!profile?.isOnline;
-  const available = useAvailableJobs(kind, online);
+  // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
+  const available = useAvailableJobs(kind, online, !!active.data);
   const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
@@ -502,7 +505,9 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
-  const jobs: any[] = available.data ?? [];
+  // While the board rests, its last answer is not shown (no stale pins on the map).
+  // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
+  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
   // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
   // 428 wants a selfie check (there's a screen for that now); 423 means only
@@ -814,7 +819,7 @@ export function MoverHomeScreen({ navigation }: any) {
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
                   <Feather name="clock" size={15} color={dk.warning} style={{ marginTop: 1 }} />
                   <T variant="label" style={{ flex: 1, color: dk.text }}>
-                    Your {expiringDoc.docType.replace(/_/g, ' ')} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
+                    Your {docLabel(expiringDoc.docType)} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
                   </T>
                 </View>
               )}

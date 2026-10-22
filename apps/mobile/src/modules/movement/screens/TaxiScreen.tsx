@@ -39,6 +39,7 @@ import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { noDriverView } from '../../../lib/taxiNoDriver';
 import { TaxiSignedOut } from '../TaxiSignedOut';
 import { signInForTaxi } from '../taxiEntry';
 
@@ -418,6 +419,8 @@ function TaxiBooking({ navigation }: any) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
         <LoadingBlock />
+        {/* [BUG-GUARDS C4] A slow ride read is no trap: Back stays on screen while it loads. */}
+        <FloatingBack navigation={navigation} insets={insets} />
       </View>
     );
   }
@@ -1276,10 +1279,19 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
 
   // Ticking clock so the "is the fix stale?" check re-evaluates without a new
   // event — a DEAD feed sends nothing, so only a timer can notice the silence.
+  // [TAXI-FLOW 22 Oct] Only while a driver's feed exists: the staleness check
+  // is its one reader, and ticking before that re-rendered the whole ride
+  // screen — map included — every 3 s for nothing while the rider waited.
+  const feedLive = lastFixAt != null;
   useEffect(() => {
+    if (!feedLive) return;
+    setNowTs(Date.now());
     const t = setInterval(() => setNowTs(Date.now()), 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [feedLive]);
+  // The honest "nobody has taken it yet" card: the server's facts on a
+  // reopened app, the live socket event while open (taxiNoDriver.ts).
+  const noDriver = noDriverView(ride, exhausted, nowTs);
 
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
@@ -1610,15 +1622,15 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
             </>
           )}
 
-          {d ? null : exhausted ? (
-            /* Terminal dead state — honest, not an endless spinner. */
+          {d ? null : noDriver ? (
+            /* Dead state — honest, not an endless spinner. */
             <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
               <IconChip icon="alert-circle" size={52} tone="error" />
               <T variant="body" weight="semibold" center style={{ marginTop: space.md }}>
-                No driver available right now
+                {noDriver.title}
               </T>
               <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-                No driver accepted this request. You can keep waiting or cancel.
+                {noDriver.body}
               </T>
             </View>
           ) : (

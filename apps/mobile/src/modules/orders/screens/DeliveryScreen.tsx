@@ -27,7 +27,7 @@ import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payL
 import { toast } from '../../../kit/toast';
 import { copyText } from '../../../lib/clipboard';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
-import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, Header, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
@@ -38,6 +38,7 @@ import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
+import { isTaxiOrder } from '../../../lib/orderTrackRoute';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -418,6 +419,17 @@ export function DeliveryScreen() {
   };
 
   const o = order.data;
+  // [TAXI-FLOW 22 Oct] THE BACKSTOP. A ride is never drawn as a store order
+  // ("Sent to the store", "Preparing", "have $800 ready for the seller"). Any
+  // door that reaches this screen with a ride's id — a notification tap, the
+  // inbox, an older caller — is handed to the ride screen the moment the
+  // server's order type is known. `replace`, so Back does not return here.
+  const rideHandedOn = useRef(false);
+  useEffect(() => {
+    if (!isTaxiOrder(o) || rideHandedOn.current) return;
+    rideHandedOn.current = true;
+    navigation.replace('Taxi');
+  }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
     && !(o?.fulfillment === 'PICKUP' && orderStatus === 'PICKED_UP');
@@ -678,7 +690,24 @@ export function DeliveryScreen() {
     prevStatusRef.current = status;
   }, [isFocused, o?.status, o?.fulfillment]);
 
-  if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (order.isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  if (isTaxiOrder(o)) {
+    // The hand-off above is on its way: nothing of the store screen shows.
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
   // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
   // On a slow line a background refresh (the 15 s poll, a reconnect) can time
   // out; that used to swap the whole order, and the Cancel button under the
@@ -687,6 +716,8 @@ export function DeliveryScreen() {
   if (!o) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => order.refetch()} />
       </View>
     );

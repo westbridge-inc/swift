@@ -1,5 +1,6 @@
 import { runtimeMode } from '../utils/runtime-mode';
 import { normalizePolicyExpression } from './rls-attestation';
+import { runAsSystem } from '../plugins/tenant-context';
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -27,12 +28,33 @@ type EnvLike = Record<string, string | undefined>;
 export const OWNER_WALL_ROLE = 'swift_owner_wall';
 export const OWNER_POLICY_NAME = 'owner_isolation';
 /** The owner-walled tables, each keyed by its owner column. */
-export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId' };
+export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId', notifications: 'userId' };
 
 /** The USING and WITH CHECK every owner policy carries (the migration writes
  *  exactly this; the boot attestation compares the stored policy with it). */
 export const OWNER_POLICY_EXPRESSION = `pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER') OR NOT pg_has_role(current_user, 'swift_owner_wall', 'MEMBER') OR "userId" = NULLIF(current_setting('app.current_user', true), '')`;
 const OWNER_POLICY_CONTRACT = normalizePolicyExpression(OWNER_POLICY_EXPRESSION) as string;
+
+/** One permissive policy an owner-walled table must carry: its command
+ *  (pg_policy.polcmd: '*' all, r select, a insert, w update, d delete) and its
+ *  normalised USING / WITH CHECK (null = none). */
+interface OwnerPolicyShape { name: string; cmd: '*' | 'r' | 'a' | 'w' | 'd'; using: string | null; check: string | null }
+/** [item 20 · notifications] Anyone may hand a person a notice (the INSERT
+ *  policy checks nothing); only the person reads, updates or deletes it. */
+export const NOTICE_WRITE_POLICY_NAME = 'notice_write';
+const OWNER_ALL: readonly OwnerPolicyShape[] = [{ name: OWNER_POLICY_NAME, cmd: '*', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT }];
+/** Exactly the permissive policies each owner-walled table carries (the
+ *  migrations write these; any other permissive policy widens the wall). */
+const OWNER_POLICY_LAYOUT: Readonly<Record<string, readonly OwnerPolicyShape[]>> = {
+  addresses: OWNER_ALL,
+  device_tokens: OWNER_ALL,
+  notifications: [
+    { name: OWNER_POLICY_NAME, cmd: 'r', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: `${OWNER_POLICY_NAME}_update`, cmd: 'w', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT },
+    { name: `${OWNER_POLICY_NAME}_delete`, cmd: 'd', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: NOTICE_WRITE_POLICY_NAME, cmd: 'a', using: null, check: 'true' },
+  ],
+};
 
 /** OWNER_RLS_BIND=1: every request binding also sets `app.current_user`. */
 export const ownerRlsBindEnabled = (env: EnvLike = process.env): boolean => env['OWNER_RLS_BIND'] === '1';
@@ -42,9 +64,9 @@ export interface OwnerWallFacts {
   walledLogin: boolean;
   /** Is it a member of swift_bypass_rls (never walled)? */
   bypassLogin: boolean;
-  /** Owner-walled tables missing RLS, FORCE or the canonical owner policy,
-   *  or carrying another permissive policy (permissive policies are OR-ed:
-   *  any other one widens the wall). */
+  /** Owner-walled tables missing RLS, FORCE or one of their canonical owner
+   *  policies, or carrying another permissive policy (permissive policies are
+   *  OR-ed: any other one widens the wall). */
   unwalledTables: string[];
 }
 
@@ -66,10 +88,12 @@ export async function readOwnerWallFacts(db: RawDb): Promise<OwnerWallFacts> {
       LEFT JOIN pg_policy p ON p.polrelid = c.oid`;
   const unwalled = Object.keys(OWNER_WALLED_TABLES).filter((table) => {
     const policies = rows.filter((r) => r.name === table);
-    const canonical = (r: (typeof rows)[number]) => r.polname === OWNER_POLICY_NAME && r.permissive === true && r.cmd === '*' && r.to_public === true
-      && normalizePolicyExpression(r.qual) === OWNER_POLICY_CONTRACT && normalizePolicyExpression(r.with_check) === OWNER_POLICY_CONTRACT;
-    return !policies.some((r) => r.secured === true) || !policies.some(canonical)
-      || policies.some((r) => r.polname !== null && r.polname !== OWNER_POLICY_NAME && r.permissive === true);
+    const layout = OWNER_POLICY_LAYOUT[table] ?? OWNER_ALL;
+    const permissive = policies.filter((r) => r.polname !== null && r.permissive === true);
+    const canonical = (r: (typeof rows)[number], shape: OwnerPolicyShape) => r.polname === shape.name && r.cmd === shape.cmd && r.to_public === true
+      && normalizePolicyExpression(r.qual) === shape.using && normalizePolicyExpression(r.with_check) === shape.check;
+    return !policies.some((r) => r.secured === true) || !layout.every((shape) => permissive.some((r) => canonical(r, shape)))
+      || permissive.some((r) => !layout.some((shape) => shape.name === r.polname));
   });
   return {
     walledLogin: login?.walled ?? false,
@@ -115,4 +139,44 @@ export function ownerWallLine(facts: OwnerWallFacts, env: EnvLike = process.env)
   return ownerRlsBindEnabled(env) && facts.walledLogin
     ? `owner wall: enforced tables=${Object.keys(OWNER_WALLED_TABLES).join(',')}`
     : 'owner wall: inert (OWNER_RLS_BIND off, login not walled)';
+}
+
+/**
+ * [item 20 · device_tokens] Work that acts for SOMEONE ELSE on an owner-walled
+ * table, outside a transaction (a push to a store, a dead-token cleanup, a
+ * token moving to the account now signed in on its device): with the wall ON
+ * it runs as the named system capability (the system login, never walled);
+ * off, exactly as before on the caller's own connection. Never inside a
+ * transaction: a transaction's queries never change connection — use the
+ * SECURITY DEFINER actions below there.
+ */
+export function ownerWallSystem<T>(capability: string, fn: () => PromiseLike<T>): Promise<T> {
+  return ownerRlsBindEnabled() ? runAsSystem(capability, async () => await fn()) : Promise.resolve(fn());
+}
+
+type TxRaw = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
+
+/** [item 20] The narrow actions a transaction takes on SOMEONE ELSE'S push
+ *  registrations (migration 20261018221000): one SECURITY DEFINER function
+ *  each, keyed by the user id it acts on, so the owner wall cannot make them
+ *  silently touch nothing. Authorization is the caller's (an admin's ban, a
+ *  session revocation, the erasure); a census test pins the callers. */
+export const OWNER_WALL_DEVICE_ACTIONS = ['swift_owner_wall_revoke_devices', 'swift_owner_wall_revoke_device', 'swift_owner_wall_erase_devices'] as const;
+
+/** Silence every active registration of `userId`. Returns how many. */
+export async function revokeUserDevices(tx: TxRaw, userId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_revoke_devices(${userId}) AS n`;
+  return row?.n ?? 0;
+}
+
+/** Silence one registration (`token`) of `userId`. Returns how many (0 or 1). */
+export async function revokeUserDevice(tx: TxRaw, userId: string, token: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_revoke_device(${userId}, ${token}) AS n`;
+  return row?.n ?? 0;
+}
+
+/** Delete every registration of `userId` (the account erasure). Returns how many. */
+export async function eraseUserDevices(tx: TxRaw, userId: string): Promise<number> {
+  const [row] = await tx.$queryRaw<Array<{ n: number }>>`SELECT public.swift_owner_wall_erase_devices(${userId}) AS n`;
+  return row?.n ?? 0;
 }

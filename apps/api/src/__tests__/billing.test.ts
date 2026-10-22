@@ -20,7 +20,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { injectWithApproval } from './helpers/admin-approval';
+import { approveAsSecondAdmin, injectWithApproval, seedSecondApproval } from './helpers/admin-approval';
 import { runBillingInvariants } from '../modules/billing/invariants';
 
 // ---------------------------------------------------------------------------
@@ -514,7 +514,7 @@ describe('Waivers, reminders, tier recalculation', () => {
     expect(stillOne).toBe(1);
   });
 
-  it('moves a vendor to the large tier from catalogue size — never from sales', async () => {
+  it('prices a vendor for the large tier from catalogue size — never from sales; the rise is held for the 14-day notice', async () => {
     const fixture = await makeVendorWithSub({
       rate: 15000,
       prepaid: 500000,
@@ -537,18 +537,26 @@ describe('Waivers, reminders, tier recalculation', () => {
 
     await billing.recalculateVendorTiers();
     let sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
-    expect(Number(sub.weeklyRate)).toBe(20000);
+    // [R27 · GUARDRAILS §7 standing rule 2] The large tier is a RISE: held (fee-rise-notice.ts), told
+    // 14 days ahead and applied from the first weekly fee after that, never written at once.
+    expect(Number(sub.weeklyRate)).toBe(15000);
+    const heldKey = `billing.fee_rise:${fixture.subId}`;
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ from: 15000, to: 20000, source: 'WEEKLY_RETIER' });
+    expect(await app.prisma.billingEvent.count({ where: { subscriptionId: fixture.subId, type: 'TIER_CHANGE' } })).toBe(0);
 
-    const tierEvent = await app.prisma.billingEvent.findFirst({
-      where: { subscriptionId: fixture.subId, type: 'TIER_CHANGE' },
-    });
-    expect(tierEvent).not.toBeNull();
-
-    // Shrink the catalogue back under the threshold
+    // Shrink the catalogue back under the threshold: the held rise no longer stands and is dropped.
     await app.prisma.item.updateMany({ where: { vendorId: fixture.vendorId }, data: { isAvailable: false } });
-    await billing.recalculateVendorTiers();
+    // [R27 · security review] The week's largest catalogue counts: listings hidden today still count
+    // for 7 days, and the lower tier must then hold on two weekly passes before the rise is dropped.
+    const t = Date.now();
+    await billing.recalculateVendorTiers(new Date(t));
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    await billing.recalculateVendorTiers(new Date(t + 8 * DAY));
+    expect((await app.prisma.platformConfig.findUnique({ where: { key: heldKey } }))?.value).toMatchObject({ to: 20000 });
+    await billing.recalculateVendorTiers(new Date(t + 15 * DAY));
     sub = await app.prisma.subscription.findUniqueOrThrow({ where: { id: fixture.subId } });
     expect(Number(sub.weeklyRate)).toBe(15000);
+    expect(await app.prisma.platformConfig.findUnique({ where: { key: heldKey } })).toBeNull();
   });
 });
 
@@ -1138,16 +1146,27 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
     const setAsideId = await openSetAsideIdOf(fx.subId);
     const reference = ref('REPORTED');
     // The release is approved; before it is applied, the payout is sent and its record asked for.
+    const reportedPayload = { amount: 15000, method: 'MMG', reference, setAsideId };
+    let reportedId = '';
     const back = await twoPeople(admin, other, 'POST', url(fx.subId, 'release'), { amount: 15000, setAsideId }, async () => {
-      const reported = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: { amount: 15000, method: 'MMG', reference, setAsideId }, headers: headersFor(other.token) });
+      const reported = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: reportedPayload, headers: headersFor(other.token) });
       expect(reported.statusCode, reported.payload).toBe(202);
+      reportedId = reported.json().error.details.approvalId as string;
     });
     expect(back.statusCode, back.payload).toBe(409);
     expect(back.json().error.code).toBe('REFUND_PAYOUT_REPORTED');
     expect(await wallet(fx.subId)).toBe(0);
     expect(await subledger('REFUND_PAYABLE', fx.subId)).toBe(15000);
     expect(await events(fx.subId, 'PREPAID_REFUND_RELEASED')).toHaveLength(0);
-    const recorded = await paid(fx.subId, { amount: 15000, method: 'MMG', reference });
+    // [U06] The payout record the other admin asked for still stands, so a
+    // second ask for it is refused at the gate (one ask per act)...
+    const again = await paid(fx.subId, { amount: 15000, method: 'MMG', reference });
+    expect(again.statusCode, again.payload).toBe(409);
+    expect(again.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...and that ask, approved by a person who did not set the refund aside
+    // (REFUND_SAME_PERSON) and applied by the admin who asked, records it.
+    await approveAsSecondAdmin(app, reportedId);
+    const recorded = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: reportedPayload, headers: { ...headersFor(other.token), 'x-swift-approval': reportedId } });
     expect(recorded.statusCode, recorded.payload).toBe(200);
     expect(recorded.json().data).toMatchObject({ refundSetAside: 0 });
     await booksAgree(fx.subId);
@@ -1178,13 +1197,21 @@ describe('fee credit refund — set aside, then paid, recorded once, two people,
       const approvalId = asked.json().error.details.approvalId as string;
       const decided = await app.inject({ method: 'POST', url: `/api/v1/admin/approvals/${approvalId}/decide`, payload: { approve: true, note: 'second person' }, headers: headersFor(other.token) });
       expect(decided.statusCode, decided.payload).toBe(200);
-      return () => app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: { ...headersFor(admin.token), 'x-swift-approval': approvalId } });
+      return Object.assign(() => app.inject({ method: 'POST', url: url(fx.subId, step), payload, headers: { ...headersFor(admin.token), 'x-swift-approval': approvalId } }), { approvalId });
     };
     // Approved for the FIRST set-aside, not used yet.
     const staleRelease = await ask('release', { amount: 9000, setAsideId: first });
     const stalePayout = await ask('paid', { amount: 9000, method: 'MMG', reference: ref('STALE'), setAsideId: first });
     // The first set-aside is paid and recorded; credit arrives and a second one of the same amount is set aside.
-    expect((await paid(fx.subId, { amount: 9000, method: 'MMG', reference: ref('FIRST') })).statusCode).toBe(200);
+    // [U06] While the stale payout ask stands, a second ask to record a payout
+    // here is refused at the gate (one ask per act)...
+    const firstPayout = { amount: 9000, method: 'MMG', reference: ref('FIRST'), setAsideId: first };
+    const refused = await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: firstPayout, headers: headersFor(admin.token) });
+    expect(refused.statusCode, refused.payload).toBe(409);
+    expect(refused.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...so the payout recorded here carries a second approval written before that rule.
+    const firstApproval = await seedSecondApproval(app, stalePayout.approvalId, { body: (b) => ({ ...b, reference: firstPayout.reference }) });
+    expect((await app.inject({ method: 'POST', url: url(fx.subId, 'paid'), payload: firstPayout, headers: { ...headersFor(admin.token), 'x-swift-approval': firstApproval } })).statusCode).toBe(200);
     await topUp(fx.subId, 9000);
     expect((await setAside(fx.subId, 9000)).statusCode).toBe(200);
     expect(await openSetAsideIdOf(fx.subId)).not.toBe(first);

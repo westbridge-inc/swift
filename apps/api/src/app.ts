@@ -37,6 +37,7 @@ import { registerLivenessRoute, registerReadinessRoute, registerRoutedWhileDegra
 import { pageOps, resolveOpsPage } from './modules/ops/ops-page';
 import { loggerRedactConfig, loggerSerializers } from './utils/logger-config';
 import { registerPublicUploads } from './utils/public-uploads';
+import { registerPublicStorePhotos } from './utils/public-store-photos';
 import { observabilityPlugin } from './plugins/observability';
 import { legalRoutes } from './modules/legal/legal.routes';
 import { publicRoutes } from './modules/public/public.routes';
@@ -263,11 +264,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return { status, timestamp: new Date().toISOString() };
     }
     const { EXHAUST_CAP, REDISPATCH_DELAY_MS } = await import('./modules/dispatch/dispatch.service');
+    // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
+    // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
+    // degraded: everything but uploads still works, and the probes must not take the API down with it.
+    const { malwareScannerStatus } = await import('./lib/malware-scan');
+    const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      malwareScanner,
       routing,
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
@@ -285,6 +292,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // Public upload trees only (items/, avatars/). Path-traversal-guarded;
   // KYC docs in other /uploads folders are never exposed here.
   registerPublicUploads(app, UPLOAD_BASE);
+  // [IMAGES-E2E] Stores' photos in object storage, at the address both apps build
+  // ("<api>/items/<store>/<file>"): only a photo a visible store still shows.
+  registerPublicStorePhotos(app);
 
   // API routes
   await app.register(authRoutes, { prefix: '/api/v1/auth' });

@@ -101,6 +101,8 @@ vi.mock('../../../kit', async () => {
     T, Eyebrow: T, PopupTitle: T, DecorativeIcon: Box, IconChip: () => null, CircleChip: Box,
     InfoRow: (p: any) => h('div', null, p.label, p.value),
     Timeline: () => null, HoldRing: () => null, LoadingBlock: () => h('div', null, 'Loading'), ErrorState: () => h('div', null, 'Error'),
+    // The kit header (its Back chip) on the loading and failure branches [UI-SWEEP U32].
+    Header: () => h('div', { 'aria-label': 'Back' }),
     PillButton: (p: any) => h('button', { type: 'button', 'aria-label': p.label, disabled: !!(p.disabled || p.loading), onClick: p.disabled || p.loading ? undefined : p.onPress }, p.label),
     PopupCard: (p: any) => (p.visible ? h('div', { role: 'dialog' }, p.children) : null),
     holdRingCaption: () => '', holdRingWindow: () => null,

@@ -70,8 +70,9 @@ describe('sensitive room publication census', () => {
     // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed)
     // + the admin store-refund close (#1607)
     // + the swap question withdrawn at its deadline on MMG (#1830, through the gate)
-    // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance)
+    // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance).
+    // + the taxi stop change (multi-stop part 4: ride:stop_changed, through the gate).
     // + the OF-33 no-show release back to dispatch (pickup-overdue.ts, through the gate).
-    expect(orderPublishers).toBe(48);
+    expect(orderPublishers).toBe(49);
   });
 });

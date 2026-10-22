@@ -1,4 +1,7 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
+import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
 import { eraseMoverObjects } from './mover-object-erasure';
 import { exportPersonalData } from './data-export';
@@ -7,11 +10,14 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
+  owedPublicPhotoCount,
   queueStorageOrphan,
   recordStorageOrphan,
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
+import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
+import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
@@ -36,9 +42,7 @@ import { isOwnedAvatarKey } from '../verification/object-authority';
 const TERMINAL_ORDER = TERMINAL_ORDER_STATUSES; // ONE definition [order/order-status.ts]
 const TERMINAL_SERVICE_JOB: ServiceJobStatus[] = ['COMPLETED', 'CANCELLED'];
 
-/** The subject of a closure request confirmed in the app. Support completes
- *  only these: a typed-in ticket is not a confirmed request. */
-export const ACCOUNT_CLOSURE_SUBJECT = 'Account closure request';
+export { ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 /** The server-written record that a closure request was confirmed in the app
  *  (behind the deletion step-up). Anyone can type the subject into a support
  *  ticket; only the confirmed request writes this record, so support completes
@@ -72,7 +76,7 @@ export class AccountService {
     const ticket = await tx.supportTicket.findFirst({ where, orderBy: { createdAt: 'desc' } })
       ?? await tx.supportTicket.create({ data: {
         userId, category: 'ACCOUNT', subject: ACCOUNT_CLOSURE_SUBJECT,
-        message: 'Please close my Swift account and de-identify my personal data after resolving outstanding business obligations. This request was confirmed in the app.',
+        message: ACCOUNT_CLOSURE_MESSAGE,
       } });
     // Same transaction as the request: the confirmation and its ticket commit
     // together. One record per ticket; a repeated request reuses it.
@@ -139,14 +143,29 @@ export class AccountService {
           tenantId: user.tenantId,
         });
       };
+      // [IMAGES-E2E · REVIEW-F S2-1] The provider's portfolio photos (they can show a customer's
+      // home or people) go with the account: each Swift-kept photo's deletion row is written with
+      // the pointer clear, under this lock; the objects are deleted after the commit.
+      const queuePortfolioBeforePointerClear = async (): Promise<void> => {
+        const provider = await tx.serviceProvider.findUnique({ where: { userId }, select: { id: true, portfolioPhotos: true } });
+        if (!provider || provider.portfolioPhotos.length === 0) return;
+        await queuePortfolioPhotoDeletions(
+          tx, { id: provider.id, userId }, user.tenantId, provider.portfolioPhotos, PUBLIC_PHOTO_ACCOUNT_DELETION,
+        );
+        await tx.serviceProvider.update({ where: { id: provider.id }, data: { portfolioPhotos: [] } });
+      };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
-        await tx.deviceToken.deleteMany({ where: { userId } });
+        // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
+        await eraseUserDevices(tx, userId);
         // [S2-29 · REVIEW-F 18 Oct] Work an approval still owes the person (the trial decision) goes with the
         // account, under this lock: a row not yet claimed never runs (a claimed one meets the tail's own barrier,
         // verification.service openForOwedWork), and the row's userId never
         // outlives the erasure (a drain that already claimed a row closes nothing: its writes are updateMany).
         await tx.verificationDecisionOutbox.deleteMany({ where: { userId } });
+        // [COORD 18 Oct 23:28Z · REVIEW-F #1879 §4] Notices, staged money-setting commands, finished mover
+        // revocations, unheld safety check-in deliveries, renewal reminders and staff permissions (erasure-coverage.ts).
+        await eraseOwedRowsInTransaction(tx, userId);
       };
       if (user.phone === `deleted:${userId}`) {
         // [REPORT-022 F-022-11/21] A completed-looking deletion is NOT proof no
@@ -155,6 +174,7 @@ export class AccountService {
         await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
+        await queuePortfolioBeforePointerClear();
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
@@ -234,6 +254,7 @@ export class AccountService {
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
       await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
+      await queuePortfolioBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
         where: { id: userId },
@@ -265,6 +286,10 @@ export class AccountService {
     if (wound && (wound.vendorsClosed || wound.itemsWithdrawn || wound.staffRevoked || wound.subscriptionsCancelled)) {
       this.app.log.info({ userId, ...wound }, '[5.1.1v] partner wound down on account deletion');
     }
+
+    // [COORD 19 Oct 03:46Z] Every saved card leaves service (REVOKED, unsent charges closed; the row is PT-1
+    // frozen) and card sessions that moved no money go; payment evidence stays (settlement history, §6).
+    await retireCardsAndSessions(prisma, userId);
 
     const memberships = await prisma.advertiserMember.findMany({
       where: { userId },
@@ -423,6 +448,20 @@ export class AccountService {
     }
     const pendingAvatarObjects = openAvatarObligations.size;
 
+    // [IMAGES-E2E · REVIEW-F S2-1] This person's photos still owed a deletion (the portfolio queued
+    // above, or one an earlier run or a take-down could not delete): deleted now; any still open
+    // keeps the receipt pending, and this sweep's retry (or the standing one) finishes it.
+    // Read as the named system capability: the census sees this person's rows whatever tenant
+    // the request runs in (an admin-run erasure included), so "nothing owed" is never a blind spot.
+    // [REVIEW-G S3-1 / DUP-AUDIT B-4] The census is a proven system-login read (#1953's proof):
+    // unproven (no system login under the wall, a narrowed policy) = still pending, never "deleted".
+    pendingUploads += await owedPublicPhotoCount(prisma, userId, [...PUBLIC_PHOTO_DELETE_REASONS], (id) =>
+      runAsSystem('account-erasure-public-photos', () => retryStorageOrphan(prisma, storage, this.app.log, id)),
+    ).catch((err: unknown) => {
+      this.app.log.error({ err, userId }, 'account public-photo erasure census failed');
+      return 1;
+    });
+
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
     //     and the biometric face template — are erased with the person.
@@ -487,6 +526,22 @@ export class AccountService {
     await prisma.supplyWatch.deleteMany({ where: { customerId: userId } });
     await prisma.cart.deleteMany({ where: { customerId: userId } });
     await prisma.cartMergeReceipt.deleteMany({ where: { userId } });
+
+    // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
+    //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
+    //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
+    // [IMAGES-E2E · DUP-AUDIT B-2] A portfolio photo still listed here (normally none: the cut-off
+    // cleared them) got its deletion row before its pointer went; deleted now, or it stays owed.
+    const lateProfilePhotos = await deidentifyProfiles(prisma, userId);
+    if (lateProfilePhotos.length > 0) {
+      pendingUploads += await runAsSystem('account-erasure-public-photos', async () => {
+        let open = 0;
+        for (const id of lateProfilePhotos) if (!(await retryStorageOrphan(prisma, storage, this.app.log, id))) open += 1;
+        return open;
+      }).catch(() => lateProfilePhotos.length);
+    }
+    await deidentifyCaseRecords(prisma, userId);
+    await deidentifySafetyRecords(prisma, userId);
 
     // 4. De-identify the account row. It stays (orders/ratings reference it for
     //    the legal retention window) but the person is stripped from it. The

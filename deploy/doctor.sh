@@ -86,6 +86,13 @@ else
         *'"redis":"ok"'*) ok "redis answering" ;;
         *) bad "redis check not ok: $HEALTH" ;;
       esac
+      # [Row 312] The upload malware scanner, as the API itself sees it.
+      case "$HEALTH" in
+        *'"malwareScanner":"ok"'*) ok "upload malware scanner answering (uploads are scanned)" ;;
+        *'"malwareScanner":"off"'*) warn "upload malware scanner is OFF (MALWARE_SCAN dark): uploads are stored unscanned" ;;
+        *'"malwareScanner":"down"'*) bad "upload malware scanner is DOWN: every upload is refused until clamd answers (docker compose -f deploy/docker-compose.yml logs --tail=100 clamd)" ;;
+        *) warn "upload malware scanner state not reported (an API older than the scanner deployment)" ;;
+      esac
       ;;
     # No token, or a rejected one: the API hides the per-check detail and the
     # only thing a 200 tells us is the aggregate status. That is not a FAIL.
@@ -152,7 +159,7 @@ if command -v docker >/dev/null 2>&1; then
   # A wedged docker CLI is itself a known failure state — bound the wait where
   # the platform allows it.
   if bounded "${COMPOSE[@]}" ps >/dev/null 2>&1; then
-    for c in postgres redis; do
+    for c in postgres redis clamd; do
       ID="$(bounded "${COMPOSE[@]}" ps -q "$c" 2>/dev/null || true)"
       if [ -n "$ID" ] && [ "$(docker inspect -f '{{.State.Status}}' "$ID" 2>/dev/null || true)" = running ]; then
         POLICY=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$ID" 2>/dev/null || echo '?')
@@ -200,7 +207,7 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   RS=$(db_query \
     "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
   if [ -z "$RH" ]; then
-    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh --project swift deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
   fi
@@ -253,6 +260,23 @@ elif [ "$(env_line PILOT_ENV)" = production ] && command -v docker >/dev/null 2>
   if [ -n "$WALL_LOGINS" ] && [ "$WALL_LOGINS" != 0 ]; then
     bad "the least-privilege logins exist (Phase C has run) but deploy/.env does not set TENANT_RLS_BIND=1: production never goes back to the owner's login (owner ruling, 14 Oct)"
   fi
+fi
+
+# [item 20] The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is switched
+# separately, after its own staging journey run — never with Phase C. Until
+# then deploy/.env names no OWNER_RLS_BIND and no role is a member of
+# swift_owner_wall: either half alone makes the API refuse to boot or every
+# owner-walled read come back empty. Read-only; a count, never a name.
+if [ -n "$(env_line OWNER_RLS_BIND)" ]; then
+  bad "deploy/.env sets OWNER_RLS_BIND: the owner wall is switched separately, after its own staging journey run (not with Phase C); remove the line"
+fi
+if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q postgres 2>/dev/null || true)" ]; then
+  OWNER_WALL_MEMBERS="$(db_query "SELECT count(*) FROM pg_auth_members m JOIN pg_roles w ON w.oid = m.roleid WHERE w.rolname = 'swift_owner_wall';" 2>/dev/null || true)"
+  case "$OWNER_WALL_MEMBERS" in
+    "") ;;
+    0) ok "no database role is a member of swift_owner_wall (the owner wall stays off)" ;;
+    *) bad "$OWNER_WALL_MEMBERS database role(s) are members of swift_owner_wall: the owner wall is switched separately, after its own staging journey run; revoke the grant before any deploy" ;;
+  esac
 fi
 
 # ── 5. The disk — the quietest killer on this machine's record ──────────────

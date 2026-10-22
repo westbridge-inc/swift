@@ -1,20 +1,21 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
 import { money } from '@/lib/customer';
-import { courierEstimate, requestCourier } from '@/lib/customer-courier';
+import { courierEstimate, requestCourier, type CourierRequest } from '@/lib/customer-courier';
 import { currentFix } from '@/lib/geolocate';
 import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place';
 // [W-18] The field moved to components/location-field.tsx and the TAXI form
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
 import { LocationField } from '@/components/location-field';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [WEB-PIN] Pinning either end on the map, as the phone does ("Set location on
 // map"). The map's code loads only when a pin is asked for.
-const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
+const PlacePinPanel = lazyRetry(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // [W-19] The text in the box IS the place, or there is no place. This form used
 // to keep the two apart — pick "42 Lamaha Street", edit the box to "9 Camp
@@ -35,6 +36,13 @@ const SIZES = [
   { k: 'EXTRA_LARGE', l: 'X-Large', d: 'Suitcase' },
 ];
 
+
+/** A request key the server accepts ([A-Za-z0-9._~-]{1,200}). */
+function newParcelKey(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `web-parcel-${crypto.randomUUID()}`
+    : `web-parcel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 export default function CourierPage() {
   const router = useRouter();
@@ -68,6 +76,7 @@ export default function CourierPage() {
   const [quoteRound, setQuoteRound] = useState(0);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const parcelIntent = useRef<{ intent: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [locating, setLocating] = useState(false);
@@ -142,7 +151,7 @@ export default function CourierPage() {
     if (!from || !to || fee === null || recipientMissing !== null || !declared) return;
     setBusy(true); setError(null);
     try {
-      const r = await requestCourier({
+      const parcel: CourierRequest = {
         pickup: { lat: from.lat, lng: from.lng },
         dropoff: { lat: to.lat, lng: to.lng },
         // the label submitted is the one that was CHOSEN, and the box shows it
@@ -155,7 +164,13 @@ export default function CourierPage() {
         declaresNoProhibitedItems: true,
         // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
         expectedFee: fee,
-      });
+      };
+      // [UI-SWEEP U65] One key per parcel intent: the same parcel pressed again
+      // (a lost answer, a double press) replays the first booking; a changed
+      // parcel is a new intent with a new key.
+      const intent = JSON.stringify(parcel);
+      if (parcelIntent.current?.intent !== intent) parcelIntent.current = { intent, key: newParcelKey() };
+      const r = await requestCourier(parcel, parcelIntent.current.key);
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
     } catch (e) {
