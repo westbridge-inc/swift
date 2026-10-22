@@ -1235,6 +1235,12 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
       s.emit('order:unsubscribe', { orderId: ride.id });
     };
   }, [d?.id, navigation, ride?.id]);
+  // [#2022 review S3-1] A driver landing on the ride ends the empty search the
+  // live event spoke about: if that driver later drops it, the new search is
+  // judged on its own (the server's noDriverFound counts only searches since).
+  useEffect(() => {
+    if (d?.id) setExhausted(false);
+  }, [d?.id]);
 
   // THE CHECK-IN CARD MUST SURVIVE A CLOSED APP.
   //
@@ -1291,7 +1297,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   }, [feedLive]);
   // The honest "nobody has taken it yet" card: the server's facts on a
   // reopened app, the live socket event while open (taxiNoDriver.ts).
-  const noDriver = noDriverView(ride, exhausted, nowTs);
+  const noDriver = noDriverView(ride, exhausted, nowTs, { rematching });
 
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);

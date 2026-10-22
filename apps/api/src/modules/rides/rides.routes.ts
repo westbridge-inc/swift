@@ -37,7 +37,8 @@ import { zMoneyWhole } from '../../utils/money-schema';
 import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } from './queue.service';
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
-import { makeDispatchService, TAXI_WAIT_LIMIT_MIN } from '../dispatch/dispatch.service';
+import { makeDispatchService } from '../dispatch/dispatch.service';
+import { readNoDriverFoundSinceAssignment, rideSearchFacts } from './search-facts';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
@@ -489,15 +490,11 @@ export async function ridesRoutes(app: FastifyInstance) {
           : customerCancelView({ ...ride, noMoverFound, assignedAt: await readAssignedAt(app.prisma, ride) }))
       : null;
     // [TAXI-FLOW 22 Oct 2026] A waiting ride's search, in the server's words
-    // (additive keys; builds 9/11/12 ignore them). `noDriverFound`: a search
-    // has already come back empty — the phone stops showing a bare spinner.
-    // `searchReleaseAt`: when the slow lane releases the ride if still nobody
-    // (dispatch's TAXI_WAIT_LIMIT_MIN from placement, the same clock).
-    const search = ride && ride.status === 'PENDING' && !ride.driverId
-      ? {
-          noDriverFound: noMoverFound,
-          searchReleaseAt: new Date(ride.placedAt.getTime() + TAXI_WAIT_LIMIT_MIN * 60_000).toISOString(),
-        }
+    // (additive keys; builds 9/11/12 ignore them): an empty search SINCE the
+    // latest driver took the ride, and when the slow lane releases it — never
+    // promised for a ride it holds for a person (search-facts.ts).
+    const search = ride
+      ? rideSearchFacts(ride, await readNoDriverFoundSinceAssignment(app.prisma, ride))
       : {};
     // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
     // stop's own); nothing while the switch is off.
