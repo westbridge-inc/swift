@@ -7,7 +7,8 @@ import * as Location from 'expo-location';
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { customerApi, riderApi, driverApi, rideApi } from '../services/api';
 import { currentDevicePosition } from '../services/devicePosition';
-import { TAXI_STOPS_CAPABILITY, maxStopsFrom } from '../lib/taxiItinerary';
+import { TAXI_STOPS_CAPABILITY, maxStopsFrom, rideStops } from '../lib/taxiItinerary';
+import { skippedStopsKey } from '../lib/routeLine';
 import { track } from '../lib/analytics';
 import {
   publishMoverLocation,
@@ -921,6 +922,33 @@ export function useTaxiStopAction() {
     onSettled: () => refreshAfterJobStep(qc),
   });
   return pv ? PV.previewMutation() : m;
+}
+
+/**
+ * [TAXI route line · MAPS-CHECK G1] The road through a driver's taxi ride
+ * (GET /driver/rides/:id/route), for the map. Read once per ride and per
+ * skipped stop — never polled, and outside the ['mover'] keys so a job step
+ * does not ask again. Any failure, a server from before the read, or preview
+ * answers null: the map keeps its straight heading line (lib/routeLine).
+ */
+export function useDriverRouteLine(job: any) {
+  const pv = usePreview();
+  const rideId = typeof job?.id === 'string' && job.id ? job.id as string : null;
+  const skipped = skippedStopsKey(rideStops(job));
+  return useQuery({
+    queryKey: ['driverRouteLine', rideId, skipped],
+    queryFn: async () => {
+      try {
+        return await unwrap(driverApi.rideRoute(rideId as string));
+      } catch {
+        return null;
+      }
+    },
+    enabled: !!rideId && !pv,
+    staleTime: 5 * 60_000,
+    retry: false,
+    meta: { silent: true },
+  });
 }
 
 // The live offer cards (the dispatch:offer stream, the queue, recovery, render

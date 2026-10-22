@@ -1,4 +1,4 @@
-// The pilot journey suite [TASK-057]: every one of the 42 ledger journeys,
+// The pilot journey suite [TASK-057]: every one of the 43 ledger journeys,
 // driven over real HTTP against the private journeys instance.
 //
 // Order of play:
@@ -60,7 +60,7 @@ export const LEDGER_ORDER = [
   'CUST-01', 'CUST-02', 'CUST-03', 'CUST-04', 'CUST-05',
   'VEND-01', 'VEND-02', 'VEND-03', 'VEND-04', 'VEND-05',
   'RIDE-01', 'RIDE-02', 'RIDE-03', 'RIDE-04',
-  'TAXI-01', 'TAXI-02', 'TAXI-03', 'TAXI-04', 'TAXI-05',
+  'TAXI-01', 'TAXI-02', 'TAXI-03', 'TAXI-04', 'TAXI-05', 'TAXI-06',
   'COUR-01', 'COUR-02',
   'SERV-01', 'SERV-02',
   'MONEY-01', 'MONEY-02', 'MONEY-03',

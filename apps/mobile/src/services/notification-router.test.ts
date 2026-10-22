@@ -418,6 +418,8 @@ const CENSUS: Case[] = [
   // Backups are stale, or are running but never leaving the machine they
   // protect. Admin-only and acted on from the server, not the phone.
   { k: 'ops_backup_stale', to: null, why: 'admins' },
+  // The upload malware scanner (clamd) stopped answering: uploads are refused until it is back.
+  { k: 'ops_malware_scanner_down', d: { failures: 2, reason: 'x' }, to: null, why: 'admins — ops page, acted on from the server (row 312)' },
   { k: 'ops_reaper_stale', d: { ageHours: 50 }, to: null, why: 'admins — the document reaper is behind by two cycles (DOC-1 §9.2)' },
   { k: 'ops_reaper_failed', d: { error: 'x' }, to: null, why: 'admins — the document reaper threw (DOC-1 §9.2)' },
   { k: 'ops_image_policy_failed', d: { error: 'boom' }, to: null, why: 'admins — ops page, admin only' },

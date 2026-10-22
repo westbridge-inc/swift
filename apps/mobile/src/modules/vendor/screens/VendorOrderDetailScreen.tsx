@@ -3,9 +3,12 @@ import React, { useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
+import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
+import { orderPaymentLine } from '../storeWords';
+import { storeTimelineLabel } from '../../../lib/orderStatus';
 import { useOrderAction, useRetryDispatch, useSetOrderFulfillmentMode, useVendorOrder, usePickingActions, useVendorMenu, useReturnReceived } from '../../../hooks/vendorops';
 import { CustodyRecoveryNotice } from '../../orders/CustodyRecoveryNotice';
 import { storeSwapWaitText } from '../../orders/substitutionCopy';
@@ -23,7 +26,6 @@ import {
   formatSlot,
   MmgDisputeNotice,
   orderActions,
-  prettyStatus,
 } from '../shared';
 import { deliveryOwnerView } from './delivery-owner';
 
@@ -49,7 +51,7 @@ function TimelineRow({ entry, last }: { entry: any; last: boolean }) {
       <View style={{ flex: 1, paddingBottom: last ? 0 : space.md }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <T variant="label" weight="semibold">
-            {prettyStatus(entry.status)}
+            {storeTimelineLabel(entry.status)}
           </T>
           <T variant="caption" tone="muted">
             {fmtWhen(entry.createdAt)}
@@ -455,20 +457,22 @@ function VendorOrderDetailBody({ navigation, route }: any) {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm }}>
             <MaterialCommunityIcons name="cash" size={16} color={color.success} />
             <T variant="caption" weight="semibold" tone="muted">
-              {order.paymentMethod === 'CASH' ? 'Cash on handover — you keep 100% of the goods total.' : String(order.paymentMethod ?? '')}
+              {orderPaymentLine(order.paymentMethod)}
             </T>
           </View>
         </Card>
 
-        {/* Cancellation — reason straight off the order record */}
+        {/* Cancellation — the reason off the order record, in words: a system
+            code (NO_DRIVERS_AVAILABLE, FOOD_TOO_OLD) reads as the shared words
+            the web console uses, never as the code [UI-SWEEP U72] */}
         {s === 'CANCELLED' ? (
           <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.danger, padding: space.lg, marginBottom: space.md }}>
             <T variant="label" weight="semibold" tone="error">
               Cancelled {fmtWhen(order.cancelledAt)}
             </T>
-            {order.cancellationReason ? (
+            {cancellationReasonWords(order.cancellationReason, 'store') ? (
               <T variant="label" tone="muted" style={{ marginTop: 4 }}>
-                {order.cancellationReason}
+                {cancellationReasonWords(order.cancellationReason, 'store')}
               </T>
             ) : null}
           </View>
