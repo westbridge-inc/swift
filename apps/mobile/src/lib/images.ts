@@ -47,8 +47,13 @@ export const DARK_BLURHASH = 'L03R{_fQfQfQfQfQfQfQfQfQfQfQ';
  * `PhotoPlaceholder` on null (the vertical's ground colour, its pictogram and
  * the category's real name), so null is not a blank: it is the designed tile.
  */
-export function categoryPhoto(category: { name?: string | null; imageUrl?: string | null }): string | null {
-  return category.imageUrl ?? null;
+export function categoryPhoto(
+  category: { name?: string | null; imageUrl?: string | null },
+  width: StorePhotoWidth = 320, // a Home category tile is a small square
+): string | null {
+  // [IMAGES-E2E PR4] Through storePhotoUrl like every store photo: the stored value is a bare
+  // key ("items/<store>/<file>") that no image view can load without the API origin.
+  return storePhotoUrl(category.imageUrl, width);
 }
 
 /**
@@ -131,6 +136,14 @@ export const HERO_PHOTO_WIDTH: StorePhotoWidth = 1280;
 
 /** A key in a public photo folder (stores' photos, providers' portfolios), exactly as the upload saves it in object storage. */
 const STORE_PHOTO_KEY = /^\/?(?:items|portfolio)\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9_-]{16}(?:\.[A-Za-z0-9_-]{1,16})?$/;
+
+/** [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] A photo Swift keeps: a path with no host (the API's
+ *  utils/photo-address.ts rule). An outside address saved before photos became upload-only is no
+ *  longer handed to customers, so the store's own screens say it needs uploading again. */
+const KEPT_PHOTO_ADDRESS = /^\/?[A-Za-z0-9_-][A-Za-z0-9_./-]*$/;
+export function isKeptPhoto(url?: string | null): boolean {
+  return typeof url === 'string' && KEPT_PHOTO_ADDRESS.test(url);
+}
 
 /** [IMAGES-E2E] A store photo sized for where it is drawn: a key in the stores' photo
  *  folder asks the server for that width (a list gets a small copy, not the full

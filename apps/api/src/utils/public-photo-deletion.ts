@@ -35,6 +35,12 @@ export function isProviderPortfolioKey(key: string, providerId: string): boolean
   return parsed !== null && parsed.folder === 'portfolio' && parsed.ownerId === providerId;
 }
 
+/** A photo Swift keeps in THIS store's photo folder. */
+export function isStorePhotoKey(key: string, vendorId: string): boolean {
+  const parsed = parsePublicPhotoKey(key);
+  return parsed !== null && parsed.folder === 'items' && parsed.ownerId === vendorId;
+}
+
 /** Both stored shapes of one object, for the reference reads. */
 function bothShapes(key: string): string[] {
   const bare = key.startsWith('/uploads/') ? key.slice('/uploads/'.length) : key;

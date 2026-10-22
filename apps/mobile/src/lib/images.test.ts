@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 // stub it so these stay pure-logic tests.
 vi.mock('../services/api', () => ({ API_URL: 'https://api.test' }));
 
-import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto, categoryPhoto, storePhotoUrl, HERO_PHOTO_WIDTH } from './images';
+import { mediaUrl, kindForVendor, itemPhoto, vendorPhoto, categoryPhoto, storePhotoUrl, HERO_PHOTO_WIDTH, isKeptPhoto } from './images';
 
 describe('mediaUrl', () => {
   it('returns null for empty input', () => {
@@ -105,5 +105,20 @@ describe('store photos reach the screen at a size made for it [IMAGES-E2E]', () 
     expect(storePhotoUrl('items/cmstore01/../../verification/AbCdEfGhIjKlMnOp.jpg')).toBe('https://api.test/items/cmstore01/../../verification/AbCdEfGhIjKlMnOp.jpg');
     expect(storePhotoUrl('avatars/u1/AbCdEfGhIjKlMnOp.jpg')).toBe('https://api.test/avatars/u1/AbCdEfGhIjKlMnOp.jpg');
     expect(storePhotoUrl(null)).toBeNull();
+  });
+});
+
+describe('a menu section photo and a kept photo [IMAGES-E2E PR4]', () => {
+  const key = 'items/cmstore01/AbCdEfGhIjKlMnOp.jpg';
+
+  it('a section photo kept in object storage loads from the API at tile size (it was handed out as a bare key)', () => {
+    expect(categoryPhoto({ name: 'Mains', imageUrl: key })).toBe(`https://api.test/${key}?w=320`);
+  });
+
+  it('only a path with no host is a photo Swift keeps; an outside address is not', () => {
+    for (const kept of [key, `/uploads/${key}`, '/uploads/items/review-pack/v1/store--item.png']) expect(isKeptPhoto(kept)).toBe(true);
+    for (const outside of ['https://elsewhere.example/a.jpg', '//elsewhere.example/a.jpg', 'data:image/png;base64,AAAA', ' https://x/y', '', null, undefined]) {
+      expect(isKeptPhoto(outside as string | null | undefined)).toBe(false);
+    }
   });
 });
