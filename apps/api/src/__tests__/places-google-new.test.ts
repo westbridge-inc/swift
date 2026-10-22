@@ -2,15 +2,19 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GooglePlacesProvider } from '../providers/places/places-provider';
+import { PlacesProviderError } from '../providers/places/places-failure';
 
 // ---------------------------------------------------------------------------
 // GooglePlacesProvider on Places API (New). The owner's Google project only
 // offers Places API (New) — the legacy Places endpoints cannot be enabled — so
 // address search must call places.googleapis.com/v1 with the key in a header
 // and a field mask, while handing the app and web EXACTLY the shapes they get
-// today. Reverse geocoding stays on the Geocoding API. Every failure degrades
-// to empty/null (the hot path never throws) and the key never leaves the
-// server: not in a URL of the new endpoints, not in a log, not in a result.
+// today. Reverse geocoding stays on the Geocoding API. No matches stay an
+// empty list / null; every FAILURE is a typed PlacesProviderError (PLACES-LOUD,
+// 22 Oct: an empty list on a refused key was the silent "No matches" lie; the
+// route turns it into an honest 503, see places-fail-loud.test.ts), and the key
+// never leaves the server: not in a URL of the new endpoints, not in a log,
+// not in a result, not in an error.
 // fetch is mocked throughout; live calls run only on the production host.
 // ---------------------------------------------------------------------------
 
@@ -226,14 +230,14 @@ describe('GooglePlacesProvider.details — Place Details (New)', () => {
   });
 });
 
-describe('GooglePlacesProvider — every failure degrades (never throws)', () => {
+describe('GooglePlacesProvider — every failure is a PlacesProviderError (never a silent empty answer)', () => {
   const PLACE_OK = { displayName: { text: 'X' }, location: { latitude: 6.8, longitude: -58.1 } };
 
   const failures: Array<[string, () => void]> = [
     ['network error', () => stubFetch(() => Promise.reject(new TypeError('fetch failed')))],
     ['403 with an error body', () =>
       stubFetch(() => jsonResponse(403, { error: { code: 403, message: 'API key not valid', status: 'PERMISSION_DENIED' } }))],
-    // A failed status degrades even when the body would otherwise map.
+    // A failed status is a failure even when the body would otherwise map.
     ['500 with a usable-looking body', () => stubFetch(() => jsonResponse(500, { ...AUTOCOMPLETE_BODY, ...PLACE_OK }))],
     ['200 carrying an error body', () =>
       stubFetch(() => jsonResponse(200, { error: { code: 400, message: 'bad', status: 'INVALID_ARGUMENT' }, ...AUTOCOMPLETE_BODY, ...PLACE_OK }))],
@@ -242,14 +246,14 @@ describe('GooglePlacesProvider — every failure degrades (never throws)', () =>
     ['suggestions that are not a list', () => stubFetch(() => jsonResponse(200, { suggestions: { placeId: 'x' } }))],
   ];
 
-  it.each(failures)('autocomplete → [] on %s', async (_name, arrange) => {
+  it.each(failures)('autocomplete → PlacesProviderError on %s', async (_name, arrange) => {
     arrange();
-    await expect(provider().autocomplete('giftland')).resolves.toEqual([]);
+    await expect(provider().autocomplete('giftland')).rejects.toBeInstanceOf(PlacesProviderError);
   });
 
-  it.each(failures.filter(([n]) => n !== 'suggestions that are not a list'))('details → null on %s', async (_name, arrange) => {
+  it.each(failures.filter(([n]) => n !== 'suggestions that are not a list'))('details → PlacesProviderError on %s', async (_name, arrange) => {
     arrange();
-    await expect(provider().details('ChIJgiftland0001')).resolves.toBeNull();
+    await expect(provider().details('ChIJgiftland0001')).rejects.toBeInstanceOf(PlacesProviderError);
   });
 
   function hangingFetch() {
@@ -261,23 +265,27 @@ describe('GooglePlacesProvider — every failure degrades (never throws)', () =>
     );
   }
 
-  it('autocomplete gives up after the same 4 s timeout and returns []', async () => {
+  it('autocomplete gives up after the same 4 s timeout and fails as a timeout', async () => {
     vi.useFakeTimers();
     hangingFetch();
-    const pending = provider().autocomplete('giftland');
+    const pending = provider().autocomplete('giftland').then(() => null, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(3999);
     expect(calls[0]!.init.signal?.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
-    await expect(pending).resolves.toEqual([]);
+    const err = await pending;
+    expect(err).toBeInstanceOf(PlacesProviderError);
+    expect((err as PlacesProviderError).failure).toEqual({ reason: 'timeout' });
     expect(calls[0]!.init.signal?.aborted).toBe(true);
   });
 
-  it('details gives up after the same 4 s timeout and returns null', async () => {
+  it('details gives up after the same 4 s timeout and fails as a timeout', async () => {
     vi.useFakeTimers();
     hangingFetch();
-    const pending = provider().details('ChIJgiftland0001');
+    const pending = provider().details('ChIJgiftland0001').then(() => null, (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(4000);
-    await expect(pending).resolves.toBeNull();
+    const err = await pending;
+    expect(err).toBeInstanceOf(PlacesProviderError);
+    expect((err as PlacesProviderError).failure).toEqual({ reason: 'timeout' });
     expect(calls[0]!.init.signal?.aborted).toBe(true);
   });
 });
@@ -293,8 +301,16 @@ describe('GooglePlacesProvider — the key stays on the server', () => {
     }
   });
 
-  it('no success or failure path logs the key or returns it', async () => {
+  it('no success or failure path logs the key, returns it or carries it in an error', async () => {
     const results: unknown[] = [];
+    // A failure now rejects: keep what each call settled with (an answer, or the
+    // error's message, stack and failure record) and search all of it for the key.
+    const settle = (p: Promise<unknown>) => p.then(
+      (value) => value,
+      (err: unknown) => (err instanceof PlacesProviderError
+        ? { error: err.name, message: err.message, stack: err.stack, failure: err.failure }
+        : { unexpected: String(err) }),
+    );
     const scenarios: Array<() => void> = [
       () => stubFetch((url) => jsonResponse(200, url.includes(':autocomplete') ? AUTOCOMPLETE_BODY : { location: { latitude: 6.8, longitude: -58.1 } })),
       () => stubFetch(() => Promise.reject(new Error(`connect failed for key=${KEY}`))),
@@ -303,12 +319,14 @@ describe('GooglePlacesProvider — the key stays on the server', () => {
     ];
     for (const arrange of scenarios) {
       arrange();
-      results.push(await provider().autocomplete('giftland', { near: { lat: 6.8, lng: -58.1 } }));
-      results.push(await provider().details('ChIJgiftland0001'));
-      results.push(await provider().reverseGeocode({ lat: 6.8, lng: -58.1 }));
+      results.push(await settle(provider().autocomplete('giftland', { near: { lat: 6.8, lng: -58.1 } })));
+      results.push(await settle(provider().details('ChIJgiftland0001')));
+      results.push(await settle(provider().reverseGeocode({ lat: 6.8, lng: -58.1 })));
     }
     expect(logged.filter((l) => l.includes(KEY))).toEqual([]);
     expect(JSON.stringify(results)).not.toContain(KEY);
+    // Every failure scenario failed loudly with the provider's own error type.
+    expect(JSON.stringify(results)).not.toContain('"unexpected"');
     // Places (New) carries the key only in the X-Goog-Api-Key header.
     for (const c of calls) {
       if (c.url.startsWith('https://places.googleapis.com/')) {
@@ -335,15 +353,18 @@ describe('GooglePlacesProvider — the legacy Places endpoints are gone; Geocodi
     expect(src).not.toMatch(/maps\/api\/place\//);
   });
 
-  it('reverse geocoding still uses the Geocoding API and degrades to null', async () => {
+  it('reverse geocoding still uses the Geocoding API; a refusal or a network error fails loudly', async () => {
     stubFetch(() => jsonResponse(200, { status: 'OK', results: [{ formatted_address: 'Regent St, Georgetown, Guyana' }] }));
     expect(await provider().reverseGeocode({ lat: 6.8, lng: -58.1 })).toBe('Regent St, Georgetown, Guyana');
     const u = new URL(calls[0]!.url);
     expect(`${u.origin}${u.pathname}`).toBe('https://maps.googleapis.com/maps/api/geocode/json');
     expect(u.searchParams.get('latlng')).toBe('6.8,-58.1');
     stubFetch(() => jsonResponse(200, { status: 'REQUEST_DENIED', results: [] }));
-    expect(await provider().reverseGeocode({ lat: 6.8, lng: -58.1 })).toBeNull();
+    await expect(provider().reverseGeocode({ lat: 6.8, lng: -58.1 })).rejects.toBeInstanceOf(PlacesProviderError);
     stubFetch(() => Promise.reject(new TypeError('fetch failed')));
+    await expect(provider().reverseGeocode({ lat: 6.8, lng: -58.1 })).rejects.toBeInstanceOf(PlacesProviderError);
+    // No address for the point is an empty answer, not a failure.
+    stubFetch(() => jsonResponse(200, { status: 'ZERO_RESULTS', results: [] }));
     expect(await provider().reverseGeocode({ lat: 6.8, lng: -58.1 })).toBeNull();
   });
 });
