@@ -268,6 +268,12 @@ async function setPlatforms(value: unknown | null) {
   else await app.prisma.platformConfig.upsert({ where: { key: FEE_CHECKOUT_PLATFORMS_KEY }, create: { key: FEE_CHECKOUT_PLATFORMS_KEY, value: value as never }, update: { value: value as never } });
   resetFeeCheckoutSwitchCache();
 }
+/** The pause's audit rows written after this call (by id, never by clock: the database's clock may drift). */
+async function newAuditRows() {
+  const actions = ['BILLING_FEE_PAUSE_STARTED', 'BILLING_FEE_PAUSE_ENDED'];
+  const seen = (await app.prisma.auditLog.findMany({ where: { action: { in: actions } }, select: { id: true } })).map((r) => r.id);
+  return (action: string) => app.prisma.auditLog.findMany({ where: { action, id: { notIn: seen } }, select: { changes: true } });
+}
 /** The sandbox (push rail on) resumes any pause a case opened; then the pause's own rows go. */
 async function noPauseOpen(): Promise<void> {
   await syncMmgPauseClock(app.prisma, new Date(), { NODE_ENV: 'test', MMG_DRIVER: 'sandbox' });
@@ -336,10 +342,11 @@ describe('live MMG with the push rail off and the checkout off: every fee is pau
 
   it('the pause tick opens the span and names the case in the audit row; the push rail back resumes it', async () => {
     const t0 = new Date();
+    const audit = await newAuditRows();
     try {
       const out = await syncMmgPauseClock(app.prisma, t0, { NODE_ENV: 'development', ...LIVE });
       expect(out).toMatchObject({ paused: true });
-      const started = await app.prisma.auditLog.findMany({ where: { action: 'BILLING_FEE_PAUSE_STARTED', createdAt: { gte: new Date(t0.getTime() - 1000) } }, select: { changes: true } });
+      const started = await audit('BILLING_FEE_PAUSE_STARTED');
       expect(started).toHaveLength(1);
       expect(started[0]!.changes).toMatchObject({ reason: 'NO_LIVE_PAY_PATH', mmg: 'no-push-rail-no-live-checkout', card: 'off' });
     } finally {
@@ -355,8 +362,7 @@ describe('the pause opens and closes as a platform switch goes off and on', () =
     stub(env);
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
     const t0 = new Date();
-    const since = new Date(t0.getTime() - 1000);
-    const audit = (action: string) => app.prisma.auditLog.findMany({ where: { action, createdAt: { gte: since } }, select: { changes: true } });
+    const audit = await newAuditRows();
     try {
       expect(await syncMmgPauseClock(app.prisma, t0, env)).toMatchObject({ paused: false });
       expect(await audit('BILLING_FEE_PAUSE_STARTED')).toHaveLength(0);

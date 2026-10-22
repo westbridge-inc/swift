@@ -111,7 +111,8 @@ async function subWithRelations(subId: string) {
 const sub = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id } });
 const clockOf = (id: string) => app.prisma.billingDunningClock.findUnique({ where: { subscriptionId: id } });
 const OFF = { MMG_DRIVER: 'disabled' };
-const ON = { MMG_DRIVER: 'sandbox' };
+// A real environment always names its mode (runtime-mode.ts refuses an unset NODE_ENV); the push rail reads it.
+const ON = { NODE_ENV: 'test', MMG_DRIVER: 'sandbox' };
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -648,10 +649,10 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
     // [22 Oct, COORD ruling on REVIEW-M's note] "MMG driver live" alone is no longer a way to pay: with
     // the push rail off and the MMG checkout off, no partner can pay with MMG, so the fee is paused
     // (these two lines read false before: that was the gap). fee-pause-pay-path.test.ts has the full table.
-    expect(await noLivePayPath(app.prisma, { MMG_DRIVER: 'live' })).toBe(true);
-    expect(await noLivePayPath(app.prisma, { MMG_DRIVER: 'live', CARD_RAIL_KILL: '1', PAYMENT_PROVIDER: 'disabled' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test', MMG_DRIVER: 'live' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test', MMG_DRIVER: 'live', CARD_RAIL_KILL: '1', PAYMENT_PROVIDER: 'disabled' })).toBe(true);
     // The sandbox off production pushes (mmgPushRailOn), so it is a way to pay.
-    expect(await noLivePayPath(app.prisma, {})).toBe(false);
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test' })).toBe(false);
   });
 
   it('MMG on: a cash store with no card and no balance is billed as ever (and fails for want of money) — never paused', async () => {

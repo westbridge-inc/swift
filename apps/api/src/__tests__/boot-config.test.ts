@@ -283,7 +283,7 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses the MMG push rail switch in production (MMG_PUSH_RAIL_ON=%j), whatever the driver', (value) => {
     expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
     expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
-    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: undefined, MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
   });
 
   it.each([undefined, '', '0'])('boots with the MMG push rail switch off (%j)', (value) => {

@@ -1078,7 +1078,14 @@ explicitly off. Beyond the earlier guards:
   a person. The poller leaves every MMG row
   untouched, and any MMG call refuses with MMG_DISABLED.
   To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
-  together (cash partners pay through the checkout page) and redeploy;
+  together (cash partners pay through the checkout page) and redeploy:
+  production refuses `MMG_DRIVER=live` without `MMG_CHECKOUT_ENABLED=1`,
+  since it never sends MMG charge requests and the checkout page is the
+  only MMG way to pay. The pause also counts MMG as a way to pay only
+  while the checkout is live on EVERY platform (the platform-config row
+  `billing.feeCheckout.platforms`): **never set a platform there to
+  `false` while fees run** unless pausing every partner's fee is intended
+  (one platform off pauses every fee on the server, cash included);
   turning a real card provider on also ends the pause, so do it only when
   partners can open the card pages (note the per-platform card switch: iOS
   is off unless switched on). While the launch lock below holds, production
