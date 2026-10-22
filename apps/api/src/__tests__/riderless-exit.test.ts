@@ -376,6 +376,43 @@ describe('[OF-01 · REVIEW-M S4-1] each riderless stretch gets its own warning a
     expect({ status: row.status, reason: row.cancellationReason }).toEqual({ status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON });
     expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(2);
   }, 300_000);
+
+  it('[REVIEW-G S4-1] a take and handback between the sweep’s read and its lock never cancels the NEW stretch: it is warned afresh first', async () => {
+    const cast = await castWalk(w, 1);
+    await offline(cast);
+    const { orderId } = await placeCashOrder(w, cast);
+    const id = orderId!;
+    expect((await call(w, 'PUT', `/api/v1/vendor/orders/${id}/accept`, cast.vendorOwner.token)).statusCode).toBe(200);
+    const accepted = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    const prep = accepted.estimatedPrepTime && accepted.estimatedPrepTime > 0 ? accepted.estimatedPrepTime : DEFAULT_PREP_PROMISE_MIN;
+    await advance(w, cast, (prep + 50) * MIN, SWEEP);
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(1);
+    // The first stretch's grace runs out with no tick in between.
+    await ageWorld(w, (RIDERLESS_GRACE_MIN + 1) * MIN);
+    // The sweep reads the row (first stretch, grace over: it will decide to cancel)...
+    const seen = await w.app.prisma.order.findUniqueOrThrow({
+      where: { id }, include: { vendor: { select: { name: true, owner: { select: { userId: true } } } } },
+    });
+    expect(seen.riderId).toBeNull();
+    // ...then, before it takes its lock, a rider takes the order and hands it back: a NEW riderless stretch.
+    const r = cast.riders[0]!;
+    expect((await call(w, 'POST', '/api/v1/rider/go-online', r.token, { latitude: r.lat, longitude: r.lng })).statusCode).toBe(200);
+    expect((await call(w, 'POST', `/api/v1/rider/orders/${id}/accept`, r.token)).statusCode).toBe(200);
+    expect((await call(w, 'POST', `/api/v1/rider/orders/${id}/handback`, r.token, { reason: 'flat tyre, cannot ride' })).statusCode).toBe(200);
+    await offline(cast);
+    const handedBack = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
+    expect({ riderId: handedBack.riderId, status: handedBack.status }).toEqual({ riderId: null, status: accepted.status });
+    expect(handedBack.riderAssignmentVersion).toBeGreaterThan(seen.riderAssignmentVersion);
+    // The cutoff, on the row it read: the locked re-read refuses the new stretch.
+    const deps = { prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: new NotificationService(w.app.prisma, w.app.io) };
+    expect(await settleTooOldOrder(deps, seen, 80, 45, new Date(), 'PREP_PROMISE')).toBe('UNTOUCHED');
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(accepted.status);
+    // The next tick treats it as the new stretch it is: warned afresh, not cancelled.
+    await runSweeps(w);
+    await drainDue(w);
+    expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe(accepted.status);
+    expect(cutoffNotices(await noticesOf(id, cast.customer.userId))).toHaveLength(2);
+  }, 300_000);
 });
 
 describe('[OF-01] the dispatch notices are told once per order state, not once per search', () => {
