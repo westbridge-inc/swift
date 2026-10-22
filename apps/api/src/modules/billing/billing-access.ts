@@ -9,8 +9,13 @@ import type { Prisma } from '@prisma/client';
  * waits and then lifts the hold through restoreBillingAccess. The owner is
  * locked even with no subscription yet: the activation may create the first.
  * NO KEY UPDATE, the mode the console's activation and reinstate already take
- * on the same row, so no caller upgrades its lock; it still waits for
- * settlement's FOR UPDATE.
+ * on the same row; it still waits for settlement's FOR UPDATE. On the daily
+ * belt's own projection transaction the person's row is already held FOR SHARE
+ * (the deletion barrier, account-closure.ts accountErasedUnderLock), so the
+ * activation waits there first and strengthens that lock here. Every
+ * transaction that takes the barrier (the projection, subscription
+ * withActivation) takes the identity-authority lock before it, so two such
+ * upgrades of the same row never meet.
  */
 export async function lockVendorActivationBilling(tx: Prisma.TransactionClient, userId: string): Promise<void> {
   await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${userId} FOR NO KEY UPDATE /* vendor-activation-fee-payer */`;

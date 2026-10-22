@@ -20,6 +20,7 @@ import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 import { lockBillingAuthority, readDunningClock } from '../modules/billing/dunning-clock';
 import { restoreBillingAccess } from '../modules/billing/billing-access';
+import { lockIdentityAuthority } from '../modules/integrity/identity-review';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -284,8 +285,27 @@ describe('[#1541] a store awaiting approval whose weekly fee billing holds goes 
       .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
   });
 
-  it.each(['settled', 'payer-only'] as const)('the activation waits for a settling payer before it reads the fee or writes the store (%s), and ends open', async (stage) => {
-    const { owner, vendor, sub } = await pendingStoreWithFee('SUSPENDED', `lock-${stage}`, false);
+  // Where the activation meets the settling payer depends on its entry. The daily belt's own projection
+  // transaction reads the person's row FOR SHARE first (#1905's deletion barrier, account-closure.ts), so it
+  // waits there, before any fee read. A projection run inside a caller's transaction takes no barrier (a
+  // transaction client has no $transaction): there the projection's own payer lock
+  // (lockVendorActivationBilling) is the first lock on the person's row. Every caller in the service today
+  // locks that row itself before it projects; the 'caller-tx' entry pins that the projection does not rely
+  // on it.
+  const ENTRIES = {
+    belt: { wait: 'activation-deletion-barrier', run: (userId: string) => svc.reprojectVendorActivation(userId) },
+    'caller-tx': {
+      wait: 'vendor-activation-fee-payer',
+      run: (userId: string) => app.prisma.$transaction(async (tx) => {
+        await lockIdentityAuthority(tx);
+        await (svc as unknown as { projectVendorActivation: (db: unknown, u: string) => Promise<void> }).projectVendorActivation(tx, userId);
+      }, { timeout: 20_000 }),
+    },
+  } as const;
+  it.each([
+    ['settled', 'belt'], ['payer-only', 'belt'], ['settled', 'caller-tx'], ['payer-only', 'caller-tx'],
+  ] as const)('the activation waits for a settling payer before it reads the fee or writes the store (%s, %s entry), and ends open', async (stage, entry) => {
+    const { owner, vendor, sub } = await pendingStoreWithFee('SUSPENDED', `lock-${stage}-${entry}`, false);
     let releasePayment!: () => void;
     const release = new Promise<void>((resolve) => { releasePayment = resolve; });
     let paymentReady!: () => void;
@@ -309,15 +329,15 @@ describe('[#1541] a store awaiting approval whose weekly fee billing holds goes 
       return lifted;
     }, { timeout: 20_000 });
     await ready;
-    // The daily belt's own path: its projection transaction.
-    const activation = svc.reprojectVendorActivation(owner.id);
+    const activation = ENTRIES[entry].run(owner.id);
+    const waitAt = `%${ENTRIES[entry].wait}%`;
     let blocked = false;
     try {
       const deadline = Date.now() + 8000;
       while (!blocked && Date.now() < deadline) {
         const rows = await app.prisma.$queryRaw<Array<{ n: number }>>`
           SELECT count(*)::int AS n FROM pg_stat_activity
-          WHERE wait_event_type = 'Lock' AND query LIKE '%vendor-activation-fee-payer%' AND query NOT LIKE '%pg_stat_activity%'`;
+          WHERE wait_event_type = 'Lock' AND query LIKE ${waitAt} AND query NOT LIKE '%pg_stat_activity%'`;
         blocked = rows[0]!.n > 0;
         if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20));
       }
@@ -326,7 +346,7 @@ describe('[#1541] a store awaiting approval whose weekly fee billing holds goes 
     }
     const outcomes = await Promise.allSettled([payment, activation]);
     expect(outcomes.map((o) => o.status), 'settlement and activation both commit, no lock-order deadlock').toEqual(['fulfilled', 'fulfilled']);
-    expect(blocked, 'the activation waited at the payer lock').toBe(true);
+    expect(blocked, `the activation waited at its first lock on the payer (${ENTRIES[entry].wait})`).toBe(true);
     expect((outcomes[0] as PromiseFulfilledResult<boolean>).value).toBe(false);
     // The activation ran after the payment committed: it saw the fee paid and opened the store itself.
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
