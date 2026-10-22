@@ -203,6 +203,43 @@ export async function isProviderVerified(
   return checklist.every((docType) => have.has(docType));
 }
 
+/**
+ * [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The documents a trade may require that are LICENCES issued for the trade:
+ * the GEI electrical licence (electrician, solar / generator / inverter installer) and the Pesticides and Toxic
+ * Chemicals Control Board's operator licence (pest control). An ID, a police clearance, a food handler's certificate or
+ * a premises registration is never called a licence.
+ */
+export const TRADE_LICENCE_DOC_TYPES: ReadonlySet<string> = new Set(['gei_electrical_licence', 'pest_control_operator_licence']);
+
+/** The licences among a checklist, in checklist order. */
+export function tradeLicencesOf(checklist: readonly string[]): string[] {
+  return checklist.filter((docType) => TRADE_LICENCE_DOC_TYPES.has(docType));
+}
+
+/**
+ * [ROLE-DOCS · PR 3 · R7 · GUARDRAILS §7(4)] "Licence on file, checked on [date]" from the licence the provider's trade
+ * REQUIRES: the latest day a PERSON approved one, or null. Fail closed: every licence the checklist names must be
+ * approved and current under THE evidence rule, each by a person — the approver must be a user of Swift, never an
+ * engine marker ('system', 'kyc:auto', 'auto:…'). An engine's approval still lets the provider work (the gate reads the
+ * record) but is never shown as a licence a person checked.
+ */
+export async function requiredLicenceCheckedOn(prisma: ProviderVerificationDb, userId: string, now = new Date()): Promise<Date | null> {
+  const licences = tradeLicencesOf(await providerChecklist(prisma, userId));
+  if (licences.length === 0) return null;
+  const rows = (await approvedEvidenceFor(prisma, userId, licences, now)).filter((row) => row.userId === userId);
+  const approvers = [...new Set(rows.map((row) => row.approvedBy).filter((by) => !/^(system$|kyc:|auto:|engine:)/.test(by)))];
+  const people = approvers.length === 0
+    ? new Set<string>()
+    : new Set((await prisma.user.findMany({ where: { id: { in: approvers } }, select: { id: true } })).map((u) => u.id));
+  let latest: Date | null = null;
+  for (const docType of licences) {
+    const checked = rows.filter((row) => row.docType === docType && people.has(row.approvedBy));
+    if (checked.length === 0) return null;
+    for (const row of checked) if (!latest || row.approvedAt > latest) latest = row.approvedAt;
+  }
+  return latest;
+}
+
 /** Optional observation seam for deterministic concurrency certification.
  * Production callers omit it; it never changes the transaction's decisions. */
 export interface ProviderVerificationRefreshObserver {
@@ -241,7 +278,8 @@ export async function projectProviderVerificationLocked(
         },
       })
     : 0;
-  const selfSkilled = matchingQualificationCount === 0;
+  // [ROLE-DOCS · PR 3] A required trade licence a person approved is not "self-skilled" either.
+  const selfSkilled = matchingQualificationCount === 0 && (await requiredLicenceCheckedOn(tx, userId)) === null;
 
   await observer?.afterSnapshot?.({
     providerId: provider.id,
