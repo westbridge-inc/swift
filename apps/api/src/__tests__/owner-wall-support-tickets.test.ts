@@ -14,6 +14,8 @@
  *    action, the write the one ticket helper), and the store's "Paid by MMG"
  *    closes it from inside the store's transaction (the second action);
  *  - the admin queue lists and resolves another person's ticket;
+ *  - the abandoned-application sweep (a daily job on the system login) sees
+ *    the person's open ticket, so it keeps their documents;
  *  - GOLDEN: with the wall ON the helper and the actions write and answer what
  *    the OFF path (the call each replaced) does, field by field;
  *  - a census pins every ticket accessor; the person binding is
@@ -240,6 +242,18 @@ describe('[item 20] support tickets for someone else', () => {
     expect(await owner.supportTicket.findUniqueOrThrow({ where: { id: ids.elsewhereTicket } })).toMatchObject({ message: 'another tenant' });
   });
 
+  it('the abandoned-application sweep, a daily job on the system login, still sees the person\'s open ticket and keeps their documents (#2011)', async () => {
+    const { openCasesOf, openCaseKeeps } = await import('../modules/verification/abandoned-application');
+    const applicant = await mkUser(['CUSTOMER'], 'CUSTOMER');
+    await owner.supportTicket.create({ data: { userId: applicant, category: 'OTHER', subject: `Waiting ${RUN}`, message: 'still open' } });
+    // The job runner's own context (jobs/queue.ts wraps every job in runAsSystem): the open ticket is seen.
+    const asJob = <T>(fn: () => Promise<T>) => tenant.runAsSystem('test:abandoned-application-sweep', fn);
+    expect(await asJob(() => openCasesOf(app.prisma, applicant))).toContain('support_ticket');
+    expect(await asJob(() => openCaseKeeps(app.prisma, applicant))).toBe(true);
+    // Bound to a tenant only, the walled login shows none of it: the check is right only as the system job it is.
+    expect(await tenant.runWithTenant(PRODUCTION, () => openCasesOf(app.prisma, applicant))).not.toContain('support_ticket');
+  });
+
   it('the admin queue lists and resolves another person\'s ticket', async () => {
     const list = await call('GET', '/api/v1/admin/support?status=OPEN', tokens.admin);
     expect(list.statusCode, list.body).toBe(200);
@@ -374,6 +388,9 @@ describe('[item 20] support tickets: the census', () => {
       // The account erasure's de-identification (#1905): the person's own tickets, keyed by userId, in a
       // transaction on the system login (runAsSystem 'account:erasure-case-records'), whoever closes the account.
       'modules/user/erasure-coverage.ts updateMany': 3,
+      // The abandoned-application sweep's open-case check (#2011): a daily queue job (runAsSystem), outside any
+      // transaction, so the count is re-issued on the system login and sees the person's open tickets.
+      'modules/verification/abandoned-application.ts count': 1,
       // Wall-OFF branches of the narrow actions.
       'jobs/queue.ts findFirst': 1,
       'modules/order/mmg-accept-expiry.ts updateMany': 1,
