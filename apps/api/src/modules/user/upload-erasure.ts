@@ -4,7 +4,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { StorageProvider } from '../../providers/storage/storage-provider';
 import { resolveLocalStorageKey, storageProviderKind } from '../../providers/storage/storage-key';
 import { deleteStorageObjectAndConfirmAbsent } from '../../lib/storage-orphans';
+import { censusSeesEveryRow, type CensusVisibilityRow } from '../../lib/census-visibility';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { writeDeletionReceipt } from '../verification/purge-receipt';
+import { UNCLAIMED_UPLOAD_DAYS, UPLOAD_DAY_MS } from '../verification/upload-window';
 
 /**
  * [Row 331 · DSAR-ERASURE · GUARDRAILS §2 "honour deletion end to end"]
@@ -38,6 +41,9 @@ async function owed<T>(log: Log | undefined, userId: string, what: string, unfin
   }
 }
 
+/** Who erased an upload the open-account sweep took (the receipt's deletedBy). */
+export const UNCLAIMED_SWEEP_ACTOR = 'unclaimed-upload-sweep';
+
 /** What a forgotten fingerprint reads as. Never a hex digest, so it can never equal a real upload's. */
 export const ERASED_FINGERPRINT = 'erased';
 
@@ -65,13 +71,27 @@ function sameObject(a: string, b: string): boolean {
   try { return resolveLocalStorageKey(a) === resolveLocalStorageKey(b); } catch { return false; }
 }
 
-/** The census reads every tenant's rows; a database that filters them cannot prove an object is unshared. */
+/** The census reads every tenant's rows; a database that filters them cannot prove an object is unshared.
+ * [Phase C] Proven per table on THIS connection (lib/census-visibility): no row security applied (the
+ * wall-off posture), or the system login under the tenant contract alone. Every pass of this module
+ * runs its transaction on the system login (runAsSystem below), so a walled erasure can prove it. */
 async function censusVisible(tx: Prisma.TransactionClient, tables: string[]): Promise<boolean> {
-  const rows = await tx.$queryRaw<Array<{ active: boolean }>>`
-    SELECT bool_or(row_security_active(t::regclass)) AS active FROM unnest(${tables}::text[]) AS t
-    /* upload-erasure-global-visibility */
-  `;
-  return rows.length === 1 && rows[0]?.active === false;
+  for (const table of tables) {
+    const rows = await tx.$queryRaw<CensusVisibilityRow[]>`
+      SELECT row_security_active(${table}::regclass) AS "active",
+             COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+             COALESCE((SELECT json_agg(json_build_object(
+                         'permissive', p.polpermissive,
+                         'cmd', p.polcmd::text,
+                         'applies', p.polroles = '{0}'::oid[]
+                                    OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                         'qual', pg_get_expr(p.polqual, p.polrelid)))
+                         FROM pg_policy p WHERE p.polrelid = ${table}::regclass), '[]'::json) AS "policies"
+      /* upload-erasure-global-visibility */
+    `;
+    if (!censusSeesEveryRow(rows)) return false;
+  }
+  return true;
 }
 
 /** The subject's row lock, taken before anything is read (the same lock order as the mover pass). */
@@ -104,10 +124,62 @@ async function closedAccount(tx: Prisma.TransactionClient, userId: string) {
  * a receipt written. Claimed objects belong to the document and mover passes.
  */
 export async function eraseUnclaimedUploads(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return owed(log, userId, 'unclaimed upload', { pending: 1, held: 0, erased: 0 }, () => db.$transaction(async (tx) => {
+  return eraseUnclaimed(db, storage, userId, { scope: 'closure' }, log);
+}
+
+/**
+ * [Row 249 · COORD 17:09Z option A] An upload nobody claimed within UNCLAIMED_UPLOAD_DAYS is erased while the
+ * account stays open: the same census, hold freeze, crypto-shred, confirmed absence and receipt as the account
+ * erasure, for this person's uploads made before `olderThan` only. A claim can never race it: a document or an
+ * identity check refuses an upload older than UPLOAD_CLAIM_DAYS (one day inside this window, upload-window.ts
+ * assertClaimableUpload), and in this mode an account-recovery pointer is a claim too (the case still needs it).
+ */
+export async function eraseStaleUnclaimedUploads(db: PrismaClient, storage: StorageProvider, userId: string, olderThan: Date, log?: Log) {
+  return eraseUnclaimed(db, storage, userId, { scope: 'stale', olderThan }, log);
+}
+
+
+/**
+ * The daily sweep: every person with an unshredded upload older than the window, a batch at a time. Each person's
+ * pass is the locked eraser above; one that cannot finish stays owed and the next run takes it again.
+ */
+export async function sweepStaleUnclaimedUploads(
+  db: PrismaClient, storage: StorageProvider, opts: { now?: Date; page?: number; log?: Log } = {},
+): Promise<{ people: number; erased: number; held: number; pending: number }> {
+  const olderThan = new Date((opts.now ?? new Date()).getTime() - UNCLAIMED_UPLOAD_DAYS * UPLOAD_DAY_MS);
+  // Every stale unshredded upload, a page at a time (keyset), so a person whose old uploads are all claimed
+  // never starves the ones behind them; an object a document names is the document's, never a candidate.
+  const people = new Set<string>();
+  for (let after: string | undefined; ;) {
+    const rows = await db.encryptedObject.findMany({
+      where: { shreddedAt: null, createdAt: { lt: olderThan }, ...(after ? { fileKey: { gt: after } } : {}) },
+      select: { fileKey: true, createdBy: true }, orderBy: { fileKey: 'asc' }, take: opts.page ?? 500,
+    });
+    if (!rows.length) break;
+    after = rows[rows.length - 1]!.fileKey;
+    const named = new Set((await db.verificationDocument.findMany({
+      where: { fileUrl: { in: rows.map((r) => r.fileKey) } }, select: { fileUrl: true },
+    })).map((d) => d.fileUrl));
+    for (const r of rows) if (!named.has(r.fileKey)) people.add(r.createdBy);
+  }
+  const total = { people: people.size, erased: 0, held: 0, pending: 0 };
+  for (const userId of [...people].sort()) {
+    const r = await eraseStaleUnclaimedUploads(db, storage, userId, olderThan, opts.log);
+    total.erased += r.erased; total.held += r.held; total.pending += r.pending;
+  }
+  return total;
+}
+
+type UnclaimedMode = { scope: 'closure' } | { scope: 'stale'; olderThan: Date };
+
+async function eraseUnclaimed(db: PrismaClient, storage: StorageProvider, userId: string, mode: UnclaimedMode, log?: Log) {
+  const capability = mode.scope === 'closure' ? 'account:erasure-unclaimed-uploads' : 'verification:unclaimed-upload-sweep';
+  return owed(log, userId, 'unclaimed upload', { pending: 1, held: 0, erased: 0 }, () => runAsSystem(capability, () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
-    const own = (await tx.encryptedObject.findMany({ where: { createdBy: userId, shreddedAt: null }, orderBy: { fileKey: 'asc' } }))
-      .filter((c) => c.createdBy === userId && c.shreddedAt === null);
+    const own = (await tx.encryptedObject.findMany({
+      where: { createdBy: userId, shreddedAt: null, ...(mode.scope === 'stale' ? { createdAt: { lt: mode.olderThan } } : {}) },
+      orderBy: { fileKey: 'asc' },
+    })).filter((c) => c.createdBy === userId && c.shreddedAt === null && (mode.scope !== 'stale' || c.createdAt < mode.olderThan));
     if (!own.length) return { pending: 0, held: 0, erased: 0 };
     // A document that names the object exactly owns it (the document pass, and its hold).
     const named = new Set((await tx.verificationDocument.findMany({
@@ -115,7 +187,10 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
     })).map((d) => d.fileUrl));
     const candidates = own.filter((c) => !named.has(c.fileKey));
     if (!candidates.length) return { pending: 0, held: 0, erased: 0 };
-    const user = await closedAccount(tx, userId);
+    // Erasure: only a committed closure authorizes it. The open-account sweep: only the age of an unclaimed upload.
+    const user = mode.scope === 'closure'
+      ? await closedAccount(tx, userId)
+      : await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } });
     let pending = 0;
     const leavePending = (key: string, reason: string) => {
       pending += 1;
@@ -142,6 +217,8 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
       const same = refs.filter((r) => sameObject(r.key, c.fileKey));
       // A document or mover pointer claims it: those passes own it (and its hold).
       if (same.some((r) => r.source === 'document' || r.source === 'mover')) continue;
+      // While the account is open, an account-recovery case that names the upload still needs it.
+      if (mode.scope === 'stale' && same.some((r) => r.source === 'recovery')) continue;
       if (same.some((r) => r.source !== 'envelope' ? r.owner !== userId : r.owner !== userId || r.key !== c.fileKey)) {
         leavePending(c.fileKey, 'Shared upload object');
         continue;
@@ -167,7 +244,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
         data: { shreddedAt: new Date(), sha256: ERASED_FINGERPRINT },
       });
       await writeDeletionReceipt(tx, {
-        submissionId: `upload:${digest(c.fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: 'unclaimed_upload', deletedBy: userId,
+        submissionId: `upload:${digest(c.fileKey)}`, subjectId: userId, tenantId: user.tenantId, docTypeCode: 'unclaimed_upload', deletedBy: mode.scope === 'closure' ? userId : UNCLAIMED_SWEEP_ACTOR,
         evidence: {
           sha256: /^[a-f0-9]{64}$/i.test(c.sha256) ? Buffer.from(c.sha256, 'hex') : null,
           bytesDeleted: BigInt(c.sizeBytes),
@@ -178,7 +255,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
       erased += 1;
     }
     return { pending, held: 0, erased };
-  }, { timeout: 60_000 }));
+  }, { timeout: 60_000 })));
 }
 
 /**
@@ -186,7 +263,7 @@ export async function eraseUnclaimedUploads(db: PrismaClient, storage: StoragePr
  * its photo is confirmed gone: until then the row is the obligation.
  */
 export async function eraseLivenessSelfies(db: PrismaClient, storage: StorageProvider, userId: string, log?: Log) {
-  return owed(log, userId, 'liveness selfie', { pending: 1, held: 0, erased: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'liveness selfie', { pending: 1, held: 0, erased: 0 }, () => runAsSystem('account:erasure-liveness-selfies', () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const rows = await tx.livenessCheck.findMany({ where: { userId }, select: { selfieUrl: true } });
     // A hold keeps the photos AND their rows (the rows say where the photos are).
@@ -217,7 +294,7 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
     // Every row goes except those whose photo is still owed: they are the obligation.
     await tx.livenessCheck.deleteMany({ where: { userId, ...(kept.length ? { selfieUrl: { notIn: kept } } : {}) } });
     return { pending: kept.length, held: 0, erased };
-  }, { timeout: 60_000 }));
+  }, { timeout: 60_000 })));
 }
 
 /**
@@ -228,7 +305,7 @@ export async function eraseLivenessSelfies(db: PrismaClient, storage: StoragePro
  * receipts keep theirs (append-only legal evidence that no matcher reads).
  */
 export async function forgetErasedFingerprints(db: PrismaClient, userId: string, log?: Log): Promise<{ forgotten: number; pending: number; held: number }> {
-  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1, held: 0 }, () => db.$transaction(async (tx) => {
+  return owed(log, userId, 'fingerprint', { forgotten: 0, pending: 1, held: 0 }, () => runAsSystem('account:erasure-fingerprints', () => db.$transaction(async (tx) => {
     await lockSubject(tx, userId);
     const user = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { phone: true } });
     // Never for a live account: its purged documents still answer the duplicate check.
@@ -253,5 +330,5 @@ export async function forgetErasedFingerprints(db: PrismaClient, userId: string,
       /* upload-erasure-forget-fingerprints */
     `;
     return { forgotten, pending: 0, held: 0 };
-  }));
+  })));
 }

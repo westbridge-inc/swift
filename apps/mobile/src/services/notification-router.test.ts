@@ -372,6 +372,7 @@ const CENSUS: Case[] = [
   { k: 'verification_rejected', to: { screen: 'IdentityVerification' }, why: 'document owner — they must re-upload. notifyRejection sends no audience, so the open app decides (table below); with no app context, the customer ID screen' },
   { k: 'verification_expired', d: { docId: 'd1', audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — renew it on the documents screen of its role' },
   { k: 'verification_expiry_reminder', d: { docId: 'd1', daysLeft: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'document owner — an approved document re-opens for upload in its renewal window, on that screen' },
+  { k: 'verification_application_abandoned', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'applicant — [Row 249] their unfinished application documents will be deleted in 14 days; finishing it happens on the documents screen of its role' },
   { k: 'verification_forced_offline', d: { audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover — taken offline because a required document lapsed; renewing it is the way back online' },
   { k: 'verification_vehicle_lapsed', d: { docId: 'd1', subjectId: 's1', suspended: 3, audience: 'earner' }, to: { screen: 'MoverDocuments' }, why: 'mover who owns the vehicle — a vehicle document lapsed and its drivers cannot take jobs; it is renewed on the mover documents checklist' },
   { k: 'verification_l2', d: { audience: 'customer' }, to: { screen: 'IdentityVerification' }, why: 'customer — their ID is on file; the ID screen shows it' },
@@ -500,7 +501,7 @@ const PARTNER_FEE_KINDS = [
 ];
 
 /** The document notices sent to whoever owns the document — a mover, a customer or a store. */
-const DOCUMENT_KINDS = ['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder'];
+const DOCUMENT_KINDS = ['verification_approved', 'verification_rejected', 'verification_expired', 'verification_expiry_reminder', 'verification_application_abandoned'];
 
 /** Census rows whose recipient is a store (owner or team). */
 const STORE_KINDS = [
@@ -616,6 +617,7 @@ describe('every destination is a route the app actually registers', () => {
     verification_approved: 'a mover whose document was approved',
     verification_expired: 'a mover whose document expired',
     verification_expiry_reminder: 'a mover whose document expires soon',
+    verification_application_abandoned: 'a mover applicant whose unfinished application documents will be deleted',
     verification_forced_offline: 'a mover taken offline for a lapsed document',
     verification_vehicle_lapsed: 'a vehicle owner whose vehicle document lapsed',
     compliance_review_failed: 'a mover offline until documents are re-verified',

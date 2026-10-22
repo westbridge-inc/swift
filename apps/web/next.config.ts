@@ -71,6 +71,34 @@ export default function createNextConfig(phase: string): NextConfig {
     // @swift/types ships TypeScript source; Next must transpile it (the admin
     // console declares the same). The site reads the market zone from it.
     transpilePackages: ['@swift/types'],
+    // [Size budget, PERF 21 Oct] The customer app's shared code in ONE chunk. Next's default
+    // splitting only makes a shared chunk of 20 kB or more, so the small modules many customer
+    // pages share (the session context, the basket state, the chunk-retry helper, the shell's
+    // icons, skeletons and routes) were copied into each page's own chunk as well as the
+    // layout's: 2.5 to 4.5 kB loaded twice on every customer page. This group puts the app's own
+    // code (and lucide's icons) that at least 12 of the customer pages use into one chunk they all
+    // load. Customer pages only (app/(app)/...); the partner consoles, sign-in and legal pages keep
+    // Next's defaults. JavaScript only: CSS keeps Next's own chunking and order.
+    webpack: (config, { isServer }) => {
+      if (isServer) return config;
+      const splitChunks = config.optimization?.splitChunks;
+      if (!splitChunks || typeof splitChunks !== 'object') return config;
+      const appOwnCode = /[\\/](src[\\/]|lucide-react[\\/])/;
+      splitChunks.cacheGroups = {
+        ...(splitChunks.cacheGroups ?? {}),
+        customerAppShared: {
+          name: 'customer-app-shared',
+          chunks: (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? ''),
+          test: (module: { type?: string; nameForCondition?: () => string | null }) =>
+            !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? ''),
+          minChunks: 12,
+          minSize: 0,
+          priority: 25,
+          reuseExistingChunk: true,
+        },
+      };
+      return config;
+    },
     // The exact origin is inlined into every client chunk from the authority,
     // so no consumer can fall back to localhost in a release by accident.
     env: {

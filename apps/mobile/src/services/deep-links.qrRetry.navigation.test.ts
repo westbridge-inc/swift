@@ -143,4 +143,19 @@ describe('[UI-SWEEP U30] a QR retry that lands replaces the failure it was tappe
     expect(stack()).toEqual(['Home', 'Storefront']);
     expect(current()).toMatchObject({ name: 'Restaurant', params: { vendorId: 'short-store' } });
   });
+
+  it('[#1907 review S4-2] a retry that lands after the customer left "Could not connect" never replaces the screen they are on', async () => {
+    const outcome = await scanWhileOffline();
+    let land!: (v: unknown) => void;
+    fx.get.mockImplementationOnce(() => new Promise((resolve) => { land = resolve; }));
+    let retry!: Promise<unknown>;
+    act(() => { retry = retryQrDestination(outcome.destination, outcome.requestId); });
+    await act(async () => navigationRef.goBack());
+    expect(stack()).toEqual(['Home']);
+    await act(async () => { land({ data: { data: { verdict: 'WEB_RENDER', vendorId: 'short-store' } } }); await retry; });
+    await settle();
+    expect(stack(), 'the store opens OVER Home: the late answer never replaces the screen the customer is on').toEqual(['Home', 'Storefront']);
+    await act(async () => navigationRef.goBack());
+    expect(current()?.name).toBe('Home');
+  });
 });

@@ -97,7 +97,7 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
-    'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',
+    'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
     // Account security: the password changed and other devices were signed out;
     // password sign-in paused after many wrong attempts

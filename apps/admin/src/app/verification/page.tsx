@@ -13,6 +13,7 @@ import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchD
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
 import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { label } from '@/lib/labels';
 
 const EXPIRING_DOC_TYPES = [
   'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -33,7 +34,8 @@ const EXPIRING_DOC_TYPES = [
 ] as const;
 const EMPTY_INSURANCE: InsuranceCheck = { insurerName: '', policyNumber: '', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: false };
 const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', label: 'Customers' }, { value: 'all', label: 'Everything' }] as const;
-function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{status}</span>; }
+/** [BUG-GUARDS C5] The document's status in words ("Waiting for review"), never the code. */
+function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{label('VerificationDocumentStatus', status)}</span>; }
 
 function TimelineActor({ actor, applicant }: { actor: string | null; applicant: Applicant }) {
   const system = isSystemActor(actor);

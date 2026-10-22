@@ -1,4 +1,6 @@
 import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { ownerWallSystem } from '../../lib/owner-rls';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 import { sendPushAfterResponse } from '../../lib/push-after-response';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
@@ -26,8 +28,9 @@ const DEFAULT_PREFS: NotificationPrefs = { push: true, sms: true, email: false }
  *  sends stop paying for ghosts. Best-effort by design. */
 async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
   if (!invalidTokens?.length) return;
-  await prisma.deviceToken
-    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } })
+  // [item 20] Dead tokens are anyone's: the named capability under the owner wall.
+  await ownerWallSystem('push:dead-token-cleanup', () => prisma.deviceToken
+    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } }))
     .catch((err) => {
       // [STORE-ALERT] Best-effort, never silent: the count only, never a token.
       log().warn({ err, count: invalidTokens.length }, 'dead push token cleanup failed');
@@ -124,7 +127,8 @@ export async function escalateVendorAlert(
   if (team && !team.ringing) return 'stopped'; // suspended or closed down: the store rings nobody
   const ringing = team ? ringRecipients(team) : null;
 
-  const rows = await prisma.notification.findMany({
+  // [item 20] The store team's alert rows, read by the ladder job bound to the order's tenant: the named capability under the owner wall.
+  const rows = await ownerWallSystem('vendor-alert:ladder-rows', () => prisma.notification.findMany({
     where: {
       AND: [
         { data: { path: ['kind'], equals: 'vendor_order_alert' } },
@@ -133,7 +137,7 @@ export async function escalateVendorAlert(
     },
     include: { user: { select: { id: true, phone: true } } },
     orderBy: { createdAt: 'asc' },
-  });
+  }));
   const current = ringing ? rows.filter((row) => ringing.includes(row.userId)) : rows;
   // Acknowledged by someone on the team (or never sent to anyone current): done.
   if (current.length === 0 || current.some((row) => row.isRead)) return 'stopped';
@@ -164,10 +168,11 @@ export async function escalateVendorAlert(
       });
       // [RINGER] Each device is told what its app can ring with: the job
       // ring for a build that has it, today's push for builds 9-11.
-      const devices = await prisma.deviceToken.findMany({
+      // [item 20] The store team's devices, read for a job: the named capability under the owner wall.
+      const devices = await ownerWallSystem('push:vendor-re-alert-devices', () => prisma.deviceToken.findMany({
         where: { userId: alert.userId, isActive: true },
         select: PUSH_DEVICE_SELECT,
-      });
+      }));
       if (devices.length > 0) {
         await pushToDevices(channels.push, devices, 'Order still waiting!', alert.body, payload)
           .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
@@ -489,17 +494,16 @@ export class NotificationService {
     // must not strand later vendors because an earlier notify threw
     // [SWIFT-UG-NOTIF-02]. Persist is wrapped (returns '' on failure); fan-out is
     // wrapped separately — every failure is LOGGED, never propagated.
-    let notification: { id: string; createdAt: Date };
+    let notification: { id: string };
     try {
-      notification = await this.prisma.notification.create({
-        data: {
-          userId: payload.userId,
-          type: payload.type,
-          title: payload.title,
-          body: payload.body,
-          data: (data ?? undefined) as any,
-          dedupeKey: payload.dedupeKey ?? null,
-        },
+      // [item 20] Written for anyone (usually someone else): the one notice helper.
+      notification = await insertNoticeFor(this.prisma, {
+        userId: payload.userId,
+        type: payload.type,
+        title: payload.title,
+        body: payload.body,
+        data: (data ?? undefined) as any,
+        dedupeKey: payload.dedupeKey ?? null,
       });
     } catch (err) {
       // [REPORT-034 #30] A dedupe-key collision is the mechanism WORKING, not
@@ -513,10 +517,10 @@ export class NotificationService {
         (err as { code?: string }).code === 'P2002'
       ) {
         try {
-          const existing = await this.prisma.notification.findUnique({
-            where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey } },
+          const existing = await ownerWallSystem('notification:dedupe-hit', () => this.prisma.notification.findUnique({
+            where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey! } },
             select: { id: true },
-          });
+          }));
           if (existing) return { id: existing.id, pushed: false };
         } catch { /* fall through to the failure path below */ }
       }
@@ -572,7 +576,8 @@ export class NotificationService {
     let pushSubmitted = !options.requirePush;
     let notification: Notification | null;
     try {
-      notification = await this.prisma.notification.findUnique({ where: { id: notificationId } });
+      // [item 20] The recipient's notice, fanned out from whoever's request wrote it: the named capability under the owner wall.
+      notification = await ownerWallSystem('notification:fanout', () => this.prisma.notification.findUnique({ where: { id: notificationId } }));
     } catch (err) {
       log().warn({ err, notificationId }, 'persisted notification lookup failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'fanout_lookup' });
@@ -606,10 +611,11 @@ export class NotificationService {
 
       if (!prefs.push) recordNoPushDevice(data);
       if (prefs.push) {
-        const devices = await this.prisma.deviceToken.findMany({
+        // [item 20] The recipient's devices, read from whoever's request sends it: the named capability under the owner wall.
+        const devices = await ownerWallSystem('push:recipient-devices', () => this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
           select: PUSH_DEVICE_SELECT, orderBy: { token: 'asc' },
-        });
+        }));
         if (devices.length === 0) recordNoPushDevice(data);
         if (devices.length > 0) {
           // Channel failures must never break the request path — but after the
@@ -899,9 +905,10 @@ export class NotificationService {
       }
       const sentAt = new Date().toISOString();
       for (const id of alertIds) {
-        const row = await this.prisma.notification.findUnique({ where: { id }, select: { data: true } });
+        // [item 20] The store team's alert rows, marked from the customer's checkout: the named capability under the owner wall.
+        const row = await ownerWallSystem('vendor-alert:backup-sms', () => this.prisma.notification.findUnique({ where: { id }, select: { data: true } }));
         const data = row?.data && typeof row.data === 'object' && !Array.isArray(row.data) ? row.data as Record<string, unknown> : {};
-        await this.prisma.notification.update({ where: { id }, data: { data: { ...data, backupSmsAt: sentAt } as Prisma.InputJsonValue } });
+        await ownerWallSystem('vendor-alert:backup-sms', () => this.prisma.notification.update({ where: { id }, data: { data: { ...data, backupSmsAt: sentAt } as Prisma.InputJsonValue } }));
       }
     } catch (err) {
       // Never into the caller: the order exists and the ladder still runs.

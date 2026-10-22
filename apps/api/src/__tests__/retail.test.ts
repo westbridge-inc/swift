@@ -12,7 +12,8 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { guessColumnMapping, applyMapping, toImportCsv } from '../utils/catalogue-map';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { injectWithApproval } from './helpers/admin-approval';
+import { askAndApprove, injectWithApproval, seedSecondApproval } from './helpers/admin-approval';
+import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 
 // ---------------------------------------------------------------------------
 // Retail (spec §4.5): AI/heuristic CSV column-mapping import and the
@@ -254,6 +255,21 @@ describe('[A-13] a refund is owed before it is paid', () => {
   it('two decisions past the same pre-read produce one transition and one audit', async () => {
     const token = await admin();
     const r = await pendingReturn();
+    const decisions = ['REFUND_DUE', 'REJECTED'] as const;
+    const resolveRequest = (status: (typeof decisions)[number], approvalId?: string) => ({
+      method: 'PUT' as const, url: `/api/v1/admin/returns/${r.id}/resolve`, payload: { status },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': 'application/json', authorization: `Bearer ${token}`,
+        ...(approvalId ? { [APPROVAL_HEADER]: approvalId } : {}) },
+    });
+    // [U06] One ask per act: while the first decision's ask stands, a second
+    // decision on this return is refused at the gate...
+    const firstApproval = await askAndApprove(app, resolveRequest('REFUND_DUE'));
+    const refused = await app.inject(resolveRequest('REJECTED'));
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...so two approved decisions can only be approvals written before that
+    // rule. They race past one pre-read exactly as before: the write guard holds.
+    const approvals = [firstApproval, await seedSecondApproval(app, firstApproval, { body: (b) => ({ ...b, status: 'REJECTED' }) })];
     let release!: () => void;
     let locked!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -267,8 +283,7 @@ describe('[A-13] a refund is owed before it is paid', () => {
       await gate;
     }, { timeout: 20_000 });
     await Promise.race([acquired, blocker.then(() => { throw new Error('fixture lock released before requests'); })]);
-    const decisions = ['REFUND_DUE', 'REJECTED'] as const;
-    const requests = decisions.map((status) => inject('PUT', `/api/v1/admin/returns/${r.id}/resolve`, { status }, token));
+    const requests = decisions.map((status, i) => app.inject(resolveRequest(status, approvals[i])));
     let waiting = 0;
     let probeError: unknown;
     try {
