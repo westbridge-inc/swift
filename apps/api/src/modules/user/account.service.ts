@@ -239,11 +239,15 @@ export class AccountService {
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
       await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
-      await revokeAccessBeforeCleanup();
+      // [row 622] The tombstone (the exact erasure marker) BEFORE the cleanup, in this same transaction: the
+      // owner wall's erase actions (devices, notices) refuse any account that does not carry it. Nothing the
+      // cleanup runs reads users.status or users.phone (owner-wall-erase-guard.test.ts pins it), and the
+      // commit is the same either way.
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      await revokeAccessBeforeCleanup();
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
