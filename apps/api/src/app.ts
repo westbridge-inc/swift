@@ -267,11 +267,17 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return { status, timestamp: new Date().toISOString() };
     }
     const { EXHAUST_CAP, REDISPATCH_DELAY_MS } = await import('./modules/dispatch/dispatch.service');
+    // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
+    // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
+    // degraded: everything but uploads still works, and the probes must not take the API down with it.
+    const { malwareScannerStatus } = await import('./lib/malware-scan');
+    const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      malwareScanner,
       routing,
       // [PLACES-LOUD] Address search: last known status and the last failure's class and
       // Google status words (never a key or a query). Detail-gated like the rest.

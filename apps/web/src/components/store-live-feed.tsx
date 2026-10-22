@@ -11,7 +11,8 @@ import { openStoreFeed, setStoreFeedLive, storeFeedUrl } from '@/lib/store-live-
  * shell for a store the server listed for this account. An event re-reads only
  * what it names, through the dashboard's normal requests: the orders list and
  * that order (every event), and the overview (a new order or a status change,
- * the only events that move its figures). After a gap, one full re-read.
+ * the only events that move its figures); a booking change, the Schedule's
+ * bookings. After a gap, one full re-read.
  */
 export function StoreLiveFeed({ storeId }: { storeId: string }): null {
   const queryClient = useQueryClient();
@@ -26,8 +27,15 @@ export function StoreLiveFeed({ storeId }: { storeId: string }): null {
       url: storeFeedUrl(BROWSER_API_ORIGIN),
       storeId,
       onLive: (live) => setStoreFeedLive(storeId, live),
-      onEvent: (event, { orderId }) => reread(orderId, event === 'order:new' || event === 'order:status_changed'),
-      onResync: () => reread(undefined, true),
+      onEvent: (event, { orderId }) => {
+        // A booking made, moved or cancelled re-reads the Schedule only.
+        if (event === 'bookings:changed') void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'bookings') });
+        else reread(orderId, event === 'order:new' || event === 'order:status_changed');
+      },
+      onResync: () => {
+        reread(undefined, true);
+        void queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'bookings') });
+      },
     });
   }, [storeId, queryClient]);
   return null;

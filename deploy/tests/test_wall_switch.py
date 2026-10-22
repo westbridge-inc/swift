@@ -103,14 +103,15 @@ class RehearsalComposeRendered(unittest.TestCase):
         self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
         for volume in model['volumes'].values():
             self.assertTrue(volume['name'].startswith('swift-rehearsal_'), volume)
-        self.assertEqual(sorted(model['services']), ['api', 'meilisearch', 'migrate', 'postgres', 'redis', 'worker'])
+        # [Row 312] The copy's own upload malware scanner (no secret: it reads none).
+        self.assertEqual(sorted(model['services']), ['api', 'clamd', 'meilisearch', 'migrate', 'postgres', 'redis', 'worker'])
         for name, service in model['services'].items():
             with self.subTest(service=name):
                 self.assertNotIn('ports', service)
                 self.assertEqual(list(service['networks']), ['private'])
                 sources = [v['source'] for v in service.get('volumes', []) if v['type'] == 'bind']
                 self.assertNotIn('/run/swift-secrets', sources)
-                if name != 'redis':
+                if name not in ('redis', 'clamd'):
                     self.assertIn('/run/swift-rehearsal-secrets', sources)
         for name in ('api', 'worker'):
             self.assertEqual(wall_env(model['services'][name])['DATABASE_URL_FILE'], '/run/secrets/DATABASE_URL')

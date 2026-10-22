@@ -218,6 +218,26 @@ never edits deploy-api.yml or launches production.
 VROOM and the geocoders are opt-in profiles; enable them only after their data
 and disk budget are reviewed. Their Compose file publishes no host ports.
 
+### The upload malware scanner (row 312)
+
+Every upload is scanned by the `clamd` service (ClamAV, pinned by tag and
+digest in docker-compose.yml) on the private network before it is stored; the
+API and worker reach it as `clamd:3310` and it publishes no port. pilot-up.sh
+starts it before anything is stopped, waits until it is healthy (signatures
+loaded; a first start on a new volume can take a few minutes) and proves, from
+the new API image on the private network, that the EICAR test string is refused
+and ordinary bytes pass. While clamd does not answer, every upload is refused
+(503) -- the shift liveness selfie included -- and the worker pages ops after
+two failed checks (two minutes apart). `./deploy/doctor.sh` reports it.
+
+Memory: about 1 GB with the signatures loaded and about 2 GB for the moment of
+a signature reload (freshclam checks 12 times a day); the service's ceiling is
+2.5 GB. Production refuses `MALWARE_SCAN` in deploy/.env unless it is unset or
+`clamd`; on staging `MALWARE_SCAN=off` takes the gate dark (uploads unscanned).
+
+    docker compose -f deploy/docker-compose.yml ps clamd
+    docker compose -f deploy/docker-compose.yml logs --tail=100 clamd
+
 Verify the exact revision and public entrance:
 
     git rev-parse HEAD
@@ -795,7 +815,7 @@ runbook authorizes a production cutover.
 
 ## 8. Pilot journeys on staging (private instance)
 
-The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 42
+The pilot journey suite (scripts/livetest, `--suite=journeys`) drives all 43
 launch-proof journeys over real HTTP: signups, orders, dispatch, taxi, courier,
 services, safety, money records and admin controls. It signs accounts in with
 the dev OTP code, so it runs ONLY against a private instance:

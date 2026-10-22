@@ -6842,7 +6842,8 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ── Support tickets ──────────────────────────────────────────────────────
-  const support = new SupportService(tenantPrisma, notifications);
+  // [item 20 · support tickets] With the owner wall on, the queue reaches other people's tickets as this capability.
+  const support = new SupportService(tenantPrisma, notifications, { capability: 'admin:support-queue', client: app.prisma });
 
   app.get('/support', { preHandler: [adminGuard] }, async (request) => {
     const { status, page } = z.object({
@@ -6874,9 +6875,16 @@ export async function adminRoutes(app: FastifyInstance) {
   // is never closed from the support queue.
   app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const ticket = await tenantPrisma.supportTicket.findUnique({
-      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
-    });
+    // [item 20 · support tickets] Another person's ticket: with the owner wall on, the named capability inside this
+    // request's tenant boundary (the same boundary tenantPrisma adds).
+    const closureScope = ownerRlsBindEnabled() ? { user: { tenantId: requireTenantId() } } : null;
+    const ticket = closureScope
+      ? await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.findFirst({
+        where: { AND: [{ id }, closureScope] }, select: { id: true, userId: true, category: true, subject: true, status: true },
+      }))
+      : await tenantPrisma.supportTicket.findUnique({
+        where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+      });
     if (!ticket) throw new NotFoundError('SupportTicket', id);
     // The subject alone can be typed by anyone; the confirmation record is
     // written only by the in-app request, behind the deletion step-up.
@@ -6899,15 +6907,18 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     const outcome = await new AccountService(app).deleteAccount(ticket.userId);
     const complete = 'deleted' in outcome && outcome.deleted === true;
-    await tenantPrisma.supportTicket.updateMany({
-      where: { id, status: { not: 'RESOLVED' } },
-      data: {
-        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
-        adminNote: complete
-          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
-          : 'Account closed; the remaining erasure is pending and retried automatically.',
-      },
-    });
+    const closureWhere = { id, status: { not: 'RESOLVED' as const } };
+    const closureData = {
+      status: 'RESOLVED' as const, resolution: 'ACTION_TAKEN' as const, resolvedById: request.user.userId, resolvedAt: new Date(),
+      adminNote: complete
+        ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+        : 'Account closed; the remaining erasure is pending and retried automatically.',
+    };
+    if (closureScope) {
+      await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [closureWhere, closureScope] }, data: closureData }));
+    } else {
+      await tenantPrisma.supportTicket.updateMany({ where: closureWhere, data: closureData });
+    }
     return { success: true, data: { ticketId: id, outcome } };
   });
 

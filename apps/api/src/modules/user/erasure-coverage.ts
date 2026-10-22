@@ -8,7 +8,10 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
+import { PUBLIC_PHOTO_ACCOUNT_DELETION } from '../../utils/public-photo-deletion';
 import { eraseNoticesOf } from '../../lib/owner-wall-notices';
 
 /** What replaces a required text column the erasure empties. */
@@ -109,9 +112,9 @@ export async function retireCardsAndSessions(db: PrismaClient, userId: string): 
  * The profile rows stay (orders, rides, jobs and receipts point at them); what identifies the person goes.
  * Photos and documents go through the mover-object erasure and the unclaimed-upload erasure (#1818).
  */
-export async function deidentifyProfiles(db: PrismaClient, userId: string): Promise<void> {
-  await db.$transaction(async (tx) => {
-    if (!await lockPerson(tx, userId)) return;
+export async function deidentifyProfiles(db: PrismaClient, userId: string): Promise<string[]> {
+  return db.$transaction(async (tx) => {
+    if (!await lockPerson(tx, userId)) return [];
     await tx.rider.updateMany({ where: { userId }, data: {
       vehicleMake: null, vehicleModel: null, vehicleYear: null, vehicleColor: null, licensePlate: null,
       currentLat: null, currentLng: null, lastLocationUpdate: null, locationSessionId: null,
@@ -122,6 +125,12 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
       currentLat: null, currentLng: null, lastLocationUpdate: null, locationSessionId: null,
       mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null,
     } });
+    // [IMAGES-E2E · DUP-AUDIT B-2] Queue, then clear: every portfolio photo Swift keeps gets its
+    // durable deletion row (storage_orphans) BEFORE its pointer goes, so no object is orphaned.
+    const provider = await tx.serviceProvider.findUnique({ where: { userId }, select: { id: true, portfolioPhotos: true } });
+    const queuedPhotos = provider && provider.portfolioPhotos.length > 0
+      ? await queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, (await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { tenantId: true } })).tenantId, provider.portfolioPhotos, PUBLIC_PHOTO_ACCOUNT_DELETION)
+      : [];
     await tx.serviceProvider.updateMany({ where: { userId }, data: { bio: null, portfolioPhotos: [] } });
     // Order totals stay. The referral link goes, and the code is retired so no one is referred to a closed account.
     const customer = await tx.customer.findUnique({ where: { userId }, select: { id: true, referralCode: true, referredBy: true } });
@@ -134,6 +143,7 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
       where: { userId, NOT: { requestHash: ERASED_TEXT } },
       data: { result: ERASED_CHECKOUT_RESULT, requestHash: ERASED_TEXT },
     });
+    return queuedPhotos;
   });
 }
 
@@ -144,7 +154,10 @@ export async function deidentifyProfiles(db: PrismaClient, userId: string): Prom
  * was preserved for or sent to the authorities (a legal retention duty, Privacy Policy §6).
  */
 export async function deidentifyCaseRecords(db: PrismaClient, userId: string): Promise<void> {
-  await db.$transaction(async (tx) => {
+  // [item 20] On the system login: under the owner wall the support tickets below are visible only to their
+  // owner, so an admin's closure or the retry sweep would clear none of the person's ticket text. Its own
+  // transaction (it takes the client), never inside a caller's; with the walls off it runs as before.
+  await runAsSystem('account:erasure-case-records', () => db.$transaction(async (tx) => {
     if (!await lockPerson(tx, userId)) return;
     await tx.strike.updateMany({ where: { userId, OR: [{ phone: { not: null } }, { addressKey: { not: null } }] }, data: { phone: null, addressKey: null } });
     await tx.enforcementAction.updateMany({
@@ -168,7 +181,7 @@ export async function deidentifyCaseRecords(db: PrismaClient, userId: string): P
       data: { detail: null, resolutionNote: null },
     });
     await tx.ratingReport.updateMany({ where: { reporterId: userId, status: { not: 'PENDING' }, note: { not: null } }, data: { note: null } });
-  });
+  }));
 }
 
 /**
