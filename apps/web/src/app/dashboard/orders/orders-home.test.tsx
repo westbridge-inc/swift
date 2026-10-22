@@ -16,14 +16,14 @@ import { guyanaDayKey } from '@/lib/vendor-hub';
 type Role = 'OWNER' | 'MANAGER' | 'STAFF';
 interface Opts {
   role?: Role; lifetime?: number; open?: boolean; accepting?: boolean; selfDelivery?: boolean;
-  orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; holdProfileRefetch?: Promise<{ body: unknown }>; failProfileRefetch?: boolean;
+  orders?: unknown[]; storeRoles?: Record<string, Role>; status?: string; vendorType?: string; holdProfileRefetch?: Promise<{ body: unknown }>; failProfileRefetch?: boolean;
 }
 
 const writes: Array<{ method: string; path: string; body: unknown }> = [];
 const reads: string[] = [];
 
 function hubApi(opts: Opts = {}) {
-  const { role = 'OWNER', lifetime = 40, open = true, accepting = true, selfDelivery = false, orders = [], storeRoles, status = 'ACTIVE' } = opts;
+  const { role = 'OWNER', lifetime = 40, open = true, accepting = true, selfDelivery = false, orders = [], storeRoles, status = 'ACTIVE', vendorType = 'RESTAURANT' } = opts;
   const profileHold = opts.holdProfileRefetch;
   let profileReads = 0;
   const daily = Array.from({ length: 13 }, (_, i) => {
@@ -39,7 +39,7 @@ function hubApi(opts: Opts = {}) {
     if (path === '/vendor/stores') {
       return { body: { success: true, data: {
         stores: [
-          { id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', isCurrentlyOpen: open, acceptingOrders: accepting, city: null, isVerified: true },
+          { id: 'store-1', name: 'Sample Kitchen', vendorType, isCurrentlyOpen: open, acceptingOrders: accepting, city: null, isVerified: true },
           { id: 'store-2', name: 'Sample Shop', vendorType: 'STORE', isCurrentlyOpen: true, acceptingOrders: true, city: null, isVerified: true },
         ],
         selectedId: store, myRole: storeRoles?.[store] ?? role,
@@ -57,7 +57,7 @@ function hubApi(opts: Opts = {}) {
         vendors: [
           { id: 'store-2', name: 'Sample Shop', vendorType: 'STORE', status: 'ACTIVE', isVerified: true, isCurrentlyOpen: false, acceptingOrders: false, selfDeliveryEnabled: false, operatingHours: [], _count: { orders: 9, items: 1 } },
           {
-            id: 'store-1', name: 'Sample Kitchen', vendorType: 'RESTAURANT', status, isVerified: true,
+            id: 'store-1', name: 'Sample Kitchen', vendorType, status, isVerified: true,
             isCurrentlyOpen: open, acceptingOrders: accepting, selfDeliveryEnabled: selfDelivery,
             operatingHours: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, openTime: '08:00', closeTime: '22:00', isClosed: false })),
             _count: { orders: lifetime, items: 3 },
@@ -156,6 +156,7 @@ describe('the Orders home copies the app', () => {
     await waitFor(() => expect(tile('Insights').textContent).toMatch(/7d \$/));
     expect(tile('Insights').getAttribute('href')).toBe('/dashboard/insights');
     await waitFor(() => expect(tile('Hours & schedule').textContent).toContain('Daily · 8:00 AM–10:00 PM'));
+    expect(tile('Hours & schedule').getAttribute('href')).toBe('/dashboard/settings');
     await waitFor(() => expect(tile('My QR & number').textContent).toContain('https://swift.test/s/SAMPLE'));
     // [BUG-GUARDS C5] The QR and subscription states read as words, never the code.
     expect(tile('My QR & number').textContent).toContain('Active');
@@ -165,6 +166,14 @@ describe('the Orders home copies the app', () => {
     expect(tile('Billing').getAttribute('href')).toBe('/dashboard/weekly-fee');
     expect(tile('Billing').textContent).toContain('Active');
     expect(tile('Billing').textContent).not.toContain('ACTIVE');
+  });
+
+  it('a Services store\'s "Hours & schedule" tile opens its Schedule, as in the app', async () => {
+    hubApi({ role: 'OWNER', vendorType: 'SERVICE' });
+    renderWithQuery(<OrdersPage />);
+    const grid = await screen.findByRole('region', { name: 'Manage' });
+    const tile = within(grid).getByRole('link', { name: /Hours & schedule/ });
+    await waitFor(() => expect(tile.getAttribute('href')).toBe('/dashboard/schedule'));
   });
 
   it('a staff login gets item availability instead of the Manage tiles', async () => {
