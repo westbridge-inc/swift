@@ -62,6 +62,7 @@ import {
   resetPasswordAttemptBudget,
 } from './password-attempts';
 import { requireStepUp } from './step-up';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 interface DeviceInfo {
   deviceId: string;
@@ -706,9 +707,7 @@ export class AuthService {
         });
       } else {
         // Inbox only: persisted, never fanned out to a push.
-        await this.app.prisma.notification.create({
-          data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } },
-        });
+        await insertNoticeFor(this.app.prisma, { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } });
       }
     } catch (error) {
       this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');

@@ -210,7 +210,9 @@ describe('MMG dispute during a new-order takeover', () => {
   beforeEach(() => { stubAudioContext(); });
   it('does not offer acceptance of a newly arrived disputed order', async () => {
     const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
-    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' }))]} />);
+    // CLAIMED: the store reported the MMG payment, so without the dispute the takeover would offer
+    // Accept (payment-first rule, lib/mmg-pay-words) — the dispute alone must withhold it.
+    rerender(<NewOrderTakeover orders={[normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' }))]} />);
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull());
   });
   it('a newly arrived disputed order never starts the chime', async () => {
@@ -224,7 +226,8 @@ describe('MMG dispute during a new-order takeover', () => {
   });
   it('withdraws a queued acceptance when the next poll reports a dispute', async () => {
     const { rerender } = renderWithQuery(<NewOrderTakeover orders={[]} />);
-    const order = normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY' }));
+    // CLAIMED: the store reported the MMG payment, so the takeover offers Accept until the dispute arrives.
+    const order = normalizeVendorOrder(wireVendorOrder({ paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED' }));
     rerender(<NewOrderTakeover orders={[order]} />);
     await screen.findByRole('button', { name: 'Accept' });
     rerender(<NewOrderTakeover orders={[{ ...order, mmgClaimMismatchAt: '2026-10-07T12:00:00.000Z' } as typeof order]} />);

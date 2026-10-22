@@ -11,6 +11,7 @@ import { bindTenantTransaction } from '../../plugins/prisma';
 import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
 import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION } from '../../utils/public-photo-deletion';
+import { eraseNoticesOf } from '../../lib/owner-wall-notices';
 
 /** What replaces a required text column the erasure empties. */
 export const ERASED_TEXT = '[deleted with the account]';
@@ -33,7 +34,9 @@ async function lockPerson(tx: Prisma.TransactionClient, userId: string): Promise
  */
 export async function eraseOwedRowsInTransaction(tx: Prisma.TransactionClient, userId: string): Promise<void> {
   await bindTenantTransaction(tx);
-  await tx.notification.deleteMany({ where: { userId } });
+  // [item 20] Through the owner wall's narrow erase action: a plain delete removes only the CALLER's own notices
+  // once the wall is on, and an admin's closure or the retry sweep would leave the person's behind.
+  await eraseNoticesOf(tx, userId);
   // [REVIEW-G S4-1 · COORD] Money-surface commands are an entity's audit chain (one generation per store or
   // partner, the writer takes max + 1). Only the person's OWN surface goes: their driver profile, closed with them.
   // A command they staged on a store or partner account that still exists stays where it is in that chain, with

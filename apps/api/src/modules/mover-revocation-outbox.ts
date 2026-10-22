@@ -359,10 +359,11 @@ async function emitDurableNotifications(
     ...order.adminNotificationIds,
   ]);
   if (ids.length === 0) return;
-  const notifications = await runtime.prisma.notification.findMany({
+  // [item 20] The notices this outbox fans out belong to other people: the named capability under the owner wall.
+  const notifications = await ownerWallSystem('mover-revocation:fanout-notices', () => runtime.prisma.notification.findMany({
     where: { id: { in: ids } },
     select: { id: true, userId: true, type: true, title: true, body: true, data: true, createdAt: true },
-  });
+  }));
   for (const notification of notifications) {
     runtime.io.to(`user:${notification.userId}`).emit('notification', notification);
   }
