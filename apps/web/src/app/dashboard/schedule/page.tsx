@@ -3,20 +3,33 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Ban, CalendarDays, X } from 'lucide-react';
+import { Ban, Calendar, X } from 'lucide-react';
 import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
-import { useSelectedVendorType } from '@/lib/catalogue-name';
+import { getStores, money } from '@/lib/vendor-api';
 import {
-  createBookingException, deleteBookingException, getBookingExceptions, getBookings, money,
+  createBookingException, deleteBookingException, getBookingExceptions, getBookings,
   type VendorBooking, type VendorBookingException,
-} from '@/lib/vendor-api';
-import { addAppointmentDays, appointmentDayKey, formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentTime';
+} from '@/lib/booking-api';
+import { formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentTime';
+// The market-day keys from the app's own file, as the business board already
+// does (lib/vendor-hub guyanaDayKey), so the console loads one copy of them.
+import { addAppointmentDays, appointmentDayKey } from '../../../../../mobile/src/lib/appointmentTime';
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+/** The selected store's type, from the same stores read the console shell makes
+ *  (`known` once it answered; `failed` when it failed with no answer at all). */
+function useSelectedStoreType(): { vendorType: string | undefined; known: boolean; failed: boolean } {
+  const storeId = useStoreId();
+  const stores = useQuery({ queryKey: ['stores'], queryFn: getStores });
+  const list = stores.data?.stores ?? [];
+  const store = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
+  return { vendorType: store?.vendorType, known: stores.isSuccess, failed: stores.isError && stores.data === undefined };
+}
 
 /** The app's two words for a booking on the day (VendorScheduleScreen AppointmentCard). */
 const bookingWords = (status: string) => (status === 'CONFIRMED' ? 'Confirmed' : 'Reserved');
@@ -38,7 +51,7 @@ function AppointmentRow({ b }: { b: VendorBooking }) {
           {b.customer?.firstName ?? 'Customer'}{b.price ? ` · ${money(b.price)}` : ''}
         </p>
       </div>
-      <span className={`whitespace-nowrap rounded-full px-3 py-1 text-[12px] font-semibold ${confirmed ? 'bg-[var(--swift-soft-success)] text-[var(--swift-success)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-muted)]'}`}>
+      <span className={`flex-none rounded-full px-3 py-1 text-[12px] font-semibold ${confirmed ? 'bg-[var(--swift-soft-success)] text-[var(--swift-success)]' : 'bg-[var(--swift-sunken)] text-[var(--swift-muted)]'}`}>
         {bookingWords(b.status)}
       </span>
     </li>
@@ -114,7 +127,7 @@ export default function SchedulePage() {
   const storeId = useStoreId();
   const queryClient = useQueryClient();
   const { manager, known: roleKnown, failed: roleFailed } = useStoreRole();
-  const { vendorType, known: typeKnown, failed: typeFailed } = useSelectedVendorType();
+  const { vendorType, known: typeKnown, failed: typeFailed } = useSelectedStoreType();
   const service = vendorType === 'SERVICE';
   const enabled = manager && service;
   const bookings = useQuery({ queryKey: storeKey(storeId, 'bookings'), queryFn: getBookings, enabled, refetchInterval: 60_000 });
@@ -203,7 +216,7 @@ export default function SchedulePage() {
           )}
           {dayBookings.length === 0 && dayBlocks.length === 0 ? (
             <div className="sw-card flex flex-col items-center p-8 text-center">
-              <CalendarDays size={28} aria-hidden className="text-[var(--swift-muted)]" />
+              <Calendar size={28} aria-hidden className="text-[var(--swift-muted)]" />
               <p className="mt-3 text-sm font-semibold">No bookings this day</p>
               <p className="mt-1 text-sm text-[var(--swift-muted)]">Your open hours are visible to customers — reservations land here.</p>
             </div>
