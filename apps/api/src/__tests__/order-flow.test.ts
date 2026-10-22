@@ -320,13 +320,14 @@ describe('Order Flow — Full Lifecycle', () => {
     const body = res.json();
     expect(res.statusCode).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.data.status).toBe('ACCEPTED');
+    expect(body.data.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
   });
 
   // -----------------------------------------------------------------------
   // Step 7: Vendor starts preparing
   // -----------------------------------------------------------------------
 
+  // [O-3] An older store build still shows "Start preparing" after Accept: its tap is a 200 no-op.
   it('Step 7: Vendor marks order as preparing', async () => {
     const res = await inject('PUT', `/api/v1/vendor/orders/${createdOrderId}/preparing`, vendorToken);
     const body = res.json();
