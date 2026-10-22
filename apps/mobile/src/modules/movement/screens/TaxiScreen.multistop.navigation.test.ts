@@ -344,8 +344,9 @@ describe('flag on — the passenger adds, removes and reorders stops up to the m
     expect(bodyOf(sent('post /rides/estimate').at(-1)).stops).toEqual(REQUEST_BODY_WITH_ONE_STOP.stops);
     expect(byTestId('taxi-add-stop')).toBeTruthy();
 
-    // One fare for the whole trip, said before booking; no per-stop fee.
-    expect(text()).toContain('One fare for the whole trip with 1 stop · pay the driver cash or MMG at drop-off. No extra fee for stops.');
+    // One fare for the whole trip, said before booking; no per-stop fee, and (REVIEW-M S4-2) a skipped stop never
+    // lowers it: said at the quote, not only after the skip.
+    expect(text()).toContain('One fare for the whole trip with 1 stop · pay the driver cash or MMG at drop-off. No extra fee for stops, and the fare stays the same if a stop is skipped.');
     expect(text()).toContain('Pickup to stop 1 · 2.5 km');
     expect(requestButton()?.textContent).toMatch(/^Request Car · \$2.?800$/);
     snap('rider-booking-one-stop-quote');
