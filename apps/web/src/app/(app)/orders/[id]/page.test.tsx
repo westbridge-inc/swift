@@ -492,7 +492,8 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const auth = await import('@/lib/auth');
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v1');
+  // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
 });

@@ -44,7 +44,7 @@ type OrderLine = {
   quantity: number;
   lineTotal?: number;
   customerPrice?: number;
-  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v1). */
+  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v2 since O-4: the removal question too). */
   subStatus?: string | null;
   substituteName?: string | null;
   substitutePrice?: number | null;

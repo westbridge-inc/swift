@@ -151,12 +151,28 @@ export function substitutionNoAnswer(order: AdjustableOrder): 'REMOVE' | 'WITHDR
  */
 export function onlyItemLeft(
   line: { id: string },
-  lines: ReadonlyArray<{ id: string; subStatus: string }>,
+  lines: ReadonlyArray<{ id: string; subStatus: string; substituteItemId: string | null; substituteName: string | null }>,
   orderStatus: string,
 ): boolean {
   if (orderStatus !== 'PENDING') return false;
-  return !lines.some((other) => other.id !== line.id && other.subStatus !== 'REFUNDED' && other.subStatus !== 'REJECTED');
+  return !lines.some((other) => other.id !== line.id && lineKeepsOrderAlive(other));
 }
+
+/**
+ * [O-4 · COORD 03:34Z, the ONE last-item rule shared with the store screens (STORE-DASH
+ * storeOrderRules.ts)] Another line keeps a waiting order alive unless it has come off
+ * (REFUNDED / REJECTED) or is under a REMOVAL question (it is on its way off). A SWAP question
+ * keeps the order alive (the customer may take the swap). PICK_ALIVE_WHERE is the same rule as a
+ * database filter, for the locked counts in picking.service.
+ */
+export function lineKeepsOrderAlive(line: { subStatus: string; substituteItemId: string | null; substituteName: string | null }): boolean {
+  if (line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED') return false;
+  return !isRemovalQuestion(line);
+}
+export const PICK_ALIVE_WHERE = {
+  subStatus: { notIn: ['REFUNDED', 'REJECTED'] as ('REFUNDED' | 'REJECTED')[] },
+  NOT: { subStatus: 'PENDING' as const, substituteItemId: null, substituteName: null },
+};
 
 /** [O-4 · REVIEW-F S3-1] What the customer reads about the only item left. */
 export const ONLY_ITEM_LEFT_COPY = "This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.";

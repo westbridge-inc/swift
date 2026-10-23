@@ -7,7 +7,7 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, type AdjustableOrder } from './substitution-view';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
 import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
@@ -403,6 +403,12 @@ export class PickingService {
       }
       assertMmgFulfilmentAllowed(order, 'ACCEPTED');
       assertMmgMoneyAdjustable(order);
+      // [O-4 · COORD 03:34Z, the shared last-item rule] The only item left (every other line off or
+      // on its way off): there is nothing to continue with, so the store rejects the order instead.
+      const alive = await tx.orderItem.count({ where: { orderId, id: { not: line.id }, ...PICK_ALIVE_WHERE } });
+      if (alive === 0) {
+        throw new AppError(409, 'REJECT_INSTEAD', `${line.name} is the only item left on this order. Reject the order instead, with the reason "Out of stock".`);
+      }
       const asked = await tx.orderItem.updateMany({
         where: { id: line.id, orderId, subStatus: 'NONE', picked: false, order: { status: 'PENDING' } },
         data: { subStatus: 'PENDING', substituteItemId: null, substituteName: null, substitutePrice: null, substituteDecideBy: decideBy },
@@ -654,7 +660,7 @@ export class PickingService {
       // item left is not removed by "continue" or a declined swap (the customer cancels instead).
       // Decided on the LOCKED rows: two answers racing on the last two lines cannot both remove.
       if (opts.requireOthersLeft && ord.status === 'PENDING') {
-        const others = await tx.orderItem.count({ where: { orderId: line.order.id, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+        const others = await tx.orderItem.count({ where: { orderId: line.order.id, id: { not: line.id }, ...PICK_ALIVE_WHERE } });
         if (others === 0) throw new AppError(409, 'ONLY_ITEM_LEFT', ONLY_ITEM_LEFT_COPY);
       }
 
@@ -774,7 +780,7 @@ export class PickingService {
     // [O-4 · REVIEW-F S3-1] The only item left on a waiting order: removing it would empty the
     // order, so no answer cancels it, free (a system cancellation: never the customer's fault).
     if (line.order.status === 'PENDING') {
-      const others = await this.prisma.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+      const others = await this.prisma.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, ...PICK_ALIVE_WHERE } });
       if (others === 0) return this.cancelOnlyItemLeft(line, now);
     }
     const closed = await this.closeLine(line, 'REFUNDED', changedBy, {
@@ -819,7 +825,7 @@ export class PickingService {
         releaseStaleMoverPointer: true,
         withinTransaction: async (tx) => {
           const still = await tx.orderItem.count({ where: { id: line.id, subStatus: 'PENDING', picked: false, substituteDecideBy: { lte: now } } });
-          const others = await tx.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+          const others = await tx.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, ...PICK_ALIVE_WHERE } });
           if (still === 0 || others > 0) throw new AppError(409, 'NOT_ONLY_ITEM_LEFT', 'The order changed; the question is handled the usual way');
         },
         invalidStatus: () => new AppError(409, 'NOT_ONLY_ITEM_LEFT', 'The order is no longer waiting'),
