@@ -529,4 +529,19 @@ describe('[O-4 · REVIEW-G S4-2] the store hears the customer\'s answer at once'
     expect(told).toHaveLength(1);
     expect(told[0]!.body).toBe(`${beans.name}: the customer continues without it. You can accept the order now.`);
   });
+
+  it('[REVIEW-F S4-1] while another question is still open the push says so, never "accept now"; the last answer says accept now', async () => {
+    const orderId = await placeOrder();
+    const [rice, beans] = [await lineOf(orderId, grocer.rice), await lineOf(orderId, grocer.beans)];
+    expect((await offerSwap(orderId, rice.id, grocer.riceB)).statusCode).toBe(200);
+    expect((await outOfStock(orderId, beans.id)).statusCode).toBe(200);
+    expect((await answer(orderId, beans.id, true)).statusCode).toBe(200);
+    const number = (await orderRow(orderId)).orderNumber;
+    const bodies = async () => (await sys(() => app.prisma.notification.findMany({
+      where: { userId: grocer.owner.userId, title: `Order #${number}: the customer answered` }, orderBy: { createdAt: 'asc' },
+    }))).map((n) => n.body);
+    expect(await bodies()).toEqual([`${beans.name}: the customer continues without it. One more item is still waiting on the customer.`]);
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200);
+    expect((await bodies())[1]).toBe(`${rice.name}: the customer approved the swap. You can accept the order now.`);
+  });
 });

@@ -857,12 +857,18 @@ export class PickingService {
     try {
       const team = await storeTeam(this.prisma, order.vendorId);
       if (!team || !team.ringing) return;
+      // [REVIEW-F S4-1 on #2043] "Accept now" only when nothing is left to answer: never a tap the
+      // server would refuse (CUSTOMER_DECIDING).
+      const stillOpen = await this.prisma.orderItem.count({ where: { orderId: order.id, subStatus: 'PENDING' } });
+      const next = stillOpen > 0
+        ? (stillOpen === 1 ? 'One more item is still waiting on the customer.' : `${stillOpen} more items are still waiting on the customer.`)
+        : 'You can accept the order now.';
       for (const userId of ringRecipients(team)) {
         await this.notifications.send({
           userId,
           type: 'ORDER_UPDATE',
           title: `Order #${order.orderNumber}: the customer answered`,
-          body: `${what}. You can accept the order now.`,
+          body: `${what}. ${next}`,
           data: { kind: 'vendor_customer_answered', orderId: order.id, orderNumber: order.orderNumber, audience: 'business' },
         });
       }
