@@ -28,6 +28,8 @@ vi.mock('../hooks/vendorops', () => ({
   useVendorProfile: () => ({ stores: [], owner: { myRole: 'OWNER' } }),
   useVendorSubscription: () => ({ data: fx.sub }),
   ...Object.fromEntries(['useVendorOrderHistory', 'useVendorOrders', 'useToggleOpen', 'useToggleOrders', 'useSetSelfDelivery', 'useOrderAction', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours'].map((name) => [name, () => ({})])),
+  // [STORE-DASH] the board's per-order wait: no store tap is out in this census.
+  usePendingOrderIds: () => new Set<string>(),
 }));
 vi.mock('../modules/vendor/shared', () => ({
   safeVendorRole: (role: string) => role,

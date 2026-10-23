@@ -10,7 +10,15 @@ const fakes = vi.hoisted(() => ({
 vi.mock('../plugins/prisma', () => ({ enterTenant: vi.fn(), enterOwner: vi.fn(), getTenantId: () => 'tenant-test' }));
 vi.mock('../modules/auth/auth.service', () => ({ AuthService: class {} }));
 vi.mock('../modules/review/gate', () => ({ reviewGate: vi.fn() }));
-vi.mock('../modules/rides/fare.service', () => ({ FareService: class {} }));
+// [PRICE-LOCK · row 448] The queue join prices the trip; this suite is about
+// credential transport, so the quote is a fixed synthetic one.
+vi.mock('../modules/rides/fare.service', () => ({
+  FareService: class {
+    async estimateTiers() {
+      return { tiers: [{ rideClass: 'ECONOMY', multiplier: 1, fare: 1_000, capacity: 4, source: 'formula' }], currencyCode: 'GYD' };
+    }
+  },
+}));
 vi.mock('../modules/order/order.service', () => ({ OrderService: class {} }));
 vi.mock('../modules/safety/sos.service', () => ({ SosService: class {} }));
 vi.mock('../modules/dispatch/dispatch.service', () => ({ makeDispatchService: () => ({}) }));

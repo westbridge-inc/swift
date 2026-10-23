@@ -9,7 +9,7 @@
 export const CANCEL_ORDER_ANSWER =
   'Yes, free, while the business has not accepted your order. Once it accepts, the order can no longer be cancelled in the app or here: '
   + 'contact the business (the order page shows the number it published). '
-  + 'Rides, parcels and bookings can be cancelled free while nobody has accepted them, and for 5 minutes after a driver, rider or provider accepts; after that, contact them. '
+  + 'Rides, parcels and bookings can be cancelled free while nobody has accepted them, and for 1 minute after a driver, rider or provider accepts; after that, contact them. '
   + 'A service job can be cancelled free until it is booked. '
   + 'You can still cancel free if no driver or rider was found, or if it is running very late. Once it is on its way, it can no longer be cancelled. '
   + 'If you paid by MMG and the business has confirmed your payment, ask the business to cancel: the business refunds you directly. '
