@@ -10,6 +10,7 @@ import {
   assertRideGates,
   assertL2,
   createRideRequest,
+  fareChanged,
   replayRideRequestAnswer,
   rideRequestClaimKey,
   rideRequestReceiptKey,
@@ -347,7 +348,13 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** POST /queue/join — enter the waitlist with the full trip, gates mirrored
    *  from the request path (no availability pre-check: the queue exists FOR
    *  the no-supply case). Replaces any prior WAITING entry (newest trip wins,
-   *  same semantic as the supply watch). */
+   *  same semantic as the supply watch).
+   *  [PRICE-LOCK · row 448] With the fare the passenger was shown (expectedFare),
+   *  the join is refused if the fare has already moved (409 FARE_CHANGED, the
+   *  fare now), and the entry keeps that fare: the scan books only at it. An
+   *  app from before the lock sends none: the entry keeps the server's fare at
+   *  the join (as an unquoted request is booked at the fare of its moment), so a
+   *  fare that moves while they wait is never charged either (logged). */
   app.post('/queue/join', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
@@ -359,6 +366,22 @@ export async function ridesRoutes(app: FastifyInstance) {
     assertRoadTripInMarket(body);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
+
+    // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
+    // passenger saw is checked now and kept with the entry; nothing is queued
+    // at a fare they were not shown. An app from before the lock (every store
+    // build today) sends none: the entry keeps the fare of this moment, the one
+    // its screen was quoted, so the wait can never move what they pay.
+    const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
+    const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
+    if (!tier) throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
+    if (body.expectedFare !== undefined && body.expectedFare !== tier.fare) {
+      throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
+    }
+    if (body.expectedFare === undefined) {
+      request.log.info({ event: 'ride_queue_join_unquoted', rideClass: body.rideClass }, '[PRICE-LOCK] queue joined without the fare the passenger was shown (an app from before the lock); the entry keeps the fare at the join');
+    }
+    const quotedFare = tier.fare;
 
     const ttlMin = RIDE_QUEUE_TTL_MIN();
     await app.prisma.rideQueueEntry.updateMany({
@@ -378,6 +401,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         rideClass: body.rideClass,
         passengerCount: body.passengerCount,
         expiresAt: new Date(Date.now() + ttlMin * 60_000),
+        quotedFare,
       },
     });
 
