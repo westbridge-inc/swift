@@ -225,7 +225,7 @@ describe('the Orders home copies the app', () => {
     const card = (n: string) => screen.getAllByRole('article').find((a) => a.textContent?.includes(n))!;
     await waitFor(() => expect(card('#SW-7001')).toBeTruthy());
     await view.user.click(within(card('#SW-7001')).getByRole('button', { name: 'Accept' }));
-    await view.user.click(within(card('#SW-7002')).getByRole('button', { name: 'Mark ready' }));
+    await view.user.click(within(card('#SW-7002')).getByRole('button', { name: 'Ready for delivery' }));
     await view.user.click(within(card('#SW-7001')).getByRole('button', { name: 'Reject' }));
     await view.user.click(within(card('#SW-7001')).getByRole('button', { name: 'Out of stock' }));
     await waitFor(() => expect(writes).toEqual([
@@ -347,11 +347,11 @@ describe('MMG orders on the board follow the app', () => {
     const view = renderWithQuery(<OrdersPage />);
     const card = await screen.findByRole('article', { name: 'Order SW-7202' });
     expect(within(card).getByText('Payment under review — order paused')).toBeTruthy();
-    expect(within(card).queryByRole('button', { name: 'Mark ready' })).toBeNull();
+    expect(within(card).queryByRole('button', { name: 'Ready for delivery' })).toBeNull();
     await view.user.click(within(card).getByText('#SW-7202'));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(await within(dialog).findByText('Payment under review — order paused')).toBeTruthy();
-    expect(within(dialog).queryByRole('button', { name: 'Mark ready' })).toBeNull();
+    expect(within(dialog).queryByRole('button', { name: 'Ready for delivery' })).toBeNull();
   });
 });
 

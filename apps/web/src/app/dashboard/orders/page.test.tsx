@@ -530,7 +530,10 @@ describe('order detail stays dismissible while its request settles', () => {
     const { user } = renderWithQuery(<OrdersPage />);
     await screen.findByRole('region', { name: 'Preparing orders' });
     await user.click(await rowFor('SW-1001'));
-    await screen.findByText('Loading…');
+    // [STORE-DASH] The window opens at once on the board's copy while its own read is still out.
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText('#SW-1001')).toBeTruthy();
+    expect(within(dialog).queryByText('Loading…')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Close order detail' }));
     expect(screen.queryByRole('button', { name: 'Close order detail' })).toBeNull();
   });
@@ -682,7 +685,7 @@ describe('the order window keeps focus inside, and returns it to the card', () =
     const { user } = renderWithQuery(<OrdersPage />);
     await user.click(await rowFor('SW-1001'));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
-    await within(dialog).findByRole('button', { name: 'Mark ready' });
+    await within(dialog).findByRole('button', { name: 'Ready for delivery' });
     const close = within(dialog).getByRole('button', { name: 'Close order detail' });
     await waitFor(() => expect(document.activeElement).toBe(close));
     await user.tab({ shift: true });
@@ -708,7 +711,7 @@ describe('the order window keeps focus inside, and returns it to the card', () =
     const { user } = renderWithQuery(<OrdersPage />);
     await user.click(await rowFor('SW-1001'));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
-    await user.click(await within(dialog).findByRole('button', { name: 'Mark ready' }));
+    await user.click(await within(dialog).findByRole('button', { name: 'Ready for delivery' }));
     const ready = await screen.findByRole('region', { name: 'Ready / handoff orders' });
     await waitFor(() => expect(within(ready).getAllByText('#SW-1001').length).toBe(1));
     await user.click(within(dialog).getByRole('button', { name: 'Close order detail' }));
@@ -768,7 +771,7 @@ describe('disputed MMG orders pause the web dashboard', () => {
     // the customer is disputing the payment (review S4-1).
     expect(within(dialog).getByText("The store's and the customer's MMG payment reports don't match. Swift support is checking it and will tell you when the order can move. Don’t hand anything over until then.")).toBeTruthy();
     expect(screen.queryByText(/customer disputes/i)).toBeNull();
-    for (const name of ['Accept', 'Start preparing', 'Mark ready', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'Find a rider', 'We’ll deliver', 'Get a Swift rider']) {
+    for (const name of ['Accept', 'Start preparing', 'Ready for delivery', 'Ready for pickup', 'Mark picked up', 'Confirm delivered', 'Search for a rider again', 'Find a rider', 'We’ll deliver', 'Get a Swift rider']) {
       expect(screen.queryByRole('button', { name }), name).toBeNull();
     }
     expect(screen.queryByRole('checkbox')).toBeNull();

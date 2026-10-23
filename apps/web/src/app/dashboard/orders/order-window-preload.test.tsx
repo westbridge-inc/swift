@@ -63,7 +63,7 @@ describe('[PERF] the order window: its own chunk, fetched at mount, drawn at the
     const dialog = screen.getByRole('dialog', { name: 'Order details' });
     expect(within(dialog).getByTestId('order-window-part')).toBeTruthy();
     expect(within(dialog).getByRole('button', { name: 'Close order detail' })).toBeTruthy();
-    expect(await within(dialog).findByRole('button', { name: 'Mark ready' })).toBeTruthy();
+    expect(await within(dialog).findByRole('button', { name: 'Ready for delivery' })).toBeTruthy();
     expect(fx.fetched).toBe(1);
   });
 });
