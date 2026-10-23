@@ -27,8 +27,10 @@
  */
 import PDFDocument from 'pdfkit';
 import type { ConsentDocumentType } from '../legal/consent.service';
+import { OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 
-export const OWN_NAME_CONSENT_TYPE: ConsentDocumentType = 'own_name_declaration';
+/** The ledger row and the filed document carry the registry's one code (DOC-INV-2: no literal outside the registry). */
+export const OWN_NAME_CONSENT_TYPE: ConsentDocumentType = OWN_NAME_DOC_TYPE;
 export const OWN_NAME_DECLARATION_VERSION = 'v1';
 
 /** The exact words. A change is a new version — a version is a promise about specific words. */
