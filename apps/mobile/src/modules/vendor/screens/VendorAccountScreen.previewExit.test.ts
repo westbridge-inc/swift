@@ -219,6 +219,8 @@ vi.mock('zustand', async () => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
+  // [STORE-DASH] the board's per-order wait reads the mutation cache: nothing is out here.
+  useMutationState: () => [],
   useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
     const invoke = (variables: unknown) => fx.runMutations ? options.mutationFn?.(variables) : undefined;
     const result = { mutate: vi.fn(invoke), mutateAsync: vi.fn(invoke), isPending: false, isError: false, isSuccess: false };

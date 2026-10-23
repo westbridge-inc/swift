@@ -24,6 +24,8 @@ vi.mock('@/lib/customer-places', () => ({
 }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: fx.coords }));
 vi.mock('./store-picker-loader', () => ({ loadStorePicker: fx.load }));
+// [Row 628] The weekly fee block has its own tests (weekly-fee.test.tsx); here it says what an API older than the tick says.
+vi.mock('./weekly-fee-loader', () => ({ loadWeeklyFee: () => import('@/test/weekly-fee-fixture') }));
 
 import SignupPage from './page';
 

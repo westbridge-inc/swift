@@ -15,7 +15,11 @@
 //     due); never an agent or a Swift Number;
 //   - with it off, the poller never follows up a request it cannot match by
 //     OUR reference (no round trip): the row waits untouched;
-//   - with it off, a partner cannot switch to automatic MMG charges.
+//   - with it off, a partner cannot switch to automatic MMG charges;
+//   - [22 Oct] with it off AND no MMG checkout live (and no live card rail),
+//     no partner can pay at all: the week is PAUSED, not failed
+//     (fee-pause-pay-path.test.ts), so the failing cases here run with the
+//     checkout live, or with the card rail live where the checkout is off.
 // Subjects are stores (vendor subscriptions): their fee has one owner.
 // ---------------------------------------------------------------------------
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
@@ -185,7 +189,8 @@ afterAll(async () => {
 describe('[Option A] the billing run never pushes while the switch is off', () => {
   it('live MMG with the round trip verified but no push switch: nothing reaches MMG; the week fails with the push-off note', async () => {
     const subId = await makeVendorSub('MOBILE_MONEY');
-    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', ...checkoutLiveEnv() });
+    resetFeeCheckoutSwitchCache();
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
     await billing.billSubscription((await withRelations(subId)) as any);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -194,9 +199,20 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
     expect(f.failureNotes).toEqual([MMG_PUSH_OFF_REASON]);
   });
 
-  it('the partner is told: the payment-failed notice is written and delivered, and names only a way to pay that exists today', async () => {
+  it('[22 Oct] with the checkout off and no card rail, the same week is paused: nothing reaches MMG, nothing fails, no notice', async () => {
     const subId = await makeVendorSub('MOBILE_MONEY');
     stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a paused fee never contacts MMG'));
+    expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('pending');
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(await facts(subId)).toEqual({ mmgPayments: [], failureNotes: [] });
+    expect(await app.prisma.billingFeeNotice.count({ where: { subscriptionId: subId } })).toBe(0);
+  });
+
+  it('the partner is told: the payment-failed notice is written and delivered, and names only a way to pay that exists today', async () => {
+    const subId = await makeVendorSub('MOBILE_MONEY');
+    // The MMG checkout is off; a live card rail is the way to pay that keeps the fee unpaused.
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '0', PAYMENT_PROVIDER: 'sandbox', CARD_RAIL_PROVIDER: 'powertranz' });
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('the push rail is off: MMG must not be contacted'));
     expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
     const owner = (await withRelations(subId)).vendor!.owner.userId;
@@ -231,7 +247,8 @@ describe('[Option A] the billing run never pushes while the switch is off', () =
 
   it('control: only the push-off week drops the retry sentence; a cash week that failed the same run keeps it', async () => {
     const subId = await makeVendorSub('CASH');
-    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' });
+    stubLive({ MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1', ...checkoutLiveEnv() });
+    resetFeeCheckoutSwitchCache();
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a cash plan never contacts MMG'));
     expect(await billing.billSubscription((await withRelations(subId)) as any)).toBe('failed');
     const notes = (await facts(subId)).failureNotes;

@@ -799,20 +799,28 @@ function TaxiBooking({ navigation }: any) {
                 label="Join the queue"
                 style={{ marginTop: space.md }}
                 loading={joinQueue.isPending}
-                disabled={!tripPayload() || stops.length > 0}
+                // [PRICE-LOCK · row 448] Like Request, Join needs the fare on screen:
+                // nobody joins the line without seeing what they pay (the join
+                // carries it as expectedFare, and the queue books only at it).
+                disabled={!tripPayload() || !selectedTier || stops.length > 0}
                 onPress={() => {
                   const payload = tripPayload();
                   // [TAXI multi-stop] The queue never holds stops (v1): a trip
                   // with stops is not silently queued without them.
-                  if (payload && stops.length === 0) {
+                  if (payload && selectedTier && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
-                    joinQueue.mutate(payload);
+                    joinQueue.mutate({ ...payload, expectedFare: selectedTier.fare });
                   }
                 }}
               />
               {!tripPayload() ? (
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
+                </T>
+              ) : null}
+              {tripPayload() && !selectedTier && stops.length === 0 ? (
+                <T variant="caption" tone="muted" center testID="taxi-queue-needs-fare" style={{ marginTop: space.sm }}>
+                  You join the line at the fare you see — waiting for the fare.
                 </T>
               ) : null}
               {stops.length > 0 ? (
@@ -1235,6 +1243,12 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
       s.emit('order:unsubscribe', { orderId: ride.id });
     };
   }, [d?.id, navigation, ride?.id]);
+  // [#2022 review S3-1] A driver landing on the ride ends the empty search the
+  // live event spoke about: if that driver later drops it, the new search is
+  // judged on its own (the server's noDriverFound counts only searches since).
+  useEffect(() => {
+    if (d?.id) setExhausted(false);
+  }, [d?.id]);
 
   // THE CHECK-IN CARD MUST SURVIVE A CLOSED APP.
   //
@@ -1291,7 +1305,7 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
   }, [feedLive]);
   // The honest "nobody has taken it yet" card: the server's facts on a
   // reopened app, the live socket event while open (taxiNoDriver.ts).
-  const noDriver = noDriverView(ride, exhausted, nowTs);
+  const noDriver = noDriverView(ride, exhausted, nowTs, { rematching });
 
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
