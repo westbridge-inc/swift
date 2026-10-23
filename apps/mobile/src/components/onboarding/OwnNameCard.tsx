@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { space } from '@swift/ui';
 import { BrandCheckbox, Card, PillButton, T } from '../../kit';
 import { vendorApi } from '../../services/api';
-import { OWN_NAME_DECLARATION_V1, OWN_NAME_HINT, OWN_NAME_TICK } from '../../lib/ownNameCopy';
+import { OWN_NAME_DECLARATION_V1, OWN_NAME_HINT, OWN_NAME_TICK, ownNameSigningFor } from '../../lib/ownNameCopy';
 
 /** The server's message for a refused signature, or a plain retry line. */
 function errorCopy(error: unknown): string {
@@ -20,7 +20,8 @@ function errorCopy(error: unknown): string {
  *  - `mode="drop"`: the store trades under its owner's own name — offer "I use a registered business name instead".
  * The server decides everything (name check, refusals); this card only asks and shows the answer.
  */
-export function OwnNameCard({ role, mode }: { role: string; mode: 'sign' | 'offer' | 'drop' }) {
+export function OwnNameCard({ role, mode, storeName }: { role: string; mode: 'sign' | 'offer' | 'drop'; storeName?: string | null }) {
+  const forStore = ownNameSigningFor(storeName);
   const qc = useQueryClient();
   const [ticked, setTicked] = useState(false);
   const [open, setOpen] = useState(mode === 'sign');
@@ -40,6 +41,7 @@ export function OwnNameCard({ role, mode }: { role: string; mode: 'sign' | 'offe
     <Card style={{ marginTop: space.md, gap: space.sm }}>
       <T variant="label" weight="bold">{mode === 'sign' ? 'Sign: I trade under my own name' : 'No business name? Trade under your own name'}</T>
       <T variant="caption" tone="muted">{OWN_NAME_HINT}</T>
+      {forStore ? <T variant="caption" weight="bold">{forStore}</T> : null}
       {open ? (
         <>
           <T variant="caption">{OWN_NAME_DECLARATION_V1}</T>
