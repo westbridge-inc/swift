@@ -80,8 +80,14 @@ describe('[SCR-002] the selection is positive, never a negative classification',
   });
 
   it('[PLAT-3] a real number inside the demo range survives a purge: only the synthetic marker selects, and the unmarked rows are counted once', async () => {
-    // A sub-range of this suite's own scope, unique to this run, so every count is exact.
-    const sub = `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e3)).padStart(3, '0')}`;
+    // A sub-range of this suite's own scope that holds NO row yet, so every count
+    // is exact. A random draw alone is not enough: the previous test puts five
+    // users at SCOPE_PREFIX + 8 random digits, and each lands in a given 3-digit
+    // sub-range 1 time in 1,000 (main red at 0f79f2c3: "expected 5 to be 4").
+    const drawSub = () => `${SCOPE_PREFIX}${String(Math.floor(Math.random() * 1e3)).padStart(3, '0')}`;
+    let sub = drawSub();
+    for (let i = 0; i < 50 && (await prisma.user.count({ where: { phone: { startsWith: sub } } })) > 0; i += 1) sub = drawSub();
+    expect(await prisma.user.count({ where: { phone: { startsWith: sub } } }), 'the sub-range starts empty').toBe(0);
     const inSub = () => `${sub}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}`;
     const person = await mk({ phone: inSub() });
     const personPartner = await mk({ phone: inSub(), roles: ['VENDOR_OWNER', 'CUSTOMER'], activeRole: 'VENDOR_OWNER' });

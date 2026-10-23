@@ -3,6 +3,7 @@ import { Pressable, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, radius, space, withAlpha } from '@swift/ui';
 import { T, cardShadow } from '../../kit';
+import { touchTarget } from '../../kit/touch-target';
 
 /**
  * The earner DASHBOARD KIT — the surface language of the mover cockpit.
@@ -138,7 +139,8 @@ export function DHeader({ title, onBack }: { title: string; onBack?: () => void 
     <View style={{ height: 52, alignItems: 'center', justifyContent: 'center' }}>
       {/* The 36dp chip plus 10dp hitSlop on every side is a 56dp effective touch target. */}
       {onBack ? (
-        <Pressable onPress={onBack} hitSlop={10} style={{ position: 'absolute', left: space.lg }}>
+        // [UI-SWEEP U-P2 census] Back is 44pt on its own (touchTarget keeps the 36pt chip where it was).
+        <Pressable onPress={onBack} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={{ position: 'absolute', left: space.lg, ...touchTarget(36) }}>
           {({ pressed }) => (
             <View style={[{ width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
               <Feather name="chevron-left" size={20} color={dk.text} />

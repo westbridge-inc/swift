@@ -40,6 +40,19 @@ export const getBookings = (): Promise<VendorBooking[]> =>
 export const getBookingExceptions = (): Promise<VendorBookingException[]> =>
   apiFetch(`${V}/bookings/exceptions`).then((r) => (r.data ?? []) as VendorBookingException[]);
 
+/** [UI-SWEEP, REVIEW-F #2013 S4-2] The store's listings by id, from the menu
+ *  read the app uses (GET /vendor/categories, items nested), so a block on ONE
+ *  listing can name it. Archived listings are not in it: such a block says
+ *  'One listing', never the whole store. */
+export const getListingNames = (): Promise<Map<string, string>> =>
+  apiFetch(`${V}/categories`).then((r) => {
+    const names = new Map<string, string>();
+    for (const c of (r.data ?? []) as Array<{ items?: Array<{ id: string; name: string }> }>) {
+      for (const it of c.items ?? []) names.set(it.id, it.name);
+    }
+    return names;
+  });
+
 export const createBookingException = (body: { date: string; start?: string; end?: string; reason?: string }) =>
   apiFetch(`${V}/bookings/exceptions`, { method: 'POST', body: JSON.stringify(body) });
 
