@@ -56,3 +56,20 @@ it('the swap card states the deadline and the no-answer outcome before the butto
   expect(CARD).toContain('{swapDeadlineText(it.substitution) ? (');
   expect(CARD).toContain('{swapDeadlineText(it.substitution)}');
 });
+
+// [O-4 · owner 22 Oct 2026] Nothing to swap, asked before the store accepted: the customer continues
+// without the item (the server lowers the total) or cancels the order through the screen's own
+// re-checked cancel flow (free while the store has not accepted).
+it('a removal question gets its own card: "Continue without it" answers yes, "Cancel order" opens the checked cancel', () => {
+  const removal = SCREEN.slice(SCREEN.indexOf('isRemovalQuestion(it.substitution) ? ('), SCREEN.indexOf('label="Approve swap"'));
+  expect(removal).toContain('is out of stock');
+  expect(removal).toContain('removalChangeText(it.substitution)');
+  expect(removal).toContain('swapDeadlineText(it.substitution)');
+  const yes = removal.slice(removal.indexOf('label="Continue without it"'), removal.indexOf('label="Cancel order"'));
+  expect(yes).toContain('decideSub.mutate({ orderId, lineId: it.id, approve: true })');
+  expect(yes).toContain('!swapDecisionPermissions(it.substitution, o.paymentMethod).approve');
+  const cancel = removal.slice(removal.indexOf('label="Cancel order"'));
+  expect(cancel).toContain('disabled={!o.canCancel}');
+  expect(cancel).toContain('void openCancelConfirmation();');
+  expect(removal).not.toContain('approve: false');
+});
