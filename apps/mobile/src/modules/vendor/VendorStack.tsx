@@ -198,6 +198,15 @@ function VendorTabs() {
   return (
     <VTab.Navigator
       screenOptions={{
+        // [SPEED 22 Oct] As the customer tabs (navigation/CustomerStack.tsx): a tab mounts on
+        // its first visit, keeps its state, and stops DRAWING while hidden. The Orders board
+        // no longer re-draws on every poll while the owner is on Products, nor Products on
+        // every menu re-read while on Orders; reads keep running, so a tab shows the latest
+        // the moment it is opened. New-order alerts are not inside a tab (VendorRoot's
+        // VendorLiveOrderLayer), so a hidden tab never silences a new order.
+        lazy: true,
+        freezeOnBlur: true,
+        animation: 'none',
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,

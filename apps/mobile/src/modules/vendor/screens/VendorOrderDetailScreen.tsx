@@ -122,7 +122,7 @@ export function VendorOrderDetailScreen(props: any) {
 
 function VendorOrderDetailBody({ navigation, route }: any) {
   const orderId: string | undefined = route.params?.orderId;
-  const { data: order, isLoading, isError, refetch } = useVendorOrder(orderId);
+  const { data: order, isLoading, isError, refetch, isPlaceholderData } = useVendorOrder(orderId);
   const returnReceived = useReturnReceived();
   const orderAction = useOrderAction();
   const retryDispatch = useRetryDispatch();
@@ -171,7 +171,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s);
   // Shelf-pick UI: quantity-tracked store types, while the bag is still open.
   const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
-  const pickable = ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
+  // [STORE-DASH] While the screen shows the board's copy (the order's own read
+  // is on its way), the lines are read-only: a tick acts on the order's own state.
+  const pickable = !isPlaceholderData && ['SUPERMARKET', 'STORE'].includes(order.vendor?.vendorType ?? '') && PICKABLE_STATES.includes(s);
   const lineResolved = (l: any) => l.picked || l.subStatus === 'REFUNDED' || l.subStatus === 'REJECTED';
   const openLines = pickable ? items.filter((l) => !lineResolved(l)).length : 0;
   /** Same substitutionGroup wins; otherwise same category; always in stock. */

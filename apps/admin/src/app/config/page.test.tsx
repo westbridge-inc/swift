@@ -90,3 +90,15 @@ describe('App updates', () => {
     expect((await within(panel).findByRole('alert')).textContent).toContain('The Android minimum cannot go down.');
   });
 });
+
+// [CANCEL-WINDOW · owner 22 Oct 2026] The read-only "Cancellation rule" card states the API's window: one minute after a
+// driver, rider or provider accepts (FREE_CANCEL_WINDOW_MIN), never the old five.
+describe('Cancellation rule card', () => {
+  it('names the one-minute window after acceptance', async () => {
+    mockApi(handler);
+    renderWithQuery(<ConfigPage />);
+    const card = await screen.findByText(/a ride, parcel or booking cancels free until a driver, rider or provider accepts it/);
+    expect(card.textContent).toContain('then for 1 minute from that acceptance;');
+    expect(card.textContent).not.toMatch(/5 minutes/);
+  });
+});

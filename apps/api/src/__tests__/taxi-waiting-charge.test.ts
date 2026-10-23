@@ -104,7 +104,7 @@ async function makeDriver(): Promise<DriverActor> {
   return { ...u, driverId: driver.id };
 }
 
-type StopSpec = { status: TaxiStopStatus; arrivedAt?: Date; departedAt?: Date; skippedAt?: Date; skipReason?: string };
+type StopSpec = { status: TaxiStopStatus; arrivedAt?: Date; departedAt?: Date; skippedAt?: Date; skipReason?: string; arrivalVerified?: boolean };
 interface RideSpec {
   status: OrderStatus;
   driverArrivedAt?: Date | null;
@@ -142,6 +142,8 @@ async function makeRide(spec: RideSpec) {
           create: stops.map((s, i) => ({
             sequence: i + 1, lat: 6.41 + i * 0.003, lng: -58.62 - i * 0.003, address: `Stop ${i + 1} ${door}`,
             status: s.status, arrivedAt: s.arrivedAt ?? null, departedAt: s.departedAt ?? null, skippedAt: s.skippedAt ?? null, skipReason: s.skipReason ?? null,
+            // [option A] An arrival here is one the E19 gate accepted, unless a case says otherwise.
+            arrivalVerified: s.arrivalVerified ?? (s.arrivedAt ? true : null),
           })),
         },
       } : {}),
