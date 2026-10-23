@@ -76,7 +76,7 @@ export function vendorRespondBy(
     fulfillment?: string | null;
     appointmentSlot?: Date | null;
     /** [O-4] The order's lines, when the caller has them: a pre-accept customer question moves the clock. */
-    items?: ReadonlyArray<{ substituteDecideBy?: Date | null }>;
+    items?: ReadonlyArray<object>;
   },
   opts: { slaMinutes: number; holdMs: number },
 ): Date | null {
@@ -100,12 +100,14 @@ export function vendorRespondBy(
  * Null when no question was asked.
  */
 export function storeClockAfterQuestion(
-  lines: ReadonlyArray<{ substituteDecideBy?: Date | null }>,
+  lines: ReadonlyArray<object>,
   slaMinutes: number,
 ): Date | null {
   let latest: number | null = null;
   for (const line of lines) {
-    const at = line.substituteDecideBy?.getTime();
+    // Any line projection: one that did not select the field simply has no question clock.
+    const decideBy = (line as { substituteDecideBy?: Date | null }).substituteDecideBy;
+    const at = decideBy instanceof Date ? decideBy.getTime() : undefined;
     if (at != null && (latest == null || at > latest)) latest = at;
   }
   return latest == null ? null : new Date(latest + slaMinutes * 60_000);
