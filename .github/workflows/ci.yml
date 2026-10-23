@@ -888,6 +888,10 @@ jobs:
       - uses: actions/checkout@v7
       - name: The stack's pinned Caddy image (the Caddyfile tests render and serve with it)
         run: docker pull caddy:2.10
+      # [Row 312] The stack's pinned upload malware scanner, so the EICAR test
+      # (deploy/tests/test_clamd_scanner.py) runs against the real clamd.
+      - name: The stack's pinned clamd image (the scanner test refuses EICAR with it)
+        run: docker pull clamav/clamav:1.4.6@sha256:3bba6dd5ac6663d55b80f86a3126e146612d93b593cc2617188d13f637d91260
       - name: Run every deploy contract test
         run: python3 -m unittest discover -s deploy/tests -v
 

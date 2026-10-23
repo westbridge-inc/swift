@@ -195,6 +195,8 @@ describe('[DOC-1 §0.5] hard limits', () => {
       'modules/ads/ads.routes.ts', 'modules/auth/auth.routes.ts', 'modules/chat/chat.routes.ts', 'modules/courier/courier.routes.ts',
       'modules/driver/driver.routes.ts', 'modules/rider/rider.routes.ts', 'modules/safety/safety.routes.ts', 'modules/vendor/vendor.routes.ts',
       'modules/verification/verification.routes.ts',
+      // [IMAGES-E2E] The one keeper of photos customers see (store photos, provider portfolio): scanned + redrawn.
+      'utils/owned-photo-upload.ts',
     ]);
     const writers = files.filter((f) => /verificationDocument\.create(Many)?\(/.test(readFileSync(f, 'utf8'))).map((f) => relative(API_SRC, f)).sort();
     expect(writers).toEqual(['modules/verification/verification.service.ts']);

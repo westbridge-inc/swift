@@ -127,6 +127,8 @@ export class LocalStorageProvider implements StorageProvider, BoundedObjectReade
 
   async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
     const abs = this.resolveKey(fileKey);
+    // Only a file INSIDE the uploads folder is ever read here (the folder itself is no photo).
+    if (!abs.startsWith(this.baseDir + path.sep)) return null;
     try {
       const s = await stat(abs);
       if (!s.isFile() || s.size > maxBytes) return null;

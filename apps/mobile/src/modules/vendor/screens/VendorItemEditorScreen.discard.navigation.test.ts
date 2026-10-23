@@ -121,7 +121,7 @@ vi.mock('../../../stores/authStore', () => ({
 }));
 vi.mock('../../../stores/storeSwitcher', () => ({ useStoreSwitcher: { getState: () => ({ selectedStoreId: 'store-A' }) } }));
 vi.mock('../../../stores/vendorPreview', () => ({ useVendorPreview: (select: (s: unknown) => unknown) => select({ previewType: fx.previewType }) }));
-vi.mock('../../../lib/images', () => ({ mediaUrl: () => undefined }));
+vi.mock('../../../lib/images', () => ({ mediaUrl: () => undefined, isKeptPhoto: () => false, storePhotoUrl: () => null, HERO_PHOTO_WIDTH: 1280 }));
 
 import { VendorItemEditorScreen } from './VendorItemEditorScreen';
 

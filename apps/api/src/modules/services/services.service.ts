@@ -5,6 +5,7 @@ import { Prisma, type PrismaClient } from '@prisma/client';
 import { approvedEvidenceFor } from '../verification/evidence';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /** The verification projection is used both on the root client and inside
  * profile-save transactions. Keep the contract narrow enough that the same
@@ -42,7 +43,8 @@ export async function sendBookingReminders(
   let sent = 0;
 
   const alreadyReminded = async (userId: string, kind: string, refId: string) => {
-    const existing = await prisma.notification.findFirst({
+    // [item 20] A customer's or provider's reminder, looked up by the reminder job: the named capability under the owner wall.
+    const existing = await ownerWallSystem('services:already-reminded', () => prisma.notification.findFirst({
       where: {
         userId,
         AND: [
@@ -51,7 +53,7 @@ export async function sendBookingReminders(
         ],
       },
       select: { id: true },
-    });
+    }));
     return existing !== null;
   };
 

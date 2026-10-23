@@ -13,6 +13,8 @@
 #   store, materialized at /run/swift-rehearsal-secrets. Never production's.
 # - Its own volumes: the base file's named volumes are scoped by the project
 #   name, so swift-rehearsal_swift-pgdata is not production's swift-pgdata.
+# - Its own upload malware scanner (clamd), on its own network, with freshclam
+#   off (no route out).
 # - Nothing public: Caddy, the website and the console are in a profile that
 #   is never enabled, and no service publishes a port.
 # - Postgres is healthy only once it answers over TCP (the image's first start
@@ -32,6 +34,13 @@ services:
     volumes: !override
       - swift-meilidata:/meili_data
       - /run/swift-rehearsal-secrets:/run/secrets:ro
+  # [Row 312] The copy's own scanner (its own signature volume, on the copy's
+  # internal network): the copy's uploads are scanned exactly as live ones,
+  # never by the live scanner. No route out, so freshclam is off and the
+  # image's own signatures are used.
+  clamd:
+    environment:
+      CLAMAV_NO_FRESHCLAMD: "true"
   migrate:
     volumes: !override
       - /run/swift-rehearsal-secrets:/run/secrets:ro
