@@ -345,7 +345,7 @@ export function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean })
   const [name, setName] = useState<string>(cat.name);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const itemCount = (cat.items ?? []).length;
-  // [IMAGES-E2E PR4] The section's own photo (Home can show it on a tile for the section's name).
+  // [IMAGES-E2E PR4/PR5] The section's own photo: above the section on the store page, and Home can show it.
   const [photoOpen, setPhotoOpen] = useState(false);
   const [photoError, setPhotoError] = useState<string | null>(null);
   // [REVIEW-F S4-5 on #1965] Removing asks first, like every other photo removal.
@@ -493,9 +493,10 @@ export function CategoryHeader({ cat, canEdit }: { cat: any; canEdit: boolean })
           </>
         ) : (
           <>
-            {/* [REVIEW-F S3-1 on #1965] Promise nothing Home may not do: Home shows one tile per section name, and none while the discovery rail is live. */}
+            {/* [REVIEW-F S3-1 on #1965 · S4-1 on #1973] True on both counts: the store page always shows it above the
+                section (PR5); Home only can (one tile per section name, none while the discovery rail is live). */}
             <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-              This photo can show on Home as the picture for “{cat.name}”. Location and camera details are removed.
+              Customers see it above “{cat.name}” on your store page, and it can show on Home. Location and camera details are removed.
             </T>
             {sectionPhotoNotShown ? (
               <T variant="caption" weight="semibold" center style={{ marginTop: space.sm, color: color.warning }}>{OUTSIDE_PHOTO_NOTE}</T>

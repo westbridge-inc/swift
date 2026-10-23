@@ -311,6 +311,20 @@ describe('[item 20] notifications written for someone else', () => {
     expect(await asked()).toBe(1);
   });
 
+  it('a store that goes live under billing\'s hold tells its owner to pay the weekly fee, from inside an admin\'s transaction (#1906)', async () => {
+    const { VerificationService } = await import('../modules/verification/verification.service');
+    const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+    const svc = new VerificationService(app.prisma, await notices(), getKycProvider());
+    // The projection's own step (private), on the hold's edge: an admin's approve or a job runs the projection.
+    const tell = (svc as unknown as { tellOwnerFeeHoldsGoLive(db: Prisma.TransactionClient, userId: string, vendor: { id: string; name: string }): Promise<void> }).tellOwnerFeeHoldsGoLive.bind(svc);
+    const vendor = { id: `hold-${RUN}`, name: STORE_NAME };
+    const told = () => owner.notification.findMany({ where: { userId: ids.storeOwner, data: { path: ['vendorId'], equals: vendor.id } } });
+    await asPerson(ids.other, () => app.prisma.$transaction((tx) => tell(tx, ids.storeOwner, vendor)));
+    expect(await told()).toEqual([expect.objectContaining({
+      userId: ids.storeOwner, type: 'SYSTEM_ANNOUNCEMENT', title: 'Documents approved', data: { vendorId: vendor.id },
+    })]);
+  });
+
   it('a once-a-day notice to a store owner, from a customer\'s checkout, is still sent once', async () => {
     const { tellOwnerHomeVisitsPaused } = await import('../modules/verification/home-visits');
     const service = await notices();
@@ -499,7 +513,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/inactivity.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 4,
+      'modules/verification/verification.service.ts insertNoticeFor': 5,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({

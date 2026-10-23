@@ -408,8 +408,8 @@ describe('GOLD-6 · CUST-05 — wrong-code denial and the counter lockout', () =
   it('a wrong code burns one attempt per try and locks after MAX tries; wrong parties are refused with exact codes', async () => {
     const customer = await makeCustomer('Vera');
     const { id, code } = await placePickupOrder(customer);
-    await vendorStep(id, 'accept', 'ACCEPTED');
-    await vendorStep(id, 'preparing', 'PREPARING');
+    await vendorStep(id, 'accept', 'PREPARING'); // [O-3] one tap: Accept starts preparation
+    await vendorStep(id, 'preparing', 'PREPARING'); // [O-3] an older build's "Start preparing": 200 no-op
     await vendorStep(id, 'ready', 'READY_FOR_PICKUP');
 
     // A coded order cannot be closed without the code.
@@ -460,8 +460,8 @@ describe('GOLD-6 · CUST-05 — counter completion with the right code', () => {
     expect(tooEarly.statusCode).toBe(400);
     expect(tooEarly.json().error.code).toBe('INVALID_STATUS');
 
-    await vendorStep(id, 'accept', 'ACCEPTED');
-    await vendorStep(id, 'preparing', 'PREPARING');
+    await vendorStep(id, 'accept', 'PREPARING'); // [O-3] one tap: Accept starts preparation
+    await vendorStep(id, 'preparing', 'PREPARING'); // [O-3] an older build's "Start preparing": 200 no-op
     await vendorStep(id, 'ready', 'READY_FOR_PICKUP');
 
     // The customer reads her pickup code from the live order at the counter.
