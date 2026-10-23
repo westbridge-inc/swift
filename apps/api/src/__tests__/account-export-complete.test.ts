@@ -320,7 +320,7 @@ describe('the account export', () => {
     const at = new Date(Date.now() - 3_600_000);
     await app.prisma.taxiTripStop.create({ data: {
       orderId: ride.id, sequence: 1, lat: 6.8012, lng: -58.1503, address: `Stop One ${MARK}`, legMeters: 1200, legSeconds: 240,
-      status: 'DEPARTED', arrivedAt: at, departedAt: new Date(at.getTime() + 300_000), actedBy: driverUser, evidenceNote: `fix 40 m from the stop ${MARK}`,
+      status: 'DEPARTED', arrivedAt: at, arrivalVerified: true, departedAt: new Date(at.getTime() + 300_000), actedBy: driverUser, evidenceNote: `fix 40 m from the stop ${MARK}`,
     } });
     await app.prisma.taxiTripStop.create({ data: {
       orderId: ride.id, sequence: 2, lat: 6.7955, lng: -58.1402, address: `Stop Two ${MARK}`, status: 'SKIPPED', skippedAt: at, skipReason: 'Couldn’t reach the stop', actedBy: driverUser,
@@ -328,8 +328,8 @@ describe('the account export', () => {
     await app.prisma.taxiTripStop.create({ data: { orderId: theirs.id, sequence: 1, lat: 6.8, lng: -58.15, address: `Their Stop ${MARK}` } });
     const data = await service().exportData(passenger) as unknown as Record<string, Array<Record<string, unknown>>> & { coverage: Record<string, unknown> };
     expect(data['taxiStops']).toEqual([
-      expect.objectContaining({ orderId: ride.id, sequence: 1, address: `Stop One ${MARK}`, lat: 6.8012, lng: -58.1503, legMeters: 1200, legSeconds: 240, status: 'DEPARTED' }),
-      expect.objectContaining({ orderId: ride.id, sequence: 2, address: `Stop Two ${MARK}`, lat: 6.7955, lng: -58.1402, status: 'SKIPPED', skipReason: 'Couldn’t reach the stop' }),
+      expect.objectContaining({ orderId: ride.id, sequence: 1, address: `Stop One ${MARK}`, lat: 6.8012, lng: -58.1503, legMeters: 1200, legSeconds: 240, status: 'DEPARTED', arrivalVerified: true }),
+      expect.objectContaining({ orderId: ride.id, sequence: 2, address: `Stop Two ${MARK}`, lat: 6.7955, lng: -58.1402, status: 'SKIPPED', skipReason: 'Couldn’t reach the stop', arrivalVerified: null }),
     ]);
     expect(data.coverage['taxiStops']).toEqual({ rows: 2, complete: true });
     // The ride they belong to is in "orders" under the same id.

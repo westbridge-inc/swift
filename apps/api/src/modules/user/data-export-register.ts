@@ -140,9 +140,11 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
     // ride's id in "orders"), in the passenger's order: what the passenger's own ride screen shows
     // (taxi-stops-read.ts). Never the row id, who moved the stop, or the driver's arrival evidence (the driver's
     // own position). A driver's trip record carries no customer place, so it carries no stops either.
+    // arrivalVerified (yes/no: the server's fix supported the arrival) IS exported: it decides whether a billable
+    // wait started at the passenger's stop, i.e. their own charge; the raw evidence behind it stays out.
     category: 'taxiStops', model: 'TaxiTripStop', through: 'order', by: ['customerId'], key: 'id', sortBy: ['orderId', 'sequence'],
     omit: { id: 'SYSTEM', evidenceNote: 'OTHER_PERSON' },
-    fields: ['orderId', 'sequence', 'address', 'lat', 'lng', 'status', 'legMeters', 'legSeconds', 'arrivedAt', 'departedAt', 'skippedAt', 'skipReason', 'createdAt', 'updatedAt'],
+    fields: ['orderId', 'sequence', 'address', 'lat', 'lng', 'status', 'legMeters', 'legSeconds', 'arrivedAt', 'arrivalVerified', 'departedAt', 'skippedAt', 'skipReason', 'createdAt', 'updatedAt'],
   },
   {
     // A store review that names you: score, tags, words and the month, as the store's reviews page lists it.
