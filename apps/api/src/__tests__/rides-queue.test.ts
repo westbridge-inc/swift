@@ -250,6 +250,43 @@ describe('join / position / leave', () => {
 });
 
 describe('the scan', () => {
+  it('[REVIEW-G #2022 S4-3] supply for a queued ride is a car that can take THAT ride: its class and its party', async () => {
+    const ANNA = { lat: 7.264, lng: -58.5013 }; // Anna Regina: a field no other test uses
+    const dropoff = { lat: 7.274, lng: -58.5113 };
+    // 1) A COMFORT ride; the only car near is an ECONOMY car (never offered a COMFORT ride).
+    const comfort = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: comfort.userId }, select: { tenantId: true } });
+    const area = () => runWithoutTenant(() => scanDeps().dispatch.getAvailability('DRIVER', ANNA, 0, tenantId));
+    const economyCar = await makeDriver(ANNA);
+    expect((await join(comfort.token, { pickup: ANNA, pickupAddress: 'Anna Regina market', dropoff, rideClass: 'COMFORT' })).statusCode).toBe(201);
+    expect((await area()).level).not.toBe('NONE'); // precondition: that car IS area supply
+    await runScan();
+    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: comfort.userId } })).status).toBe('WAITING');
+    expect(await app.prisma.order.count({ where: { customerId: comfort.userId, orderType: 'TAXI' } })).toBe(0);
+    // Control: a COMFORT car arrives -> the same entry is requested.
+    const comfortCar = await makeDriver(ANNA);
+    await app.prisma.driver.update({ where: { id: comfortCar.driverId }, data: { rideClass: 'COMFORT' } as never });
+    await runScan();
+    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: comfort.userId } })).status).toBe('MATCHED');
+    await app.prisma.order.updateMany({ where: { customerId: comfort.userId }, data: { status: 'CANCELLED' } });
+    await app.prisma.driver.updateMany({ where: { id: { in: [economyCar.driverId, comfortCar.driverId] } }, data: { isOnline: false, isAvailable: false } });
+
+    // 2) A party of 4; the only car near seats 3.
+    const party = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const small = await makeDriver(ANNA);
+    await app.prisma.driver.update({ where: { id: small.driverId }, data: { vehicleCapacity: 3 } });
+    expect((await join(party.token, { pickup: ANNA, pickupAddress: 'Anna Regina market', dropoff, passengerCount: 4 })).statusCode).toBe(201);
+    expect((await area()).level).not.toBe('NONE');
+    await runScan();
+    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: party.userId } })).status).toBe('WAITING');
+    // Control: a car that seats 4 -> requested.
+    const four = await makeDriver(ANNA);
+    await runScan();
+    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: party.userId } })).status).toBe('MATCHED');
+    await app.prisma.order.updateMany({ where: { customerId: party.userId }, data: { status: 'CANCELLED' } });
+    await app.prisma.driver.updateMany({ where: { id: { in: [small.driverId, four.driverId] } }, data: { isOnline: false, isAvailable: false } });
+  });
+
   it('contains FIFO, supply, worker dispatch, and created orders within each tenant', async () => {
     const spot = { lat: 5.22, lng: -59.31 }; // isolated from every other fixture
     const otherTenant = await app.prisma.tenant.create({
@@ -411,43 +448,6 @@ describe('the scan', () => {
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: ride.id } });
     await app.prisma.order.updateMany({ where: { customerId: dual.userId }, data: { status: 'CANCELLED' } });
     await app.prisma.driver.update({ where: { id: own.id }, data: { isOnline: false, isAvailable: false } });
-  });
-
-  it('[REVIEW-G #2022 S4-3] supply for a queued ride is a car that can take THAT ride: its class and its party', async () => {
-    const ANNA = { lat: 7.264, lng: -58.5013 }; // Anna Regina: a field no other test uses
-    const dropoff = { lat: 7.274, lng: -58.5113 };
-    // 1) A COMFORT ride; the only car near is an ECONOMY car (never offered a COMFORT ride).
-    const comfort = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: comfort.userId }, select: { tenantId: true } });
-    const area = () => runWithoutTenant(() => scanDeps().dispatch.getAvailability('DRIVER', ANNA, 0, tenantId));
-    const economyCar = await makeDriver(ANNA);
-    expect((await join(comfort.token, { pickup: ANNA, pickupAddress: 'Anna Regina market', dropoff, rideClass: 'COMFORT' })).statusCode).toBe(201);
-    expect((await area()).level).not.toBe('NONE'); // precondition: that car IS area supply
-    await runScan();
-    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: comfort.userId } })).status).toBe('WAITING');
-    expect(await app.prisma.order.count({ where: { customerId: comfort.userId, orderType: 'TAXI' } })).toBe(0);
-    // Control: a COMFORT car arrives -> the same entry is requested.
-    const comfortCar = await makeDriver(ANNA);
-    await app.prisma.driver.update({ where: { id: comfortCar.driverId }, data: { rideClass: 'COMFORT' } as never });
-    await runScan();
-    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: comfort.userId } })).status).toBe('MATCHED');
-    await app.prisma.order.updateMany({ where: { customerId: comfort.userId }, data: { status: 'CANCELLED' } });
-    await app.prisma.driver.updateMany({ where: { id: { in: [economyCar.driverId, comfortCar.driverId] } }, data: { isOnline: false, isAvailable: false } });
-
-    // 2) A party of 4; the only car near seats 3.
-    const party = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const small = await makeDriver(ANNA);
-    await app.prisma.driver.update({ where: { id: small.driverId }, data: { vehicleCapacity: 3 } });
-    expect((await join(party.token, { pickup: ANNA, pickupAddress: 'Anna Regina market', dropoff, passengerCount: 4 })).statusCode).toBe(201);
-    expect((await area()).level).not.toBe('NONE');
-    await runScan();
-    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: party.userId } })).status).toBe('WAITING');
-    // Control: a car that seats 4 -> requested.
-    const four = await makeDriver(ANNA);
-    await runScan();
-    expect((await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: party.userId } })).status).toBe('MATCHED');
-    await app.prisma.order.updateMany({ where: { customerId: party.userId }, data: { status: 'CANCELLED' } });
-    await app.prisma.driver.updateMany({ where: { id: { in: [small.driverId, four.driverId] } }, data: { isOnline: false, isAvailable: false } });
   });
 
   it('auto-requests the FIFO head through the REAL request core when a driver frees up', async () => {
