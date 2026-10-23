@@ -14,8 +14,16 @@ import { uploadScanStates } from './upload-scan-debt';
  * `profilePhotoUrl` pointer is held to the same rule, since it can name any stored upload. The plate,
  * the vehicle and the person's own photo (an avatar upload, which the bypass never covers) are untouched.
  * One query per payload; a lookup error withholds every photo in it (AWAITING).
+ *
+ * RULE (REVIEW-G S4): this is a preSerialization hook, so it sees only objects. A body sent pre-serialised
+ * (a JSON string, a Buffer or the raw response stream) or a direct socket emit would skip it: send an
+ * object and publish order events through emitToOrderRoom. A census in vehicle-photo-scan.unit.test.ts
+ * fails on either. Measured (REVIEW-F S4-2): p95 0.28 ms on a 500-item market list, 0.37 ms on a
+ * 200-order board, 0.61 ms when photos are present (one query); serialising the same payload costs ~3 ms.
  */
-const FIELDS: Readonly<Record<string, string>> = { vehiclePhotoUrl: 'vehiclePhotoScan', profilePhotoUrl: 'profilePhotoScan' };
+/** The photo fields and the state field written beside each (own keys only: never a prototype name). */
+const stateFieldOf = (key: string): string | null =>
+  key === 'vehiclePhotoUrl' ? 'vehiclePhotoScan' : key === 'profilePhotoUrl' ? 'profilePhotoScan' : null;
 
 /** The same object test as the legacy pointer walker (admin/document-reviewer.ts): a null prototype counts. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -24,19 +32,26 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function collect(value: unknown, out: Set<string>, seen: WeakSet<object>): void {
-  if (Array.isArray(value)) { if (seen.has(value)) return; seen.add(value); for (const item of value) collect(item, out, seen); return; }
-  if (!isPlainObject(value) || seen.has(value)) return;
-  seen.add(value);
-  for (const [key, child] of Object.entries(value)) {
-    if (key in FIELDS && typeof child === 'string' && child) out.add(child);
-    else collect(child, out, seen);
+/** [REVIEW-F S4-2 · speed] Runs on EVERY response, so it allocates nothing per node: a plain recursive
+ *  read of own keys. A response payload is acyclic (it is about to be serialised); a cycle would overflow
+ *  here and the request fails rather than serving anything (fail closed). */
+function collect(value: unknown, out: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) { const item = value[i]; if (item !== null && typeof item === 'object') collect(item, out); }
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const child = value[key];
+    if (typeof child === 'string') { if (child && stateFieldOf(key)) out.add(child); }
+    else if (child !== null && typeof child === 'object') collect(child, out);
   }
 }
 
 export async function withVehiclePhotosScanned<T>(prisma: Pick<PrismaClient, 'uploadScanDebt'>, payload: T): Promise<T> {
   const photos = new Set<string>();
-  collect(payload, photos, new WeakSet());
+  collect(payload, photos);
   if (photos.size === 0) return payload;
   const states = await uploadScanStates(prisma, [...photos]);
   if ([...states.values()].every((s) => s === 'SCANNED')) return payload;
@@ -53,11 +68,12 @@ export async function withVehiclePhotosScanned<T>(prisma: Pick<PrismaClient, 'up
     const out: Record<string, unknown> = {};
     seen.set(value, out);
     for (const [key, child] of Object.entries(value)) {
-      if (key in FIELDS && typeof child === 'string' && child) {
+      const stateField = stateFieldOf(key);
+      if (stateField && typeof child === 'string' && child) {
         const state = states.get(child) ?? 'AWAITING';
         if (state === 'SCANNED') { out[key] = child; continue; }
         out[key] = null;
-        out[FIELDS[key]!] = state;
+        out[stateField] = state;
         continue;
       }
       out[key] = walk(child);

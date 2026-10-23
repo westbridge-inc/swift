@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { withVehiclePhotosScanned } from '../lib/photo-scan-filter';
 
 // [Row 312 · COORD 23 Oct, ruling (a) for vehicle photos] The admin response filter: a vehicle photo
@@ -47,6 +47,13 @@ describe('[Row 312] vehicle photos in admin responses', () => {
     expect({ ...(out.data.rider as Record<string, unknown>) }).toEqual({ vehiclePhotoUrl: null, vehiclePhotoScan: 'AWAITING', plate: 'PAA 1' });
   });
 
+  it('[REVIEW-F S4-2] only the two photo keys count, never a prototype name; a payload without them is returned as is, unqueried', async () => {
+    const { prisma, findMany } = db([]);
+    const payload = { constructor: 'not-a-photo', toString: 'nor-this', hasOwnProperty: 'nor-this', data: [{ vehiclePhotoUrl: null, name: 'x' }] };
+    expect(await withVehiclePhotosScanned(prisma, payload)).toBe(payload);
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
   it('[ruling 01:28Z] the client-written profilePhotoUrl pointer is held to the same rule (it can name any upload)', async () => {
     const { prisma } = db([{ fileKey: 'liveness/u1/selfie.jpg', result: null }, { fileKey: 'vehicles/p/car.jpg', result: 'FOUND' }]);
     const out = await withVehiclePhotosScanned(prisma, { rider: { profilePhotoUrl: '/uploads/liveness/u1/selfie.jpg', vehiclePhotoUrl: 'vehicles/p/car.jpg' }, other: { profilePhotoUrl: 'avatars/u2/me.jpg' } });
@@ -62,6 +69,32 @@ describe('[Row 312 · ruling 01:28Z] the filter is wired on every surface', () =
     const at = app.indexOf('registerUploadPhotoScan(app)');
     expect(at, 'app.ts must call registerUploadPhotoScan(app)').toBeGreaterThan(-1);
     expect(at).toBeLessThan(app.indexOf("await app.register(authRoutes"));
+  });
+
+  // [REVIEW-G S4 · 02:30Z] The filter is a preSerialization hook: a body sent pre-serialised (a string,
+  // Buffer or raw stream) or a direct socket emit would pass it by. None may exist unless named here.
+  it('no route sends a pre-serialised body, and no direct socket emit carries a photo field (both would skip the filter)', () => {
+    const SRC = join(__dirname, '..');
+    const files: string[] = [];
+    const walk = (dir: string) => { for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== '__tests__' && e.name !== 'generated') walk(full); }
+      else if (e.name.endsWith('.ts') && !e.name.endsWith('.test.ts') && !e.name.endsWith('.d.ts')) files.push(full);
+    } };
+    walk(SRC);
+    const PRESERIALISED = /reply\.send\(\s*(JSON\.stringify|Buffer\.from)|reply\.serializer\(|reply\.serialize\(|reply\.raw\.(write|end)\(/;
+    const ALLOWED_PRESERIALISED: Record<string, string> = {}; // file (relative) -> why it carries no photo field
+    const preSerialised = files.filter((f) => PRESERIALISED.test(readFileSync(f, 'utf8'))).map((f) => relative(SRC, f)).filter((f) => !(f in ALLOWED_PRESERIALISED));
+    expect(preSerialised, 'a pre-serialised body skips the photo filter: send an object, or list the file with a reason').toEqual([]);
+    const photoEmits: string[] = [];
+    for (const f of files) {
+      if (f.endsWith(join('order', 'order-room-emission.service.ts'))) continue; // the filtered door itself
+      const lines = readFileSync(f, 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        if (/\.emit\(/.test(line) && /vehiclePhotoUrl|profilePhotoUrl|riderCounterpartySelect|RIDER_COUNTERPARTY_SELECT/.test(lines.slice(i, i + 30).join('\n'))) photoEmits.push(`${relative(SRC, f)}:${i + 1}`);
+      });
+    }
+    expect(photoEmits, 'a direct emit with a photo field skips the filter: publish through emitToOrderRoom').toEqual([]);
   });
 
   // The order room: the customer's ride and delivery cards over the socket.
