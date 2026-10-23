@@ -8,6 +8,8 @@ const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to
 
 /** [Row 312] A document stored while the malware scanner was down is not opened before a clean scan. */
 const AWAITING_MALWARE_SCAN_SENTENCE = 'This document is waiting for a malware scan: it was uploaded while the scanner was down. It opens once the scan answers clean; there is nothing to do meanwhile.';
+/** [Row 312 · REVIEW-F S3-1] A rescan found malware (or could not scan it): it never opens; the person re-uploads. */
+const FAILED_MALWARE_SCAN_SENTENCE = 'This document failed its malware scan and was taken out of service. Ask the person to upload it again.';
 
 export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: string; label: string; onViewed: (_viewed: boolean) => void; onRejectMissing?: () => void }) {
   const [url, setUrl] = useState('');
@@ -53,6 +55,9 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
         if (response.headers.get('X-Swift-Error-Code') === 'AWAITING_MALWARE_SCAN') {
           throw Object.assign(new Error(AWAITING_MALWARE_SCAN_SENTENCE), { code: 'AWAITING_MALWARE_SCAN' });
         }
+        if (response.headers.get('X-Swift-Error-Code') === 'FAILED_MALWARE_SCAN') {
+          throw Object.assign(new Error(FAILED_MALWARE_SCAN_SENTENCE), { code: 'FAILED_MALWARE_SCAN' });
+        }
         if (response.status === 403 && response.headers.get('X-Swift-Error-Code') === 'DOCUMENT_REVIEWER_REQUIRED') {
           throw Object.assign(new Error(DOCUMENT_REVIEWER_SENTENCE), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
         }
@@ -79,7 +84,9 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
         const message = (err as { message?: string })?.message;
         if (code === 'DOCUMENT_REVIEWER_REQUIRED') { setError(message || 'You need the document-reviewer permission to open documents. Ask a super-admin.'); return; }
         // [Row 312 · G S3-1 (a)] Our words, not the server's: trying again works only after the rescan.
-        if (code === 'AWAITING_MALWARE_SCAN') { setError(AWAITING_MALWARE_SCAN_SENTENCE); return; }
+        if (code === 'AWAITING_MALWARE_SCAN') { setMissing(false); setError(AWAITING_MALWARE_SCAN_SENTENCE); return; }
+        // [REVIEW-F S3-1] Never opens: the reviewer's reject-and-re-upload path is offered, like a missing file.
+        if (code === 'FAILED_MALWARE_SCAN') { setMissing(true); setError(FAILED_MALWARE_SCAN_SENTENCE); return; }
         setError(unavailable ? (code === 'DOCUMENT_PURGED' ? 'This document was removed under the retention policy. The applicant must re-submit it before it can be approved.' : 'The file is missing. The applicant must re-submit it before it can be approved.') : 'The document could not be loaded. Try View document again.');
       }
     } finally { if (generation.current === attempt) setLoading(false); }

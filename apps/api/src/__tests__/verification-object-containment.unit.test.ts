@@ -120,7 +120,7 @@ function harness() {
     },
     // [Row 312 · G S3-1 (a)] The viewer asks whether a document is still owed a malware scan; nothing
     // in this suite was stored under the bypass, so no debt row exists.
-    uploadScanDebt: { findFirst: vi.fn(async () => null) },
+    uploadScanDebt: { findMany: vi.fn(async () => []) },
     encryptedObject: {
       findUnique: vi.fn(async ({ where }: any) => objects.get(where.fileKey) ?? null),
       // [#1449 follow-up] The upload route first asks for the uploader's own identical recent upload (a lost-reply retry).

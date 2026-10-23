@@ -23,7 +23,7 @@ vi.mock('../modules/ops/ops-page', () => ({
 
 import { pageOps } from '../modules/ops/ops-page';
 import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, memoryScannerCooldown, scanUpload, registerScannerCooldown, type UploadSurface } from '../lib/malware-scan';
-import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, QUARANTINE_HELD_FOLDER, RESCAN_BATCH, awaitingMalwareScan, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
+import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, QUARANTINE_HELD_FOLDER, RESCAN_BATCH, documentScanState, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
 import { encryptBuffer, generateDek } from '../providers/storage/envelope';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { alertClassOf } from '../providers/notifications/alert-class';
@@ -374,18 +374,22 @@ describe('[Row 312] every upload that can be stored unscanned records its debt',
   });
 });
 
-describe('[Row 312 · G S3-1 (a)] the document viewer waits for a clean scan', () => {
-  it('awaiting = any debt row for the key (local or bucket spelling) not closed CLEAN; a lookup error reads as awaiting', async () => {
-    let where: Record<string, unknown> | undefined;
-    const found = { uploadScanDebt: { findFirst: async (q: { where: Record<string, unknown> }) => { where = q.where; return { id: 'd1' }; } } };
-    await expect(awaitingMalwareScan(found as never, '/uploads/verification/u1/doc.enc')).resolves.toBe(true);
-    expect(where).toEqual({
-      fileKey: { in: ['/uploads/verification/u1/doc.enc', 'verification/u1/doc.enc'] },
-      OR: [{ result: null }, { result: { not: 'CLEAN' } }],
-    });
-    const none = { uploadScanDebt: { findFirst: async () => null } };
-    await expect(awaitingMalwareScan(none as never, 'verification/u1/doc.enc')).resolves.toBe(false);
-    const broken = { uploadScanDebt: { findFirst: async () => { throw new Error('db down'); } } };
-    await expect(awaitingMalwareScan(broken as never, 'verification/u1/doc.enc')).resolves.toBe(true);
+describe('[Row 312 · G S3-1 (a) + F S3-1] what the document viewer may say about a document owed a scan', () => {
+  const db = (rows: Array<{ result: string | null }> | Error, seen?: (q: unknown) => void) => ({ uploadScanDebt: { findMany: async (q: unknown) => { seen?.(q); if (rows instanceof Error) throw rows; return rows; } } });
+  it('open (stored under the bypass, rescan owed) or held: AWAITING; a lookup error reads as AWAITING (never served)', async () => {
+    let query: unknown;
+    await expect(documentScanState(db([{ result: null }], (q) => { query = q; }) as never, '/uploads/verification/u1/doc.enc')).resolves.toBe('AWAITING');
+    expect(query).toEqual({ where: { fileKey: { in: ['/uploads/verification/u1/doc.enc', 'verification/u1/doc.enc'] } }, select: { result: true } });
+    await expect(documentScanState(db([{ result: 'HELD' }]) as never, 'k')).resolves.toBe('AWAITING');
+    await expect(documentScanState(db(new Error('db down')) as never, 'k')).resolves.toBe('AWAITING');
+    // An open row outranks any closed one for the same key.
+    await expect(documentScanState(db([{ result: 'FOUND' }, { result: null }]) as never, 'k')).resolves.toBe('AWAITING');
+  });
+  it('closed on a positive or unscannable (or anything unknown): FAILED, never opens; erased or shredded: GONE; clean or no row: SCANNED', async () => {
+    for (const result of ['FOUND', 'UNSCANNABLE', 'SOMETHING_NEW']) await expect(documentScanState(db([{ result }]) as never, 'k'), result).resolves.toBe('FAILED');
+    for (const result of ['GONE', 'SHREDDED']) await expect(documentScanState(db([{ result }]) as never, 'k'), result).resolves.toBe('GONE');
+    await expect(documentScanState(db([{ result: 'GONE' }, { result: 'FOUND' }]) as never, 'k')).resolves.toBe('FAILED');
+    await expect(documentScanState(db([{ result: 'CLEAN' }]) as never, 'k')).resolves.toBe('SCANNED');
+    await expect(documentScanState(db([]) as never, 'k')).resolves.toBe('SCANNED');
   });
 });

@@ -32,6 +32,7 @@ import { REAL_PNG, uniquePng } from './helpers/real-image';
 
 const GRANT = 'documents.review';
 const AWAITING = 'AWAITING_MALWARE_SCAN';
+const FAILED = 'FAILED_MALWARE_SCAN';
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
@@ -87,8 +88,8 @@ async function uploadedDoc(): Promise<{ docId: string; fileUrl: string }> {
   return { docId: doc.id, fileUrl };
 }
 
-/** A fake clamd that answers PING and calls every stream clean. */
-async function cleanClamd(): Promise<Record<string, string>> {
+/** A fake clamd that answers PING and gives every stream the same verdict (clean, or a signature). */
+async function fakeClamd(verdict: 'OK' | 'FOUND' = 'OK'): Promise<Record<string, string>> {
   const server = net.createServer((socket) => {
     let data = Buffer.alloc(0);
     socket.on('data', (chunk) => {
@@ -102,7 +103,7 @@ async function cleanClamd(): Promise<Record<string, string>> {
         if (data.length < at + 4 + length) return;
         at += 4 + length;
       }
-      socket.end('stream: OK\0');
+      socket.end(verdict === 'OK' ? 'stream: OK\0' : 'stream: Eicar-Test-Signature FOUND\0');
     });
   });
   servers.push(server);
@@ -175,7 +176,7 @@ describe('[Row 312 · G S3-1 (a)] a document stored under the bypass is not open
 
     // clamd is back: the rescan answers CLEAN and closes the debt; the document opens as before.
     for (const name of SCAN_ENV) delete process.env[name];
-    const env = await cleanClamd();
+    const env = await fakeClamd('OK');
     const pass = await rescanUploadDebt({ prisma: app.prisma as never, redis: app.redis, notifications: {} as never, storage: getStorageProvider(), env });
     expect(pass.clean).toBeGreaterThanOrEqual(1);
     const opened = await mint(reviewer.token, docId);
@@ -184,6 +185,24 @@ describe('[Row 312 · G S3-1 (a)] a document stored under the bypass is not open
     expect(shown.statusCode).toBe(200);
     expect(Buffer.from(shown.rawPayload).equals(REAL_PNG)).toBe(true);
     expect(await viewAudits(docId)).toBe(1);
+  });
+
+  it('[REVIEW-F S3-1] a rescan that finds a signature: FAILED, in honest words (never opens), and never served', async () => {
+    Object.assign(process.env, DOWN, { MALWARE_SCAN_BYPASS: '1' });
+    const { docId } = await uploadedDoc();
+    for (const name of SCAN_ENV) delete process.env[name];
+    const env = await fakeClamd('FOUND');
+    const pass = await rescanUploadDebt({ prisma: app.prisma as never, redis: app.redis, notifications: { send: async () => undefined } as never, storage: getStorageProvider(), env });
+    expect(pass.quarantined).toBeGreaterThanOrEqual(1);
+    const reviewer = await person('ADMIN', ['*', GRANT]);
+    const refused = await mint(reviewer.token, docId);
+    expect(refused.json().error.code, refused.body).toBe(FAILED);
+    expect(refused.json().error.message).toBe('This document failed its malware scan and was taken out of service. Ask the person to upload it again.');
+    expect(refused.json().error.message).not.toMatch(/opens once/i);
+    expect(await viewAudits(docId)).toBe(0);
+    const served = await render(mintRenderPath(docId, reviewer.id, 60).path);
+    expect(served.json().error.code).toBe(FAILED);
+    expect(Buffer.from(served.rawPayload).includes(REAL_PNG.subarray(0, 64))).toBe(false);
   });
 
   it('a document scanned at upload (no debt) opens at once, as before', async () => {

@@ -148,29 +148,68 @@ export async function evidenceObjectKey(prisma: DebtDb, fileKey: string): Promis
   return row?.releasedKey ?? null;
 }
 /**
- * [Row 312 · REVIEW-G S3-1 · COORD 23 Oct, option (a)] Is this stored object still owed a clean malware
- * scan? True while an upload-scan debt for it is open (stored unscanned under the bypass, awaiting its
- * rescan) or closed on anything but CLEAN. Staff never open such a file: the admin document viewer
- * answers AWAITING_MALWARE_SCAN until the rescan answers CLEAN (a clean bypass row forgets its key, so
- * nothing matches then). Fails CLOSED: a lookup that errors reads as awaiting.
+ * [Row 312 · REVIEW-G S3-1 (a) + REVIEW-F S3-1 · COORD 23 Oct] What a stored upload's scan debt says to
+ * anyone who would show it to staff. Staff never see an upload that has not scanned CLEAN:
+ *   AWAITING  stored unscanned (the bypass) with its rescan still owed, or held: it opens once a scan
+ *             answers clean. A lookup that errors reads as AWAITING (fail closed).
+ *   FAILED    a rescan found a signature, or it could not be scanned (or any result this code does not
+ *             know): taken out of service, it NEVER opens; the person uploads it again.
+ *   GONE      erased or crypto-shredded before its rescan: the file no longer exists.
+ *   SCANNED   no debt, or the debt closed CLEAN (a clean bypass row forgets its key): show as before.
  */
-export async function awaitingMalwareScan(prisma: DebtDb, fileKey: string): Promise<boolean> {
+export type UploadScanState = 'SCANNED' | 'AWAITING' | 'FAILED' | 'GONE';
+
+/** The state a set of debt rows for one object gives it (an open or held row outranks any closed one). */
+function scanStateOf(rows: ReadonlyArray<{ result: string | null }>): UploadScanState {
+  if (rows.some((r) => r.result === null || r.result === 'HELD')) return 'AWAITING';
+  if (rows.some((r) => r.result !== 'CLEAN' && r.result !== 'GONE' && r.result !== 'SHREDDED')) return 'FAILED';
+  if (rows.some((r) => r.result === 'GONE' || r.result === 'SHREDDED')) return 'GONE';
+  return 'SCANNED';
+}
+const keySpellings = (fileKey: string): string[] => {
   const path = storedPath(fileKey);
-  const keys = [...new Set([fileKey, path, `/uploads/${path}`])];
+  return [...new Set([fileKey, path, `/uploads/${path}`])];
+};
+
+export async function documentScanState(prisma: DebtDb, fileKey: string): Promise<UploadScanState> {
+  let rows: Array<{ result: string | null }>;
   try {
-    const row = await prisma.uploadScanDebt.findFirst({
-      where: { fileKey: { in: keys }, OR: [{ result: null }, { result: { not: 'CLEAN' } }] },
-      select: { id: true },
-    });
-    return row !== null;
+    rows = await prisma.uploadScanDebt.findMany({ where: { fileKey: { in: keySpellings(fileKey) } }, select: { result: true } });
   } catch {
-    return true;
+    return 'AWAITING';
   }
+  return scanStateOf(rows);
 }
 
-/** The refusal the document viewer answers while awaitingMalwareScan holds (the console repeats it). */
-export function awaitingMalwareScanError(): AppError {
-  return new AppError(409, 'AWAITING_MALWARE_SCAN', 'This document is waiting for a malware scan (it was stored while the scanner was down). It opens once the scan answers clean.');
+/** documentScanState for many keys in ONE query (an admin list). A lookup error reads as AWAITING for all. */
+export async function uploadScanStates(prisma: DebtDb, fileKeys: readonly string[]): Promise<Map<string, UploadScanState>> {
+  const out = new Map<string, UploadScanState>();
+  const unique = [...new Set(fileKeys)];
+  if (unique.length === 0) return out;
+  let rows: Array<{ fileKey: string | null; result: string | null }>;
+  try {
+    rows = await prisma.uploadScanDebt.findMany({ where: { fileKey: { in: unique.flatMap(keySpellings) } }, select: { fileKey: true, result: true } });
+  } catch {
+    for (const key of unique) out.set(key, 'AWAITING');
+    return out;
+  }
+  for (const key of unique) {
+    const path = storedPath(key);
+    out.set(key, scanStateOf(rows.filter((r) => r.fileKey !== null && storedPath(r.fileKey) === path)));
+  }
+  return out;
+}
+
+export const AWAITING_MALWARE_SCAN_MESSAGE = 'This document is waiting for a malware scan (it was stored while the scanner was down). It opens once the scan answers clean.';
+export const FAILED_MALWARE_SCAN_MESSAGE = 'This document failed its malware scan and was taken out of service. Ask the person to upload it again.';
+
+/** The refusal for a state that must not be shown (null = show as before). GONE answers like any missing
+ *  verification file (the reviewer's reject-and-re-upload path). */
+export function uploadScanRefusal(state: UploadScanState): AppError | null {
+  if (state === 'AWAITING') return new AppError(409, 'AWAITING_MALWARE_SCAN', AWAITING_MALWARE_SCAN_MESSAGE);
+  if (state === 'FAILED') return new AppError(410, 'FAILED_MALWARE_SCAN', FAILED_MALWARE_SCAN_MESSAGE);
+  if (state === 'GONE') return new AppError(400, 'VERIFICATION_OBJECT_UNAVAILABLE', 'This verification file is unavailable. Upload it again.');
+  return null;
 }
 
 export const QUARANTINE_DAYS = 30;

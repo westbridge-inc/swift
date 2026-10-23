@@ -1,6 +1,6 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
-import { awaitingMalwareScan, awaitingMalwareScanError, retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
+import { documentScanState, uploadScanRefusal, retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -41,6 +41,7 @@ import { RatingStatsService } from '../rating/rating-stats.service';
 import { assertFounderAccess } from './founder-access';
 import { reviewerTypedFields } from '../verification/identity-signal-policy';
 import { documentReviewerRequired, holdsDocumentReviewerGrant, setDocumentReviewerGrant, withoutLegacyDocumentPointers } from './document-reviewer';
+import { withVehiclePhotosScanned } from './vehicle-photo-scan';
 import { CATALOGUE_APPROVER_CAPABILITY, catalogueApproverRequired, holdsCatalogueApproverGrant, setCatalogueApproverGrant } from './catalogue-approver';
 import { signupSelfieFor } from '../verification/signup-selfie';
 import { ADMIN_ACTION_CLASSES, ADMIN_REASON_HEADER, ADMIN_ROUTE_AUTHORITY, capabilitiesOf, capabilityMode, decideCapability, holdsCapability, reasonOf, reasonProblem, reasonRefusal, routeTemplateOf } from './admin-authority';
@@ -770,6 +771,10 @@ export async function adminRoutes(app: FastifyInstance) {
     if (holdsDocumentReviewerGrant(request.adminPermissions)) return payload;
     return withoutLegacyDocumentPointers(payload);
   });
+
+  // [Row 312 · COORD 23 Oct, ruling (a) for vehicle photos] A vehicle photo stored while the scanner was
+  // down (the bypass) leaves an admin response only after its rescan answers CLEAN (vehicle-photo-scan.ts).
+  app.addHook('preSerialization', async (_request: any, _reply: any, payload: unknown) => withVehiclePhotosScanned(app.prisma, payload));
 
   // [ADM-006] A CONSEQUENTIAL ACTION STATES WHY, before it happens.
   //
@@ -6281,7 +6286,7 @@ export async function adminRoutes(app: FastifyInstance) {
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
     // [Row 312 · G S3-1 (a), COORD 23 Oct] A document stored while the scanner was down (the bypass) is not
     // opened by staff until its rescan answers CLEAN: no link is minted and no view is recorded.
-    if (await awaitingMalwareScan(app.prisma, doc.fileUrl)) throw awaitingMalwareScanError();
+    { const refusal = uploadScanRefusal(await documentScanState(app.prisma, doc.fileUrl)); if (refusal) throw refusal; }
     // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
     // re-checks their grant on every load.
     const minted = mintRenderPath(id, request.user.userId, ttlSeconds);
