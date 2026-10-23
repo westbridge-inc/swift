@@ -147,6 +147,32 @@ export async function evidenceObjectKey(prisma: DebtDb, fileKey: string): Promis
   });
   return row?.releasedKey ?? null;
 }
+/**
+ * [Row 312 · REVIEW-G S3-1 · COORD 23 Oct, option (a)] Is this stored object still owed a clean malware
+ * scan? True while an upload-scan debt for it is open (stored unscanned under the bypass, awaiting its
+ * rescan) or closed on anything but CLEAN. Staff never open such a file: the admin document viewer
+ * answers AWAITING_MALWARE_SCAN until the rescan answers CLEAN (a clean bypass row forgets its key, so
+ * nothing matches then). Fails CLOSED: a lookup that errors reads as awaiting.
+ */
+export async function awaitingMalwareScan(prisma: DebtDb, fileKey: string): Promise<boolean> {
+  const path = storedPath(fileKey);
+  const keys = [...new Set([fileKey, path, `/uploads/${path}`])];
+  try {
+    const row = await prisma.uploadScanDebt.findFirst({
+      where: { fileKey: { in: keys }, OR: [{ result: null }, { result: { not: 'CLEAN' } }] },
+      select: { id: true },
+    });
+    return row !== null;
+  } catch {
+    return true;
+  }
+}
+
+/** The refusal the document viewer answers while awaitingMalwareScan holds (the console repeats it). */
+export function awaitingMalwareScanError(): AppError {
+  return new AppError(409, 'AWAITING_MALWARE_SCAN', 'This document is waiting for a malware scan (it was stored while the scanner was down). It opens once the scan answers clean.');
+}
+
 export const QUARANTINE_DAYS = 30;
 export const CLOSED_ROW_DAYS = 30;
 export const RESCAN_BATCH = 25;

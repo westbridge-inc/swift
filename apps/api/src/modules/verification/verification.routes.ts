@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
-import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
+import { awaitingMalwareScan, awaitingMalwareScanError, recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
@@ -282,6 +282,9 @@ export async function verificationRoutes(app: FastifyInstance) {
       throw documentReviewerRequired();
     }
     const meta = await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: docId });
+    // [Row 312 · G S3-1 (a)] Stored while the scanner was down (the bypass): never decrypted or served to
+    // staff before its rescan answers CLEAN, whatever link was minted.
+    if (await awaitingMalwareScan(app.prisma, doc.fileUrl)) throw awaitingMalwareScanError();
     const keys = getKeyProvider();
     if (!keys) throw new AppError(503, 'ENCRYPTION_OFF', 'MASTER_KEK is not configured on this server.');
 

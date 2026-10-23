@@ -6,6 +6,9 @@ import { Modal } from '@/components/Modal';
 /** The API's own sentence for a missing document-reviewer grant (document-reviewer.ts), for the render path. */
 const DOCUMENT_REVIEWER_SENTENCE = 'You need the document-reviewer permission to open or decide documents. A super-admin grants it under Document reviewers at the top of the Review Center.';
 
+/** [Row 312] A document stored while the malware scanner was down is not opened before a clean scan. */
+const AWAITING_MALWARE_SCAN_SENTENCE = 'This document is waiting for a malware scan: it was uploaded while the scanner was down. It opens once the scan answers clean; there is nothing to do meanwhile.';
+
 export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: string; label: string; onViewed: (_viewed: boolean) => void; onRejectMissing?: () => void }) {
   const [url, setUrl] = useState('');
   const [pdf, setPdf] = useState(false);
@@ -46,6 +49,10 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
       if (!response.ok) {
         // [VERIFY-DOCS V3] The grant can be revoked after the link was minted: the render refuses, and the
         // same-origin proxy names the code in a header (it relays no body), so the page says why.
+        // [Row 312] Stored while the malware scanner was down: not opened before a clean scan.
+        if (response.headers.get('X-Swift-Error-Code') === 'AWAITING_MALWARE_SCAN') {
+          throw Object.assign(new Error(AWAITING_MALWARE_SCAN_SENTENCE), { code: 'AWAITING_MALWARE_SCAN' });
+        }
         if (response.status === 403 && response.headers.get('X-Swift-Error-Code') === 'DOCUMENT_REVIEWER_REQUIRED') {
           throw Object.assign(new Error(DOCUMENT_REVIEWER_SENTENCE), { code: 'DOCUMENT_REVIEWER_REQUIRED' });
         }
@@ -71,6 +78,8 @@ export function DocumentViewer({ id, label, onViewed, onRejectMissing }: { id: s
         // never works: say so in the server's words (who grants it, and where).
         const message = (err as { message?: string })?.message;
         if (code === 'DOCUMENT_REVIEWER_REQUIRED') { setError(message || 'You need the document-reviewer permission to open documents. Ask a super-admin.'); return; }
+        // [Row 312 · G S3-1 (a)] Our words, not the server's: trying again works only after the rescan.
+        if (code === 'AWAITING_MALWARE_SCAN') { setError(AWAITING_MALWARE_SCAN_SENTENCE); return; }
         setError(unavailable ? (code === 'DOCUMENT_PURGED' ? 'This document was removed under the retention policy. The applicant must re-submit it before it can be approved.' : 'The file is missing. The applicant must re-submit it before it can be approved.') : 'The document could not be loaded. Try View document again.');
       }
     } finally { if (generation.current === attempt) setLoading(false); }

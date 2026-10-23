@@ -1,6 +1,6 @@
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
-import { retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
+import { awaitingMalwareScan, awaitingMalwareScanError, retryHeldEvidenceScan } from '../../lib/upload-scan-debt';
 import { vatTracker } from '../billing/vat-tracker';
 import { adminCardSession, adminCardSessions, adminResolveCardSession, adminSubscriptionCards } from '../billing/card-rail.routes';
 import { listCases, caseDetail, claimCase, directCase, assignRelay, confirmReturn } from '../custody/custody-recovery';
@@ -6279,6 +6279,9 @@ export async function adminRoutes(app: FastifyInstance) {
     const ttlSeconds = 300;
 
     await resolveVerificationObject(app.prisma, { fileKey: doc.fileUrl, userId: doc.userId, documentId: doc.id });
+    // [Row 312 · G S3-1 (a), COORD 23 Oct] A document stored while the scanner was down (the bypass) is not
+    // opened by staff until its rescan answers CLEAN: no link is minted and no view is recorded.
+    if (await awaitingMalwareScan(app.prisma, doc.fileUrl)) throw awaitingMalwareScanError();
     // [VERIFY-DOCS V3] The link is minted FOR this reviewer: the render route
     // re-checks their grant on every load.
     const minted = mintRenderPath(id, request.user.userId, ttlSeconds);

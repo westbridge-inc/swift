@@ -22,8 +22,8 @@ vi.mock('../modules/ops/ops-page', () => ({
 }));
 
 import { pageOps } from '../modules/ops/ops-page';
-import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, memoryScannerCooldown, scanUpload, useScannerCooldown, type UploadSurface } from '../lib/malware-scan';
-import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, QUARANTINE_HELD_FOLDER, RESCAN_BATCH, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
+import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, SAFETY_EVIDENCE_SURFACES, malwareScanBypassOn, memoryScannerCooldown, scanUpload, registerScannerCooldown, type UploadSurface } from '../lib/malware-scan';
+import { MAX_RESCAN_ATTEMPTS, QUARANTINE_FOLDER, QUARANTINE_HELD_FOLDER, RESCAN_BATCH, awaitingMalwareScan, recordUnscannedUpload, rescanUploadDebt, UPLOAD_QUARANTINED_PAGE_TITLE } from '../lib/upload-scan-debt';
 import { encryptBuffer, generateDek } from '../providers/storage/envelope';
 import { JOB_RECOVERY } from '../jobs/recovery-policy';
 import { alertClassOf } from '../providers/notifications/alert-class';
@@ -31,7 +31,7 @@ import { alertClassOf } from '../providers/notifications/alert-class';
 const EICAR_LIKE = Buffer.from('synthetic payload the fake scanner calls a virus');
 const servers: net.Server[] = [];
 // The payload-failure cool-down is module state: every test starts without one.
-beforeEach(() => useScannerCooldown(memoryScannerCooldown()));
+beforeEach(() => registerScannerCooldown(memoryScannerCooldown()));
 afterEach(async () => {
   vi.mocked(pageOps).mockClear();
   await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
@@ -371,5 +371,21 @@ describe('[Row 312] every upload that can be stored unscanned records its debt',
   it('the rescan is a registered, replay-safe job, and its page is an ops-class alert', () => {
     expect(JOB_RECOVERY['upload-rescan']).toMatchObject({ policy: 'SAFE_REPLAY' });
     for (const kind of ['ops_upload_quarantined', 'ops_malware_scan_bypass', 'ops_evidence_unscanned', 'ops_evidence_held']) expect(alertClassOf(kind), kind).toBe(alertClassOf('ops_backup_stale'));
+  });
+});
+
+describe('[Row 312 · G S3-1 (a)] the document viewer waits for a clean scan', () => {
+  it('awaiting = any debt row for the key (local or bucket spelling) not closed CLEAN; a lookup error reads as awaiting', async () => {
+    let where: Record<string, unknown> | undefined;
+    const found = { uploadScanDebt: { findFirst: async (q: { where: Record<string, unknown> }) => { where = q.where; return { id: 'd1' }; } } };
+    await expect(awaitingMalwareScan(found as never, '/uploads/verification/u1/doc.enc')).resolves.toBe(true);
+    expect(where).toEqual({
+      fileKey: { in: ['/uploads/verification/u1/doc.enc', 'verification/u1/doc.enc'] },
+      OR: [{ result: null }, { result: { not: 'CLEAN' } }],
+    });
+    const none = { uploadScanDebt: { findFirst: async () => null } };
+    await expect(awaitingMalwareScan(none as never, 'verification/u1/doc.enc')).resolves.toBe(false);
+    const broken = { uploadScanDebt: { findFirst: async () => { throw new Error('db down'); } } };
+    await expect(awaitingMalwareScan(broken as never, 'verification/u1/doc.enc')).resolves.toBe(true);
   });
 });
