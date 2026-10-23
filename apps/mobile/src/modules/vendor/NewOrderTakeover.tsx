@@ -7,7 +7,7 @@ import { color, motion, radius, space } from '@swift/ui';
 import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
 import { useVendorOrder, useOrderAction, usePickingActions } from '../../hooks/vendorops';
-import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, lineStockWords, nothingToAccept } from './storeOrderRules';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, lastLineStanding, lineStockWords, nothingToAccept } from './storeOrderRules';
 import { rejectReasonsFor } from './rejectReasons';
 import { orderLineOptionsText } from './orderLineOptions';
 import { acceptClockLabel, takeoverSettled } from './acceptClock';
@@ -37,8 +37,9 @@ export function NewOrderTakeover({
   const current = queue[0];
   const orderId = current?.orderId;
   const [rejecting, setRejecting] = useState(false);
+  const [lastOut, setLastOut] = useState(false);
   // A fresh order in the queue starts at the decision, never mid-reject.
-  useEffect(() => setRejecting(false), [orderId]);
+  useEffect(() => { setRejecting(false); setLastOut(false); }, [orderId]);
   // [Wave 3 vs reference 22 · #941] The draining accept clock. `respondBy`
   // is the SERVER's deadline — the exact arithmetic auto-cancel was enqueued
   // with — and it is null whenever the order is not PENDING, so the clock
@@ -216,7 +217,16 @@ export function NewOrderTakeover({
                 </T>
               ) : null}
               {/* [STORE-DASH · O-4] One tap per item: the customer is asked (continue without it, or cancel). */}
-              {canMarkOutOfStock(o, i) ? (
+              {lastLineStanding(o, i) ? (
+                // [REVIEW-F S3-2 on #2048] The last item: Reject (out of stock), asked once below.
+                <PillButton
+                  label={OUT_OF_STOCK_WORDS.lastButton}
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onPress={() => setLastOut(true)}
+                />
+              ) : canMarkOutOfStock(o, i) ? (
                 <PillButton
                   label={OUT_OF_STOCK_WORDS.button}
                   variant="outline"
@@ -248,6 +258,15 @@ export function NewOrderTakeover({
           </T>
         ) : null}
         <View style={{ gap: space.md }}>
+          {lastOut ? (
+            <>
+              <T variant="label" weight="semibold" tone="error" center>
+                {OUT_OF_STOCK_WORDS.lastAsk}
+              </T>
+              <PillButton label={OUT_OF_STOCK_WORDS.lastYes} variant="outline" disabled={busy} onPress={() => { setLastOut(false); decide('reject', OUT_OF_STOCK_WORDS.lastReason); }} />
+              <PillButton label={OUT_OF_STOCK_WORDS.lastKeep} variant="soft" disabled={busy} onPress={() => setLastOut(false)} />
+            </>
+          ) : null}
           {nothingLeft ? (
             <T variant="label" weight="semibold" tone="error" center>
               {OUT_OF_STOCK_WORDS.nothing}

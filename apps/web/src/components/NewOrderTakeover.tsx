@@ -5,7 +5,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { BellRing } from 'lucide-react';
 import { acceptOrder, money, refundLine, rejectOrder, type VendorOrder } from '@/lib/vendor-api';
 // The app's own O-4 rules and words (plain file, imported as is).
-import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lineStockWords, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { rejectReasonsFor } from '@/lib/reject-reasons';
 // The app's own clock wording (plain file, imported as is).
 import { acceptClockLabel } from '../../../mobile/src/modules/vendor/acceptClock';
@@ -69,6 +69,8 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
   // why", then the reason); one stray tap here used to reject with a
   // preselected reason. Now the first press only opens the reasons.
   const [rejecting, setRejecting] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const acceptRef = useRef<HTMLButtonElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -219,7 +221,7 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
   const current = queue[0] ? (orders.find((o) => o.id === queue[0]!.id) ?? queue[0]) : undefined;
   const currentId = current?.id;
   // A different order on top starts at the first step again.
-  useEffect(() => { setRejecting(false); }, [currentId]);
+  useEffect(() => { setRejecting(false); setLastOut(false); }, [currentId]);
   // The takeover is a modal dialog: focus moves into it, on Accept.
   useEffect(() => {
     if (!currentId) return;
@@ -294,7 +296,17 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
                 {i.quantity}× {i.name}
                 {lineStockWords(i) && <span className="block text-xs font-semibold text-amber-700">{lineStockWords(i)}</span>}
               </p>
-              {canMarkOutOfStock(current, i) && (
+              {lastLineStanding(current, i) && (
+                <button
+                  type="button"
+                  onClick={() => setLastOut(true)}
+                  disabled={busy}
+                  className="min-h-9 shrink-0 rounded-lg border border-[var(--swift-red)]/30 px-3 text-xs font-bold text-[var(--swift-red)] disabled:opacity-50"
+                >
+                  {OUT_OF_STOCK_WORDS.lastButton}
+                </button>
+              )}
+              {canMarkOutOfStock(current, i) && !lastLineStanding(current, i) && (
                 <button
                   type="button"
                   onClick={() => outOfStock.mutate({ id: current.id, lineId: i.id })}
@@ -319,6 +331,15 @@ export default function NewOrderTakeover({ orders, onOpenOrder }: { orders: Vend
             {heldReason ?? 'Awaiting MMG payment'}
             {attestable && !canConfirm && <span className="mt-1 block font-normal text-[var(--swift-muted)]">Only the owner or a manager can confirm MMG payments.</span>}
           </p>
+        )}
+        {lastOut && (
+          <div role="group" aria-label="Reject the order as out of stock" className="mt-4 rounded-xl bg-[var(--swift-red)]/5 p-3">
+            <p className="text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.lastAsk}</p>
+            <div className="mt-2 flex justify-center gap-2">
+              <button type="button" disabled={busy} onClick={() => { setLastOut(false); reject.mutate({ id: current.id, reason: OUT_OF_STOCK_WORDS.lastReason }); }} className="min-h-11 rounded-xl bg-[var(--swift-red)] px-5 font-bold text-white disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastYes}</button>
+              <button type="button" disabled={busy} onClick={() => setLastOut(false)} className="min-h-11 rounded-xl bg-black/5 px-5 font-semibold disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastKeep}</button>
+            </div>
+          </div>
         )}
         <div className="mt-5 flex flex-col items-stretch gap-2 min-[400px]:flex-row min-[400px]:items-center min-[400px]:justify-center">
           {held ? (

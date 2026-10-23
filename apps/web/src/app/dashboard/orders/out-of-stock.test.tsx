@@ -66,7 +66,9 @@ describe('[O-4] the order window', () => {
     expect(within(dialog).getByRole('button', { name: 'Reject' })).toBeTruthy();
     expect(within(dialog).getByText('Waiting on the customer’s answer — accept after they reply.')).toBeTruthy();
     expect(within(dialog).getByText('Asked the customer: continue without it, or cancel')).toBeTruthy();
-    expect(within(dialog).getAllByRole('button', { name: /^Out of stock: / })).toHaveLength(1);
+    // [REVIEW-F S3-2] Sorrel is now the last item still coming: its step is Reject, not a question.
+    expect(within(dialog).queryAllByRole('button', { name: /^Out of stock: / })).toHaveLength(0);
+    expect(within(dialog).getByRole('button', { name: 'Out of stock — reject the order' })).toBeTruthy();
   });
 
   it('every item came off: no Accept, "reject the order with a reason"', async () => {
@@ -127,5 +129,45 @@ describe('[O-4] the new-order popup', () => {
     expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull();
     expect(screen.getByText('Every item is out of stock — reject the order with a reason.')).toBeTruthy();
     expect(screen.getByRole('button', { name: /Reject — tell us why/ })).toBeTruthy();
+  });
+});
+
+describe('[REVIEW-F S3-2 on #2048] the last item out of stock is Reject (out of stock), asked once', () => {
+  const ask = 'This is the last item. Reject the order as out of stock? The customer is told right away.';
+
+  it('order window: no customer question; asked once; "Yes, reject" rejects with "Out of stock"', async () => {
+    const writes2: Array<{ path: string; body: unknown }> = [];
+    const orders = [wireVendorOrder({ id: 'o-6', orderNumber: 'SW-9006', status: 'PENDING', items: lines({ name: 'Pepperpot', subStatus: 'REFUNDED' }, { name: 'Sorrel' }) })];
+    mockApi((request: ApiRequest) => {
+      const path = request.url.pathname.replace('/api/v1', '');
+      if (request.method !== 'GET') { writes2.push({ path, body: request.init?.body ? JSON.parse(String(request.init.body)) : null }); return { body: { success: true, data: {} } }; }
+      if (path === '/vendor/orders') return { body: { success: true, data: orders, meta: { total: 1 } } };
+      if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: orders[0] } };
+      return { status: 404, body: { success: false } };
+    });
+    const view = renderWithQuery(<OrdersPage />);
+    const dialog = await openWindow('SW-9006', view);
+    expect(within(dialog).queryByRole('button', { name: /^Out of stock: / })).toBeNull();
+    await view.user.click(within(dialog).getByRole('button', { name: 'Out of stock — reject the order' }));
+    expect(within(dialog).getByText(ask)).toBeTruthy();
+    expect(writes2).toEqual([]);
+    await view.user.click(within(dialog).getByRole('button', { name: 'Yes, reject' }));
+    await waitFor(() => expect(writes2).toEqual([{ path: '/vendor/orders/o-6/reject', body: { reason: 'Out of stock' } }]));
+  });
+
+  it('new-order popup: the same, and "Keep it" sends nothing', async () => {
+    api([]);
+    const one = normalizeVendorOrder(wireVendorOrder({ id: 'p-2', orderNumber: 'SW-9102', status: 'PENDING', items: lines({ name: 'Sorrel' }) }));
+    const view = renderWithQuery(<NewOrderTakeover orders={[]} />);
+    view.rerender(<NewOrderTakeover orders={[one]} />);
+    await screen.findByText(/NEW ORDER/);
+    expect(screen.queryByRole('button', { name: /^Out of stock: / })).toBeNull();
+    await view.user.click(screen.getByRole('button', { name: 'Out of stock — reject the order' }));
+    expect(screen.getByText(ask)).toBeTruthy();
+    await view.user.click(screen.getByRole('button', { name: 'Keep it' }));
+    expect(writes).toEqual([]);
+    await view.user.click(screen.getByRole('button', { name: 'Out of stock — reject the order' }));
+    await view.user.click(screen.getByRole('button', { name: 'Yes, reject' }));
+    await waitFor(() => expect(writes).toEqual([{ method: 'PUT', path: '/vendor/orders/p-2/reject' }]));
   });
 });

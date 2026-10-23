@@ -17,6 +17,7 @@ import { createRoot } from 'react-dom/client';
 const fx = vi.hoisted(() => ({
   orders: {} as Record<string, any>,
   refund: { mutate: vi.fn(), isPending: false, isError: false, error: null } as any,
+  act: { mutate: vi.fn(), isPending: false, isError: false, error: null } as any,
   token: new Proxy({}, { get: (_target, key): unknown => key === Symbol.toPrimitive ? () => 0 : fx.token }),
 }));
 
@@ -59,7 +60,7 @@ vi.mock('../../../hooks/vendorops', () => {
   const idle = () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null });
   return {
     useVendorOrder: (id?: string) => ({ data: id ? fx.orders[id] : undefined, isLoading: false, isError: false, refetch: vi.fn() }),
-    useOrderAction: idle, useRetryDispatch: idle, useSetOrderFulfillmentMode: idle, useReturnReceived: idle,
+    useOrderAction: () => fx.act, useRetryDispatch: idle, useSetOrderFulfillmentMode: idle, useReturnReceived: idle,
     usePickingActions: () => ({ setPicked: idle(), substitute: idle(), refundLine: fx.refund }),
     useVendorMenu: () => ({ data: [] }),
   };
@@ -87,6 +88,7 @@ const buttons = (label: string) => [...host.querySelectorAll('button')].filter((
 
 beforeEach(() => {
   fx.refund.mutate = vi.fn();
+  fx.act.mutate = vi.fn();
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => {
@@ -115,7 +117,9 @@ describe('[STORE-DASH · O-4] "Out of stock" per item on a waiting order', () =>
     expect(text).toContain('Asked the customer: continue without it, or cancel');
     expect(text).not.toContain('Waiting on the customer: null');
     expect(text).toContain('Waiting on the customer’s answer — accept after they reply.');
-    expect(buttons('Out of stock')).toHaveLength(1);
+    // [REVIEW-F S3-2] Sorrel is now the last item still coming: its step is Reject, not a question.
+    expect(buttons('Out of stock')).toHaveLength(0);
+    expect(buttons('Out of stock — reject the order')).toHaveLength(1);
   });
 
   it('every item came off: the screen says to reject with a reason', async () => {
@@ -128,5 +132,26 @@ describe('[STORE-DASH · O-4] "Out of stock" per item on a waiting order', () =>
     const text = await show(order({ status: 'PREPARING' }));
     expect(buttons('Out of stock')).toHaveLength(0);
     expect(text).not.toContain('Waiting on the customer’s answer');
+  });
+});
+
+describe('[REVIEW-F S3-2 on #2048] the last item out of stock is Reject (out of stock), asked once', () => {
+  it('one item left: no customer question; the store is asked once, then the order is rejected as out of stock', async () => {
+    await show(order({ status: 'PENDING', items: [line('l1', 'Pepperpot', { subStatus: 'REFUNDED' }), line('l2', 'Sorrel')] }));
+    expect(buttons('Out of stock')).toHaveLength(0);
+    await act(async () => { buttons('Out of stock — reject the order')[0]!.click(); });
+    expect(host.textContent).toContain('This is the last item. Reject the order as out of stock? The customer is told right away.');
+    expect(fx.act.mutate).not.toHaveBeenCalled();
+    await act(async () => { buttons('Yes, reject')[0]!.click(); });
+    expect(fx.act.mutate).toHaveBeenCalledWith({ id: 'a', action: 'reject', reason: 'Out of stock' });
+    expect(fx.refund.mutate).not.toHaveBeenCalled();
+  });
+
+  it('"Keep it" sends nothing', async () => {
+    await show(order({ status: 'PENDING', items: [line('l1', 'Sorrel')] }));
+    await act(async () => { buttons('Out of stock — reject the order')[0]!.click(); });
+    await act(async () => { buttons('Keep it')[0]!.click(); });
+    expect(fx.act.mutate).not.toHaveBeenCalled();
+    expect(buttons('Out of stock — reject the order')).toHaveLength(1);
   });
 });

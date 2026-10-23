@@ -24,7 +24,7 @@ import {
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
 // The app's own O-4 rules and words (plain file, imported as is).
-import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -240,6 +240,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const [error, setError] = useState<string | null>(null);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
@@ -408,7 +410,17 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
               <div className="flex items-center justify-between gap-3">
                 <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
                 <span className="flex shrink-0 items-center gap-2">
-                  {!paused && canMarkOutOfStock(o, it) && (
+                  {!paused && lastLineStanding(o, it) && !lastOut && (
+                    <button
+                      type="button"
+                      onClick={() => setLastOut(true)}
+                      disabled={act.isPending || reject.isPending}
+                      className="min-h-9 rounded-lg border border-[var(--swift-red)]/30 px-3 text-xs font-bold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                    >
+                      {OUT_OF_STOCK_WORDS.lastButton}
+                    </button>
+                  )}
+                  {!paused && canMarkOutOfStock(o, it) && !lastLineStanding(o, it) && (
                     <button
                       type="button"
                       onClick={() => outOfStock.mutate(it.id)}
@@ -423,6 +435,15 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
                 </span>
               </div>
               {stock && <p className="mt-0.5 text-xs font-semibold text-amber-700">{stock}</p>}
+              {lastOut && lastLineStanding(o, it) && (
+                <div role="group" aria-label="Reject the order as out of stock" className="mt-2 rounded-lg bg-[var(--swift-red)]/5 p-3">
+                  <p className="text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.lastAsk}</p>
+                  <div className="mt-2 flex gap-2">
+                    <button type="button" disabled={reject.isPending} onClick={() => { setLastOut(false); reject.mutate(OUT_OF_STOCK_WORDS.lastReason); }} className="min-h-11 rounded-lg bg-[var(--swift-red)] px-4 text-sm font-semibold text-white disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastYes}</button>
+                    <button type="button" disabled={reject.isPending} onClick={() => setLastOut(false)} className="min-h-11 rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastKeep}</button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}

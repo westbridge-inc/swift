@@ -5,7 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
-import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lineQuestion, nothingToAccept } from '../storeOrderRules';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { orderPaymentLine } from '../storeWords';
@@ -130,6 +130,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const fulfillmentMode = useSetOrderFulfillmentMode();
   const [confirmReject, setConfirmReject] = useState(false);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
   // [MOB-050] The counter hand-over is a ceremony, not a button: the vendor
   // TYPES what the customer reads out. The screen used to print the code and
   // send nothing, so the server (which requires it) refused every attempt and
@@ -401,7 +403,29 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                   </T>
                 </View>
                 {/* [STORE-DASH · O-4] A waiting order, every store type: one tap per item asks the customer. */}
-                {canMarkOutOfStock(order, it) ? (
+                {lastLineStanding(order, it) ? (
+                  <View style={{ marginLeft: 64, marginTop: space.xs, gap: space.xs }}>
+                    {lastOut ? (
+                      <>
+                        <T variant="caption" weight="semibold" tone="error">{OUT_OF_STOCK_WORDS.lastAsk}</T>
+                        <View style={{ flexDirection: 'row', gap: space.sm }}>
+                          <PillButton
+                            label={OUT_OF_STOCK_WORDS.lastYes}
+                            variant="primary"
+                            size="sm"
+                            disabled={busy}
+                            onPress={() => { setLastOut(false); orderAction.mutate({ id: order.id, action: 'reject', reason: OUT_OF_STOCK_WORDS.lastReason }); }}
+                          />
+                          <PillButton label={OUT_OF_STOCK_WORDS.lastKeep} variant="soft" size="sm" disabled={busy} onPress={() => setLastOut(false)} />
+                        </View>
+                      </>
+                    ) : (
+                      <View style={{ alignSelf: 'flex-start' }}>
+                        <PillButton label={OUT_OF_STOCK_WORDS.lastButton} variant="outline" size="sm" disabled={busy} onPress={() => setLastOut(true)} />
+                      </View>
+                    )}
+                  </View>
+                ) : canMarkOutOfStock(order, it) ? (
                   <View style={{ marginLeft: 64, marginTop: space.xs, alignSelf: 'flex-start' }}>
                     <PillButton
                       label={OUT_OF_STOCK_WORDS.button}

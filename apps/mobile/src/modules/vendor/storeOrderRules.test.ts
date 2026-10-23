@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  MMG_MONEY_MOVED, OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lineQuestion, lineStockWords, mmgAwaitingPayment, nothingToAccept,
+  MMG_MONEY_MOVED, OUT_OF_STOCK_WORDS, answeredSinceAsked, canMarkOutOfStock, lastLineStanding, customerDeciding, lineQuestion, lineStockWords, mmgAwaitingPayment, nothingToAccept,
 } from './storeOrderRules';
 import { takeoverSettled } from './acceptClock';
 
@@ -85,7 +85,10 @@ describe('[O-4] the phone takeover and board use them (source contract: no React
   const takeover = read('src/modules/vendor/NewOrderTakeover.tsx');
   const board = read('src/modules/vendor/screens/VendorOps.tsx');
   it('each takeover item has the one-tap "Out of stock" that asks about THAT line', () => {
-    expect(takeover).toMatch(/\{canMarkOutOfStock\(o, i\) \? \(/);
+    expect(takeover).toMatch(/\) : canMarkOutOfStock\(o, i\) \? \(/);
+    // [REVIEW-F S3-2] the last item's step is Reject, asked once
+    expect(takeover).toMatch(/\{lastLineStanding\(o, i\) \? \(/);
+    expect(takeover).toMatch(/decide\('reject', OUT_OF_STOCK_WORDS\.lastReason\)/);
     expect(takeover).toMatch(/onPress=\{\(\) => picking\.refundLine\.mutate\(\{ orderId: current\.orderId, lineId: i\.id \}\)\}/);
   });
   it('a takeover whose every item came off offers no ACCEPT, only the words and Reject', () => {
@@ -93,5 +96,39 @@ describe('[O-4] the phone takeover and board use them (source contract: no React
   });
   it('the board card says why there is no Accept', () => {
     expect(board).toMatch(/\{customerDeciding\(order\) \? OUT_OF_STOCK_WORDS\.deciding : OUT_OF_STOCK_WORDS\.nothing\}/);
+  });
+});
+
+describe('[REVIEW-F S3-2 on #2048] the last item still coming', () => {
+  it('only that line is still coming (others removed, or being asked about for removal): it is the last', () => {
+    const a = L('NONE'); const b = L('REFUNDED'); const c = L('PENDING', null); const d = L('REJECTED');
+    expect(lastLineStanding(waiting(a, b, c, d), a)).toBe(true);
+    expect(lastLineStanding(waiting(a), a)).toBe(true);
+  });
+  it('another line still coming (or only a swap being asked): not the last', () => {
+    const a = L('NONE'); const b = L('NONE'); const swap = L('PENDING', 'Mauby');
+    expect(lastLineStanding(waiting(a, b), a)).toBe(false);
+    expect(lastLineStanding(waiting(a, swap), a)).toBe(false);
+  });
+  it('never on an accepted order or a line already asked', () => {
+    const a = L('NONE');
+    expect(lastLineStanding({ status: 'PREPARING', items: [a] }, a)).toBe(false);
+    const asked = L('PENDING', null);
+    expect(lastLineStanding(waiting(asked), asked)).toBe(false);
+  });
+});
+
+describe('[REVIEW-F S3-1 on #2048] the customer answered', () => {
+  const o = (id: string, ...items: unknown[]) => ({ id, orderNumber: id.toUpperCase(), status: 'PENDING', items });
+  it('an order that was being decided and is waiting again with no question is answered', () => {
+    const r = answeredSinceAsked(new Set(['x']), [o('x', L('REFUNDED'), L('NONE')), o('y', L('PENDING', null))]);
+    expect(r.answered).toEqual([{ orderId: 'x', orderNumber: 'X' }]);
+    expect([...r.deciding]).toEqual(['y']);
+  });
+  it('still deciding, never asked, or no longer waiting (accepted, cancelled): not answered', () => {
+    expect(answeredSinceAsked(new Set(['x']), [o('x', L('PENDING', null))]).answered).toEqual([]);
+    expect(answeredSinceAsked(new Set(), [o('x', L('NONE'))]).answered).toEqual([]);
+    expect(answeredSinceAsked(new Set(['x']), [{ ...o('x', L('NONE')), status: 'CANCELLED' }]).answered).toEqual([]);
+    expect(answeredSinceAsked(new Set(['x']), undefined).answered).toEqual([]);
   });
 });

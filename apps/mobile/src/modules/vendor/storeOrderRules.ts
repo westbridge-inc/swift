@@ -57,6 +57,38 @@ export function canMarkOutOfStock(order: OrderLike, line: LineLike): boolean {
   return sub == null || sub === 'NONE';
 }
 
+/**
+ * [REVIEW-F S3-2 on #2048 · with #2043 S3-1] The line is the order's LAST item still coming: every
+ * other line came off, or is already being asked about for removal. Asking the customer about it
+ * would offer a "Continue without it" that empties the order, so the step is Reject (out of stock).
+ */
+export function lastLineStanding(order: OrderLike, line: LineLike): boolean {
+  if (!canMarkOutOfStock(order, line)) return false;
+  const coming = linesOf(order).filter((l) => l?.subStatus !== 'REFUNDED' && l?.subStatus !== 'REJECTED' && lineQuestion(l) !== 'removal');
+  return coming.length === 1 && coming[0] === line;
+}
+
+/**
+ * [REVIEW-F S3-1 on #2048] The customer answered: orders the store asked about (`asked`) that are
+ * waiting again with no open question are the store's decision again — the phone re-raises the
+ * new-order screen for them (the server sends no push for an answer, and the store's response
+ * clock restarts from it). Returns those, and the orders still being decided (the next `asked`).
+ */
+export function answeredSinceAsked(
+  asked: ReadonlySet<string>,
+  board: unknown,
+): { answered: Array<{ orderId: string; orderNumber?: string }>; deciding: Set<string> } {
+  const orders = Array.isArray(board) ? (board as Array<{ id?: unknown; orderNumber?: unknown } & NonNullable<OrderLike>>) : [];
+  const deciding = new Set<string>();
+  const answered: Array<{ orderId: string; orderNumber?: string }> = [];
+  for (const o of orders) {
+    if (typeof o?.id !== 'string') continue;
+    if (customerDeciding(o)) deciding.add(o.id);
+    else if (asked.has(o.id) && waiting(o)) answered.push({ orderId: o.id, ...(typeof o.orderNumber === 'string' ? { orderNumber: o.orderNumber } : {}) });
+  }
+  return { answered, deciding };
+}
+
 /** The store's words, phone and web alike. */
 export const OUT_OF_STOCK_WORDS = {
   button: 'Out of stock',
@@ -66,6 +98,13 @@ export const OUT_OF_STOCK_WORDS = {
   declined: 'Swap declined — removed',
   deciding: 'Waiting on the customer’s answer — accept after they reply.',
   nothing: 'Every item is out of stock — reject the order with a reason.',
+  // [REVIEW-F S3-2 on #2048] The last item: the step is Reject, asked once (it cannot be undone).
+  lastButton: 'Out of stock — reject the order',
+  lastAsk: 'This is the last item. Reject the order as out of stock? The customer is told right away.',
+  lastYes: 'Yes, reject',
+  lastKeep: 'Keep it',
+  /** The reject reason a last-item rejection sends (the store's own preset). */
+  lastReason: 'Out of stock',
 } as const;
 
 /** What a line says about its out-of-stock state, or null when there is nothing to say. */
