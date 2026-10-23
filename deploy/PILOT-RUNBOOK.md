@@ -1275,6 +1275,21 @@ SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
 `./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
 exact SHA …`. Then follow section 9 for the certificate chain.
 
+**Launch: the requested revision's own pilot-up.sh (staging #14, 23 Oct).**
+After its checkout pilot-up.sh now restarts itself once from the requested
+revision's own pilot-up.sh when that differs (`pilot-up: <sha> has its own
+pilot-up.sh; restarting it`), so a newer revision's steps (the clamd start and
+EICAR proof) are never skipped; a checkout older than this fix (production
+before launch) still runs its old steps, so move it first:
+`git fetch origin main && git switch --detach "$APPROVED_SHA"`, then run
+pilot-up as above. Fallback manual check, every deploy:
+clamd healthy + EICAR proof after pilot-up
+(`docker compose -f deploy/docker-compose.yml ps clamd` healthy, and the log
+line `upload malware scanner ready: … EICAR refused`); if either is missing,
+`docker compose -f deploy/docker-compose.yml up -d --wait clamd` at once
+(uploads fail closed until it is healthy) and rerun pilot-up with the same SHA
+for the proof.
+
 ## 13. The least-privilege database logins (TA-S0-003)
 
 The API and worker can run on two runtime logins instead of the database
