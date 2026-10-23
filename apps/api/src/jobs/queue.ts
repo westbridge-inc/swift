@@ -2098,8 +2098,11 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // or, on MMG, the question is withdrawn — so no order waits forever on
         // an answer. CAS per line; each line runs in its own order's tenant.
         const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const { OrderService } = await import('../modules/order/order.service');
         const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
           narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+          // [O-4] the only item left with no answer cancels its waiting order (free) through the seam.
+          orderService: new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         });
         if (res.removed + res.withdrawn + res.started + res.cancelled + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;

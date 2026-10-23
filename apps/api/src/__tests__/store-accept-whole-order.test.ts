@@ -311,7 +311,7 @@ describe('[O-4] "Out of stock" before accepting asks the customer', () => {
     const rice = before.items.find((l) => l.itemId === grocer.rice)!;
     expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
     const due = (await lineOf(orderId, grocer.rice)).substituteDecideBy!;
-    const swept = await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000) }));
+    const swept = await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000), orderService: new OrderService(app.prisma, app.io, undefined, undefined, app.redis) }));
     expect(swept.removed).toBeGreaterThanOrEqual(1);
     const after = await orderRow(orderId);
     expect(after.items.find((l) => l.id === rice.id)!.subStatus).toBe('REFUNDED');
@@ -321,11 +321,11 @@ describe('[O-4] "Out of stock" before accepting asks the customer', () => {
   });
 
   it('every item removed: there is nothing to accept — the store rejects instead', async () => {
+    // [REVIEW-F S3-1] A customer's answers can no longer empty a waiting order (the only item left is
+    // refused, or cancels free on no answer), so this pins the accept's own refusal on an order whose
+    // every line is already off (e.g. one written before that rule).
     const orderId = await placeOrder();
-    for (const line of (await orderRow(orderId)).items) {
-      expect((await outOfStock(orderId, line.id)).statusCode).toBe(200);
-      expect((await answer(orderId, line.id, true)).statusCode).toBe(200);
-    }
+    await sys(() => app.prisma.orderItem.updateMany({ where: { orderId }, data: { subStatus: 'REFUNDED' } }));
     const refused = await accept(orderId);
     expect(refused.statusCode, refused.body).toBe(409);
     expect(refused.json().error.code).toBe('NOTHING_TO_ACCEPT');
@@ -449,7 +449,7 @@ describe('[O-4 · REVIEW-F S3-1] the only item left: the order can\'t go ahead w
     const rice = await lineOf(orderId, grocer.rice);
     expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
     const due = (await lineOf(orderId, grocer.rice)).substituteDecideBy!;
-    const swept = await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000) }));
+    const swept = await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000), orderService: new OrderService(app.prisma, app.io, undefined, undefined, app.redis) }));
     expect(swept.cancelled).toBeGreaterThanOrEqual(1);
     const row = await orderRow(orderId);
     expect({ status: row.status, by: row.cancelledBy }).toEqual({ status: 'CANCELLED', by: null });

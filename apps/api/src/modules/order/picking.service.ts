@@ -93,6 +93,10 @@ export class PickingService {
   constructor(
     private prisma: PrismaClient,
     private io: Server,
+    /** [O-4] The canonical seam, built by the caller WITH its Redis (offer withdrawal, census B4):
+     *  needed only to cancel a waiting order whose only item got no answer. Without it that
+     *  question stays open and the no-response clock ends the order (never removed into nothing). */
+    private orderService?: Pick<import('./order.service').OrderService, 'transitionOrderAtomically'>,
   ) {
     this.notifications = new NotificationService(prisma, io);
   }
@@ -802,10 +806,10 @@ export class PickingService {
     line: { id: string; orderId: string; name: string; order: { customerId: string; orderNumber: string; vendorId: string | null } },
     now: Date,
   ): Promise<'cancelled' | 'skipped'> {
-    const { OrderService } = await import('./order.service');
+    if (!this.orderService) return 'skipped';
     const reason = `Out of stock: ${line.name} was the only item and the customer did not answer in time`;
     try {
-      await new OrderService(this.prisma, this.io).transitionOrderAtomically({
+      await this.orderService.transitionOrderAtomically({
         orderId: line.orderId,
         target: 'CANCELLED',
         allowedFrom: ['PENDING'],
@@ -904,6 +908,8 @@ export async function sweepSubstitutionDeadlines(
     now?: Date;
     limit?: number;
     narrow?: <T>(orderId: string, fn: () => Promise<T>) => Promise<T>;
+    /** [O-4] See PickingService: lets a waiting order whose only item got no answer be cancelled, free. */
+    orderService?: Pick<import('./order.service').OrderService, 'transitionOrderAtomically'>;
   } = {},
 ): Promise<{ removed: number; withdrawn: number; started: number; cancelled: number; failed: number }> {
   const now = opts.now ?? new Date();
@@ -920,7 +926,7 @@ export async function sweepSubstitutionDeadlines(
     take: opts.limit ?? 200,
   });
   const result = { removed: 0, withdrawn: 0, started: 0, cancelled: 0, failed: 0 };
-  const picking = new PickingService(prisma, io);
+  const picking = new PickingService(prisma, io, opts.orderService);
   for (const line of due) {
     try {
       const outcome = await narrow(line.orderId, () => picking.expireSubstitution(line.id, now));

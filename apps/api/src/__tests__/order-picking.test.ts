@@ -854,7 +854,8 @@ describe('[L09 · M026] the store sees the options the customer chose', () => {
 
 // Ruling A: only a client that renders server decision permissions may opt in.
 describe('swap capability and current money holds', () => {
-  it.each(['', '?swapDecisions=v0', '?swapDecisions=v2', '?swapDecisions=v1&swapDecisions=v0'])(
+  // [O-4] v2 is now a real level (it adds the pre-accept removal question); v3 is the unknown one.
+  it.each(['', '?swapDecisions=v0', '?swapDecisions=v3', '?swapDecisions=v1&swapDecisions=v0'])(
     'legacy/unknown capability %s preserves the old item response', async (query) => {
       const original = await makeItem({ name: `Legacy original ${seq}`, price: 500, group: `legacy-${seq}` });
       const replacement = await makeItem({ name: `Legacy replacement ${seq}`, price: 900, group: `legacy-${seq}` });
