@@ -34,6 +34,9 @@ const MIN = 60_000;
 const TRAVEL_MIN = 20;
 const NUDGE_MIN = 10;
 const RELEASE_MIN = 20;
+// [O-3 · owner 22 Oct 2026, #2024] A store's Accept starts preparation in one tap: an accepted
+// order the store has not marked ready is PREPARING, and a released leg goes back to that stage.
+const ACCEPTED_STATUS = 'PREPARING';
 const DEFAULT_PREP_PROMISE_MIN = 30;
 const NUDGE_TITLE = 'Pick up now or release the order';
 const CUSTOMER_TITLE = 'Finding you a new rider';
@@ -181,8 +184,8 @@ describe('[OF-33] a rider who accepts and never picks up: one nudge, then back t
     expect((await w.app.prisma.order.findUniqueOrThrow({ where: { id } })).status).toBe('RIDER_ASSIGNED');
     await tickAt(cast, id, prep + RELEASE_MIN);
     const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    // Never marked ready: back to ACCEPTED, the kitchen's own honest stage.
-    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'ACCEPTED', riderId: null });
+    // Never marked ready: back to the kitchen's own honest stage (PREPARING since O-3).
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: ACCEPTED_STATUS, riderId: null });
   }, 300_000);
 
   it('goods in the rider’s hands are never released by the timer: a confirmed pickup holds', async () => {
@@ -408,7 +411,7 @@ describe('[OF-33 · COORD security ruling 21 Oct] the at-the-counter exemption f
     // A fresh fix, 1.1 km from the store (set directly: the GPS door is not what this case is about).
     await tickWithFix(id, prep + RELEASE_MIN, () => w.app.prisma.rider.update({ where: { id: r.riderId }, data: { currentLat: 6.8113, currentLng: -58.1551, lastLocationUpdate: new Date() } }).then(() => {}));
     const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'ACCEPTED', riderId: null });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: ACCEPTED_STATUS, riderId: null });
     expect(count(await noticesOf(id, cast.vendorOwner.userId), STORE_WAITING_TITLE)).toBe(0);
   }, 300_000);
 
@@ -418,7 +421,7 @@ describe('[OF-33 · COORD security ruling 21 Oct] the at-the-counter exemption f
     // At the store, but the fix is 3 minutes old.
     await tickWithFix(id, prep + RELEASE_MIN, () => w.app.prisma.rider.update({ where: { id: r.riderId }, data: { currentLat: r.lat, currentLng: r.lng, lastLocationUpdate: new Date(Date.now() - 3 * MIN) } }).then(() => {}));
     const row = await w.app.prisma.order.findUniqueOrThrow({ where: { id } });
-    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: 'ACCEPTED', riderId: null });
+    expect({ status: row.status, riderId: row.riderId }).toEqual({ status: ACCEPTED_STATUS, riderId: null });
   }, 300_000);
 
   it('(c) after three release windows at the counter, ops gets ONE loud page that needs a decision — still no automatic no-show', async () => {
