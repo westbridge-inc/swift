@@ -61,11 +61,20 @@ async function makeAccount(role: 'ADMIN' | 'SUPER_ADMIN' | 'CUSTOMER'): Promise<
   return { token, userId: user.id };
 }
 
-const call = (token: string, method: 'PUT', url: string, payload: Record<string, unknown>) =>
-  app.inject({
+/** Successful account-status actions per target: each one owes the target a
+ *  backstop audit row that lands AFTER its response (see `settled`). */
+const succeeded = new Map<string, number>();
+const STATUS_ACTION = /^\/api\/v1\/admin\/users\/([^/]+)\/(suspend|unsuspend|ban|unban)$/;
+
+const call = async (token: string, method: 'PUT', url: string, payload: Record<string, unknown>) => {
+  const res = await app.inject({
     method, url, payload,
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
   });
+  const target = STATUS_ACTION.exec(url)?.[1];
+  if (target && res.statusCode < 300) succeeded.set(target, (succeeded.get(target) ?? 0) + 1);
+  return res;
+};
 
 /** Everything an account-status action can change about the target. */
 async function snapshot(userId: string) {
@@ -78,9 +87,19 @@ async function snapshot(userId: string) {
   return { status: user.status, sessions, audit, notifications };
 }
 
-/** The admin audit backstop writes its row AFTER the response is sent; give a
- *  preceding successful action's hook its turn before reading a baseline. */
-const settled = () => new Promise((r) => setTimeout(r, 300));
+/** The admin audit backstop writes its row AFTER the response is sent. Before
+ *  a baseline is read, wait (bounded) until every successful action on this
+ *  target has its backstop row: a late row from the PREVIOUS action would
+ *  otherwise land between the two snapshots and read as the refusal's effect. */
+async function settled(targetId: string) {
+  const owed = succeeded.get(targetId) ?? 0;
+  const landed = () => app.prisma.auditLog.count({
+    where: { entityId: targetId, action: { startsWith: 'ADMIN PUT /api/v1/admin/users/:id/' } },
+  });
+  const deadline = Date.now() + 10_000;
+  while ((await landed()) < owed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+  expect(await landed(), 'every earlier successful action on the target has its backstop row').toBeGreaterThanOrEqual(owed);
+}
 
 /** A refusal must leave the target exactly as it was — status, sessions, audit
  *  rows and notifications — after the post-response audit hook has had its turn. */
@@ -88,18 +107,20 @@ async function expectRefusedUnchanged(
   actor: Actor, action: 'ban' | 'suspend' | 'unsuspend' | 'unban', targetId: string,
   expected: { status: number; code?: string },
 ) {
-  await settled();
+  await settled(targetId);
   const before = await snapshot(targetId);
   const res = await call(actor.token, 'PUT', `/api/v1/admin/users/${targetId}/${action}`, { reason: REASON });
   expect(res.statusCode, `${action}: ${res.body}`).toBe(expected.status);
   if (expected.code) expect(res.json().error.code).toBe(expected.code);
-  await settled();
+  // A refusal is a 4xx, which the backstop never records; this pause only
+  // bounds how long a WRONGFUL row gets to appear before "unchanged" is judged.
+  await new Promise((r) => setTimeout(r, 300));
   expect(await snapshot(targetId), `${action} must change nothing`).toEqual(before);
   return before;
 }
 
 async function waitFor<T>(read: () => Promise<T | null>): Promise<T | null> {
-  for (let i = 0; i < 30; i += 1) {
+  for (let i = 0; i < 100; i += 1) { // bounded at ~10 s: a loaded runner outlasts 3 s
     const found = await read();
     if (found) return found;
     await new Promise((r) => setTimeout(r, 100));
