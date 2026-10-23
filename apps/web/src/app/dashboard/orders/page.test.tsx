@@ -349,13 +349,16 @@ describe('[W-25] the store attests only where money plausibly landed', () => {
     const row = await rowFor('SW-1001');
     await dismissTakeover(user);
     await user.click(row);
-    await screen.findByRole('button', { name: /^Paid by MMG$/i });
-    expect(screen.getByText(line)).toBeTruthy();
+    // [STORE-DASH] The card's MMG step now carries the same name; the window's button is the one that sends.
+    const dialog = screen.getByRole('dialog', { name: 'Order details' });
+    await within(dialog).findByRole('button', { name: /^Paid by MMG$/i });
+    expect(within(dialog).getByText(line)).toBeTruthy();
   });
 
   it('offers it on a PENDING payment, names the amount, and will not send without a reference', async () => {
     const { user, fetchMock } = await openMmgDetail('PENDING');
-    const button = await screen.findByRole('button', { name: /^Paid by MMG$/i });
+    // [STORE-DASH] The card's MMG step now carries the same name; the window's button is the one that sends.
+    const button = await within(screen.getByRole('dialog', { name: 'Order details' })).findByRole('button', { name: /^Paid by MMG$/i });
     // [PAYMENT-SIMPLIFY] The button says only "Paid by MMG"; the amount is named beside it.
     expect(screen.getByText(/^Tap when .*\d.* is in your MMG account\.$/)).toBeTruthy();
     expect((button as HTMLButtonElement).disabled).toBe(true); // no reference yet

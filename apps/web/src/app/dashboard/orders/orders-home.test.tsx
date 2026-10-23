@@ -337,7 +337,7 @@ describe('MMG orders on the board follow the app', () => {
     expect(within(card).getByText('Awaiting MMG payment')).toBeTruthy();
     expect(within(card).queryByRole('button', { name: 'Accept' })).toBeNull();
     expect(within(card).getByRole('button', { name: 'Reject' })).toBeTruthy();
-    await view.user.click(within(card).getByRole('button', { name: 'Confirm MMG payment' }));
+    await view.user.click(within(card).getByRole('button', { name: 'Paid by MMG' }));
     expect(await screen.findByRole('dialog', { name: 'Order details' })).toBeTruthy();
   });
 
@@ -395,7 +395,7 @@ describe('MMG payment states on the card', () => {
     expect(within(c).queryByText(/confirmed/i)).toBeNull();
     expect(within(c).queryByText('Awaiting MMG payment')).toBeNull();
     expect(within(c).getByRole('button', { name: 'Accept' })).toBeTruthy();
-    expect(within(c).queryByRole('button', { name: 'Confirm MMG payment' })).toBeNull();
+    expect(within(c).queryByRole('button', { name: 'Paid by MMG' })).toBeNull();
   });
   it('a provider-captured payment (CAPTURED) offers Accept and says it was received', async () => {
     const c = await card('CAPTURED');
@@ -405,7 +405,7 @@ describe('MMG payment states on the card', () => {
   it('a pending payment offers the confirmation step instead of Accept', async () => {
     const c = await card('PENDING');
     expect(within(c).getByText('Awaiting MMG payment')).toBeTruthy();
-    expect(within(c).getByRole('button', { name: 'Confirm MMG payment' })).toBeTruthy();
+    expect(within(c).getByRole('button', { name: 'Paid by MMG' })).toBeTruthy();
     expect(within(c).queryByRole('button', { name: 'Accept' })).toBeNull();
   });
   it('a failed payment says why, instead of "Awaiting"', async () => {
@@ -505,7 +505,7 @@ describe('no Accept entry point offers an unpaid MMG order', () => {
     expect(within(popup).queryByRole('button', { name: 'Accept' })).toBeNull();
     expect(within(popup).getByText('Awaiting MMG payment')).toBeTruthy();
     // Its confirmation opens the order window (and the popup steps aside).
-    await view.user.click(within(popup).getByRole('button', { name: 'Confirm MMG payment' }));
+    await view.user.click(within(popup).getByRole('button', { name: 'Paid by MMG' }));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(screen.queryByText(/View later/)).toBeNull();
     // 2. The order window.
@@ -515,7 +515,7 @@ describe('no Accept entry point offers an unpaid MMG order', () => {
     // 3. The card.
     const card = screen.getByRole('article', { name: 'Order SW-7701' });
     expect(within(card).queryByRole('button', { name: 'Accept' })).toBeNull();
-    expect(within(card).getByRole('button', { name: 'Confirm MMG payment' })).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Paid by MMG' })).toBeTruthy();
     expect(writes.filter((w) => w.path.endsWith('/accept'))).toEqual([]);
   });
 
@@ -526,7 +526,7 @@ describe('no Accept entry point offers an unpaid MMG order', () => {
     renderWithQuery(<OrdersPage />);
     const popup = (await screen.findByText(/View later/)).closest('div.fixed') as HTMLElement;
     expect(within(popup).getByText('Only the owner or a manager can confirm MMG payments.')).toBeTruthy();
-    expect(within(popup).queryByRole('button', { name: /Accept|Confirm MMG payment/ })).toBeNull();
+    expect(within(popup).queryByRole('button', { name: /Accept|Paid by MMG/ })).toBeNull();
   });
 
   it('a failed payment in the popup gives its reason and no Accept', async () => {

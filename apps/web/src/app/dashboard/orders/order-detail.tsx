@@ -23,6 +23,8 @@ import {
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
+// The app's own O-4 rules and words (plain file, imported as is).
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -41,7 +43,10 @@ function actionsFor(o: VendorOrder) {
   const isAppt = o.fulfillment === 'APPOINTMENT';
   const out: Array<{ label: string; kind: string; tone?: 'danger' }> = [];
   if (s === 'PENDING' || s === 'PLACED') {
-    out.push({ label: 'Accept', kind: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
+    // [STORE-DASH · O-4] No Accept while the customer answers an "Out of stock" question, or once
+    // every item came off (the server refuses both); Reject stays.
+    if (!customerDeciding(o) && !nothingToAccept(o)) out.push({ label: 'Accept', kind: 'accept' });
+    out.push({ label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
   } else if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
@@ -276,6 +281,13 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   // [E10] The API requires a reason on every rejection, so reject is its own
   // mutation keyed on the chosen preset — it never flows through `act` with no
   // reason. Same three presets the mobile app offers.
+  // [STORE-DASH · O-4] "Out of stock" on a waiting order: one tap asks the customer (continue
+  // without it, or cancel); the server recalculates the total only after the answer.
+  const outOfStock = useMutation({
+    mutationFn: (lineId: string) => refundLine(id, lineId),
+    onError: (e) => setError((e as Error).message),
+    onSettled: refresh,
+  });
   const reject = useMutation({
     mutationFn: (why: string) => rejectOrder(id, why),
     onError: (e) => setError((e as Error).message),
@@ -389,12 +401,31 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       {paused && <p role="status" className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{MMG_DISPUTE_NOTICE.body}</p>}
 
       <div className="mt-4 space-y-1.5">
-        {o.items.map((it) => (
-          <div key={it.id} className="flex justify-between gap-3 text-sm">
-            <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
-            <span className="shrink-0 font-medium">{money(it.totalCustomer)}</span>
-          </div>
-        ))}
+        {o.items.map((it) => {
+          const stock = s === 'PENDING' ? lineStockWords(it) : null;
+          return (
+            <div key={it.id} className="text-sm">
+              <div className="flex items-center justify-between gap-3">
+                <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {!paused && canMarkOutOfStock(o, it) && (
+                    <button
+                      type="button"
+                      onClick={() => outOfStock.mutate(it.id)}
+                      disabled={outOfStock.isPending || act.isPending || reject.isPending}
+                      aria-label={`${OUT_OF_STOCK_WORDS.button}: ${it.name}`}
+                      className="min-h-9 rounded-lg border border-[var(--swift-red)]/30 px-3 text-xs font-bold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                    >
+                      {OUT_OF_STOCK_WORDS.button}
+                    </button>
+                  )}
+                  <span className="font-medium">{money(it.totalCustomer)}</span>
+                </span>
+              </div>
+              {stock && <p className="mt-0.5 text-xs font-semibold text-amber-700">{stock}</p>}
+            </div>
+          );
+        })}
       </div>
       {isMmg && mmgMoneyMoved(o.paymentStatus) && <p className="mt-2 text-sm font-semibold text-[var(--swift-success)]">{mmgMovedLabel(o.paymentStatus)}</p>}
 
@@ -587,6 +618,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
       {(actions.length > 0 || confirmDelivered || confirmReject || error) && (
         <div data-testid="order-action-bar" className="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--swift-border)] bg-[var(--swift-card)] px-6 py-4">
+          {!paused && customerDeciding(o) && <p role="status" className="w-full text-sm font-semibold text-amber-800">{OUT_OF_STOCK_WORDS.deciding}</p>}
+          {!paused && nothingToAccept(o) && <p role="status" className="w-full text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
           {actions.map((a) => (
             <span key={a.kind} className="flex min-w-0 flex-1 items-center gap-2">
               {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
