@@ -355,6 +355,12 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
       throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
     }
+    // [22 Oct, COORD ruling] Production never pushes (refused below), so with MMG live the checkout
+    // page is the only MMG way to pay: live MMG with the checkout off would leave no partner a way to
+    // pay with MMG. The fee pause also holds then (fee-pause.ts); this refusal is the belt to that brace.
+    if (env['MMG_CHECKOUT_ENABLED'] !== '1') {
+      throw new Error('FATAL: MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1: production never sends MMG charge requests, so the MMG checkout page is the only MMG way to pay. Switch both on together, or set MMG_DRIVER=disabled (every weekly fee is then paused). Refusing to start.');
+    }
   }
 
   // [S1 · SWITCHES 21 Oct, Option A] The MMG push rail (Swift sending a charge request to a
