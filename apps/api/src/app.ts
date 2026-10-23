@@ -168,6 +168,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
+  // [Row 312 · COORD 23 Oct] A photo stored while the scanner was down (the bypass) leaves NO response,
+  // on any surface, before its rescan answers CLEAN (lib/photo-scan-filter.ts). Root hook, before any route.
+  { const { registerUploadPhotoScan } = await import('./lib/photo-scan-filter'); registerUploadPhotoScan(app); }
 
   // Multi-tenancy: give every request a fresh tenant store BEFORE any auth runs,
   // so `authenticate` can bind the caller's tenant without leaking across

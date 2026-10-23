@@ -17,6 +17,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { adminRoutes } from '../modules/admin/admin.routes';
+import { registerUploadPhotoScan } from '../lib/photo-scan-filter';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -65,6 +66,8 @@ beforeAll(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app); registerEmptyJsonBodyParser(app);
   await app.register(prismaPlugin); await app.register(redisPlugin); await app.register(authPlugin); await app.register(socketPlugin);
+  // The app's own wiring (app.ts): the root filter, before any route.
+  registerUploadPhotoScan(app);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await system(() => app.prisma.user.create({ data: {
