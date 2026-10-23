@@ -463,30 +463,6 @@ export function preparationMayStart(
 }
 
 /**
- * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
- * store order the store has just accepted (or, for MMG, just marked "Paid by
- * MMG")? Every store type: a restaurant's kitchen and a grocery's pick list
- * both live inside PREPARING. Never a booking (BOOKING_LAW: it is confirmed,
- * then completed), never a parcel or a ride (no store), and never an MMG order
- * the payment-first law still holds (unpaid, or two claims that disagree) —
- * that order stops at ACCEPTED and "Paid by MMG" starts it. A question, never a
- * gate: the seam re-decides the next hop with its own gates on the locked row.
- */
-export function preparationMayStart(
-  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'>,
-): boolean {
-  if (order.fulfillment === 'APPOINTMENT') return false;
-  if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
-  try {
-    assertMmgFulfilmentAllowed(order, 'PREPARING');
-    return true;
-  } catch (error) {
-    if (error instanceof AppError) return false;
-    throw error;
-  }
-}
-
-/**
  * REFUNDED is intentionally overloaded in the current order model.  The
  * normal state machine uses it after CANCELLED/DELIVERED/COMPLETED as a
  * financial/accounting transition.  The admin cancellation override may use
