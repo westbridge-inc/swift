@@ -203,6 +203,8 @@ export async function scanRideQueue(
       e.tenantId,
       null,
       e.customerId,
+      // [REVIEW-G #2022 S4-3] A car that can take THIS ride: its class and party.
+      { rideClass: e.rideClass as RideClass, passengerCount: e.passengerCount },
     );
     if (supply.level === 'NONE') continue;
     if (!cellBudget.has(cell)) cellBudget.set(cell, supply.level === 'GOOD' ? 3 : 1);
