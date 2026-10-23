@@ -9,6 +9,8 @@ import { AppError } from '../utils/errors';
 import { closeResourcesBounded, idempotentAsync, positiveDurationMs } from '../utils/async-lifecycle';
 import { GUYANA_TZ } from '../modules/prep/prep-time';
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
+import { ownerRlsBindEnabled } from '../lib/owner-rls';
+import { insertTicketFor, orderCaseExists } from '../lib/owner-wall-tickets';
 import { recoveryFor } from './recovery-policy';
 import {
   requireActiveDiscoveryTenant,
@@ -540,11 +542,13 @@ export async function escalateStoreSilentMmgClaim(ctx: JobContext, orderId: stri
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
     const order = await tx.order.findUnique({ where: { id: orderId } });
     if (!order || !isStoreSilentOnClaimedMmgPayment(order, new Date())) return null;
-    const existing = await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
+    // [item 20] The customer's case, looked up and opened by the sweep bound to the order's tenant: with the wall on, the
+    // narrow action and the one ticket helper.
+    const existing = ownerRlsBindEnabled()
+      ? await orderCaseExists(tx, orderId, MMG_STORE_SILENT_SUBJECT)
+      : await tx.supportTicket.findFirst({ where: { orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT }, select: { id: true } });
     if (existing) return null;
-    const ticket = await tx.supportTicket.create({
-      data: { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) },
-    });
+    const ticket = await insertTicketFor(tx, { userId: order.customerId, orderId, category: 'PAYMENT', subject: MMG_STORE_SILENT_SUBJECT, message: mmgStoreSilentTicketMessage(order.orderNumber) });
     return { ticketId: ticket.id, order };
   });
   if (!opened) return false;
