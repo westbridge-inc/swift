@@ -18,7 +18,7 @@ import { toast } from '../../../kit/toast';
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
 import type { OrderVerticalFacts } from '@swift/types';
 import {
-  CircleChip, Photo,
+  Header, Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
   Pictogram, PillButton, Screen, T,
 } from '../../../kit';
@@ -235,12 +235,16 @@ export function OrdersHistoryScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveIdsKey]);
 
+  // [UI-SWEEP U11 → U-P2, owner 22 Oct] A pushed screen since Activity left
+  // the tab bar, so it gets the kit Header every pushed screen uses: Back at
+  // the top LEFT, a 44pt target. It used to be a bare back chip inside this
+  // column; its 44pt touch box stretched across the column and centred the
+  // chip, so Back sat in the top centre of the screen.
+  const backBar = <Header />;
   // THE PAPER HEADER — ink on the page ground, no slab, no white pill.
   const header = (
-    <View style={{ paddingTop: space.lg, paddingBottom: space.lg }}>
-      {/* [UI-SWEEP U11] A pushed screen since Activity left the tab bar: its own back chip. */}
-      <CircleChip icon="chevron-left" label="Back" onPress={() => navigation.goBack()} />
-      <T variant="micro" tone="muted" style={{ marginTop: space.lg }}>ORDERS & RIDES</T>
+    <View style={{ paddingTop: space.sm, paddingBottom: space.lg }}>
+      <T variant="micro" tone="muted">ORDERS & RIDES</T>
       <T variant="title" style={{ marginTop: 2 }}>Your activity</T>
     </View>
   );
@@ -249,6 +253,7 @@ export function OrdersHistoryScreen() {
   if (!isAuthenticated) {
     return (
       <Screen>
+        {backBar}
         {headerBlock}
         <EmptyState picto="orders" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign in" onAction={promptLogin} />
       </Screen>
@@ -297,7 +302,12 @@ export function OrdersHistoryScreen() {
   }
 
   /** The 56pt identity square. Photography carries its own radius and sits on
-   *  paper; a ride, having no storefront, gets a hairline-bordered tile. */
+   *  paper; a ride, having no storefront, gets a hairline-bordered tile.
+   *  [UI-SWEEP U-P3, owner 22 Oct] A store's square is its LOGO when it has
+   *  one (a cover is a wide banner, cropped to 56pt it shows nothing), else
+   *  its cover, else the shop icon alone. Never the store's name: the row
+   *  already prints it beside the tile, and squeezed into 56pt it wrapped
+   *  and broke ("SWIF / T M..."). */
   const identity = (o: any, isRide: boolean, size: number) =>
     isRide ? (
       <View
@@ -316,8 +326,9 @@ export function OrdersHistoryScreen() {
       </View>
     ) : (
       <Photo
-        uri={vendorPhoto(o.vendor)}
+        uri={vendorPhoto(o.vendor ? { logoUrl: o.vendor.logoUrl ?? null } : null) ?? vendorPhoto(o.vendor)}
         label={o.vendor?.name}
+        showLabel={false}
         glyph="shops"
         transition={150}
         style={{ width: size, height: size, borderRadius: radius.md }}
@@ -372,13 +383,10 @@ export function OrdersHistoryScreen() {
           </View>
           {amountText(o, isRide)}
         </View>
+        {/* [UI-SWEEP U-P4] The status only: the order number is shown in
+            full on the order's own screen (Track / Details), never cut off here. */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
           <TonePill label={st.label} tone={st.tone} />
-          {o.orderNumber ? (
-            <T variant="label" tone="muted" numberOfLines={1}>
-              #{o.orderNumber}
-            </T>
-          ) : null}
         </View>
         <PillButton
           label={isRide ? 'Track ride' : 'Track order'}
@@ -402,9 +410,12 @@ export function OrdersHistoryScreen() {
     const sub = isRide && (o.pickupAddress || o.deliveryAddress)
       ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
       : itemsSummary(o);
-    // Status · time · order number — every part dropped when the server did
-    // not send it, so the line never carries an invented value.
-    const meta = [st.label, timeOfDay(o.placedAt), o.orderNumber ? `#${o.orderNumber}` : null]
+    // Status · time — every part dropped when the server did not send it, so
+    // the line never carries an invented value. [UI-SWEEP U-P4, owner 22 Oct]
+    // No order number: on one line it was cut off ("#SW-261020-00..."), and
+    // the row already names the day, time, store and items. Details shows it
+    // in full.
+    const meta = [st.label, timeOfDay(o.placedAt)]
       .filter(Boolean)
       .join(' · ');
     const inner = (
@@ -493,6 +504,7 @@ export function OrdersHistoryScreen() {
 
   return (
     <Screen>
+      {backBar}
       {orders.isLoading || liveOrders.isLoading ? (
         <>
           {headerBlock}
