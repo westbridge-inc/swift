@@ -242,8 +242,8 @@ describe('[ROLE-DOCS] the declaration replaces the business registration, checke
       await service.approveDocument(doc.id, adminId, undefined, undefined, docType === 'owner_national_id' ? { documentNumber: `ID2${NUM}` } : {});
     }
     const [own, trading] = await system(() => Promise.all([o.vendorId, burgers.id].map((id) => app.prisma.vendor.findUniqueOrThrow({ where: { id } }))));
-    expect([own.isVerified, own.status]).toEqual([true, 'ACTIVE']);
-    expect([trading.isVerified, trading.status]).toEqual([false, 'PENDING_APPROVAL']);
+    expect([own!.isVerified, own!.status]).toEqual([true, 'ACTIVE']);
+    expect([trading!.isVerified, trading!.status]).toEqual([false, 'PENDING_APPROVAL']);
     // the trading-name store is not frozen by the other store's checked name
     const rename = await call('PUT', '/api/v1/vendor/profile', other, { name: 'Best Burgers GY' });
     expect(rename.statusCode, rename.body).toBe(200);

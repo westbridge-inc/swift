@@ -1923,8 +1923,8 @@ export class VerificationService {
    *  list (an own-name store's declaration while a trading-name store of the type still asks for the registration). */
   private async storeSubmittableChecklist(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
     const lists = [await this.checklistFor(userId, countryCode, roleKey)];
-    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { vendorType: roleKey }, select: { id: true } } } });
-    for (const v of owner?.vendors ?? []) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true } } } });
+    for (const v of (owner?.vendors ?? []).filter((x) => x.vendorType === roleKey)) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
     return [...new Set(lists.flat())];
   }
 
