@@ -413,6 +413,109 @@ describe('the scan', () => {
     await app.prisma.driver.update({ where: { id: own.id }, data: { isOnline: false, isAvailable: false } });
   });
 
+  it('[REVIEW-F S3-1] the no-driver fact counts only searches since the latest driver took the ride; a held MMG ride promises no release time', async () => {
+    // A waiting ride, made the real way (queue -> scan -> request core).
+    const BARTICA = { lat: 6.4067, lng: -58.6214 }; // a field no other test uses
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const d = await makeDriver(BARTICA);
+    expect((await join(c.token, { pickup: BARTICA, pickupAddress: 'Bartica stelling', dropoff: { lat: 6.4167, lng: -58.6314 } })).statusCode).toBe(201);
+    await runScan();
+    const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId } });
+    expect(entry.status).toBe('MATCHED');
+    await app.prisma.driver.update({ where: { id: d.driverId }, data: { isOnline: false, isAvailable: false } });
+    const ride = await app.prisma.order.findUniqueOrThrow({ where: { id: entry.matchedOrderId! } });
+    expect(ride.status).toBe('PENDING');
+    expect(ride.driverId).toBeNull();
+    const active = async () => (await app.inject({
+      method: 'GET', url: '/api/v1/rides/active', headers: { authorization: `Bearer ${c.token}` },
+    })).json().data;
+    const cancelFacts = (r: any) => ({
+      canCancel: r.canCancel, freeCancellationExpiresAt: r.freeCancellationExpiresAt,
+      cancellationMessage: r.cancellationMessage, cancelUnavailable: r.cancelUnavailable,
+    });
+    const at = (msAfterPlacement: number) => new Date(ride.placedAt.getTime() + msAfterPlacement);
+    const exhausted = (startedAt: Date, resolution: string | null) => app.prisma.dispatchSearch.create({
+      data: { vertical: 'TAXI', subjectType: 'ORDER', subjectId: ride.id, status: 'EXHAUSTED', wave: 3, radiusKm: 15, startedAt, exhaustedAt: new Date(startedAt.getTime() + 20_000), resolution },
+    });
+
+    // (c) control: two empty searches (a re-sweep RETRIED the first), never
+    // assigned -> the honest card stays up (no flicker between re-sweeps).
+    await exhausted(at(1_000), 'RETRIED');
+    await exhausted(at(61_000), null);
+    // Any other status record (here a later PENDING note) is not a driver
+    // taking the ride: it moves no boundary.
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'PENDING', changedBy: 'system', note: 'test: not an assignment', createdAt: at(90_000) } });
+    const before = await active();
+    expect(before.noDriverFound).toBe(true);
+    // A search that STARTED before the driver took the ride and ended empty
+    // after (exhaustedAt 130 s) belongs to the old search, not the new one.
+    await exhausted(at(110_000), 'RETRIED');
+
+    // (a) A driver then TOOK the ride (the claim's append-only record) and
+    // dropped it (back to PENDING, no driver). The old empty searches say
+    // nothing about the search now running for a new driver.
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'DRIVER_ASSIGNED', changedBy: 'test-driver', note: 'Mover accepted the job', createdAt: at(120_000) } });
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'PENDING', changedBy: 'test-driver', note: 'Driver cancelled: test', createdAt: at(180_000) } });
+    const rematching = await active();
+    expect(rematching.noDriverFound).toBe(false);
+    // (d) the cancel verdict (a fee rule) is NOT this fact: unchanged.
+    expect(cancelFacts(rematching)).toEqual(cancelFacts(before));
+
+    // (b) The re-dispatch's own search comes back empty -> the card again.
+    await exhausted(at(181_000), null);
+    expect((await active()).noDriverFound).toBe(true);
+
+    // (e) [REVIEW-G #2030 S4-1] A SECOND driver takes it and drops it: the
+    // boundary is the LATEST claim, so that 181 s empty search no longer
+    // counts (an earliest-claim rule would still count it)...
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'DRIVER_ASSIGNED', changedBy: 'test-driver-2', note: 'Mover accepted the job', createdAt: at(240_000) } });
+    await app.prisma.orderStatusLog.create({ data: { orderId: ride.id, status: 'PENDING', changedBy: 'test-driver-2', note: 'Driver cancelled: test', createdAt: at(300_000) } });
+    expect((await active()).noDriverFound).toBe(false);
+    // ...until the search after that comes back empty.
+    await exhausted(at(301_000), null);
+    expect((await active()).noDriverFound).toBe(true);
+
+    // [REVIEW-F S4-3] A ride recorded as paid by MMG is HELD for a person at
+    // the wait limit, never released on its own: no release time is promised.
+    expect(typeof (await active()).searchReleaseAt).toBe('string');
+    await app.prisma.order.update({ where: { id: ride.id }, data: { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CAPTURED' } as never });
+    const held = await active();
+    expect(held.id).toBe(ride.id);
+    expect(held.searchReleaseAt ?? null).toBeNull();
+    expect(held.noDriverFound).toBe(true);
+
+    // Cleanup: back to the unpaid cash ride it was (a paid-MMG cancel needs a
+    // refund obligation, rightly refused by the database).
+    await app.prisma.order.update({ where: { id: ride.id }, data: { paymentMethod: ride.paymentMethod, paymentStatus: ride.paymentStatus } as never });
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: ride.id } });
+    await app.prisma.order.updateMany({ where: { customerId: c.userId }, data: { status: 'CANCELLED' } });
+  });
+
+  it('[REVIEW-G S4-2] the supply FOR a customer also leaves out a driver they blocked (the same pair rule dispatch applies)', async () => {
+    const LETHEM = { lat: 3.3803, lng: -59.7968 }; // a field no other test uses
+    const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
+    const only = await makeDriver(LETHEM);
+    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: c.userId }, select: { tenantId: true } });
+    const block = await app.prisma.userBlock.create({ data: { tenantId, blockerId: c.userId, blockedId: only.userId, reason: 'test' } });
+    expect((await join(c.token, { pickup: LETHEM, pickupAddress: 'Lethem market', dropoff: { lat: 3.3903, lng: -59.8068 } })).statusCode).toBe(201);
+    // Precondition: that car IS supply to anyone else.
+    const area = await runWithoutTenant(() => scanDeps().dispatch.getAvailability('DRIVER', LETHEM, 0, tenantId));
+    expect(area.level).not.toBe('NONE');
+    // The only car near is one this customer blocked: no ride nobody can fill.
+    await runScan();
+    const waiting = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId } });
+    expect(waiting.status).toBe('WAITING');
+    expect(await app.prisma.order.count({ where: { customerId: c.userId, orderType: 'TAXI' } })).toBe(0);
+    // Control: the block lifted, the same entry is auto-requested.
+    await app.prisma.userBlock.update({ where: { id: block.id }, data: { unblockedAt: new Date() } });
+    await runScan();
+    const matched = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: c.userId } });
+    expect(matched.status).toBe('MATCHED');
+    await app.prisma.userBlock.deleteMany({ where: { id: block.id } });
+    await app.prisma.order.updateMany({ where: { customerId: c.userId }, data: { status: 'CANCELLED' } });
+    await app.prisma.driver.update({ where: { id: only.driverId }, data: { isOnline: false, isAvailable: false } });
+  });
+
   it('auto-requests the FIFO head through the REAL request core when a driver frees up', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await makeDriver(GT); // one free driver in Georgetown
