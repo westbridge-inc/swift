@@ -290,7 +290,7 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 
 /** Reviewed: the message is true even when a read failed. Every entry must still match a real hit. */
 const KNOWN: Record<string, string> = {
-  'app/dashboard/orders/page.tsx | Nothing left to hand over — cancel this order': 'Picking summary of an order that is already on screen: every line was removed. No read decides it.',
+  'app/dashboard/orders/order-detail.tsx | Nothing left to hand over — cancel this order': 'Picking summary of an order that is already on screen: every line was removed. No read decides it.',
   'components/guest-basket.tsx | Your basket is empty.': 'The guest basket lives on this device (lib/basket.ts), not in a server read; it cannot fail to load.',
   'app/(app)/order/search/page.tsx | () => { if (sequence.current === request) setSug': 'Type-ahead suggestions only: they vanish on a failure and say nothing; the search itself reports its own failure.',
 };

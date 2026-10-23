@@ -525,8 +525,16 @@ describe('[MC-PR2] GET /vendors/:id/activation-checklist — the per-document tr
     const owner = await makeUser('Logged');
     const store = await makeStore(owner.id);
     expect((await read(`/api/v1/admin/vendors/${store.id}/activation-checklist`)).statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 200));
-    const rows = await system(() => app.prisma.sensitiveReadLog.findMany({ where: { action: 'GET /vendors/:id/activation-checklist', subjectId: store.id } }));
+    // The record is written by the admin onResponse hook, AFTER inject()
+    // resolves: wait for the row itself (bounded), never a fixed sleep that a
+    // loaded runner outlasts.
+    const logged = () => system(() => app.prisma.sensitiveReadLog.findMany({ where: { action: 'GET /vendors/:id/activation-checklist', subjectId: store.id } }));
+    const deadline = Date.now() + 10_000;
+    let rows = await logged();
+    while (rows.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      rows = await logged();
+    }
     expect(rows.length).toBeGreaterThan(0);
     expect(rows[0]!.capability).toBe('vendor.read');
   });

@@ -1,4 +1,5 @@
 import { assertPlacesConfig } from './places-config';
+import { classifyGeocodeStatus, classifyGoogleApiFailure, PlacesProviderError } from './places-failure';
 import type { PrismaClient } from '@prisma/client';
 
 // ---------------------------------------------------------------------------
@@ -35,6 +36,13 @@ export interface PlacesQueryContext {
   userId?: string;
 }
 
+/**
+ * [PLACES-LOUD] Each method answers "no matches" with [] / null. A provider that
+ * could not answer rejects with a PlacesProviderError (places-failure.ts) rather
+ * than disguising the failure as an empty answer: GooglePlacesProvider (production)
+ * does. The OSM stack, by design, folds a failed Photon / Nominatim call into the
+ * local suggestions (zones and saved addresses), so its answers stay real ones.
+ */
 export interface PlacesProvider {
   autocomplete(query: string, ctx?: PlacesQueryContext): Promise<PlaceSuggestion[]>;
   // ctx carries the caller's identity: resolving an `addr:` placeId (a saved
@@ -164,11 +172,17 @@ export class LocalPlacesProvider implements PlacesProvider {
 // ---------------------------------------------------------------------------
 // GooglePlacesProvider — Places API (New) Autocomplete + Place Details, and the
 // Geocoding API for reverse lookups. The owner's Google project offers only
-// Places API (New); the legacy Places endpoints cannot be enabled there. Same
-// hot-path discipline as the maps seam: never throws, degrades to empty/null
-// on any network error, timeout, !ok, error body or unreadable body. The key
-// is server-only: Places (New) carries it in the X-Goog-Api-Key header, never
-// in a URL, and nothing here logs it.
+// Places API (New); the legacy Places endpoints cannot be enabled there.
+// [PLACES-LOUD 22 Oct 2026] "No matches" and FAILURE are different answers:
+// Google answering with nothing is [] / null, exactly as before; every failure
+// (a non-2xx, an auth / quota / permission error body, a timeout, a network
+// error, an unreadable body) is a PlacesProviderError with its class and
+// Google's status words (places-failure.ts). It used to degrade to [] / null,
+// which the apps showed as "No matches": a refused key was invisible. The
+// route makes the failure an honest 503, a log line, a metric and a page. The
+// key is server-only: Places (New) carries it in the X-Goog-Api-Key header,
+// never in a URL; the Geocoding URL that carries it is never logged, and no
+// error or failure record holds it.
 // ---------------------------------------------------------------------------
 
 const GOOGLE_TIMEOUT_MS = 4000;
@@ -187,13 +201,15 @@ const LOCATION_BIAS_RADIUS_M = 50000;
 const GOOGLE_PLACE_ID = /^[A-Za-z0-9_-]+$/;
 
 interface GoogleAutocompleteResponse {
-  suggestions?: Array<{
-    placePrediction?: {
-      placeId?: string;
-      text?: { text?: string };
-      structuredFormat?: { mainText?: { text?: string }; secondaryText?: { text?: string } };
-    };
-  }>;
+  suggestions?: unknown;
+}
+
+interface GoogleAutocompleteSuggestion {
+  placePrediction?: {
+    placeId?: string;
+    text?: { text?: string };
+    structuredFormat?: { mainText?: { text?: string }; secondaryText?: { text?: string } };
+  };
 }
 
 interface GooglePlaceResponse {
@@ -203,27 +219,58 @@ interface GooglePlaceResponse {
 }
 
 interface GoogleGeocodeResponse {
-  status?: string;
+  status?: unknown;
   results?: Array<{ formatted_address?: string }>;
+}
+
+/** One Google answer: the HTTP status and the parsed JSON body (undefined when it was not JSON). */
+interface GoogleAnswer {
+  ok: boolean;
+  status: number;
+  body: unknown;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object';
 }
 
 export class GooglePlacesProvider implements PlacesProvider {
   constructor(private apiKey: string) {}
 
-  private async requestJson<T>(url: string | URL, init: NonNullable<Parameters<typeof fetch>[1]> = {}): Promise<T | null> {
+  /** Fetch with the timeout. Throws PlacesProviderError for no answer (timeout / network); otherwise
+   *  returns the status and the body, which each caller judges (a 404 is an answer for details). */
+  private async request(url: string | URL, init: NonNullable<Parameters<typeof fetch>[1]> = {}): Promise<GoogleAnswer> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GOOGLE_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { ...init, signal: controller.signal });
-      if (!res.ok) return null;
-      const body: unknown = await res.json();
-      if (body === null || typeof body !== 'object' || 'error' in body) return null;
-      return body as T;
-    } catch {
-      return null;
+      let res: Response;
+      try {
+        res = await fetch(url, { ...init, signal: controller.signal });
+      } catch {
+        // The thrown error is dropped on purpose: its text can quote the URL (the
+        // Geocoding URL carries the key). Only the class survives.
+        throw new PlacesProviderError({ reason: controller.signal.aborted ? 'timeout' : 'network' });
+      }
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        if (controller.signal.aborted) throw new PlacesProviderError({ reason: 'timeout' });
+        body = undefined;
+      }
+      return { ok: res.ok, status: res.status, body };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** A Places (New) answer that must be a JSON object: anything else is a classified failure. */
+  private placesBody(answer: GoogleAnswer): Record<string, unknown> {
+    if (!answer.ok || (isObject(answer.body) && 'error' in answer.body)) {
+      throw new PlacesProviderError(classifyGoogleApiFailure(answer.status, answer.body));
+    }
+    if (!isObject(answer.body)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
+    return answer.body;
   }
 
   private placesHeaders(fieldMask: string): Record<string, string> {
@@ -238,14 +285,17 @@ export class GooglePlacesProvider implements PlacesProvider {
         circle: { center: { latitude: ctx.near.lat, longitude: ctx.near.lng }, radius: LOCATION_BIAS_RADIUS_M },
       };
     }
-    const data = await this.requestJson<GoogleAutocompleteResponse>(AUTOCOMPLETE_URL, {
+    const answer = await this.request(AUTOCOMPLETE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.placesHeaders(AUTOCOMPLETE_FIELD_MASK) },
       body: JSON.stringify(body),
     });
-    if (!data || !Array.isArray(data.suggestions)) return [];
+    const data = this.placesBody(answer) as GoogleAutocompleteResponse;
+    // Google answers {} when nothing matches: that is "no matches", not a failure.
+    if (data.suggestions === undefined) return [];
+    if (!Array.isArray(data.suggestions)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
     const out: PlaceSuggestion[] = [];
-    for (const s of data.suggestions) {
+    for (const s of data.suggestions as GoogleAutocompleteSuggestion[]) {
       const p = s?.placePrediction;
       if (!p?.placeId) continue;
       out.push({
@@ -260,12 +310,16 @@ export class GooglePlacesProvider implements PlacesProvider {
 
   async details(placeId: string, _ctx?: PlacesQueryContext): Promise<PlaceDetail | null> {
     if (!GOOGLE_PLACE_ID.test(placeId)) return null;
-    const data = await this.requestJson<GooglePlaceResponse>(`${PLACE_DETAILS_URL}${encodeURIComponent(placeId)}`, {
+    const answer = await this.request(`${PLACE_DETAILS_URL}${encodeURIComponent(placeId)}`, {
       headers: this.placesHeaders(DETAILS_FIELD_MASK),
     });
-    const lat = data?.location?.latitude;
-    const lng = data?.location?.longitude;
-    if (!data || typeof lat !== 'number' || typeof lng !== 'number') return null;
+    // Google saying it does not know this id (its own NOT_FOUND status, not any 404 page) is
+    // an answer: there is no such place. Everything else that is not a place is a failure.
+    if (answer.status === 404 && classifyGoogleApiFailure(answer.status, answer.body).googleStatus === 'NOT_FOUND') return null;
+    const data = this.placesBody(answer) as GooglePlaceResponse;
+    const lat = data.location?.latitude;
+    const lng = data.location?.longitude;
+    if (typeof lat !== 'number' || typeof lng !== 'number') return null;
     return {
       placeId,
       label: data.displayName?.text ?? data.formattedAddress ?? 'Selected place',
@@ -278,8 +332,13 @@ export class GooglePlacesProvider implements PlacesProvider {
     const url = new URL(GEOCODE_URL);
     url.searchParams.set('latlng', `${point.lat},${point.lng}`);
     url.searchParams.set('key', this.apiKey);
-    const data = await this.requestJson<GoogleGeocodeResponse>(url);
-    if (!data || data.status !== 'OK') return null;
+    const answer = await this.request(url);
+    if (!answer.ok) throw new PlacesProviderError(classifyGoogleApiFailure(answer.status, answer.body));
+    if (!isObject(answer.body)) throw new PlacesProviderError({ reason: 'bad_response', httpStatus: answer.status });
+    const data = answer.body as GoogleGeocodeResponse;
+    // ZERO_RESULTS: Google answered, there is no address for this point.
+    if (data.status === 'ZERO_RESULTS') return null;
+    if (data.status !== 'OK') throw new PlacesProviderError(classifyGeocodeStatus(answer.status, data.status));
     return data.results?.[0]?.formatted_address ?? null;
   }
 }

@@ -28,3 +28,13 @@ describe('[PERF] the sign-up page does not load the store map picker up front', 
     expect(staticImports).toContain("import '@/components/store-location-picker.module.css';");
   });
 });
+
+describe('[PERF · row 628] the weekly fee block loads on the partner steps only', () => {
+  const feeLoader = readFileSync(join(__dirname, 'weekly-fee-loader.ts'), 'utf8');
+  it('imports the block and its price read on demand (type imports cost nothing at run time)', () => {
+    expect(staticImports.filter((line) => /weekly-fee'|signup-fee'/.test(line) && !/^import type /.test(line))).toEqual([]);
+    expect(staticImports).toContain("import { loadWeeklyFee } from './weekly-fee-loader';");
+    expect(feeLoader).toContain("export const loadWeeklyFee = () => import('./weekly-fee');");
+    expect(feeLoader.split('\n').filter((line) => /^import\s/.test(line))).toEqual([]);
+  });
+});
