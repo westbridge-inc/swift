@@ -8,7 +8,7 @@ import { money } from '../../lib/money';
 import { addAppointmentDays, appointmentDayKey, formatAppointmentSlot } from '../../lib/appointmentTime';
 import { canVendorConfirmDelivered } from './screens/delivery-owner';
 import { MMG_DISPUTE_NOTICE, mmgDisputePaused, withoutForwardWorkWhilePaused } from './order-dispute';
-import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from './storeOrderRules';
+import { canMarkHandedToRider, customerDeciding, handoverNeedsNoCode, mmgAwaitingPayment, nothingToAccept } from './storeOrderRules';
 import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
 import { storeStatusLabel } from '../../lib/orderStatus';
 
@@ -22,7 +22,7 @@ export function prettyVendorType(t?: string) {
 
 // ─── Order helpers ───────────────────────────────────────────────────────────
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 /** Statuses where a rider owns the status lane; kitchen progress then rides
  *  the preparingAt/readyAt timestamps (see the vendor prep routes). */
@@ -57,10 +57,16 @@ function statusActions(order: any): { label: string; action: VendorOrderActionKi
   if (COURIER_ACTIVE.includes(s)) {
     if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
     if (!order?.readyAt) return [{ label: 'Ready for delivery', action: 'ready' }];
+    // [STORE-DASH · O-2] The rider is at the counter: one tap records the hand-over (custody stays the rider's "Picked up").
+    if (canMarkHandedToRider(order)) return [{ label: 'Handed to rider', action: 'handed-to-rider' }];
     return [];
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
-  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
+  // [STORE-DASH · O-2] With the store's pickup code off, one tap after checking the name and order number.
+  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup)
+    return handoverNeedsNoCode(order) ? [{ label: 'Handed to customer', action: 'handed-to-customer' }] : [{ label: 'Mark picked up', action: 'complete-pickup' }];
+  // [STORE-DASH · O-2] A ready Swift-rider delivery whose rider is at the counter.
+  if (canMarkHandedToRider(order)) return [{ label: 'Handed to rider', action: 'handed-to-rider' }];
   // Store-owned delivery has its own terminal ceremony. Platform-rider orders
   // remain exclusively completable from the assigned rider's app.
   if (canVendorConfirmDelivered({

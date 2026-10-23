@@ -116,3 +116,61 @@ export function lineStockWords(line: LineLike): string | null {
   if (line?.subStatus === 'REJECTED') return OUT_OF_STOCK_WORDS.declined;
   return null;
 }
+
+// ─── O-2 hand-overs (owner ruling 22 Oct 19:45Z; server contract STORE-FLOW 07:58Z) ───────────────
+// - Takeaway: the store's requirePickupCode setting is OFF by default; the server says per order
+//   (pickupCodeRequired). Off = "Handed to customer" in one tap, after checking the customer's first
+//   name and the order number (PUT complete-pickup with no code). On = today's typed code.
+// - Delivery with a Swift rider: "Handed to rider" (PUT handed-to-rider) writes one status-log row;
+//   custody stays the rider's "Picked up". Shown only when the server knows the step (the order
+//   carries handedToRiderAt), so an older server never gets a request it cannot answer.
+
+type HandoverOrder = {
+  status?: unknown; fulfillment?: unknown; fulfillmentMode?: unknown; riderId?: unknown; rider?: unknown;
+  pickupCodeRequired?: unknown; handedToRiderAt?: unknown;
+} | null | undefined;
+
+/** The takeaway hand-over needs no code: the store's setting is off. Unknown (an older server) = the code is still needed. */
+export function handoverNeedsNoCode(order: HandoverOrder): boolean {
+  return order?.pickupCodeRequired === false;
+}
+
+const RIDER_AT_STORE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'READY'];
+
+/** "Handed to rider" may be tapped: a Swift-rider delivery with its rider assigned, not marked yet, on a server that knows the step. */
+export function canMarkHandedToRider(order: HandoverOrder): boolean {
+  if (!order || !('handedToRiderAt' in order) || order.handedToRiderAt) return false;
+  if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  if (!order.riderId && !order.rider) return false;
+  return RIDER_AT_STORE.includes(String(order.status ?? '').toUpperCase());
+}
+
+type RiderLike = { user?: { firstName?: unknown } | null; vehicleType?: unknown; vehicleMake?: unknown; vehicleModel?: unknown; vehicleColor?: unknown; licensePlate?: unknown; photoUrl?: unknown } | null | undefined;
+const word = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+/** What the store checks at the hand-over: the rider's first name and vehicle (colour make model · plate). */
+export function riderHandoverLine(rider: RiderLike): string | null {
+  const name = word(rider?.user?.firstName);
+  const vehicle = [word(rider?.vehicleColor), word(rider?.vehicleMake), word(rider?.vehicleModel)].filter(Boolean).join(' ') || word(rider?.vehicleType);
+  const plate = word(rider?.licensePlate);
+  const parts = [name, [vehicle, plate].filter(Boolean).join(' · ') || null].filter(Boolean);
+  return parts.length ? parts.join(' — ') : null;
+}
+
+/** The rider's photo, only as the server's resolved address (never a raw storage key). */
+export function riderPhotoUrl(rider: RiderLike): string | null {
+  const url = word(rider?.photoUrl);
+  return url && /^https?:\/\//.test(url) ? url : null;
+}
+
+export const HANDOVER_WORDS = {
+  toRider: 'Handed to rider',
+  toCustomer: 'Handed to customer',
+  checkName: (firstName: unknown, orderNumber: unknown) =>
+    `Check the name before you hand it over: ${word(firstName) ?? 'the customer'} · order #${word(orderNumber) ?? ''}`.trimEnd(),
+  checkRider: 'Check the rider before you hand it over:',
+  handedToRider: 'Handed to the rider',
+  settingTitle: 'Ask for the pickup code',
+  settingOn: 'Customers collecting an order read out their code; you type it.',
+  settingOff: 'You hand takeaway orders over after checking the customer’s first name and order number.',
+} as const;

@@ -121,7 +121,15 @@ export interface VendorOrder {
   estimatedPrepTime?: number | null;
   items: OrderLine[];
   customer?: { id: string; firstName: string | null; lastName: string | null; phone?: string | null; avatar?: string | null } | null;
-  rider?: { user?: { firstName: string | null; lastName: string | null; phone: string | null } | null } | null;
+  rider?: {
+    user?: { firstName: string | null; lastName: string | null; phone: string | null } | null;
+    /** [O-2] The vehicle the store checks at the hand-over, and the rider's photo (a resolved address or null). */
+    vehicleType?: string | null; vehicleMake?: string | null; vehicleModel?: string | null; vehicleColor?: string | null; licensePlate?: string | null; photoUrl?: string | null;
+  } | null;
+  /** [O-2] false when the store's "Ask for the pickup code" is off (absent on an older server = the code is needed). */
+  pickupCodeRequired?: boolean;
+  /** [O-2] When the store tapped "Handed to rider" (absent on an older server, which has no such step). */
+  handedToRiderAt?: string | null;
   /**
    * The two routes select DIFFERENT vendor columns: the board sends
    * `{ id, name, selfDeliveryEnabled }`, the detail sends
@@ -283,8 +291,11 @@ export const setFulfillmentMode = (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_
  *  already recorded against another order. */
 export const confirmPayment = (id: string, reference: string) =>
   apiFetch(`${V}/orders/${id}/confirm-payment`, { method: 'POST', body: JSON.stringify({ reference }) });
-export const completePickup = (id: string, code: string) =>
-  apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
+// [STORE-DASH · O-2] With the store's pickup code off, the hand-over sends no code at all.
+export const completePickup = (id: string, code?: string) =>
+  apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify(code ? { code } : {}) });
+/** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
+export const handedToRider = (id: string) => apiFetch(`${V}/orders/${id}/handed-to-rider`, { method: 'PUT', body: '{}' });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
 /** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
 export const confirmReturnReceived = (id: string) =>

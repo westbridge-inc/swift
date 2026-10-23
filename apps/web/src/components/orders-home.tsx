@@ -19,7 +19,7 @@ import {
   numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
 } from '@/lib/vendor-hub';
 import {
-  acceptOrder, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
+  acceptOrder, completePickup, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, handedToRider, markDelivered, markPreparing, markReady,
   money, rejectOrder, toggleOpen, toggleOrders, updateProfile, type VendorOrder,
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
@@ -27,7 +27,8 @@ import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
-import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, OUT_OF_STOCK_WORDS, canMarkHandedToRider, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { RiderHandoverLine } from './rider-handover-line';
 import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
@@ -447,6 +448,35 @@ export function StoreStatusCard({ store, manager, readFailed = false, onRetryRea
   );
 }
 
+/** [STORE-DASH · O-2] "Ask for the pickup code" — the store-wide takeaway setting (owners and managers), off by default. */
+export function PickupCodeCard({ store, readFailed = false, onRetryRead = () => {} }: { store: HubStore; readFailed?: boolean; onRetryRead?: () => void }) {
+  const storeId = useStoreId();
+  const client = useQueryClient();
+  const required = !!store.requirePickupCode;
+  const mut = useMutation({
+    mutationFn: () => updateProfile({ requirePickupCode: !required }),
+    // Locked until the store is re-read, so a quick second tap cannot send the stale opposite.
+    onSettled: () => Promise.all([
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'profile') }),
+      client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') }),
+    ]),
+  });
+  return (
+    <section aria-label="Pickup code" className="sw-card p-5">
+      <button type="button" role="switch" aria-label={HANDOVER_WORDS.settingTitle} aria-checked={required} disabled={readFailed || mut.isPending} onClick={() => mut.mutate()}
+        className="flex min-h-12 w-full items-center justify-between gap-3 text-left disabled:opacity-60">
+        <span className="min-w-0 flex-1">
+          <span className="block font-semibold">{HANDOVER_WORDS.settingTitle}</span>
+          <span className="sw-caption mt-1 block">{required ? HANDOVER_WORDS.settingOn : HANDOVER_WORDS.settingOff}</span>
+        </span>
+        <Switch on={required} />
+      </button>
+      {mut.isError && <p className="mt-2 text-[13px] text-[var(--swift-error)]">Couldn’t update — try again.</p>}
+      {readFailed && <ReadFailed onRetry={onRetryRead} />}
+    </section>
+  );
+}
+
 /** "Deliver my own orders" — the store-wide self-delivery setting (owners and managers). */
 export function SelfDeliveryCard({ store, readFailed = false, onRetryRead = () => {} }: { store: HubStore; readFailed?: boolean; onRetryRead?: () => void }) {
   const storeId = useStoreId();
@@ -498,6 +528,9 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       if (kind === 'preparing') return markPreparing(order.id);
       if (kind === 'ready') return markReady(order.id);
       if (kind === 'delivered') return markDelivered(order.id);
+      // [STORE-DASH · O-2] One tap from the card: the takeaway hand-over with the code off (no code sent), and the rider hand-over.
+      if (kind === 'handed-to-customer') return completePickup(order.id);
+      if (kind === 'handed-to-rider') return handedToRider(order.id);
       if (kind === 'complete-appointment') return apiFetch(`/api/v1/vendor/orders/${order.id}/complete-appointment`, { method: 'PUT', body: '{}' });
       throw new Error(`Unknown action ${kind}`);
     },
@@ -542,6 +575,9 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       {/* [REVIEW-F S4-3 on #2032] One name for the MMG step: the window's own button (the reference is typed there). */}
       {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Paid by MMG</button>}
       {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+      {/* [STORE-DASH · O-2] The rider the store checks before "Handed to rider"; then that it went. */}
+      {!paused && canMarkHandedToRider(order) && <RiderHandoverLine rider={order.rider} />}
+      {order.handedToRiderAt && <p className="sw-caption font-semibold">{HANDOVER_WORDS.handedToRider}</p>}
       {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}
       {!paused && nothingToAccept(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-red-600)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}

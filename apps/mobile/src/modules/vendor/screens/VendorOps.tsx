@@ -49,6 +49,7 @@ import {
   useToggleOpen,
   useToggleOrders,
   useSetSelfDelivery,
+  useSetRequirePickupCode,
   useOrderAction,
   usePendingOrderIds,
   useVendorMenu,
@@ -60,7 +61,8 @@ import {
   useVendorHours,
 } from '../../../hooks/vendorops';
 import { cardTapFor } from '../boardTaps';
-import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
+import { HANDOVER_WORDS, OUT_OF_STOCK_WORDS, canMarkHandedToRider, customerDeciding, handoverNeedsNoCode, nothingToAccept } from '../storeOrderRules';
+import { RiderHandoverLine } from '../RiderHandoverLine';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
@@ -204,7 +206,8 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.sm }}>
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
           <T variant="label" tone="muted">
-            Ask the customer for their code at collection
+            {/* [STORE-DASH · O-2] With the store's pickup code off: check the name and the order number. */}
+            {handoverNeedsNoCode(order) ? HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber) : 'Ask the customer for their code at collection'}
           </T>
         </View>
       ) : !isPickup && order.deliveryAddress ? (
@@ -280,6 +283,13 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         </View>
       ) : null}
       <MmgDisputeNotice order={order} />
+      {/* [STORE-DASH · O-2] Who the order goes to, checked before "Handed to rider"; then that it went. */}
+      {canMarkHandedToRider(order) ? <RiderHandoverLine rider={order.rider} /> : null}
+      {order.handedToRiderAt ? (
+        <T variant="caption" weight="semibold" tone="muted" style={{ marginTop: space.sm }}>
+          {HANDOVER_WORDS.handedToRider}
+        </T>
+      ) : null}
       {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
       {customerDeciding(order) || nothingToAccept(order) ? (
         <T variant="label" weight="semibold" style={{ marginTop: space.sm, color: color.warning }}>
@@ -862,6 +872,7 @@ export function VendorOps({ store, navigation }: any) {
   const toggleOpen = useToggleOpen();
   const toggleOrders = useToggleOrders();
   const setSelfDelivery = useSetSelfDelivery();
+  const setRequirePickupCode = useSetRequirePickupCode();
   const orderAction = useOrderAction();
   const ordersQ = useVendorOrders(true);
   const { stores, owner } = useVendorProfile();
@@ -1278,6 +1289,38 @@ export function VendorOps({ store, navigation }: any) {
               )}
             </Pressable>
             {setSelfDelivery.isError ? (
+              <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
+                Couldn’t update — try again.
+              </T>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {/* [STORE-DASH · O-2] "Ask for the pickup code" — off by default for every store; owner/manager
+            (the self-delivery setting's rights). Shown only once the server serves the setting. */}
+        {!inPreview && surface.canSetSelfDelivery && typeof store.requirePickupCode === 'boolean' ? (
+          <Card style={{ marginBottom: space.lg }}>
+            <Pressable
+              testID="vendor-require-pickup-code"
+              disabled={setRequirePickupCode.isPending}
+              onPress={() => setRequirePickupCode.mutate(!store.requirePickupCode)}
+              accessibilityRole="switch"
+              accessibilityLabel={HANDOVER_WORDS.settingTitle}
+              accessibilityState={{ checked: !!store.requirePickupCode, disabled: setRequirePickupCode.isPending, busy: setRequirePickupCode.isPending }}
+            >
+              {({ pressed }) => (
+                <View style={{ minHeight: space['5xl'], flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: pressed ? 0.82 : 1 }}>
+                  <View style={{ flex: 1, paddingRight: space.md }}>
+                    <T variant="body" weight="bold">{HANDOVER_WORDS.settingTitle}</T>
+                    <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                      {store.requirePickupCode ? HANDOVER_WORDS.settingOn : HANDOVER_WORDS.settingOff}
+                    </T>
+                  </View>
+                  <AvailabilitySwitch value={!!store.requirePickupCode} disabled={setRequirePickupCode.isPending} accessible={false} pointerEvents="none" />
+                </View>
+              )}
+            </Pressable>
+            {setRequirePickupCode.isError ? (
               <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
                 Couldn’t update — try again.
               </T>
