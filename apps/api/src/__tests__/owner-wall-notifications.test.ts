@@ -35,9 +35,10 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { computedClientAccess, delegateEscapes } from './helpers/delegate-escapes';
 import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
-import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
+import { OWNER_WALL_DEVICE_ACTIONS, OWNER_WALLED_TABLES, ownerWallRefusal, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 import {
   OWNER_WALL_NOTICE_ACTIONS, insertNoticeFor, noticeId, pendingStaffInvitesOf, publicPhoneAsked, staffInviteesOf, upsertNoticeFor,
@@ -311,6 +312,20 @@ describe('[item 20] notifications written for someone else', () => {
     expect(await asked()).toBe(1);
   });
 
+  it('a store that goes live under billing\'s hold tells its owner to pay the weekly fee, from inside an admin\'s transaction (#1906)', async () => {
+    const { VerificationService } = await import('../modules/verification/verification.service');
+    const { getKycProvider } = await import('../providers/kyc/kyc-provider');
+    const svc = new VerificationService(app.prisma, await notices(), getKycProvider());
+    // The projection's own step (private), on the hold's edge: an admin's approve or a job runs the projection.
+    const tell = (svc as unknown as { tellOwnerFeeHoldsGoLive(db: Prisma.TransactionClient, userId: string, vendor: { id: string; name: string }): Promise<void> }).tellOwnerFeeHoldsGoLive.bind(svc);
+    const vendor = { id: `hold-${RUN}`, name: STORE_NAME };
+    const told = () => owner.notification.findMany({ where: { userId: ids.storeOwner, data: { path: ['vendorId'], equals: vendor.id } } });
+    await asPerson(ids.other, () => app.prisma.$transaction((tx) => tell(tx, ids.storeOwner, vendor)));
+    expect(await told()).toEqual([expect.objectContaining({
+      userId: ids.storeOwner, type: 'SYSTEM_ANNOUNCEMENT', title: 'Documents approved', data: { vendorId: vendor.id },
+    })]);
+  });
+
   it('a once-a-day notice to a store owner, from a customer\'s checkout, is still sent once', async () => {
     const { tellOwnerHomeVisitsPaused } = await import('../modules/verification/home-visits');
     const service = await notices();
@@ -366,6 +381,30 @@ describe('[item 20] GOLDEN: with the wall ON every converted call-site class wri
       await withBind(bind, () => insertNoticeFor(owner, data));
       await expect(withBind(bind, () => insertNoticeFor(owner, data))).rejects.toMatchObject({ code: 'P2002' });
       await expect(withBind(bind, () => owner.$transaction((tx) => insertNoticeFor(tx, data)))).rejects.toMatchObject({ code: 'P2002' });
+    }
+  });
+
+  it('[REVIEW-M S4-2] a notice keyed by id whose dedupe key another notice holds fails as the unique index fails: the transaction is aborted, ON as OFF', async () => {
+    /** One attempt inside a transaction: what the write threw, and whether the transaction could still be used after it. */
+    const attempt = async (client: Pick<PrismaClient, '$transaction'>, key: string) => {
+      const out = { caught: '', after: '' };
+      await client.$transaction(async (tx) => {
+        out.caught = await upsertNoticeFor(tx, { id: noticeId(), userId: ids.target, type: 'ORDER_UPDATE', title: 'Again', body: 'again', dedupeKey: key })
+          .then(() => 'written', (e: { code?: string }) => e.code ?? 'no code');
+        out.after = await tx.$queryRaw`SELECT 1 AS one`
+          .then(() => 'usable', (e) => (/25P02|current transaction is aborted/.test(String(e)) ? 'aborted' : `other: ${String(e).slice(0, 160)}`));
+      }).catch(() => undefined);
+      return out;
+    };
+    const cases = [
+      ['OFF', () => withBind('0', () => attempt(owner, `s42-off-${RUN}`)), `s42-off-${RUN}`],
+      ['ON', () => withBind('1', () => attempt(owner, `s42-on-${RUN}`)), `s42-on-${RUN}`],
+      ['ON, walled, someone else\'s transaction', () => withBind('1', () => asPerson(ids.other, () => attempt(app.prisma, `s42-wall-${RUN}`))), `s42-wall-${RUN}`],
+    ] as const;
+    for (const [label, run, key] of cases) {
+      await owner.notification.create({ data: { userId: ids.target, type: 'SYSTEM_ANNOUNCEMENT', title: 'Held', body: 'held', dedupeKey: key } });
+      expect(await run(), label).toEqual({ caught: 'P2002', after: 'aborted' });
+      expect(await owner.notification.count({ where: { userId: ids.target, dedupeKey: key } }), label).toBe(1);
     }
   });
 
@@ -445,6 +484,56 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     }
   });
 
+  it('[REVIEW-M S4-1] every action runs as a definer the wall never reaches, the owner of every walled table; the attestation refuses one it would reach', async () => {
+    // The wall admits a superuser, a BYPASSRLS role, a swift_bypass_rls member and anyone NOT in swift_owner_wall. Inside
+    // a SECURITY DEFINER action current_user is its owner: the owner must be one of those, or the action is walled too.
+    const rows = await owner.$queryRaw<Array<{ name: string; walled_definer: boolean; owns_walled_tables: boolean }>>`
+      SELECT p.proname::text AS name,
+             (NOT o.rolsuper AND NOT o.rolbypassrls AND pg_has_role(o.oid, 'swift_owner_wall', 'MEMBER')
+                AND NOT pg_has_role(o.oid, 'swift_bypass_rls', 'MEMBER')) AS walled_definer,
+             NOT EXISTS (SELECT 1 FROM unnest(${Object.keys(OWNER_WALLED_TABLES)}::text[]) AS t(name)
+                           LEFT JOIN pg_class c ON c.relname = t.name AND c.relnamespace = 'public'::regnamespace AND c.relkind = 'r'
+                          WHERE c.relowner IS DISTINCT FROM p.proowner) AS owns_walled_tables
+        FROM pg_proc p JOIN pg_roles o ON o.oid = p.proowner
+       WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'swift_owner_wall_%' ORDER BY 1`;
+    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS, ...OWNER_WALL_TICKET_ACTIONS].sort());
+    for (const r of rows) expect(r, r.name).toMatchObject({ walled_definer: false, owns_walled_tables: true });
+    expect((await readOwnerWallFacts(app.prisma)).walledActions).toEqual([]);
+
+    // What the pin prevents, measured and rolled back: ONE action handed to a definer the wall reaches (a swift_owner_wall
+    // member and nothing that escapes it). Bound to someone else it no longer finds the notice it exists to find —
+    // silently, no error — the attestation names it, and switched on the boot refuses it.
+    const key = `s41-${RUN}`;
+    const requestRole = decodeURIComponent(new URL(logins!.requestUrl).username);
+    const walledDefiner = `swift_s41_${RUN}`;
+    const seen: Array<string | null> = [];
+    let facts: Awaited<ReturnType<typeof readOwnerWallFacts>> | undefined;
+    const ROLLBACK = new Error('rolled back on purpose');
+    await expect(owner.$transaction(async (tx) => {
+      seen.push((await tx.notification.create({ data: { userId: ids.target, type: 'SYSTEM_ANNOUNCEMENT', title: 'Held', body: 'held', dedupeKey: key } })).id);
+      const lookUp = async () => {
+        await tx.$executeRawUnsafe(`SET LOCAL ROLE ${requestRole}`);
+        await tx.$queryRaw`SELECT set_config('app.current_user', ${ids.other}, true)`;
+        const [row] = await tx.$queryRaw<Array<{ id: string | null }>>`SELECT public.swift_owner_wall_notice_id(${ids.target}, ${key}) AS id`;
+        await tx.$executeRawUnsafe('RESET ROLE');
+        return row?.id ?? null;
+      };
+      seen.push(await lookUp());
+      await tx.$executeRawUnsafe(`CREATE ROLE ${walledDefiner} NOLOGIN IN ROLE swift_owner_wall, swift_app`);
+      await tx.$executeRawUnsafe(`ALTER FUNCTION public.swift_owner_wall_notice_id OWNER TO ${walledDefiner}`);
+      seen.push(await lookUp());
+      facts = await readOwnerWallFacts(tx);
+      throw ROLLBACK;
+    }, { timeout: 30_000 })).rejects.toBe(ROLLBACK);
+    expect(seen).toEqual([seen[0], seen[0], null]);
+    expect(facts!.walledActions).toEqual(['swift_owner_wall_notice_id']);
+    expect(ownerWallRefusal({ ...facts!, walledLogin: true, bypassLogin: false }, { OWNER_RLS_BIND: '1', TENANT_RLS_BIND: '1' }))
+      .toMatch(/swift_owner_wall_notice_id run\(s\) inside the wall/);
+    // Rolled back: the action is the table owner's again, the role gone.
+    expect((await readOwnerWallFacts(app.prisma)).walledActions).toEqual([]);
+    expect(await owner.$queryRaw`SELECT 1 FROM pg_roles WHERE rolname = ${walledDefiner}`).toEqual([]);
+  });
+
   it('every notice write goes through the helper, and every notice read or update is the person\'s own or names its capability', () => {
     const root = join(__dirname, '..');
     const files: string[] = [];
@@ -464,6 +553,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     const plainReads: Record<string, number> = {};
     const rawSql: Record<string, number> = {};
     const relationCounts: Record<string, number> = {};
+    const escapes: Record<string, number> = {};
+    const computed: Record<string, number> = {};
     const bump = (map: Record<string, number>, key: string) => { map[key] = (map[key] ?? 0) + 1; };
     for (const path of files) {
       const rel = relative(root, path);
@@ -481,10 +572,13 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       }
       for (let n = (text.match(/\b(FROM|INTO|UPDATE|JOIN)\s+"?notifications"?\b/g) ?? []).length; n > 0; n -= 1) bump(rawSql, rel);
       for (let n = (text.match(/\bnotifications\s*:\s*true\b/g) ?? []).length; n > 0; n -= 1) bump(relationCounts, rel);
+      for (const form of delegateEscapes(text, 'notification')) bump(escapes, `${rel} ${form}`);
+      for (const form of computedClientAccess(text)) bump(computed, `${rel} ${form}`);
     }
     expect(writes).toEqual([]);
     // INSERTs without RETURNING already (they pass notice_write as written).
-    expect(bulk).toEqual({ [HELPER]: 2, 'modules/admin/admin.routes.ts': 1, 'modules/mover-revocation-outbox.ts': 1, 'modules/safety/incident.service.ts': 1 });
+    // The helper: the ON insert, the ON idempotent insert, and its collision re-insert (REVIEW-M S4-2).
+    expect(bulk).toEqual({ [HELPER]: 3, 'modules/admin/admin.routes.ts': 1, 'modules/mover-revocation-outbox.ts': 1, 'modules/safety/incident.service.ts': 1 });
     expect(helperCalls).toEqual({
       'modules/auth/auth.service.ts insertNoticeFor': 1,
       'modules/billing/fee-demand-delivery.ts upsertNoticeFor': 1,
@@ -499,7 +593,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/inactivity.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 4,
+      'modules/verification/verification.service.ts insertNoticeFor': 5,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
@@ -522,6 +616,15 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
     expect(rawSql).toEqual({ 'modules/compliance/retention.service.ts': 2, 'modules/vendor/staff-invites.ts': 1 });
     // The admin user detail's inbox count is recounted through its capability with the wall on.
     expect(relationCounts).toEqual({ 'modules/admin/admin.routes.ts': 1 });
+    // [REVIEW-M S4-3] The counts above see `.notification.<op>(` only. A notice delegate taken as a value, by a quoted
+    // name or destructured — or any client indexed by a computed name — would escape them: none does. Pinned: the
+    // helper's own writer type, and the job queue's worker map (a key named notification, not the delegate).
+    expect(escapes).toEqual({
+      [`${HELPER} { notification } key or destructuring`]: 1,
+      [`${HELPER} ['notification']`]: 1,
+      'jobs/queue.ts { notification } key or destructuring': 1,
+    });
+    expect(computed).toEqual({});
   });
 });
 

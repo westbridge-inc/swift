@@ -61,5 +61,10 @@ describe('[ads] a week is Monday 00:00 to Sunday 23:59 in Guyana', () => {
     expect(elapsedWeekDays(WK2, SUN_21_GY)).toBe(0);
     expect(elapsedWeekDays(WK1, new Date('2026-10-12T03:59:00Z'))).toBe(0); // Sunday 11 Oct 23:59 Guyana: not begun
     expect(elapsedWeekDays(WK1, new Date('2026-10-13T04:00:00Z'))).toBe(1);
+    // [REVIEW-G A2] Capped at the whole week: revenue recognises amount / 7 x days, so a week long past is seven days
+    // served, never more — a week after it ended, a year after.
+    expect(elapsedWeekDays(WK1, new Date(MON_0000_GY.getTime() + 7 * 86_400_000))).toBe(7);
+    expect(elapsedWeekDays(WK1, new Date('2027-10-12T04:00:00Z'))).toBe(7);
+    expect(elapsedWeekDays(WK2, new Date(WK2.getTime() - 30 * 86_400_000))).toBe(0); // a month before it begins
   });
 });

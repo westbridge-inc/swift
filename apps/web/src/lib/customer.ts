@@ -47,7 +47,8 @@ export function savePendingAppointment(a: Appointment) {
 export function clearPendingAppointments() { localStorage.removeItem(APPT_KEY); }
 export interface VendorDetail extends Vendor {
   description?: string;
-  categories: Array<{ id: string; name: string; items: MenuItem[] }>;
+  /** [IMAGES-E2E PR5] imageUrl: the section's own photo (a kept one; absent from an older API). */
+  categories: Array<{ id: string; name: string; imageUrl?: string | null; items: MenuItem[] }>;
 }
 export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
