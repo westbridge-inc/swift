@@ -329,8 +329,10 @@ describe('the account export', () => {
     const data = await service().exportData(passenger) as unknown as Record<string, Array<Record<string, unknown>>> & { coverage: Record<string, unknown> };
     expect(data['taxiStops']).toEqual([
       expect.objectContaining({ orderId: ride.id, sequence: 1, address: `Stop One ${MARK}`, lat: 6.8012, lng: -58.1503, legMeters: 1200, legSeconds: 240, status: 'DEPARTED', arrivalVerified: true }),
-      expect.objectContaining({ orderId: ride.id, sequence: 2, address: `Stop Two ${MARK}`, lat: 6.7955, lng: -58.1402, status: 'SKIPPED', skipReason: 'Couldn’t reach the stop', arrivalVerified: null }),
+      expect.objectContaining({ orderId: ride.id, sequence: 2, address: `Stop Two ${MARK}`, lat: 6.7955, lng: -58.1402, status: 'SKIPPED', skipReason: 'Couldn’t reach the stop' }),
     ]);
+    // No arrival, no verified claim (an empty column is left out, like every other).
+    expect(data['taxiStops']![1]).not.toHaveProperty('arrivalVerified');
     expect(data.coverage['taxiStops']).toEqual({ rows: 2, complete: true });
     // The ride they belong to is in "orders" under the same id.
     expect(data['orders']).toEqual([expect.objectContaining({ id: ride.id, taxiStopCount: 2 })]);
