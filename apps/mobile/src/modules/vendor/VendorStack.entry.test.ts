@@ -1034,3 +1034,40 @@ describe('[NO-DEAD-ENDS · DS781] the held-store doors are the ones that exist',
     expect(fx.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['vendor', 'orders'] });
   });
 });
+
+// [SPEED 22 Oct · owner: "switching the tabs from Orders to Products is slow"] A store's
+// tabs mount on first visit and PAUSE drawing while hidden (as the customer tabs do,
+// navigation/CustomerStack.tsx): the Orders board no longer re-draws on every poll while
+// the owner is on Products, and a visited Products tab no longer re-draws every row on
+// each menu re-read while the owner is on Orders. New-order alerts are not inside a tab
+// (VendorLiveOrderLayer sits beside the tabs in VendorRoot), so a paused tab silences nothing.
+describe('the store tabs pause while hidden (every store type)', () => {
+  it.each(['RESTAURANT', 'STORE', 'SUPERMARKET', 'SERVICE'] as const)('%s: every tab is lazy and frozen on blur, none unmounts', (type) => {
+    useVendorPreview.getState().enterPreview(type);
+    useAuthStore.getState().setIntent('vendor');
+    const root = fx.mount(vendorRoot(), {});
+    const tabsEl = named(root.output, 'VendorTabs');
+    expect(tabsEl).toHaveLength(1);
+    const tabs = fx.mount(tabsEl[0]!.type as (props: unknown) => unknown, tabsEl[0]!.props);
+    const nav = only(tabs.output, 'Tab.Navigator');
+    expect(nav.props.screenOptions).toMatchObject({ lazy: true, freezeOnBlur: true, animation: 'none' });
+    const screens = ofType(tabs.output, 'Tab.Screen');
+    expect(screens.map((s) => s.props.name)[0]).toBe('Orders');
+    expect(screens.length).toBeGreaterThanOrEqual(3);
+    for (const screen of screens) {
+      expect(screen.props.options?.freezeOnBlur, `${screen.props.name} is not exempt from the pause`).not.toBe(false);
+      expect(screen.props.options?.unmountOnBlur, `${screen.props.name} keeps its state`).toBeUndefined();
+      expect(screen.props.options?.lazy, `${screen.props.name} mounts on first visit`).not.toBe(false);
+    }
+    // The new-order layer is a sibling of the tabs, not inside one.
+    expect(named(tabs.output, 'VendorLiveOrderLayer')).toHaveLength(0);
+  });
+
+  it('control: a live store\'s new-order layer stays beside the tabs, outside any tab', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(liveStore));
+    const root = fx.mount(vendorRoot(), {});
+    expect(named(root.output, 'VendorTabs')).toHaveLength(1);
+    expect(named(root.output, 'VendorLiveOrderLayer')).toHaveLength(1);
+  });
+});
