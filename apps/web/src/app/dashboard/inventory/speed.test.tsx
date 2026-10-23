@@ -14,7 +14,7 @@ import InventoryPage from './page';
 import { mockApi, renderWithQuery } from '@/test/test-utils';
 
 const COUNT = 200;
-let items: Array<Record<string, unknown>>;
+let items: Array<{ id: string } & Record<string, unknown>>;
 beforeEach(() => {
   drawn.rows = 0;
   items = Array.from({ length: COUNT }, (_, i) => ({ id: `item-${i}`, name: `Product ${i}`, basePrice: '1000.00', stockQuantity: null, sku: `SKU-${i}`, isAvailable: true, category: { id: i % 2 ? 'odd' : 'even', name: i % 2 ? 'Odd' : 'Even' } }));
