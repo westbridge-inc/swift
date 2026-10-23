@@ -74,7 +74,7 @@ describe('Terms of Service (Part 4)', () => {
 
 describe('Privacy Policy (Part 4)', () => {
   it.each([
-    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 21 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
+    ['¶1 the Act is passed, not in force; Swift follows it now', "and the rights you have. Guyana's Data Protection Act 2023 has been passed but, as of 22 October 2026, has not been brought into force. Swift follows it now and will update this policy when it starts."],
     ['¶2 controller and data protection officer', '<p>Westbridge Inc. (trading as Swift), registration no. 17703, Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana, is the data controller. Our data protection officer is the Data Protection Officer, Westbridge Inc., privacy@swiftgy.com.'],
     ['¶15 ID checks for safety and fraud prevention', "checking partners' identity and licence documents, and customers' IDs for taxi rides and larger orders, for safety and fraud prevention.</li>"],
     ['¶16 legal obligations', '<li><b>To meet legal obligations:</b> keeping tax and accounting records, and responding to lawful demands from authorities.</li>'],
@@ -164,9 +164,10 @@ describe('Child Safety (Part 4)', () => {
 describe('one version for the whole batch', () => {
   // The V1b batch shipped as 2026-10-16; the human-only identity + no-customer-photo words follow as 2026-10-17;
   // the customer-ID retention sentence (Privacy s.6) as 2026-10-18; the taxi waiting charge (Terms s.4) and phone
-  // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); [ROLE-DOCS · owner
-  // 21 Oct 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-21.1.
-  it('is 2026-10-21.1', () => {
-    expect(LEGAL_VERSION).toBe('2026-10-21.1');
+  // crash reports kept 90 days (Privacy) as 2026-10-21 (legal-waiting-crash-2026-10-21.test.ts); the one-minute
+  // cancel window (Terms s.7, owner 22 Oct) as 2026-10-22 (legal-version-binding.test.ts); [ROLE-DOCS · owner 21 Oct
+  // 2026] police clearance optional for taxi drivers only (Privacy ¶18, Mover Agreement) as 2026-10-22.1.
+  it('is 2026-10-22.1', () => {
+    expect(LEGAL_VERSION).toBe('2026-10-22.1');
   });
 });

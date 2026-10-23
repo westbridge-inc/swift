@@ -153,7 +153,7 @@ describe('GET /orders/:id — the order screen’s contract', () => {
   });
 
   // [owner #50, 14 Oct] No marker any more: an accepted booking past the
-  // five-minute window is not cancelled in the app — the provider's published
+  // one-minute window is not cancelled in the app — the provider's published
   // number instead.
   it('control — an accepted booking past the window is committed: no Cancel, no fee, contact the provider', async () => {
     // [owner ruling 14 Oct] The window counts from the provider's acceptance: accepted ten minutes ago is past it.

@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient, SubscriptionStatus } from '@prisma/client';
+import { mmgDisabled } from '../../providers/mmg/mmg-provider';
 import { noLivePayPath } from './fee-pause';
 import { log } from '../../utils/logger';
 import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, projectDunningClock, resumeInstant } from './dunning-clock';
@@ -6,8 +7,8 @@ import { ACTIVE_CONFIRMATION_STATES, activeOverdueMs, currentDunningClock, proje
 // ---------------------------------------------------------------------------
 // [PROD-PATH] The fee pause of the shared dunning clock.
 //
-// While no partner has a live way to pay (fee-pause.ts: MMG switched off and
-// no live card rail) no billing deadline may run for ANY partner, whatever
+// While no partner has a live way to pay (fee-pause.ts: no live MMG way to pay
+// and no live card rail) no billing deadline may run for ANY partner, whatever
 // their billing method. Every deadline the billing machine acts on — the
 // 48-hour grace the operate gate enforces, the retry, the nudges and the
 // churn — is a position on that subscription's BillingDunningClock
@@ -139,7 +140,7 @@ function openSince(value: unknown): string | null {
 /** The global pause also holds during a pending/failed resume, including
  * subscriptions whose individual clock has never been visited. */
 export async function feePauseSpanOpen(db: ConfigReader, env: Record<string, string | undefined> = process.env): Promise<boolean> {
-  return noLivePayPath(env) || !!await db.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } });
+  return await noLivePayPath(db, env) || !!await db.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } });
 }
 
 /**
@@ -221,7 +222,7 @@ export async function syncMmgPauseClock(
   let pausedNow = 0;
   let resumedNow = 0;
   let reactivated = 0;
-  const paused = noLivePayPath(env);
+  const paused = await noLivePayPath(prisma, env);
   if (paused) {
     const opened = await prisma.$transaction(async (tx) => {
       await tickLock(tx);
@@ -229,11 +230,11 @@ export async function syncMmgPauseClock(
       await tx.platformConfig.create({ data: { key: FEE_PAUSE_OPEN_KEY, value: { since: now.toISOString() } } });
       await tx.auditLog.create({ data: {
         action: 'BILLING_FEE_PAUSE_STARTED', entity: 'PlatformConfig', entityId: FEE_PAUSE_OPEN_KEY,
-        changes: { since: now.toISOString(), reason: 'NO_LIVE_PAY_PATH', mmg: 'off', card: 'off' },
+        changes: { since: now.toISOString(), reason: 'NO_LIVE_PAY_PATH', mmg: mmgDisabled(env) ? 'off' : 'no-push-rail-no-live-checkout', card: 'off' },
       } });
       return true;
     });
-    if (opened) log().warn({ since: now.toISOString() }, '[PROD-PATH] fee pause STARTED: MMG is off and no card rail is live, so no partner can pay; every weekly fee is paused (no charge, no dunning, no suspension, no churn)');
+    if (opened) log().warn({ since: now.toISOString() }, '[PROD-PATH] fee pause STARTED: no MMG way to pay (MMG off, or the push rail off and the MMG checkout not live on every platform) and no card rail is live, so no partner can pay; every weekly fee is paused (no charge, no dunning, no suspension, no churn)');
   }
   // Pause, FROM THE PAUSE'S OWN START, every clock the pause must hold. The
   // persisted start is authoritative, so a tick or clock transaction that
@@ -400,7 +401,7 @@ export async function feePauseStatus(
   now = new Date(),
   env: Record<string, string | undefined> = process.env,
 ): Promise<FeePauseStatus> {
-  const paused = noLivePayPath(env);
+  const paused = await noLivePayPath(prisma, env);
   const [open, held, repairs] = await Promise.all([
     prisma.platformConfig.findUnique({ where: { key: FEE_PAUSE_OPEN_KEY }, select: { value: true } }),
     heldClocks(prisma),

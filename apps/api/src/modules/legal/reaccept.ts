@@ -55,8 +55,13 @@ export const NON_MATERIAL_CHANGES: ReadonlyArray<{ version: string; why: string 
     why: 'Privacy section 6 now says a customer\u2019s own ID is kept while the account is open and deleted with the account, which is what already happens; it takes nothing from anyone.',
   },
   {
-    // [ROLE-DOCS · owner 21 Oct 2026; COORD ruling 21 Oct: NON-material, on top of the material 2026-10-21]
-    version: '2026-10-21.1',
+    // [owner ruling 22 Oct 2026 23:05Z \u00b7 COORD 23:14Z: non-material PRE-LAUNCH; re-ruled MATERIAL if launch comes first]
+    version: '2026-10-22',
+    why: 'Terms section 7 shortens the free cancel window for a ride, a parcel or a booking from five minutes to one minute after a driver, rider or provider accepts it. It does take time from customers, but it lands before launch: no customer has used Swift under the five-minute window, so nobody is asked again.',
+  },
+  {
+    // [ROLE-DOCS · owner 21 Oct 2026; COORD rulings 21 Oct (NON-material) + 23 Oct 00:59Z (stamped above 2026-10-22)]
+    version: '2026-10-22.1',
     why: 'Swift asks for less: delivery riders are no longer offered a police clearance (only taxi drivers may add one), and the Privacy Policy and the driver agreement now say so. No one loses anything and no one is asked for more.',
   },
 ];
