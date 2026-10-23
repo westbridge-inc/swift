@@ -30,7 +30,7 @@ vi.mock('../modules/ops/ops-page', () => ({
 }));
 
 import { pageOps } from '../modules/ops/ops-page';
-import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, PAYLOAD_FAILURE_COOLDOWN_KEY, PAYLOAD_FAILURE_COOLDOWN_MS, memoryScannerCooldown, redisScannerCooldown, scanUpload, useScannerCooldown } from '../lib/malware-scan';
+import { BYPASS_SURFACES, NEVER_REFUSED_SURFACES, PAYLOAD_FAILURE_COOLDOWN_KEY, PAYLOAD_FAILURE_COOLDOWN_MS, memoryScannerCooldown, redisScannerCooldown, scanUpload, registerScannerCooldown } from '../lib/malware-scan';
 import {
   QUARANTINE_HELD_FOLDER, assertServableKey, evidenceAdmissible, evidenceObjectKey, heldFolder, isQuarantineKey, recordUnscannedUpload,
   rescanUploadDebt, retryHeldEvidenceScan,
@@ -41,7 +41,7 @@ import { ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 
 const servers: net.Server[] = [];
 // The cool-down is module state: every test starts without one.
-beforeEach(() => useScannerCooldown(memoryScannerCooldown()));
+beforeEach(() => registerScannerCooldown(memoryScannerCooldown()));
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.mocked(pageOps).mockClear();
@@ -254,7 +254,7 @@ describe('[M-1] the payload-failure cool-down', () => {
 
   it('the cool-down ends PAYLOAD_FAILURE_COOLDOWN_MS after the last payload failure; a genuine outage then gets the bypass again', async () => {
     let now = 1_000_000;
-    useScannerCooldown(memoryScannerCooldown(() => now));
+    registerScannerCooldown(memoryScannerCooldown(() => now));
     const env = await crashOnFirstScan();
     await expect(scanUpload(Buffer.from('crafted'), { surface: 'liveness', log: log() }, env, { timeoutMs: 500 })).rejects.toMatchObject({ statusCode: 503 });
     now += PAYLOAD_FAILURE_COOLDOWN_MS - 1;
@@ -295,7 +295,7 @@ describe('[M-1] the payload-failure cool-down', () => {
 
   it('the API and the worker register the Redis-backed cool-down at boot', () => {
     for (const file of ['app.ts', 'worker.ts']) {
-      expect(readFileSync(join(__dirname, '..', file), 'utf8'), file).toMatch(/useScannerCooldown\(redisScannerCooldown\(/);
+      expect(readFileSync(join(__dirname, '..', file), 'utf8'), file).toMatch(/registerScannerCooldown\(redisScannerCooldown\(/);
     }
   });
 });

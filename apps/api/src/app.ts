@@ -164,7 +164,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // [Row 312 · COORD 22 Oct] The upload scanner's payload-failure cool-down is shared by every API
   // replica (and the worker) through Redis, so a file that crashes clamd on one replica cannot make the
   // next upload on another look "down".
-  { const { redisScannerCooldown, useScannerCooldown } = await import('./lib/malware-scan'); useScannerCooldown(redisScannerCooldown(app.redis)); }
+  { const { redisScannerCooldown, registerScannerCooldown } = await import('./lib/malware-scan'); registerScannerCooldown(redisScannerCooldown(app.redis)); }
   await app.register(authPlugin);
   await app.register(socketPlugin);
   runtimeReadiness.checkRealtime = app.checkSocketAdapterReady;
