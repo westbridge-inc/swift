@@ -88,7 +88,11 @@ describe('vendor order board — money is never invented', () => {
     await dismissTakeover(user);
     expect(row.textContent).toContain('9:00 AM');
     await user.click(row);
-    expect(await screen.findAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
+    // [STORE-DASH] Wait for the window itself (its code arrives as a separate part): findAll returned as
+    // soon as the CARD's line was there, so under load the count read 1. Same two places asserted.
+    const dialog = await screen.findByRole('dialog', { name: 'Order details' });
+    expect(await within(dialog).findByText(/Appointment:.*9:00 AM/)).toBeTruthy();
+    expect(screen.getAllByText(/Appointment:.*9:00 AM/)).toHaveLength(2);
     expect(screen.queryByText('20 min prep')).toBeNull();
   });
 

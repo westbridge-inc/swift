@@ -49,7 +49,7 @@ import { VendorOps } from './VendorOps';
 // read from the element tree it returns.
 // ---------------------------------------------------------------------------
 
-type El = { type: unknown; props: Record<string, any> };
+type El = { type: unknown; props: { children?: unknown; order?: any; busy?: boolean; onAction?: (..._a: any[]) => void } };
 function elements(node: unknown): El[] {
   if (Array.isArray(node)) return node.flatMap(elements);
   if (!node || typeof node !== 'object' || !('props' in node)) return [];
@@ -78,7 +78,7 @@ describe('[STORE-DASH] the board: only the tapped order waits', () => {
     fx.pending = new Set(['order-a']);
     fx.mutate.mockClear();
     const b = cards(board()).find((c) => c.props.order.id === 'order-b')!;
-    b.props.onAction('ready');
+    b.props.onAction!('ready');
     expect(fx.mutate).toHaveBeenCalledWith({ id: 'order-b', action: 'ready', code: undefined });
   });
 
