@@ -1,0 +1,306 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import Fastify, { type FastifyInstance } from 'fastify';
+import { nanoid } from 'nanoid';
+import { Prisma, type UserRole } from '@prisma/client';
+import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
+import { redisPlugin } from '../plugins/redis';
+import { authPlugin } from '../plugins/auth';
+import { socketPlugin } from '../plugins/socket';
+import { registerTenantHeaderScope } from '../plugins/tenant-header-scope';
+import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
+import { registerErrorHandler } from '../middleware/error-handler';
+import { customerRoutes } from '../modules/user/customer.routes';
+import { vendorRoutes, HANDED_TO_RIDER_NOTE } from '../modules/vendor/vendor.routes';
+import { riderRoutes } from '../modules/rider/rider.routes';
+
+// ---------------------------------------------------------------------------
+// [O-2 · owner 22 Oct 2026, ruling 19:45Z] "Stores: no pickup code" — every
+// store type. There is no rider pickup code; the code a store types is the
+// TAKEAWAY code.
+// - Takeaway: the code is OFF by default (requirePickupCode false). The store
+//   checks the customer's first name + order number and taps "Handed to
+//   customer" (the existing complete-pickup, no code). A code an older store
+//   build still sends is verified exactly as before. A store may turn the
+//   code on: then today's flow.
+// - Delivery: the store taps "Handed to rider" (its card shows the rider's
+//   photo, first name, vehicle and plate): one status-log row, no status
+//   change. The rider's "Picked up" records the GPS distance to the store as
+//   EVIDENCE ONLY — never a gate.
+// Courier/parcel and taxi custody are untouched. Real routes, production composition.
+// ---------------------------------------------------------------------------
+
+const PHONE_PREFIX = '+5920345';
+const FIXTURE = 'store-flow-handover-no-code-fixture';
+const DAY = 24 * 60 * 60 * 1000;
+const STORE = { lat: 6.8013, lng: -58.1551 };
+const HOME = { lat: 6.8045, lng: -58.1553 };
+
+let app: FastifyInstance;
+let seq = 0;
+const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, FIXTURE);
+
+type Actor = { userId: string; token: string; sessionId: string };
+type Rider = Actor & { riderId: string };
+let customer: Actor;
+let owner: Actor;
+let vendorId: string;
+let itemId: string;
+const asStore = () => ({ 'x-vendor-id': vendorId });
+
+async function makeUser(firstName: string, roles: UserRole[], activeRole: UserRole): Promise<Actor> {
+  seq += 1;
+  const user = await sys(() => app.prisma.user.create({
+    data: {
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName, lastName: `Hand${seq}`, roles, activeRole,
+      isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2',
+      ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
+    },
+  }));
+  const token = app.jwt.sign({ userId: user.id, role: activeRole, jti: nanoid(8) });
+  const session = await sys(() => app.prisma.session.create({
+    data: { userId: user.id, token, refreshToken: nanoid(48), authMethod: 'OTP', deviceId: `o2-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) },
+  }));
+  return { userId: user.id, token, sessionId: session.id };
+}
+
+/** An onboarded, online rider; `at` is the rider's last known position (null = no fix on file). */
+async function makeRider(firstName: string, at: { lat: number; lng: number } | null = STORE): Promise<Rider> {
+  const actor = await makeUser(firstName, ['RIDER', 'CUSTOMER'], 'RIDER');
+  const rider = await sys(() => app.prisma.rider.create({
+    data: {
+      userId: actor.userId, riderType: 'BOTH', vehicleType: 'MOTORCYCLE', vehicleMake: 'Honda', vehicleModel: 'CG125', vehicleColor: 'Red', licensePlate: 'CJ 1234',
+      documentsVerified: true, isOnline: true, isAvailable: true,
+      currentLat: at?.lat ?? null, currentLng: at?.lng ?? null, lastLocationUpdate: at ? new Date() : null,
+      locationSessionId: actor.sessionId, floatLimit: 100_000,
+    },
+  }));
+  return { ...actor, riderId: rider.id };
+}
+
+function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
+  return app.inject({
+    method, url,
+    headers: { ...headers, ...(payload !== undefined ? { 'content-type': 'application/json' } : {}), authorization: `Bearer ${token}` },
+    ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
+  });
+}
+const orderRow = (id: string) => sys(() => app.prisma.order.findUniqueOrThrow({ where: { id } }));
+const logs = (orderId: string) => sys(() => app.prisma.orderStatusLog.findMany({ where: { orderId }, orderBy: { createdAt: 'asc' } }));
+const storeStep = async (orderId: string, step: string, expected: string) => {
+  const res = await call('PUT', `/api/v1/vendor/orders/${orderId}/${step}`, owner.token, undefined, asStore());
+  expect(res.statusCode, res.body).toBe(200);
+  expect(res.json().data.status).toBe(expected);
+};
+
+async function placeOrder(fulfillment: 'PICKUP' | 'DELIVERY'): Promise<{ id: string; code: string | null }> {
+  expect((await call('DELETE', '/api/v1/customer/cart', customer.token)).statusCode).toBe(200);
+  const added = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId, itemId, quantity: 1 });
+  expect(added.statusCode, added.body).toBe(201);
+  const body = fulfillment === 'PICKUP'
+    ? { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }
+    : { paymentMethod: 'CASH' };
+  const placed = await call('POST', '/api/v1/customer/checkout', customer.token, body, { 'idempotency-key': `o2-${nanoid(10)}` });
+  expect(placed.statusCode, placed.body).toBe(200);
+  const order = placed.json().data.order as { id: string; pickupCode?: string | null };
+  await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { holdExpiresAt: null } }));
+  return { id: order.id, code: order.pickupCode ?? null };
+}
+const readyTakeaway = async () => {
+  const order = await placeOrder('PICKUP');
+  await storeStep(order.id, 'accept', 'PREPARING');
+  await storeStep(order.id, 'ready', 'READY_FOR_PICKUP');
+  return order;
+};
+const completePickup = (orderId: string, code?: string) =>
+  call('PUT', `/api/v1/vendor/orders/${orderId}/complete-pickup`, owner.token, code === undefined ? {} : { code }, asStore());
+const setCodeRequired = async (on: boolean) => {
+  const res = await call('PUT', '/api/v1/vendor/profile', owner.token, { requirePickupCode: on }, asStore());
+  expect(res.statusCode, res.body).toBe(200);
+};
+const handedToRider = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/handed-to-rider`, owner.token, undefined, asStore());
+const storeDetail = async (orderId: string) => {
+  const res = await call('GET', `/api/v1/vendor/orders/${orderId}`, owner.token, undefined, asStore());
+  expect(res.statusCode, res.body).toBe(200);
+  return res.json().data as Record<string, unknown> & { rider?: Record<string, unknown> & { user?: Record<string, unknown> } | null };
+};
+/** A delivery accepted by the store and taken by `rider`. */
+async function riderOwnedDelivery(rider: Rider) {
+  const order = await placeOrder('DELIVERY');
+  await storeStep(order.id, 'accept', 'PREPARING');
+  const grab = await call('POST', `/api/v1/rider/orders/${order.id}/accept`, rider.token, {});
+  expect(grab.statusCode, grab.body).toBe(200);
+  return order.id;
+}
+
+async function purgeFixtures() {
+  await sys(async () => {
+    const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
+    const ids = users.map((u) => u.id);
+    if (ids.length === 0) return;
+    const vendorIds = (await app.prisma.vendor.findMany({ where: { owner: { userId: { in: ids } } }, select: { id: true } })).map((v) => v.id);
+    const riderIds = (await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } })).map((r) => r.id);
+    const orderIds = (await app.prisma.order.findMany({
+      where: { OR: [{ customerId: { in: ids } }, { vendorId: { in: vendorIds } }, { riderId: { in: riderIds } }] }, select: { id: true },
+    })).map((o) => o.id);
+    if (orderIds.length > 0) await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
+    await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
+    await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
+    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
+    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
+    await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
+    await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
+    await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+  });
+}
+
+beforeAll(async () => {
+  app = Fastify({ logger: false });
+  registerErrorHandler(app);
+  registerEmptyJsonBodyParser(app);
+  await app.register(prismaPlugin);
+  await app.register(redisPlugin);
+  await app.register(authPlugin);
+  await app.register(socketPlugin);
+  app.addHook('onRequest', async () => { beginRequestTenantContext(); });
+  registerTenantHeaderScope(app);
+  await app.register(customerRoutes, { prefix: '/api/v1/customer' });
+  await app.register(vendorRoutes, { prefix: '/api/v1/vendor' });
+  await app.register(riderRoutes, { prefix: '/api/v1/rider' });
+  await app.ready();
+  await purgeFixtures();
+
+  customer = await makeUser('Asha', ['CUSTOMER'], 'CUSTOMER');
+  await sys(() => app.prisma.address.create({
+    data: { userId: customer.userId, label: 'Home', addressLine1: '5 Handover Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: HOME.lat, longitude: HOME.lng, isDefault: true },
+  }));
+  owner = await makeUser('Owner', ['VENDOR_OWNER'], 'VENDOR_OWNER');
+  const ownerRow = await sys(() => app.prisma.vendorOwner.create({ data: { userId: owner.userId } }));
+  vendorId = (await sys(() => app.prisma.vendor.create({
+    data: {
+      ownerId: ownerRow.id, name: 'Handover Diner', slug: `o2-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT',
+      phone: `${PHONE_PREFIX}900`, addressLine1: '7 Handover Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: STORE.lat, longitude: STORE.lng, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true, deliveryRadius: 50,
+    },
+  }))).id;
+  const category = await sys(() => app.prisma.category.create({ data: { vendorId, name: 'Mains', sortOrder: 0 } }));
+  itemId = (await sys(() => app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Pepperpot', basePrice: 2200, isAvailable: true } }))).id;
+});
+
+afterAll(async () => {
+  try { await purgeFixtures(); } finally { await app.close(); }
+});
+
+describe('[O-2] takeaway: the pickup code is off by default, for every store', () => {
+  it('a new store has the code off; "Handed to customer" completes a ready takeaway order with no code', async () => {
+    expect((await sys(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } }))).requirePickupCode).toBe(false);
+    const order = await readyTakeaway();
+    expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: false, orderNumber: expect.any(String), customer: { firstName: 'Asha' } });
+    const handed = await completePickup(order.id);
+    expect(handed.statusCode, handed.body).toBe(200);
+    expect((await orderRow(order.id)).status).toBe('COMPLETED');
+    expect((await logs(order.id)).at(-1)).toMatchObject({ status: 'COMPLETED', note: 'Handed to the customer: the store checked the name and order number' });
+  });
+
+  it('an older store build that still sends the code: the code is verified exactly as before (a wrong one refused)', async () => {
+    const order = await readyTakeaway();
+    expect(order.code).toMatch(/^\d{6}$/);
+    const wrong = await completePickup(order.id, order.code === '000000' ? '111111' : '000000');
+    expect(wrong.statusCode, wrong.body).toBe(400);
+    expect(wrong.json().error.code).toBe('WRONG_PICKUP_CODE');
+    expect((await orderRow(order.id)).status).toBe('READY_FOR_PICKUP');
+    const right = await completePickup(order.id, order.code!);
+    expect(right.statusCode, right.body).toBe(200);
+    expect((await logs(order.id)).at(-1)).toMatchObject({ status: 'COMPLETED', note: 'Picked up by customer' });
+  });
+
+  it('a store that turns the code on gets today\'s flow: no code is refused, the right code completes', async () => {
+    await setCodeRequired(true);
+    try {
+      const profile = await call('GET', '/api/v1/vendor/profile', owner.token, undefined, asStore());
+      expect(profile.json().data.requirePickupCode).toBe(true);
+      const order = await readyTakeaway();
+      expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
+      const missing = await completePickup(order.id);
+      expect(missing.statusCode).toBe(400);
+      expect(missing.json().error.code).toBe('MISSING_PICKUP_CODE');
+      expect((await completePickup(order.id, order.code!)).statusCode).toBe(200);
+    } finally {
+      await setCodeRequired(false);
+    }
+  });
+});
+
+describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the rider\'s "Picked up"', () => {
+  it('the card names the rider (photo resolved, first name, vehicle, plate); one tap writes one log row and moves nothing; a repeat is a 200 no-op', async () => {
+    const rider = await makeRider('Ravi');
+    await sys(() => app.prisma.user.update({ where: { id: rider.userId }, data: { avatar: 'https://cdn.example.test/ravi.jpg' } }));
+    const orderId = await riderOwnedDelivery(rider);
+    const before = await orderRow(orderId);
+    const card = await storeDetail(orderId);
+    expect(card).toMatchObject({ handedToRiderAt: null });
+    expect(card.rider).toMatchObject({
+      photoUrl: 'https://cdn.example.test/ravi.jpg',
+      vehicleMake: 'Honda', vehicleModel: 'CG125', vehicleColor: 'Red', licensePlate: 'CJ 1234',
+      user: { firstName: 'Ravi' },
+    });
+    expect(card.rider?.user).not.toHaveProperty('avatar'); // never the raw stored value
+
+    const tap = await handedToRider(orderId);
+    expect(tap.statusCode, tap.body).toBe(200);
+    const at = tap.json().data.handedToRiderAt as string;
+    expect(new Date(at).getTime()).toBeGreaterThan(0);
+    const after = await orderRow(orderId);
+    expect({ status: after.status, riderId: after.riderId }).toEqual({ status: before.status, riderId: rider.riderId });
+    expect((await logs(orderId)).filter((l) => l.note === HANDED_TO_RIDER_NOTE)).toHaveLength(1);
+
+    const again = await handedToRider(orderId);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().data.handedToRiderAt).toBe(at);
+    expect((await logs(orderId)).filter((l) => l.note === HANDED_TO_RIDER_NOTE)).toHaveLength(1);
+    expect(await storeDetail(orderId)).toMatchObject({ handedToRiderAt: at });
+    const board = await call('GET', '/api/v1/vendor/orders', owner.token, undefined, asStore());
+    expect((board.json().data as Array<{ id: string; handedToRiderAt: string | null }>).find((o) => o.id === orderId)?.handedToRiderAt).toBe(at);
+  });
+
+  it('no rider yet: the tap is refused with the reason; a takeaway order is never "handed to a rider"', async () => {
+    const delivery = await placeOrder('DELIVERY');
+    await storeStep(delivery.id, 'accept', 'PREPARING');
+    const early = await handedToRider(delivery.id);
+    expect(early.statusCode, early.body).toBe(409);
+    expect(early.json().error.code).toBe('NO_RIDER_YET');
+    const takeaway = await readyTakeaway();
+    const wrong = await handedToRider(takeaway.id);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('NOT_A_RIDER_DELIVERY');
+  });
+
+  it('the rider\'s "Picked up" records the GPS distance to the store as evidence; a rider with no fix is never stopped', async () => {
+    const near = await makeRider('Nia', STORE);
+    const nearOrder = await riderOwnedDelivery(near);
+    for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up']) {
+      const res = await call('PUT', `/api/v1/rider/orders/${nearOrder}/${step}`, near.token, {});
+      expect(res.statusCode, `${step}: ${res.body}`).toBe(200);
+    }
+    const picked = (await logs(nearOrder)).find((l) => l.status === 'PICKED_UP')!;
+    expect(picked.note).toMatch(/^Rider confirmed collecting the order — .*\(0 m from the pickup, fix \d+s old\)$/);
+
+    const blind = await makeRider('Bo', null);
+    const blindOrder = await riderOwnedDelivery(blind);
+    for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up']) {
+      const res = await call('PUT', `/api/v1/rider/orders/${blindOrder}/${step}`, blind.token, {});
+      expect(res.statusCode, `${step}: ${res.body}`).toBe(200);
+    }
+    expect((await logs(blindOrder)).find((l) => l.status === 'PICKED_UP')!.note).toBe('Rider confirmed collecting the order — no GPS fix on file');
+  });
+});

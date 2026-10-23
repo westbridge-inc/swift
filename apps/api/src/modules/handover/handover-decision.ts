@@ -10,6 +10,10 @@ export interface HandoverDecision {
   vendorUserId?: string;
   expectedVendorId?: string;
   handoverVersion?: string;
+  /** [O-2 · owner 22 Oct 2026] Takeaway only: the store has the pickup code OFF (the default), so a
+   *  handover with NO code needs no proof (the store checked the customer's first name + order
+   *  number). A code that IS sent (store builds 9/11/12) is still verified exactly as before. */
+  codeWaived?: boolean;
 }
 export interface HandoverFailure {
   handoverFailure: { statusCode: number; code: string; message: string };
@@ -73,6 +77,9 @@ export async function verifyHandoverDecision(tx: Prisma.TransactionClient, sourc
   // Existing in-flight legacy rows remain compatible. Appointment proof is a
   // separate client rollout; this operation never changes that contract.
   if (!secret) return null;
+  // [O-2] No code, and the store has the takeaway code off: no proof is asked. (Before the attempt
+  // lockout: the lockout guards code GUESSES, and none is being made.)
+  if (pickup && proof.codeWaived === true && !proof.code) return null;
   const attempts = pickup ? source.pickupCodeAttempts : source.ridePinAttempts;
   const { locked, remaining } = handoverAttemptState(attempts);
   if (locked) return { handoverFailure: { statusCode: 400, code: 'MAX_ATTEMPTS', message: 'Too many incorrect handover-code attempts on this order. Please contact support.' } };
