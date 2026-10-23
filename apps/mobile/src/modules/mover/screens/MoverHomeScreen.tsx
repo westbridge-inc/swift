@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
@@ -11,6 +11,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
 import { boardPaused, recentBoard } from '../../../lib/moverBoard';
+import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
   useMoverStats,
@@ -456,6 +457,8 @@ export function MoverHomeScreen({ navigation }: any) {
     ? { lat: liveLocation.latitude, lng: liveLocation.longitude }
     : undefined;
   const demand = useDemand<any>(kind, here);
+  // [row 54] A tap on map demand can open the sheet onto the open board.
+  const sheetRef = useRef<BottomSheet>(null);
 
   // DASH-03: last 7 days from the SERVER-aggregated daily endpoint — the old
   // client-side grouping summed the paginated (limit-20) earnings list, so an
@@ -592,6 +595,18 @@ export function MoverHomeScreen({ navigation }: any) {
     }
   };
 
+  // [row 54 · owner 9 Oct] "N waiting" on the map answers a tap with what is
+  // true (modules/mover/demandTap): the open board when it has jobs, how the
+  // work reaches the mover when it does not, GO when offline. Never a dead tap,
+  // never a customer's location.
+  const demandTap = demandTapFor({ online, hasActiveJob: !!activeJob, boardCount: jobs.length, isDriver });
+  const onDemandTap = demandTap
+    ? () => {
+        if (demandTap.kind === 'show-board') sheetRef.current?.snapToIndex(1);
+        else toast.show(demandTap.title, demandTap.body);
+      }
+    : undefined;
+
   // Camera sits slightly SOUTH of the earner so the location dot floats in
   // the upper map half, clear of the GO ring.
   const region = {
@@ -654,14 +669,14 @@ export function MoverHomeScreen({ navigation }: any) {
         {isDriver
           ? [
               ...(d.points ?? []).map((p: any, i: number) => (
-                <Marker key={`p${i}`} coordinate={{ latitude: p.lat, longitude: p.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+                <Marker key={`p${i}`} coordinate={{ latitude: p.lat, longitude: p.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false} onPress={onDemandTap}>
                   <DemandDot />
                 </Marker>
               )),
               ...(d.clusters ?? [])
                 .filter((c: any) => c.count > 1)
                 .map((c: any, i: number) => (
-                  <Marker key={`c${i}`} coordinate={{ latitude: c.lat, longitude: c.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+                  <Marker key={`c${i}`} coordinate={{ latitude: c.lat, longitude: c.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false} onPress={onDemandTap}>
                     <ClusterBadge count={c.count} />
                   </Marker>
                 )),
@@ -727,6 +742,7 @@ export function MoverHomeScreen({ navigation }: any) {
       ) : null}
 
       <BottomSheet
+        ref={sheetRef}
         index={0}
         snapPoints={['34%', '80%']}
         enableDynamicSizing={false}
@@ -945,6 +961,12 @@ export function MoverHomeScreen({ navigation }: any) {
                 <T variant="label" style={{ color: dk.muted, marginTop: space.sm }}>
                   {demandLine ?? 'Waiting for nearby jobs…'}
                 </T>
+                {demandLine ? (
+                  // [row 54] Demand is not a list to grab from: say how it arrives.
+                  <T variant="caption" center style={{ color: dk.muted, marginTop: space.xs, paddingHorizontal: space.lg }}>
+                    Requests reach you as offers on this screen. Stay online.
+                  </T>
+                ) : null}
               </View>
             ) : (
               <>

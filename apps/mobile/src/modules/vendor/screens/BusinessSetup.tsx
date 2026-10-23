@@ -13,9 +13,10 @@ import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
 import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useQueryClient } from '@tanstack/react-query';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
+import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { useLocationStore } from '../../../stores/locationStore';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import {
@@ -135,22 +136,30 @@ export function BusinessSetup() {
   useEffect(() => {
     if (stale) void refetchPricing();
   }, [stale, refetchPricing]);
+  // [Row 628] The weekly fee, said before the store is created: the server's words and the amount
+  // for THIS business type, and the tick given to exactly that amount — a new type or a new price
+  // clears it. An API with no words asks nothing and gets nothing. The button names what is missing
+  // in screen order: the form, then the fee tick, then the agreement below it.
+  const fee = feeTick(pricing.data, gate.ok ? gate.quote.rate : null);
+  const [feeTickedFor, setFeeTickedFor] = useState<string | null>(null);
+  const feeTicked = fee.kind === 'tick' && feeTickedFor === fee.key;
+  const feeAsk = fee.kind === 'invalid' ? FEE_TICK_COPY.invalid : fee.kind === 'tick' && !feeTicked ? FEE_TICK_COPY.ask : null;
+  const ask = businessSetupBlocker({ ...form, agree: true }) ?? feeAsk ?? blocker;
 
   const submit = () => {
     if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
+    if (feeAsk) return; // the weekly-fee tick, restated for the same reason
     // Guarded by `blocker`, restated so the call site cannot fabricate a pin:
     // no confirmed pin, no payload.
     const business = vendorBusinessPayload(form);
     if (!business) return;
     const ownName = business.nameBasis === 'OWN_NAME';
-    become.mutate({
-      role: 'VENDOR',
-      business,
-      acceptAgreement: agree,
-    }, {
+    become.mutate({ role: 'VENDOR', business, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) }, {
       // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed; it is
       // signed now. If this fails, the store's Documents checklist offers the same signature again.
       onSuccess: () => { if (ownName) void vendorApi.signOwnName().catch(() => undefined); },
+      // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
+      onError: (e) => { if (feeTickError(e)) void refetchPricing(); },
     });
   };
 
@@ -283,12 +292,13 @@ export function BusinessSetup() {
           </T>
         </Card>
 
+        <WeeklyFeeTerms fee={fee} ticked={feeTicked} onToggle={() => fee.kind === 'tick' && setFeeTickedFor(feeTicked ? null : fee.key)} />
         <Pressable
           accessibilityRole="checkbox"
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
           onPress={() => edit((draft) => ({ agree: !draft.agree }))}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, minHeight: 48 }}
         >
           <MaterialCommunityIcons
             name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}
@@ -304,7 +314,7 @@ export function BusinessSetup() {
         </Pressable>
         {become.isError ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
-            {storeCreateErrorCopy(become.error)}
+            {feeTickError(become.error) ?? storeCreateErrorCopy(become.error)}
           </T>
         ) : null}
         {/* [#947's grammar] Disabled names the first missing thing — the fee
@@ -313,9 +323,9 @@ export function BusinessSetup() {
             store pin after the address because its map starts from the address
             (lib/storePin businessSetupBlocker). */}
         <PillButton
-          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : blocker ?? 'Create store'}
+          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : ask ?? 'Create store'}
           loading={become.isPending}
-          disabled={!gate.ok || blocker !== null}
+          disabled={!gate.ok || ask !== null}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />

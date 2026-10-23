@@ -50,6 +50,7 @@ import {
   useToggleOrders,
   useSetSelfDelivery,
   useOrderAction,
+  usePendingOrderIds,
   useVendorMenu,
   useVendorQr,
   useVendorSubscription,
@@ -58,6 +59,7 @@ import {
   useVendorOps,
   useVendorHours,
 } from '../../../hooks/vendorops';
+import { cardTapFor } from '../boardTaps';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
@@ -287,6 +289,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               size="md"
               style={{ flex: 1 }}
               disabled={busy}
+              loading={busy && a.action !== 'reject'}
               onPress={() => onAction(a.action)}
             />
           ))}
@@ -841,7 +844,10 @@ function VendorStaffAvailability({ navigation }: any) {
 }
 
 export function VendorOps({ store, navigation }: any) {
-  const [queueOpen, setQueueOpen] = useState(false);
+  // [STORE-DASH · owner 22 Oct] The whole live queue is on the board from the
+  // start, as on the web board: every order's next step is one tap away, never
+  // behind "Open loaded queue". The store can still collapse it.
+  const [queueOpen, setQueueOpen] = useState(true);
   // [E10 · DS200 D1] The board's Reject/Decline opens the same reason chooser
   // as the order screen: the API refuses a rejection without a reason, so a
   // bare tap used to fail with nothing on screen.
@@ -900,7 +906,16 @@ export function VendorOps({ store, navigation }: any) {
   const open = shownStoreOpen(!!store.isCurrentlyOpen, toggleOpen.isPending, toggleOpen.variables);
   const accepting = !!store.acceptingOrders;
   const selfDelivery = !!store.selfDeliveryEnabled;
-  const busy = orderAction.isPending;
+  // [STORE-DASH] Only the order that was tapped waits for the server's answer
+  // (boardTaps): a slow answer for one order never freezes the others.
+  const pendingIds = usePendingOrderIds();
+  const openOrder = (o: any) => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber });
+  const onCardAction = (o: any, action: VendorOrderActionKind, code?: string) => {
+    const tap = cardTapFor(action);
+    if (tap === 'reject') setRejecting({ id: o.id, fulfillment: o.fulfillment });
+    else if (tap === 'open') openOrder(o);
+    else orderAction.mutate({ id: o.id, action, code });
+  };
 
   // The live board works the open queue; finished orders live in History.
   const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -1121,9 +1136,9 @@ export function VendorOps({ store, navigation }: any) {
               <VendorOrderCard
                 key={o.id}
                 order={o}
-                busy={busy}
-                onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
-                onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+                busy={pendingIds.has(o.id)}
+                onAction={(action, code) => onCardAction(o, action, code)}
+                onOpen={() => openOrder(o)}
               />
             ))}
             {inProgress.length > 0 ? (
@@ -1135,9 +1150,9 @@ export function VendorOps({ store, navigation }: any) {
                   <VendorOrderCard
                     key={o.id}
                     order={o}
-                    busy={busy}
-                    onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
-                    onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+                    busy={pendingIds.has(o.id)}
+                    onAction={(action, code) => onCardAction(o, action, code)}
+                    onOpen={() => openOrder(o)}
                   />
                 ))}
               </>
@@ -1150,16 +1165,9 @@ export function VendorOps({ store, navigation }: any) {
             </T>
             <VendorOrderCard
               order={newOrders[0] ?? inProgress[0]}
-              busy={busy}
-              onAction={(action, code) => {
-                const target = newOrders[0] ?? inProgress[0];
-                if (action === 'reject') setRejecting({ id: target.id, fulfillment: target.fulfillment });
-                else orderAction.mutate({ id: target.id, action, code });
-              }}
-              onOpen={() => {
-                const order = newOrders[0] ?? inProgress[0];
-                navigation.navigate('VendorOrderDetail', { orderId: order.id, orderNumber: order.orderNumber });
-              }}
+              busy={pendingIds.has((newOrders[0] ?? inProgress[0]).id)}
+              onAction={(action, code) => onCardAction(newOrders[0] ?? inProgress[0], action, code)}
+              onOpen={() => openOrder(newOrders[0] ?? inProgress[0])}
             />
           </>
         )}
@@ -1289,7 +1297,7 @@ export function VendorOps({ store, navigation }: any) {
             label={why}
             variant="outline"
             style={{ alignSelf: 'stretch', marginTop: space.md }}
-            disabled={busy}
+            disabled={rejecting != null && pendingIds.has(rejecting.id)}
             onPress={() => {
               const target = rejecting;
               setRejecting(null);
