@@ -354,6 +354,8 @@ describe('the driver moves the ride through its stops', () => {
     expect(stopEvents(rideId)).toEqual([]);
 
     // Arrive at stop 1: the server's clock, the evidence note, the grace clock.
+    // The car is at the stop (a fresh fix ~40 m away): the arrival is verified.
+    await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentLat: S1.lat + 0.0003, currentLng: S1.lng, lastLocationUpdate: new Date() } }));
     const before = Date.now();
     const arrive = await stopAction(driver, rideId, 1, 'arrived');
     expect(arrive.statusCode, arrive.body).toBe(200);
@@ -366,6 +368,7 @@ describe('the driver moves the ride through its stops', () => {
     const [row1] = await stopRows(rideId);
     expect(row1!.actedBy).toBe(driver.userId);
     expect(row1!.evidenceNote).toMatch(/^Driver reported arriving at stop 1 — .* \d+m away, fix \d+s old$/);
+    expect(row1!.arrivalVerified, 'a fresh fix within 300 m of the stop').toBe(true);
     expect(stopEvents(rideId)).toEqual([{ orderId: rideId, sequence: 1, status: 'ARRIVED', nextStopSequence: 1 }]);
     // The driver's active ride carries the same grace clock.
     const active = (await call('GET', '/api/v1/driver/rides/active', driver.token)).json().data;
@@ -444,6 +447,11 @@ describe('the passenger did not come back to the car at a stop', () => {
 
     const arrive = await stopAction(driver, rideId, 1, 'arrived');
     expect(arrive.statusCode, arrive.body).toBe(200);
+    // [option A] The car's fix is at the pickup, ~0.9 km from the stop: the arrival is
+    // recorded (never refused) but not verified, so its wait is never charged.
+    const [unverified] = await stopRows(rideId);
+    expect(unverified!.arrivalVerified).toBe(false);
+    expect(unverified!.evidenceNote).toMatch(/ — not verified, so this wait is not charged$/);
     const retryAt = arrive.json().data.stopWait.noShowAvailableAt as string;
     const tooSoon = await outcome('no_show');
     expect(tooSoon.statusCode, tooSoon.body).toBe(409);
