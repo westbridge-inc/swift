@@ -33,8 +33,8 @@ describe('the order screen follows a substitution as it happens', () => {
   });
 
   it('the customer reads what approving changes before the buttons, and decides through the hook bound to this order', () => {
-    // [TRANSFORMED 17 Oct: the import gains swapDeadlineText.]
-    expect(SCREEN).toContain("import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';");
+    // [TRANSFORMED 17 Oct: the import gains swapDeadlineText. O-4 22 Oct: and the removal question's two helpers.]
+    expect(SCREEN).toContain("import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';");
     expect(CARD.indexOf('swapChangeText(it.substitution, o.paymentMethod)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
     // [TRANSFORMED after #1707: the order travels with each decision, never the render's closure.]
     expect(SCREEN).toContain('const decideSub = useDecideSubstitution();');
