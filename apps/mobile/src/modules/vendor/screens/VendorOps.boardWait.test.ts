@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ReactElement } from 'react';
 
 const fx = vi.hoisted(() => {
   const token: unknown = new Proxy({}, { get: (_target, key) => key === Symbol.toPrimitive ? () => 0 : token });
