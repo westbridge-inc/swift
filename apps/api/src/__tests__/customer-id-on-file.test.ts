@@ -204,6 +204,24 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     }
   });
 
+  // [REVIEW-G #2001 S3-1] The erase needs more than "the caller's own upload": nothing else may name it. An old app
+  // that sends one of the person's OWN submitted documents as the "selfie" (their own key, their own envelope) must
+  // never erase that document's file — the intake still succeeds, the document keeps its bytes, no receipt is written.
+  it('an old app naming one of the person’s own submitted documents as the selfie never erases that document', async () => {
+    const c = await customer();
+    const licence = await upload(c.token, readable());
+    const doc = await runWithoutTenant(() => app.prisma.verificationDocument.create({
+      data: { userId: c.id, role: 'DRIVER', docType: 'drivers_licence', fileUrl: licence },
+    }));
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, readable()), selfieUrl: licence });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data).toMatchObject({ status: 'APPROVED', idCheck: 'ON_FILE' });
+    const envelope = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: licence } });
+    expect([envelope.wrappedDek === null, envelope.shreddedAt]).toEqual([false, null]);
+    expect(await app.prisma.deletionReceipt.count({ where: { subjectId: c.id, docTypeCode: 'unused_customer_selfie' } })).toBe(0);
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: doc.id } })).fileUrl).toBe(licence);
+  });
+
   it('a second ID on an account already on file is refused in plain words', async () => {
     const c = await customer();
     expect((await submit(c.token, { idDocumentUrl: await upload(c.token, readable()) })).statusCode).toBe(201);
