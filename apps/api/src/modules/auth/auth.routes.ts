@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { partnerPriceList } from '../country/partner-pricing';
+import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -516,6 +517,9 @@ export async function authRoutes(app: FastifyInstance) {
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
+        // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
+        // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
+        feeTerms: weeklyFeeTerms(),
       },
     });
   });
