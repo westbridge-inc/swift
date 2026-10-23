@@ -51,7 +51,10 @@ describe('the application reports address search in /ready and the /health detai
       const publicHealth = await app.inject('/health');
       expect(publicHealth.json()).not.toHaveProperty('places');
 
-      expect(fetch.mock.calls.filter(([url]) => String(url).includes('googleapis.com'))).toHaveLength(0);
+      // Exact hosts the provider calls (Places API (New), Geocoding), compared on the parsed hostname.
+      const googleHosts = new Set(['places.googleapis.com', 'maps.googleapis.com']);
+      const hostOf = (url: unknown) => { try { return new URL(String(url)).hostname; } catch { return ''; } };
+      expect(fetch.mock.calls.filter(([url]) => googleHosts.has(hostOf(url)))).toHaveLength(0);
       expect(JSON.stringify([body, detail.json()])).not.toContain(FIXTURE_KEY);
     } finally {
       await app.close();

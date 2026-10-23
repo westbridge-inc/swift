@@ -802,20 +802,25 @@ describe('places smoke command: config refusals, exit codes, and the key never p
 
   it('a live-shaped success exits 0, calling Places (New) for "Giftland" in Guyana and the Geocoding API', async () => {
     stubFetch((url) => {
-      if (url.includes(':autocomplete')) return jsonResponse(200, SUGGESTIONS);
-      if (url.startsWith('https://places.googleapis.com/v1/places/')) return jsonResponse(200, PLACE);
+      const u = new URL(url);
+      if (u.hostname === 'places.googleapis.com' && u.pathname === '/v1/places:autocomplete') return jsonResponse(200, SUGGESTIONS);
+      if (u.hostname === 'places.googleapis.com' && u.pathname.startsWith('/v1/places/')) return jsonResponse(200, PLACE);
       return jsonResponse(200, GEOCODE_OK);
     });
     const r = await run({ PLACES_PROVIDER: 'google', GOOGLE_MAPS_API_KEY_BACKEND: KEY });
     expect(r.code).toBe(0);
     expect(r.out).toContain('PLACES SMOKE PASS');
     expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ input: 'Giftland', includedRegionCodes: ['gy'] });
-    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(['/v1/places:autocomplete', '/v1/places/ChIJgiftland0001', '/maps/api/geocode/json']);
+    expect(calls.map((c) => { const u = new URL(c.url); return `${u.protocol}//${u.hostname}${u.pathname}`; })).toEqual([
+      'https://places.googleapis.com/v1/places:autocomplete',
+      'https://places.googleapis.com/v1/places/ChIJgiftland0001',
+      'https://maps.googleapis.com/maps/api/geocode/json',
+    ]);
     expect(r.out.join('\n')).not.toContain(KEY);
   });
 
   it('a refused key exits 1 and prints the Google status, never the key or the message Google wrote', async () => {
-    stubFetch((url) => url.includes('geocode')
+    stubFetch((url) => new URL(url).hostname === 'maps.googleapis.com'
       ? jsonResponse(200, { status: 'REQUEST_DENIED', error_message: `The provided API key ${KEY} is invalid.`, results: [] })
       : googleError(400, 'INVALID_ARGUMENT', 'API_KEY_INVALID', `API key not valid: ${KEY}`));
     const r = await run({ PLACES_PROVIDER: 'google', GOOGLE_MAPS_API_KEY_BACKEND: KEY });
