@@ -31,7 +31,9 @@ type Role = 'INFRA' | 'REQUEST' | 'JOB' | 'JOB_PENDING' | 'SHARED';
 const CENSUS: Record<string, { sites: number; role: Role }> = {
   'app.ts': { sites: 1, role: 'INFRA' },
   // [item 20] The owner wall's boot attestation: catalogue reads only (role membership, row security, the policy).
-  'lib/owner-rls.ts': { sites: 2, role: 'INFRA' },
+  'lib/owner-rls.ts': { sites: 3, role: 'INFRA' }, // + [REVIEW-M S4-1] the walled-definer catalogue read
+  // [item 20 · notifications] The idempotent notice write's read-back (a narrow SECURITY DEFINER action), in the caller's transaction or on its root client.
+  'lib/owner-wall-notices.ts': { sites: 1, role: 'SHARED' },
   'lib/rls-attestation.ts': { sites: 5, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },
@@ -83,6 +85,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/user/account.service.ts': { sites: 1, role: 'SHARED' },
   'modules/user/partner-wind-down.ts': { sites: 2, role: 'SHARED' },
   'modules/vendor/vendor.routes.ts': { sites: 1, role: 'REQUEST' },
+  // [Row 249] The abandoned-application sweep's open-case census (reports about a person's rating, message, store or
+  // item): read-only, run by the daily documents job on the system login (runAsSystem 'verification:abandoned-case-census').
+  'modules/verification/abandoned-application.ts': { sites: 2, role: 'JOB' },
   'modules/verification/mover-document-authority.ts': { sites: 2, role: 'SHARED' },
   'modules/verification/object-authority.ts': { sites: 3, role: 'SHARED' },
   'modules/verification/subjects.ts': { sites: 1, role: 'SHARED' },

@@ -181,7 +181,8 @@ export function doorGuidanceFor(reason: string): DoorGuidance {
   // The original family: the money simply has not landed yet. Here the store
   // confirming IS the resolution, so the old advice is the right advice.
   return {
-    headline: `Payment not confirmed (${reason.replace(/_/g, ' ').toLowerCase()}) — do not hand over the order yet. Ask the store to confirm the payment, then refresh.`,
+    // [UI-SWEEP U73] No code in the sentence (it read "(mobile money pending)").
+    headline: 'Payment not confirmed — do not hand over the order yet. Ask the store to confirm the payment, then refresh.',
     action: 'refresh',
   };
 }

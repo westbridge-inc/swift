@@ -20,9 +20,14 @@ import {
   tradeRiskTier,
 } from './services.service';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
+import { retryStorageOrphan } from '../../lib/storage-orphans';
+import { queuePortfolioPhotoDeletions, servedPortfolioPhotos } from './portfolio-photos';
+import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { serviceJobCancelVerdict } from '../order/cancel-policy';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 import { getTenantId } from '../../plugins/prisma';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { assertProviderProfileWording, isServiceCategoryOperational } from './service-catalog';
 import { formatGuyanaTime } from '../../utils/guyana-day';
 import { offersLegalServices } from '../compliance/prohibited-items';
@@ -78,7 +83,29 @@ const jobRequestSchema = z.object({
 const QUOTE_AMOUNT = new Intl.NumberFormat('en-GY', { maximumFractionDigits: 2 });
 const rateSchema = z.object({ score: z.number().int().min(1).max(5), comment: z.string().max(1000).optional() });
 
+/** [IMAGES-E2E PR3] How many photos one provider's portfolio holds. */
+export const PORTFOLIO_MAX = 12;
+
+/** [IMAGES-E2E PR3] A profile save may keep, reorder or drop portfolio photos, never add
+ *  one (an outside address or a path into another folder would skip the scan and the redraw). */
+export function assertPortfolioOnlyKeeps(sent: string[], current: string[]): void {
+  const allowed = new Set(current);
+  if (new Set(sent).size !== sent.length || sent.some((photo) => !allowed.has(photo))) {
+    throw new AppError(400, 'PORTFOLIO_UPLOAD_ONLY', 'Add portfolio photos by uploading them');
+  }
+}
+
 export async function servicesRoutes(app: FastifyInstance) {
+  const storage = getStorageProvider();
+  /** After the pointer change commits: delete each photo now. A delete that fails stays open
+   *  and the standing retry (retryStorageOrphans) finishes it. */
+  const deleteQueuedPhotos = async (orphanIds: string[]) => {
+    if (orphanIds.length === 0) return;
+    // The named system capability: the "does any row still show it" read sees every row.
+    await runAsSystem('public-photo-deletion', async () => {
+      for (const id of orphanIds) await retryStorageOrphan(app.prisma, storage, app.log, id);
+    });
+  };
   const auth = { preHandler: [app.authenticate] };
   const optionalAuth = { preHandler: [app.authenticateOptional] };
   const ratingService = new RatingService(app.prisma, app.io);
@@ -157,13 +184,14 @@ export async function servicesRoutes(app: FastifyInstance) {
     // no protected title the trade's checklist does not prove.
     assertProviderProfileWording(trade, body.bio);
     const userId = request.user.userId;
+    let droppedPhotoDeletions: string[] = [];
     const provider = await app.prisma.$transaction(async (tx) => {
       // One profile per human is the idempotency boundary. Lock the owning user
       // so concurrent first saves cannot race the unique upsert, and persist the
       // trade BEFORE evaluating its legal checklist (electricians must never get
       // a base-doc-only verification window on first save or trade change).
-      const users = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string }>>`
-        SELECT u."id", u."status"::text, t."kind"::text AS "tenantKind" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+      const users = await tx.$queryRaw<Array<{ id: string; status: string; tenantKind: string; tenantId: string }>>`
+        SELECT u."id", u."status"::text, t."kind"::text AS "tenantKind", u."tenantId" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
         WHERE u."id" = ${userId}
         FOR UPDATE OF u /* service-provider-profile-authority */
       `;
@@ -172,6 +200,24 @@ export async function servicesRoutes(app: FastifyInstance) {
       }
       // [REVIEW-PARTNER] A demo account never becomes a service provider.
       if (users[0].tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
+      // [IMAGES-E2E PR3] Portfolio photos are UPLOADED (POST /providers/me/portfolio: scanned,
+      // redrawn without camera data). A profile save may keep, reorder or drop them, never add one.
+      if (body.portfolioPhotos !== undefined) {
+        // [REVIEW-G S4-2] Read under the provider row's lock: a photo taken down meanwhile is not written back.
+        const locked = await tx.$queryRaw<Array<{ id: string; portfolioPhotos: string[] }>>`
+          SELECT "id", "portfolioPhotos" FROM "service_providers" WHERE "userId" = ${userId}
+          FOR UPDATE /* service-provider-portfolio-authority */
+        `;
+        const current = locked[0]?.portfolioPhotos ?? [];
+        assertPortfolioOnlyKeeps(body.portfolioPhotos, current);
+        // [REVIEW-F S2-1] A photo the save drops is deleted, not just unlinked.
+        const kept = new Set(body.portfolioPhotos);
+        if (locked[0]) {
+          droppedPhotoDeletions = await queuePortfolioPhotoDeletions(
+            tx, { id: locked[0].id, userId }, users[0].tenantId, current.filter((photo) => !kept.has(photo)),
+          );
+        }
+      }
       await tx.serviceProvider.upsert({
         where: { userId },
         create: {
@@ -193,8 +239,107 @@ export async function servicesRoutes(app: FastifyInstance) {
       await projectProviderVerificationLocked(tx, userId);
       return tx.serviceProvider.findUniqueOrThrow({ where: { userId } });
     });
+    await deleteQueuedPhotos(droppedPhotoDeletions);
     // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
     return { success: true, data: { ...provider, ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)) } };
+  });
+
+  /** [IMAGES-E2E PR3] POST /providers/me/portfolio — add one photo of the provider's own work. */
+  app.post('/providers/me/portfolio', auth, async (request) => {
+    const userId = request.user.userId;
+    const provider = await app.prisma.serviceProvider.findUnique({
+      where: { userId },
+      select: { id: true, portfolioPhotos: true, user: { select: { status: true } } },
+    });
+    if (!provider) throw new NotFoundError('ServiceProvider');
+    if (provider.user.status !== 'ACTIVE') {
+      throw new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot publish a provider profile right now.');
+    }
+    if (provider.portfolioPhotos.length >= PORTFOLIO_MAX) {
+      throw new AppError(409, 'PORTFOLIO_FULL', `A portfolio holds ${PORTFOLIO_MAX} photos. Remove one to add another.`);
+    }
+    const url = await keepPublicPhoto(request, storage, `portfolio/${provider.id}`, 'provider-portfolio');
+    // [REVIEW-G S4-1 · REVIEW-F S2-1] Added under the account's and the row's locks (the order the
+    // profile save and account erasure use): a closed account or a full portfolio does not take
+    // the photo, and the bytes just kept are deleted rather than left behind.
+    // [REVIEW-G/F S4-1 on #1918] The bytes are kept before this transaction: if it fails (a DB
+    // error, a lost connection) they get their durable deletion row in a fresh transaction and are
+    // deleted, never left behind with no pointer and no row.
+    const discardKept = async (): Promise<void> => {
+      const orphanIds = await app.prisma.$transaction(async (tx) => {
+        const owner = await tx.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+        return owner ? queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, owner.tenantId, [url]) : [];
+      }).catch((err: unknown) => {
+        app.log.error({ err, providerId: provider.id }, 'portfolio upload: deletion row for unkept photo failed');
+        return [] as string[];
+      });
+      await deleteQueuedPhotos(orphanIds).catch(() => undefined);
+    };
+    const added = await app.prisma.$transaction(async (tx) => {
+      const users = await tx.$queryRaw<Array<{ status: string; tenantId: string }>>`
+        SELECT "status"::text, "tenantId" FROM "users" WHERE "id" = ${userId}
+        FOR UPDATE /* service-provider-portfolio-upload-authority */
+      `;
+      const rows = await tx.$queryRaw<Array<{ portfolioPhotos: string[] }>>`
+        SELECT "portfolioPhotos" FROM "service_providers" WHERE "id" = ${provider.id}
+        FOR UPDATE /* service-provider-portfolio-authority */
+      `;
+      const tenantId = users[0]?.tenantId;
+      const refusal = users[0]?.status !== 'ACTIVE'
+        ? new AppError(403, 'ACCOUNT_NOT_ACTIVE', 'This account cannot publish a provider profile right now.')
+        : !rows[0]
+          ? new NotFoundError('ServiceProvider')
+          : rows[0].portfolioPhotos.length >= PORTFOLIO_MAX
+            ? new AppError(409, 'PORTFOLIO_FULL', `A portfolio holds ${PORTFOLIO_MAX} photos. Remove one to add another.`)
+            : null;
+      if (refusal) {
+        const orphanIds = tenantId ? await queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, tenantId, [url]) : [];
+        return { refusal, orphanIds };
+      }
+      const updated = await tx.serviceProvider.update({
+        where: { id: provider.id },
+        data: { portfolioPhotos: { push: url } },
+        select: { id: true, portfolioPhotos: true },
+      });
+      return { updated };
+    }).catch(async (error: unknown) => {
+      await discardKept();
+      throw error;
+    });
+    if ('refusal' in added) {
+      await deleteQueuedPhotos(added.orphanIds ?? []);
+      throw added.refusal;
+    }
+    return { success: true, data: added.updated };
+  });
+
+  /** [IMAGES-E2E PR3] DELETE /providers/me/portfolio/:file — take one photo down (the public door stops serving it). */
+  app.delete<{ Params: { file: string } }>('/providers/me/portfolio/:file', auth, async (request) => {
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+    if (!user) throw new NotFoundError('ServiceProvider');
+    // [REVIEW-F S2-1] The photo's bytes are deleted, not just unlinked: the deletion row is
+    // written with the pointer change, under the row's lock, and the object deleted after.
+    const { portfolio, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ id: string; portfolioPhotos: string[] }>>`
+        SELECT "id", "portfolioPhotos" FROM "service_providers" WHERE "userId" = ${userId}
+        FOR UPDATE /* service-provider-portfolio-authority */
+      `;
+      const provider = rows[0];
+      if (!provider) throw new NotFoundError('ServiceProvider');
+      const removed = provider.portfolioPhotos.filter((photo) => photo.split('/').pop() === request.params.file);
+      if (removed.length === 0) throw new NotFoundError('PortfolioPhoto', request.params.file);
+      const queued = await queuePortfolioPhotoDeletions(tx, { id: provider.id, userId }, user.tenantId, removed);
+      const row = await tx.serviceProvider.update({
+        where: { id: provider.id },
+        data: { portfolioPhotos: { set: provider.portfolioPhotos.filter((photo) => !removed.includes(photo)) } },
+        select: { id: true, portfolioPhotos: true },
+      });
+      return { portfolio: row, orphanIds: queued };
+    });
+    await deleteQueuedPhotos(orphanIds);
+    // Only the photo list goes back (id + portfolioPhotos), never the provider's whole row.
+    return { success: true, data: portfolio };
   });
 
   app.get('/providers/me', auth, async (request) => {
@@ -356,7 +501,7 @@ export async function servicesRoutes(app: FastifyInstance) {
           trade: provider.trade,
           tradeLabel: serviceTradeLabel(provider.trade),
           bio: provider.bio,
-          portfolioPhotos: provider.portfolioPhotos,
+          portfolioPhotos: servedPortfolioPhotos(provider),
           // The honest star line (displayRating / ratingBucket / topRated).
           // Kept alongside the raw fields, which the sort still uses as a
           // tie-break — ranking may read the true mean; DISPLAY may not.

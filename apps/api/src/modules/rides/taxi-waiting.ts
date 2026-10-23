@@ -83,6 +83,9 @@ export interface TaxiWaitStopClock {
   sequence: number;
   status: TaxiStopStatus;
   arrivedAt: Date | null;
+  /** [COORD ruling 19 Oct, option A] Only TRUE (the E19 gate accepted the
+   *  arrival) starts a charged wait; null or false is never billed. */
+  arrivalVerified?: boolean | null;
   departedAt: Date | null;
   skippedAt: Date | null;
 }
@@ -138,7 +141,8 @@ export function tallyTaxiWaiting(clock: TaxiWaitClock, terms: TaxiWaitingTerms, 
   }
   const stops = new Map<number, TaxiWaitSpan | null>();
   for (const stop of clock.stops) {
-    if (!stop.arrivedAt) { stops.set(stop.sequence, null); continue; }
+    // An arrival the GPS could not place starts no charged wait (null: like no arrival).
+    if (!stop.arrivedAt || stop.arrivalVerified !== true) { stops.set(stop.sequence, null); continue; }
     const end = stop.departedAt ?? stop.skippedAt;
     if (end) stops.set(stop.sequence, { ms: span(stop.arrivedAt, end), running: false });
     else if (live && isTaxiStopOpen(stop.status) && clock.status === TAXI_STOP_PARENT_STATUS) stops.set(stop.sequence, { ms: span(stop.arrivedAt, now), running: true });
@@ -222,7 +226,7 @@ const termsOfRow = (row: WaitingRow): TaxiWaitingTerms => ({
   currencyCode: row.currencyCode,
 });
 
-const STOP_CLOCK_SELECT = { sequence: true, status: true, arrivedAt: true, departedAt: true, skippedAt: true } as const;
+const STOP_CLOCK_SELECT = { sequence: true, status: true, arrivedAt: true, arrivalVerified: true, departedAt: true, skippedAt: true } as const;
 
 /** The terms row written with the ride, inside its creation, while the switch is on. */
 export function waitingTermsCreate(tenantId: string, terms: TaxiWaitingTerms, termsVersion: number | null) {
@@ -344,8 +348,14 @@ export async function decorateRideWaiting(
     return breakdown ? { fareBreakdown: breakdown } : {};
   }
   const terms = termsOfRow(row);
+  // [option A] Which arrivals the gate accepted: read with the stops' clocks
+  // (never on the wire), only for a ride with stops.
+  const verified = itineraryStops && itineraryStops.length > 0
+    ? new Map((await db.taxiTripStop.findMany({ where: { orderId: ride.id }, select: { sequence: true, arrivalVerified: true } })).map((r) => [r.sequence, r.arrivalVerified]))
+    : null;
+  const clockStops = (itineraryStops ?? []).map((s) => ({ ...s, arrivalVerified: verified?.get(s.sequence) ?? null }));
   const tally = tallyTaxiWaiting(
-    { status: ride.status, driverArrivedAt: ride.driverArrivedAt, pickedUpAt: ride.pickedUpAt, stops: itineraryStops ?? [] },
+    { status: ride.status, driverArrivedAt: ride.driverArrivedAt, pickedUpAt: ride.pickedUpAt, stops: clockStops },
     terms,
     now,
     'live',

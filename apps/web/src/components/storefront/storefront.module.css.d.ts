@@ -89,6 +89,7 @@ declare const styles: {
   readonly rows: string;
   readonly secondaryButton: string;
   readonly section: string;
+  readonly sectionPhoto: string;
   readonly sectionTitle: string;
   readonly select: string;
   readonly seller: string;

@@ -5,6 +5,8 @@ import { canReadBounded, getStorageProvider, type StorageProvider } from '../pro
 import { runAsSystem } from '../plugins/tenant-context';
 import { isVendorVisible, VISIBLE_VENDOR_SELECT } from '../modules/vendor/vendor-visibility';
 import { feePausePredicate, readFeePause } from '../modules/billing/mmg-pause';
+import { isProviderVerified } from '../modules/services/services.service';
+import { canonicalServiceTrade, isServiceCategoryOperational } from '../modules/services/service-catalog';
 import { hiddenAmong, storeHiddenFromCustomers } from '../modules/compliance/prohibited-gate';
 import { MAX_IMAGE_PIXELS, sniffImageType } from './images';
 
@@ -33,7 +35,7 @@ import { MAX_IMAGE_PIXELS, sniffImageType } from './images';
 //     whose owner's account is ACTIVE (a closed account publishes nothing even
 //     before its store is wound down);
 //   - ONLY a photo that store still shows: a live menu item that is not held or
-//     banned, a live menu section, its logo or its cover. A replaced photo, a key
+//     banned, a live menu section switched on, its logo or its cover. A replaced photo, a key
 //     typed into ANOTHER store's row and a photo nobody references publish
 //     nothing;
 //   - a check that cannot be made is a refusal, never a pass;
@@ -47,10 +49,17 @@ import { MAX_IMAGE_PIXELS, sniffImageType } from './images';
 //     browser need not ask again; the lifetime stays ONE day (not a year), so a
 //     photo a store removes, or one of an item later banned, stops being served
 //     within the day everywhere. A refusal is never cached.
+//
+// [IMAGES-E2E PR3] The same door, with the same drawing, cache and limits, serves
+// service providers' portfolio photos at "/portfolio/<provider>/<file>". It serves
+// only a provider customers may see (account ACTIVE, verified for a trade Swift
+// operates) whose portfolio still lists that exact photo.
 // ---------------------------------------------------------------------------
 
 /** The stores' photo folder (vendor.routes: `items/${vendorId}`). */
 export const STORE_PHOTO_FOLDER = 'items';
+/** [IMAGES-E2E PR3] Service providers' portfolio folder (services.routes: `portfolio/${providerId}`). */
+export const PORTFOLIO_PHOTO_FOLDER = 'portfolio';
 /** The upload ceiling (app.ts multipart fileSize): nothing larger was ever accepted. */
 export const STORE_PHOTO_MAX_BYTES = 5 * 1024 * 1024;
 /** The long edge of a photo asked for without a width: the largest any screen draws. */
@@ -95,33 +104,69 @@ export async function storeShowsPhoto(app: FastifyInstance, vendorId: string, fi
       select: { ...VISIBLE_VENDOR_SELECT, logoUrl: true, coverImageUrl: true, owner: { select: { user: { select: { status: true } } } } },
     });
     if (!store || store.owner?.user?.status !== 'ACTIVE') return false;
+    // [REVIEW-M S4-2] Which row shows the photo is asked FIRST: a name no row of this
+    // store shows (a guess, a replaced photo) costs three reads, never the visibility
+    // reads below. The visibility rule is then applied in full to a photo that is shown.
+    let shownBy: 'store' | { itemIds: string[] } | null = null;
+    if (stored.includes(store.logoUrl ?? '') || stored.includes(store.coverImageUrl ?? '')) {
+      shownBy = 'store';
+    } else {
+      // [REVIEW-M S4-1] A menu section the store switched off is not shown, nor its picture.
+      const section = await app.prisma.category.findFirst({
+        where: { vendorId, imageUrl: { in: stored }, archivedAt: null, isActive: true },
+        select: { id: true },
+      });
+      if (section) {
+        shownBy = 'store';
+      } else {
+        const items = await app.prisma.item.findMany({
+          where: { vendorId, imageUrl: { in: stored }, archivedAt: null },
+          select: { id: true },
+          take: 20,
+        });
+        if (items.length > 0) shownBy = { itemIds: items.map((i) => i.id) };
+      }
+    }
+    if (shownBy === null) return false;
     const feePause = store.subscription
       ? await readFeePause(app.prisma, process.env, store.subscription.id)
       : feePausePredicate(false);
     if (!isVendorVisible(store, feePause)) return false;
     if (await storeHiddenFromCustomers(app.prisma, vendorId)) return false;
-    if (stored.includes(store.logoUrl ?? '') || stored.includes(store.coverImageUrl ?? '')) return true;
-    const section = await app.prisma.category.findFirst({
-      where: { vendorId, imageUrl: { in: stored }, archivedAt: null },
-      select: { id: true },
-    });
-    if (section) return true;
-    const items = await app.prisma.item.findMany({
-      where: { vendorId, imageUrl: { in: stored }, archivedAt: null },
-      select: { id: true },
-      take: 20,
-    });
-    if (items.length === 0) return false;
-    const hidden = await hiddenAmong(app.prisma, items.map((i) => i.id));
-    return items.some((i) => !hidden.has(i.id));
+    if (shownBy === 'store') return true;
+    const hidden = await hiddenAmong(app.prisma, shownBy.itemIds);
+    return shownBy.itemIds.some((id) => !hidden.has(id));
   });
 }
 
-async function decide(app: FastifyInstance, vendorId: string, file: string, now: number): Promise<boolean> {
-  const key = `${vendorId}/${file}`;
+/** [IMAGES-E2E PR3] True while a provider customers may see (account ACTIVE, verified for a
+ *  trade Swift operates) shows this exact photo in their portfolio. */
+export async function providerShowsPhoto(app: FastifyInstance, providerId: string, file: string): Promise<boolean> {
+  const stored = `${PORTFOLIO_PHOTO_FOLDER}/${providerId}/${file}`;
+  const local = `/uploads/${stored}`;
+  return runAsSystem('public-portfolio-photo', async () => {
+    const provider = await app.prisma.serviceProvider.findUnique({
+      where: { id: providerId },
+      select: { userId: true, trade: true, portfolioPhotos: true, user: { select: { status: true } } },
+    });
+    if (!provider || provider.user?.status !== 'ACTIVE') return false;
+    if (!provider.portfolioPhotos.includes(stored) && !provider.portfolioPhotos.includes(local)) return false;
+    const trade = canonicalServiceTrade(provider.trade);
+    if (!trade || !isServiceCategoryOperational(trade)) return false;
+    return isProviderVerified(app.prisma, provider.userId);
+  });
+}
+
+/** One public photo folder: what it is called and who decides a photo in it is shown. */
+type PhotoDoor = { folder: string; shows: (app: FastifyInstance, ownerId: string, file: string) => Promise<boolean> };
+const STORE_DOOR: PhotoDoor = { folder: STORE_PHOTO_FOLDER, shows: storeShowsPhoto };
+const PORTFOLIO_DOOR: PhotoDoor = { folder: PORTFOLIO_PHOTO_FOLDER, shows: providerShowsPhoto };
+
+async function decide(app: FastifyInstance, door: PhotoDoor, ownerId: string, file: string, now: number): Promise<boolean> {
+  const key = `${door.folder}/${ownerId}/${file}`;
   const hit = decisions.get(key);
   if (hit && now - hit.at < DECISION_TTL_MS) return hit.shown;
-  const shown = await storeShowsPhoto(app, vendorId, file);
+  const shown = await door.shows(app, ownerId, file);
   if (decisions.size >= DECISION_MAX) decisions.delete(decisions.keys().next().value!);
   decisions.set(key, { shown, at: now });
   return shown;
@@ -203,8 +248,8 @@ export function resetStorePhotoCachesForTests(): void {
   rendered.clear();
 }
 
-function weakEtag(vendorId: string, file: string, width: number | null): string {
-  const digest = createHash('sha256').update(`${RENDER_VERSION}|${vendorId}/${file}|${width ?? 'full'}`).digest('base64url').slice(0, 27);
+function weakEtag(path: string, width: number | null): string {
+  const digest = createHash('sha256').update(`${RENDER_VERSION}|${path}|${width ?? 'full'}`).digest('base64url').slice(0, 27);
   return `W/"${digest}"`;
 }
 
@@ -216,15 +261,17 @@ function etagMatches(header: string | undefined, etag: string): boolean {
 
 // ── The door ─────────────────────────────────────────────────────────────────
 
-export async function serveStorePhoto(
-  app: FastifyInstance,
-  request: FastifyRequest<{ Params: { vendorId: string; file: string }; Querystring: Record<string, string | undefined> }>,
-  reply: FastifyReply,
-  storage: StorageProvider,
-) {
+type PhotoRequest = FastifyRequest<{ Params: { ownerId: string; file: string }; Querystring: Record<string, string | undefined> }>;
+
+export async function serveStorePhoto(app: FastifyInstance, request: PhotoRequest, reply: FastifyReply, storage: StorageProvider) {
+  return servePublicPhoto(app, request, reply, storage, STORE_DOOR);
+}
+
+async function servePublicPhoto(app: FastifyInstance, request: PhotoRequest, reply: FastifyReply, storage: StorageProvider, door: PhotoDoor) {
   const refuse = (code: number) => reply.code(code).header('Cache-Control', 'no-store').send();
-  const { vendorId, file } = request.params;
-  if (!STORE_ID.test(vendorId) || !PHOTO_NAME.test(file)) return refuse(404);
+  const { ownerId, file } = request.params;
+  if (!STORE_ID.test(ownerId) || !PHOTO_NAME.test(file)) return refuse(404);
+  const path = `${door.folder}/${ownerId}/${file}`;
   const query = request.query ?? {};
   const keys = Object.keys(query);
   if (keys.some((k) => k !== 'w')) return refuse(400);
@@ -236,13 +283,13 @@ export async function serveStorePhoto(
 
   let shown = false;
   try {
-    shown = await decide(app, vendorId, file, Date.now());
+    shown = await decide(app, door, ownerId, file, Date.now());
   } catch (err) {
     request.log.error({ err }, '[IMAGES-E2E] could not decide whether a store photo is public; not served');
   }
   if (!shown) return refuse(404);
 
-  const etag = weakEtag(vendorId, file, width);
+  const etag = weakEtag(path, width);
   const ok = (r: Rendered) => reply
     .header('Content-Type', r.type)
     .header('Cache-Control', STORE_PHOTO_CACHE_CONTROL)
@@ -256,7 +303,7 @@ export async function serveStorePhoto(
     return reply.code(304).header('Cache-Control', STORE_PHOTO_CACHE_CONTROL).header('ETag', etag).send();
   }
 
-  const cacheKey = `${vendorId}/${file}|${width ?? 'full'}`;
+  const cacheKey = `${path}|${width ?? 'full'}`;
   const cached = rendered.get(cacheKey);
   if (cached) return ok(cached);
 
@@ -268,7 +315,7 @@ export async function serveStorePhoto(
         const timer = setTimeout(() => controller.abort(), readDeadlineMs());
         try {
           if (!canReadBounded(storage)) throw new Error('storage provider has no bounded read');
-          const bytes = await storage.getObjectWithin(`${STORE_PHOTO_FOLDER}/${vendorId}/${file}`, STORE_PHOTO_MAX_BYTES, controller.signal);
+          const bytes = await storage.getObjectWithin(path, STORE_PHOTO_MAX_BYTES, controller.signal);
           if (!bytes) return null;
           const drawn = await renderStorePhoto(bytes, width);
           if (drawn) rendered.set(cacheKey, drawn);
@@ -294,11 +341,13 @@ export async function serveStorePhoto(
 }
 
 export function registerPublicStorePhotos(app: FastifyInstance, storage: StorageProvider = getStorageProvider()) {
-  app.get<{ Params: { vendorId: string; file: string }; Querystring: Record<string, string | undefined> }>(
-    `/${STORE_PHOTO_FOLDER}/:vendorId/:file`,
-    // Its own allowance: one screen of a store is dozens of photos, and many
-    // phones share one address on the mobile networks.
-    { config: { rateLimit: { max: 600, timeWindow: '1 minute' } } },
-    async (request, reply) => serveStorePhoto(app, request, reply, storage),
-  );
+  for (const door of [STORE_DOOR, PORTFOLIO_DOOR]) {
+    app.get<{ Params: { ownerId: string; file: string }; Querystring: Record<string, string | undefined> }>(
+      `/${door.folder}/:ownerId/:file`,
+      // Its own allowance: one screen of a store is dozens of photos, and many
+      // phones share one address on the mobile networks.
+      { config: { rateLimit: { max: 600, timeWindow: '1 minute' } } },
+      async (request, reply) => servePublicPhoto(app, request, reply, storage, door),
+    );
+  }
 }

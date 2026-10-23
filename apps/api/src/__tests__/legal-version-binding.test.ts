@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -209,14 +210,24 @@ const PUBLISHED: Record<
     driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
     vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
   },
-  // [ROLE-DOCS · owner 21 Oct 2026 · COORD ruling (A), NON-material] On top of 2026-10-21: police clearance optional for
-  // TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents paragraph). Same day, so the
-  // human date is unchanged: Terms and the Business Agreement keep their 2026-10-21 hashes exactly.
-  '2026-10-21.1': {
-    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
-    privacy: '0904106f583020771b1cddd74122f30a6f050f509a7817cae9ffda92a9ffa20c',
-    driver_agreement: '3d1ad774321c726ae2263b9c38abc101240aba9c8380d9634267f4f8b6f29fa2',
-    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  // [Owner ruling 22 Oct 2026 · NON-material pre-launch (COORD 23:14Z)] Terms s.7: a ride, a parcel or a booking
+  // cancels free for one minute after a driver, rider or provider accepts it (was five minutes), as
+  // order/cancel-policy.ts FREE_CANCEL_WINDOW_MIN applies it. Nothing else changed: putting "five minutes" and
+  // 21 October back reproduces all four 2026-10-21 pins exactly. The date re-pins Privacy and the two agreements.
+  '2026-10-22': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: 'ebd6a47d17bdebd135068b1284d48893e1f3d306085e4c04a5e68a90afbe01da',
+    driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
+  // [ROLE-DOCS · owner 21 Oct 2026 · COORD rulings (A) + 23 Oct 00:59Z, NON-material] On top of 2026-10-22: police
+  // clearance optional for TAXI drivers only (Privacy "With your explicit consent" line; Mover Agreement documents
+  // paragraph). Same day, so the human date is unchanged: Terms and the Business Agreement keep their 2026-10-22 hashes.
+  '2026-10-22.1': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: '9d0eb3b0e6b218d18edbb10630c4fcefeea090043cf5671c2b9ad7658f993ebb',
+    driver_agreement: 'bfbfc55fb330b4d6e095ec3754c76570a8c128d460a7a59b3c4c0c586161b785',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
   },
 };
 
@@ -253,6 +264,13 @@ describe('legal version binding [F-035-08]', () => {
     expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
   });
 
+  it('[owner 22 Oct 2026] the Terms state the free cancel window the server applies: one minute after acceptance', () => {
+    // FREE_CANCEL_WINDOW_MIN is the window cancellationVerdict enforces; the Terms must name that number, never another.
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(TERMS).toContain('A ride, a parcel or a booking can be cancelled free at any time while nobody has accepted it, and for one minute after a driver, rider or provider accepts it; after that, contact your driver, rider or provider.');
+    expect(TERMS).not.toMatch(/five minutes after a driver|5 minutes after a driver/i);
+  });
+
   it('the served version is a version this file has pinned', () => {
     expect(
       Object.keys(PUBLISHED),
@@ -272,7 +290,7 @@ describe('legal version binding [F-035-08]', () => {
 
   it('the version is a date stamp, and LAST_UPDATED must move with it (shape check)', () => {
     // [ROLE-DOCS · COORD ruling 21 Oct 2026 — a DELIBERATE extension] A second stamp on the same day carries a
-    // same-day suffix (2026-10-21.1): versions compare as strings, so it sorts after 2026-10-21 and before the next
+    // same-day suffix (2026-10-22.1): versions compare as strings, so it sorts after 2026-10-22 and before the next
     // day. The date part still has to match LAST_UPDATED.
     expect(LEGAL_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}(\.\d+)?$/);
     // The human form is rendered into both documents — same date, or the

@@ -2,7 +2,7 @@
  * [ROLE-DOCS · owner ruling 21 Oct 2026] "I trade under my own name" in place of a business registration — ONLY where
  * Guyana law makes registration unnecessary: Business Names (Registration) Act, Cap. 90:05, s.3(b) — one person whose
  * business name is their true surname "without any addition other than his true forenames or the initials thereof"
- * need not register; s.3(c) — unless they changed their name (other than by marriage). (vendor/own-name.ts)
+ * need not register; s.3(c) — unless they changed their name (except, for a woman, in consequence of marriage). (vendor/own-name.ts)
  *
  *  - The sign-up asks the question first; a name that clearly is not the owner's own is refused before a store exists.
  *  - The owner signs the versioned words (consent ledger) and Swift files them as the `own_name_declaration` document.
@@ -134,6 +134,10 @@ describe('[ROLE-DOCS] what counts as trading under your own name (BNA s.3)', () 
     expect(MOBILE_WORDS).toBe(OWN_NAME_DECLARATION_V1);
     expect(WEB_WORDS).toBe(OWN_NAME_DECLARATION_V1);
     expect(OWN_NAME_DECLARATION_V1).toMatch(/Business Names \(Registration\) Act, Cap\. 90:05, section 3/);
+    // [REVIEW-F #2046 S3-1] s.3(c) excuses a change of name only "in the case of a woman in consequence of marriage":
+    // the declaration says exactly that much, never "any marriage" for anyone.
+    expect(OWN_NAME_DECLARATION_V1).toContain('3. I have not changed my name, except where I am a woman whose name changed because of marriage.');
+    expect(OWN_NAME_DECLARATION_V1).not.toMatch(/other than by marriage/);
   });
 
   it('the own-name lists replace ONLY the business registration, for the three store types asked for one', () => {
@@ -207,6 +211,42 @@ describe('[ROLE-DOCS] the declaration replaces the business registration, checke
     expect((await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: o.vendorId } }))).isVerified).toBe(false);
     // and the old approval is never reused for a later name: support decides
     expect((await sign(o)).json().error.code).toBe('OWN_NAME_SUPPORT');
+  });
+
+  // [REVIEW-G #2046 S2-1 · COORD ruling 23 Oct] The declaration is PER STORE, never per type: an owner with an own-name
+  // store and a trading-name store of the SAME type signs for the first only. The second keeps needing its business
+  // registration (BNA s.3(b)), can still be renamed, and never goes live on the first store's declaration.
+  it('per store: signing for "R. Persaud" never changes "Best Burgers", which keeps needing its business registration', async () => {
+    const o = await owner('Ramesh', 'Persaud', 'R. Persaud');
+    const ownerId = (await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: o.vendorId }, select: { ownerId: true } }))).ownerId;
+    const burgers = await runWithTenant('swift-default', () => app.prisma.vendor.create({ data: {
+      ownerId, name: 'Best Burgers', slug: `own-${RUN.toLowerCase()}-bb-${seq}`, vendorType: 'STORE', phone: `+5928${NUM}8${seq}`, addressLine1: '2 Own Lane', city: 'Georgetown', region: 'Demerara-Mahaica',
+      latitude: 6.8, longitude: -58.16, status: 'PENDING_APPROVAL', publicPhone: '+5926001235',
+    } }));
+    const other = { ...o, vendorId: burgers.id };
+    expect((await sign(other)).json().error.code).toBe('OWN_NAME_MISMATCH');
+    const signed = await sign(o);
+    expect(signed.statusCode, signed.body).toBe(201);
+    const flag = async (id: string) => (await system(() => app.prisma.vendor.findUniqueOrThrow({ where: { id } }))).tradesUnderOwnName;
+    expect([await flag(o.vendorId), await flag(burgers.id)]).toEqual([true, false]);
+    // each store's own gate list: the declaration for the own-name store, the registration for the other
+    expect((await service.activationChecklist(o.userId, 'STORE', { vendorId: o.vendorId })).checklist).toEqual(['owner_national_id', 'own_name_declaration', 'storefront_photo']);
+    expect((await service.activationChecklist(o.userId, 'STORE', { vendorId: burgers.id })).checklist).toEqual(['owner_national_id', 'business_registration', 'storefront_photo']);
+    // the declaration's evidence names exactly the one store
+    const consent = await system(() => app.prisma.consentRecord.findFirstOrThrow({ where: { subjectId: o.userId, documentType: OWN_NAME_CONSENT_TYPE } }));
+    expect(consent.evidence).toMatchObject({ vendorId: o.vendorId, storeName: 'R. Persaud' });
+
+    await service.approveDocument(signed.json().data.declaration.id as string, adminId, undefined, undefined, { ownNameConfirmed: true });
+    for (const docType of ['owner_national_id', 'storefront_photo']) {
+      const doc = await service.submitDocument(o.userId, 'STORE', docType, await ownedVerificationFixture(app.prisma, o.userId, `own2-${docType}`), 'v1');
+      await service.approveDocument(doc.id, adminId, undefined, undefined, docType === 'owner_national_id' ? { documentNumber: `ID2${NUM}` } : {});
+    }
+    const [own, trading] = await system(() => Promise.all([o.vendorId, burgers.id].map((id) => app.prisma.vendor.findUniqueOrThrow({ where: { id } }))));
+    expect([own!.isVerified, own!.status]).toEqual([true, 'ACTIVE']);
+    expect([trading!.isVerified, trading!.status]).toEqual([false, 'PENDING_APPROVAL']);
+    // the trading-name store is not frozen by the other store's checked name
+    const rename = await call('PUT', '/api/v1/vendor/profile', other, { name: 'Best Burgers GY' });
+    expect(rename.statusCode, rename.body).toBe(200);
   });
 
   it('refuses to sign for a name that is not the owner\'s own, for a service business, and once a registration is on file', async () => {

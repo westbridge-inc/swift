@@ -1265,7 +1265,7 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // The due obligation must commit WITH the account cutoff, before it can
     // lose authentication. Verify actual transaction ordering, not a bypass.
     expect(h.db.verificationDocument.updateMany.mock.invocationCallOrder[0]).toBeLessThan(h.db.user.update.mock.invocationCallOrder[0]);
-    for (const table of ['session', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox', 'notification', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
+    for (const table of ['session', 'address', 'accountRecovery', 'livenessCheck', 'tripShareToken', 'emergencyContact', 'rideQueueEntry', 'supplyWatch', 'cart', 'cartMergeReceipt', 'verificationDecisionOutbox', 'moverRevocationOutbox', 'guardianCheckinDelivery', 'renewalSchedule', 'admin']) expect(h.db[table].deleteMany).toHaveBeenCalledOnce();
     // [REVIEW-G S4-1] No driver profile, so no own money surface to delete: every command the person staged is
     // kept in its entity's chain and de-identified, exactly once.
     expect(h.db.moneySurfaceCommand.deleteMany).not.toHaveBeenCalled();
@@ -1273,6 +1273,10 @@ describe('review corrections: deletion obligations and retry progress', () => {
     // [item 20] Push registrations go through the owner wall's one narrow erase action, for this account, once.
     const erases = (h.db.$queryRaw.mock.calls as unknown[][]).filter(([q, ...v]) => Array.isArray(q) && (q as string[]).join('?').includes('swift_owner_wall_erase_devices') && v[0] === A);
     expect(erases).toHaveLength(1);
+    // [item 20] ...and so do the person's notices (#1905's erasure, through swift_owner_wall_erase_notices), never a plain delete.
+    const noticeErases = (h.db.$queryRaw.mock.calls as unknown[][]).filter(([q, ...v]) => Array.isArray(q) && (q as string[]).join('?').includes('swift_owner_wall_erase_notices') && v[0] === A);
+    expect(noticeErases).toHaveLength(1);
+    expect(h.db.notification.deleteMany).not.toHaveBeenCalled();
     expect(storage.delete).toHaveBeenCalledExactlyOnceWith(avatar(A));
     expect(storage.getObject).toHaveBeenCalledWith(avatar(A));
     expect(h.db.encryptedObject.updateMany).not.toHaveBeenCalled();

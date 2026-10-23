@@ -1,7 +1,6 @@
 import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
-import { scanUpload } from '../../lib/malware-scan';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
@@ -12,8 +11,8 @@ import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
-import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -58,7 +57,11 @@ import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
+import { IMPORT_PHOTO_ADDRESS_NOTE, uploadOnlyPhotoField } from '../../utils/photo-address';
+import { retryStorageOrphan } from '../../lib/storage-orphans';
+import { runAsSystem } from '../../plugins/tenant-context';
+import { queueStorePhotoDeletions } from './store-photos';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -339,10 +342,12 @@ const csvRowSchema = z.object({
   imageUrl: z.string().max(2048).optional().default(''),
 });
 
+// [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] No photo column: photos are uploaded, never
+// imported (an imageUrl column in an older file is still read, and refused per row).
 const CSV_TEMPLATE = [
-  'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
-  'Groceries,Basmati Rice 5kg,"Long grain, aged",3500,RICE-5KG,bag,40,true,DELIVERY,',
-  'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT,',
+  'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment',
+  'Groceries,Basmati Rice 5kg,"Long grain, aged",3500,RICE-5KG,bag,40,true,DELIVERY',
+  'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT',
 ].join('\n');
 
 
@@ -545,7 +550,7 @@ async function requireListingAllowed(
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
-    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType, app.prisma, vendorId);
   if (verified) return;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
   if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
@@ -721,6 +726,31 @@ function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayB
   return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
 }
 
+/**
+ * [IMAGES-E2E] What PUT /profile may do with the logo and cover addresses. They are
+ * photos the store uploads (POST /profile/logo|cover), so typed text may only take
+ * one down ('' = none) or send back the value already there (a client that echoes
+ * the profile). Anything else (an outside address, another store's key, a path into
+ * another folder) is refused: it would skip the scan and the redraw. undefined =
+ * leave the field as it is.
+ */
+export async function storePhotoFieldsForWrite(
+  app: FastifyInstance,
+  vendorId: string,
+  logoUrl: string | undefined,
+  coverImageUrl: string | undefined,
+): Promise<{ logoUrl?: string | null; coverImageUrl?: string | null }> {
+  if (logoUrl === undefined && coverImageUrl === undefined) return {};
+  const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { logoUrl: true, coverImageUrl: true } });
+  const one = (sent: string | undefined, now: string | null | undefined): string | null | undefined => {
+    if (sent === undefined) return undefined;
+    if (sent.trim() === '') return null;
+    if (sent === (now ?? '')) return undefined;
+    throw new AppError(400, 'STORE_PHOTO_UPLOAD_ONLY', 'Add the store\'s logo or cover by uploading a photo');
+  };
+  return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
   // [PERF item 3] A store's order taps answer without waiting for the push to the customer's
@@ -747,6 +777,35 @@ export async function vendorRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const storage = getStorageProvider();
+  /** [IMAGES-E2E PR4] After a store photo's pointer change commits: delete each photo now. A
+   *  delete that fails stays owed and the standing retry (retryStorageOrphans) finishes it. */
+  const deleteQueuedPhotos = async (orphanIds: string[]) => {
+    if (orphanIds.length === 0) return;
+    await runAsSystem('public-photo-deletion', async () => {
+      for (const id of orphanIds) await retryStorageOrphan(app.prisma, storage, app.log, id);
+    });
+  };
+  /** A photo just kept that its row could not take (the row went meanwhile) is deleted, not left behind. */
+  const discardKeptPhoto = async (vendorId: string, url: string) => {
+    const ids = await app.prisma.$transaction((tx) => queueStorePhotoDeletions(tx, vendorId, [url])).catch(() => [] as string[]);
+    await deleteQueuedPhotos(ids);
+  };
+  /** [IMAGES-E2E PR4] A menu section's photo set (an upload) or taken down (null), under the
+   *  section's lock; the photo it replaces is queued for deletion in the same transaction. */
+  const setSectionPhoto = async (vendorId: string, id: string, url: string | null) => {
+    const { category, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+        SELECT "imageUrl" FROM "categories" WHERE "id" = ${id} AND "vendorId" = ${vendorId} AND "archivedAt" IS NULL
+        FOR UPDATE /* section-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Category', id);
+      const queued = rows[0].imageUrl !== url ? await queueStorePhotoDeletions(tx, vendorId, [rows[0].imageUrl]) : [];
+      const row = await tx.category.update({ where: { id }, data: { imageUrl: url } });
+      return { category: row, orphanIds: queued };
+    });
+    await deleteQueuedPhotos(orphanIds);
+    return category;
+  };
   const bookingService = new BookingService(app.prisma, app.io);
   const qrService = new QrService(app.prisma);
   const discovery = new DiscoveryService(app.prisma);
@@ -805,7 +864,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // never "Reopen it from Account": no such control exists (store-hold.ts).
       throw storeHoldRefusal(vendor);
     }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
@@ -1343,8 +1402,9 @@ export async function vendorRoutes(app: FastifyInstance) {
    * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
    * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
    * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
-   * `own_name_declaration` document a person reviews against the owner's ID, and marks EVERY store of this type the
-   * owner holds as trading under their own name. Owner only.
+   * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
+   * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
+   * store of the owner keeps needing its business registration. Owner only.
    */
   app.post('/onboarding/own-name', auth, async (request, reply) => {
     const access = await requireVendor(app, request, 'OWNER');
@@ -1391,8 +1451,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
     const legalName = `${user.firstName} ${user.lastName}`.trim();
     await app.prisma.$transaction(async (tx) => {
-      // Every store of this type the owner holds: one checklist serves them, so they share the basis.
-      await tx.vendor.updateMany({ where: { ownerId: vendor.ownerId, vendorType: vendor.vendorType }, data: { tradesUnderOwnName: true } });
+      // This store only: its name is the one checked, and the one the PDF and this consent row name.
+      await tx.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: true } });
       await recordConsent(tx, {
         subjectType: 'vendor_user', subjectId: userId, documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION,
         action: 'granted', surface, ip: request.ip,
@@ -1415,15 +1475,15 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /**
    * [ROLE-DOCS · owner ruling 21 Oct 2026] DELETE /onboarding/own-name — the owner uses a business name after all
-   * (or the reviewer rejected the own-name declaration): every store of this type goes back to needing a business
-   * registration. A declaration on file no longer counts for these stores (their checklist asks for the registration
+   * (or the reviewer rejected the own-name declaration): THIS store goes back to needing a business registration
+   * (per store, as POST). A declaration on file no longer counts for these stores (their checklist asks for the registration
    * again); it is never reused for a later name (POST refuses then: support decides). Owner only.
    */
   app.delete('/onboarding/own-name', auth, async (request) => {
     const access = await requireVendor(app, request, 'OWNER');
     const userId = request.user.userId;
-    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { ownerId: true, vendorType: true } });
-    await app.prisma.vendor.updateMany({ where: { ownerId: vendor.ownerId, vendorType: vendor.vendorType }, data: { tradesUnderOwnName: false } });
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { id: true, vendorType: true } });
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: false } });
     await verification.reprojectVendorActivation(userId);
     const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
     return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
@@ -1517,12 +1577,27 @@ export async function vendorRoutes(app: FastifyInstance) {
     // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
     if (body.refundRule !== undefined) requireRole(access, 'OWNER');
     const refundRule = refundRuleForWrite(body.refundRule);
+    // [IMAGES-E2E] The logo and cover are photos the store UPLOADS (POST /profile/logo|cover:
+    // scanned, redrawn without metadata, kept where the public door serves them). Typed
+    // text may only take one down ('' = none) or repeat what is already there.
+    const photoFields = await storePhotoFieldsForWrite(app, vendorId, body.logoUrl, body.coverImageUrl);
+    let photoOrphans: string[] = [];
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
     // mover is not the owner) lands in this same transaction.
     const { vendor, pinNoticeId } = await app.prisma.$transaction(async (tx) => {
       const before = pin ? await lockStorePin(tx, vendorId) : null;
+      // [IMAGES-E2E PR4] A logo or cover this save takes down is deleted, not just unlinked:
+      // read under the row's lock, queued for deletion in this transaction, deleted after.
+      const clearing = (['logoUrl', 'coverImageUrl'] as const).filter((field) => photoFields[field] === null);
+      if (clearing.length > 0) {
+        const rows = await tx.$queryRaw<Array<{ logoUrl: string | null; coverImageUrl: string | null }>>`
+          SELECT "logoUrl", "coverImageUrl" FROM "vendors" WHERE "id" = ${vendorId}
+          FOR UPDATE /* store-photo-authority */
+        `;
+        photoOrphans = await queueStorePhotoDeletions(tx, vendorId, clearing.map((field) => rows[0]?.[field]));
+      }
       const updated = await tx.vendor.update({
         where: { id: vendorId },
         data: {
@@ -1536,8 +1611,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.region !== undefined && { region: body.region }),
           ...(body.latitude !== undefined && { latitude: body.latitude }),
           ...(body.longitude !== undefined && { longitude: body.longitude }),
-          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(photoFields.logoUrl !== undefined && { logoUrl: photoFields.logoUrl }),
+          ...(photoFields.coverImageUrl !== undefined && { coverImageUrl: photoFields.coverImageUrl }),
           ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
           ...(body.tags !== undefined && { tags: body.tags }),
           ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
@@ -1558,6 +1633,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     // The notice committed with the move; fanning it out afterwards cannot undo either.
     if (pinNoticeId) await notifications.publishPersisted(pinNoticeId);
+    await deleteQueuedPhotos(photoOrphans);
 
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });
@@ -1732,7 +1808,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // first (this re-read sees the loss and refuses) or this ON write commits
     // first (they simply win afterward).
     const verified = vendor.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED',
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
@@ -1763,7 +1839,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // A discovered stale-true is healed post-rollback (a write inside
       // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx, vendorId);
       if (!verifiedOk) {
         if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
@@ -1804,7 +1880,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           });
           if (!still.isVerified) return;
           const nowVerified = await verification.isRoleVerified(
-            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx, vendorId);
           if (!nowVerified) {
             await tx.vendor.updateMany({
               where: { id: vendorId, isVerified: true },
@@ -1982,7 +2058,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
       ? order.items[0]?.itemId ?? null
       : null;
-    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
+    // [O-3 · owner 22 Oct 2026] Accept IS the start of preparation (STORE_ACCEPT_PATH): one tap,
+    // PENDING -> ACCEPTED -> PREPARING in this one commit, one push to the customer. A booking or an
+    // MMG order still waiting for "Paid by MMG" stops at ACCEPTED (preparationMayStart).
+    const [acceptedStatus, preparingStatus] = STORE_ACCEPT_PATH;
+    const updated = await orderService.updateStatus(order.id, acceptedStatus, request.user.userId, 'Accepted by vendor', {
+      continueTo: { target: preparingStatus, note: 'Preparing: the store accepted the order', when: preparationMayStart },
       withinTransaction: async (tx, lockedOrder) => {
         // [Q12 · AX289 F1] An order whose hold lapsed before the release sweep
         // reached it: accepting takes it out of the sweep's reach, so the
@@ -2132,6 +2213,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (order.status === 'ACCEPTED') {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
+    }
+    // [O-3] Accept already started preparation. Store builds 9/11/12 (and a stale web tab) still
+    // show "Start preparing" after an accept: their tap is a 200 no-op that answers with the order
+    // as it is — never an error, never a second status row or push. A closed order still refuses.
+    if (order.preparingAt && !isTerminalOrderStatus(order.status)) {
+      return { success: true, data: order };
     }
     if (COURIER_ACTIVE.includes(order.status)) {
       if (order.preparingAt) return { success: true, data: order }; // double-tap safe
@@ -2512,7 +2599,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
-    const updated = capture.order;
+    // [O-3 · STORE_ACCEPT_PATH] An MMG order the store accepted before the money arrived stopped at
+    // ACCEPTED (payment-first). "Paid by MMG" is where its preparation starts: the rest of the
+    // store's one-tap accept, never a separate "Start preparing". After the claim committed, and on
+    // its own: a booking, a disputed claim (the seam re-decides payment-first on the locked row) or
+    // an order that moved on first is left as it is, and the claim stands either way.
+    const startPreparation = capture.order.status === STORE_ACCEPT_PATH[0] && preparationMayStart(capture.order);
+    const prepared = startPreparation
+      ? await orderService.updateStatus(order.id, STORE_ACCEPT_PATH[1], request.user.userId, 'Preparing: the store confirmed the MMG payment', {
+        allowedFrom: [STORE_ACCEPT_PATH[0]],
+      }).catch((err: unknown) => {
+        request.log.warn({ err, orderId: order.id }, '[O-3] preparation did not start with the MMG payment; the store can still start it');
+        return null;
+      })
+      : null;
+    const updated = prepared ?? capture.order;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
@@ -2745,7 +2846,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post('/categories', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createCategorySchema.parse(request.body);
-    const category = await menu.createCategory(vendorId, body);
+    // [IMAGES-E2E PR4] A section's photo is uploaded (POST /categories/:id/image), never typed.
+    uploadOnlyPhotoField(body.imageUrl, null, 'the section\'s photo');
+    const category = await menu.createCategory(vendorId, { ...body, imageUrl: undefined });
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
@@ -2753,10 +2856,40 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /categories/:id — Update a category */
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const body = updateCategorySchema.parse(request.body);
-    const category = await menu.updateCategory(vendorId, request.params.id, body);
+    const { imageUrl, ...fields } = updateCategorySchema.parse(request.body);
+    // [IMAGES-E2E PR4] Typed text may only take the section's photo down ('') or repeat it.
+    const current = imageUrl === undefined ? null
+      : await app.prisma.category.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null }, select: { imageUrl: true } });
+    if (imageUrl !== undefined && !current) throw new NotFoundError('Category', request.params.id);
+    const photo = uploadOnlyPhotoField(imageUrl, current?.imageUrl, 'the section\'s photo');
+    let category = await menu.updateCategory(vendorId, request.params.id, fields);
+    if (photo === null) category = await setSectionPhoto(vendorId, request.params.id, null);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
+  });
+
+  /** [IMAGES-E2E PR4] POST /categories/:id/image — the section's own photo (store managers):
+   *  a photo whose bytes say so, scanned, redrawn without metadata (storeOwnPhoto), kept in the
+   *  store's photo folder, which the public door serves while the section is live. */
+  app.post<{ Params: IdParam }>('/categories/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const section = await app.prisma.category.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null }, select: { id: true } });
+    if (!section) throw new NotFoundError('Category', request.params.id);
+    const url = await storeOwnPhoto(request, vendorId);
+    const category = await setSectionPhoto(vendorId, section.id, url).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      throw err;
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: { id: category.id, name: category.name, imageUrl: category.imageUrl } };
+  });
+
+  /** [IMAGES-E2E PR4] DELETE /categories/:id/image — take the section's photo down (deleted from storage). */
+  app.delete<{ Params: IdParam }>('/categories/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const category = await setSectionPhoto(vendorId, request.params.id, null);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: { id: category.id, name: category.name, imageUrl: category.imageUrl } };
   });
 
   /** DELETE /categories/:id — Delete a category: [owner 11 Oct] it and its
@@ -2832,6 +2965,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const body = createItemSchema.parse(request.body);
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] An item's photo is uploaded (POST /items/:id/image), never typed.
+    uploadOnlyPhotoField(body.imageUrl, null, 'the item\'s photo');
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
@@ -2858,7 +2993,6 @@ export async function vendorRoutes(app: FastifyInstance) {
         categoryId: body.categoryId,
         name: body.name.trim(),
         description: body.description?.trim(),
-        imageUrl: body.imageUrl,
         basePrice: body.basePrice,
         sku: body.sku,
         unit: body.unit,
@@ -3146,6 +3280,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const failures: Array<{ row: number; errors: string[] }> = [];
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] A row that names a photo address is imported
+    // WITHOUT it (photos are uploaded), and the answer says so for that row.
+    const notes: Array<{ row: number; note: string }> = [];
     const valid: Array<{ rowNumber: number; data: z.infer<typeof csvRowSchema> }> = [];
 
     rows.forEach((raw, index) => {
@@ -3199,13 +3336,13 @@ export async function vendorRoutes(app: FastifyInstance) {
             stockQuantity: data.stockQuantity === '' ? undefined : data.stockQuantity,
             isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
             fulfillment: data.fulfillment === '' ? 'DELIVERY' : data.fulfillment,
-            imageUrl: data.imageUrl || undefined,
             dietaryTags: [],
             allergens: [],
           },
         });
         importedIds.push({ id: created.id, row: rowNumber, name: data.name });
         imported += 1;
+        if (data.imageUrl.trim() !== '') notes.push({ row: rowNumber, note: IMPORT_PHOTO_ADDRESS_NOTE });
       } catch {
         failures.push({ row: rowNumber, errors: ['Database rejected this row'] });
       }
@@ -3228,9 +3365,70 @@ export async function vendorRoutes(app: FastifyInstance) {
         failedCount: failures.length,
         // Cap the detail list so a fully-broken huge file stays readable
         failures: failures.slice(0, 100),
+        notes: notes.slice(0, 100),
+        notesCount: notes.length,
       },
     };
   });
+
+  /**
+   * [IMAGES-E2E] The one way a store's own photo (menu item, logo, cover) is kept:
+   * a JPEG/PNG/WebP whose bytes say so, scanned, then DRAWN AGAIN with the public
+   * door's own drawing (utils/public-store-photos renderStorePhoto: upright, sRGB,
+   * no metadata at all, EXIF/GPS/XMP/ICC included, long edge at most 1600 px), and
+   * kept in the store's photo folder `items/<store>/`, which is the only folder the
+   * public door serves. The storage seam strips again on the way in.
+   */
+  async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
+    return keepPublicPhoto(request, storage, `items/${vendorId}`, 'store-media');
+  }
+
+  /** [IMAGES-E2E PR4] The logo or cover set (an upload) or taken down (null) under the store row's
+   *  lock; the photo it replaces is queued for deletion in the same transaction, deleted after. */
+  const setStorePhoto = async (vendorId: string, field: 'logoUrl' | 'coverImageUrl', url: string | null) => {
+    const { vendor, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ logoUrl: string | null; coverImageUrl: string | null }>>`
+        SELECT "logoUrl", "coverImageUrl" FROM "vendors" WHERE "id" = ${vendorId}
+        FOR UPDATE /* store-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Vendor', vendorId);
+      const before = rows[0][field];
+      const queued = before !== url ? await queueStorePhotoDeletions(tx, vendorId, [before]) : [];
+      const row = await tx.vendor.update({
+        where: { id: vendorId },
+        data: { [field]: url },
+        select: { id: true, logoUrl: true, coverImageUrl: true },
+      });
+      return { vendor: row, orphanIds: queued };
+    });
+    await deleteQueuedPhotos(orphanIds);
+    return vendor;
+  };
+
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers).
+   *  [#1964 retry census] Registered with literal paths, so the census can read every route. */
+  const uploadStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const url = await storeOwnPhoto(request, vendorId);
+    const vendor = await setStorePhoto(vendorId, field, url).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      throw err;
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.post('/profile/logo', auth, uploadStorePhoto('logoUrl'));
+  app.post('/profile/cover', auth, uploadStorePhoto('coverImageUrl'));
+
+  /** DELETE /profile/logo, /profile/cover — take it down (deleted from storage after the pointer goes). */
+  const removeStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const vendor = await setStorePhoto(vendorId, field, null);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.delete('/profile/logo', auth, removeStorePhoto('logoUrl'));
+  app.delete('/profile/cover', auth, removeStorePhoto('coverImageUrl'));
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
@@ -3238,30 +3436,28 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
-      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
-    }
+    const url = await storeOwnPhoto(request, vendorId);
 
-    const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
-      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    }
-
-    await scanUpload(buffer, { surface: 'store-media', log: request.log });
-    const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `items/${vendorId}`,
+    // [IMAGES-E2E PR4] Under the item's lock; the photo it replaces is queued for deletion in the
+    // same transaction and deleted after (a photo the row could not take is deleted too).
+    const { item, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+        SELECT "imageUrl" FROM "items" WHERE "id" = ${request.params.id} AND "vendorId" = ${vendorId} AND "archivedAt" IS NULL
+        FOR UPDATE /* item-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Item', request.params.id);
+      const queued = await queueStorePhotoDeletions(tx, vendorId, [rows[0].imageUrl]);
+      const row = await tx.item.update({
+        where: { id: request.params.id, archivedAt: null },
+        data: { imageUrl: url },
+        select: { id: true, name: true, imageUrl: true },
+      });
+      return { item: row, orphanIds: queued };
+    }).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      return goneIfArchived(request.params.id)(err);
     });
-
-    const item = await app.prisma.item.update({
-      where: { id: request.params.id, archivedAt: null },
-      data: { imageUrl: url },
-      select: { id: true, name: true, imageUrl: true },
-    }).catch(goneIfArchived(request.params.id));
+    await deleteQueuedPhotos(orphanIds);
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -3278,6 +3474,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     await assertNotBanned(app.prisma, existing.id, { wordBanEditable: true });
 
     const body = updateItemSchema.parse(request.body);
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Typed text may only take the item's photo down ('') or repeat it.
+    const photo = uploadOnlyPhotoField(body.imageUrl, existing.imageUrl, 'the item\'s photo');
+    let photoOrphans: string[] = [];
     if (body.name !== undefined) assertNotBannedGoods([body.name]);
 
     // If moving to a different category, verify ownership
@@ -3312,13 +3511,20 @@ export async function vendorRoutes(app: FastifyInstance) {
     // transaction: "Spare Rum" + {isAvailable: true} is refused (nothing of the request is written), "Spare Rum"
     // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
     const item = await app.prisma.$transaction(async (tx) => {
+      if (photo === null) {
+        const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+          SELECT "imageUrl" FROM "items" WHERE "id" = ${request.params.id} AND "archivedAt" IS NULL
+          FOR UPDATE /* item-photo-authority */
+        `;
+        photoOrphans = await queueStorePhotoDeletions(tx, vendorId, [rows[0]?.imageUrl]);
+      }
       const updated = await tx.item.update({
         where: { id: request.params.id, archivedAt: null },
         data: {
           ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
           ...(body.name !== undefined && { name: body.name.trim() }),
           ...(body.description !== undefined && { description: body.description?.trim() }),
-          ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
+          ...(photo === null && { imageUrl: null }),
           ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
           ...(body.sku !== undefined && { sku: body.sku }),
           ...(body.unit !== undefined && { unit: body.unit }),
@@ -3339,6 +3545,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
       return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
     }).catch(goneIfArchived(request.params.id));
+    await deleteQueuedPhotos(photoOrphans);
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
     //

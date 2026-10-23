@@ -175,7 +175,7 @@ export class RideRequestOutcomeUnknownError extends AppError {
 
 /** The server's fare for this itinerary and tier is not the one the passenger
  *  was shown: nothing is booked, and the answer names the fare now. */
-function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
+export function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
   return new AppError(409, 'FARE_CHANGED',
     'The fare for this trip has changed. Check the new fare, then book again.',
     { expectedFare: expectedFare ?? null, fare, rideClass, currencyCode });
@@ -197,7 +197,13 @@ type GatedUser = {
 export async function assertRideGates(
   app: RideRequestApp,
   userId: string,
-  opts: { dispatch?: DispatchService; pickup?: { lat: number; lng: number } } = {},
+  opts: {
+    dispatch?: DispatchService;
+    pickup?: { lat: number; lng: number };
+    /** [REVIEW-G #2022 S4-3] What the requested ride needs of a car (class,
+     *  party, stops): the pre-check counts only cars dispatch could offer it to. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean };
+  } = {},
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
@@ -231,7 +237,7 @@ export async function assertRideGates(
   // drivers come online mid-search).
   if (opts.dispatch && opts.pickup
     && process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId);
+    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId, null, user.id, opts.ride ?? null);
     if (supply.level === 'NONE') {
       throw new AppError(
         409,
@@ -300,7 +306,9 @@ export async function createRideRequest(
   const stops = body.stops ?? [];
   if (stops.length === 0) assertRoadTripInMarket(body);
   const user = await assertRideGates(app, userId,
-    availabilityPreCheck ? { dispatch, pickup: body.pickup } : {});
+    availabilityPreCheck
+      ? { dispatch, pickup: body.pickup, ride: { rideClass: body.rideClass, passengerCount: body.passengerCount, taxiStops: stops.length > 0 } }
+      : {});
   if (expectedTenantId && user.tenantId !== expectedTenantId) {
     throw new AppError(
       409,

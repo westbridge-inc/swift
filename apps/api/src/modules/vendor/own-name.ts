@@ -12,7 +12,7 @@
  *          except in the case of a woman in consequence of marriage;"
  *   s.2  "'initials' includes any recognised abbreviation of a forename".
  * So ONE person whose store's name is their true surname — with nothing added but their true first names or
- * their initials — and who has not changed their name (other than by marriage) need not register. Anything
+ * their initials — and who has not changed their name (a woman's change on marriage excepted, s.3(c)) need not register. Anything
  * else (a trading name, a partnership, a company) keeps the business registration requirement. Penalty for a
  * business that should have registered and did not: s.9 (GYD 1,000 a day, research D7).
  *
@@ -27,8 +27,10 @@
  */
 import PDFDocument from 'pdfkit';
 import type { ConsentDocumentType } from '../legal/consent.service';
+import { OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 
-export const OWN_NAME_CONSENT_TYPE: ConsentDocumentType = 'own_name_declaration';
+/** The ledger row and the filed document carry the registry's one code (DOC-INV-2: no literal outside the registry). */
+export const OWN_NAME_CONSENT_TYPE: ConsentDocumentType = OWN_NAME_DOC_TYPE;
 export const OWN_NAME_DECLARATION_VERSION = 'v1';
 
 /** The exact words. A change is a new version — a version is a promise about specific words. */
@@ -37,7 +39,7 @@ export const OWN_NAME_DECLARATION_V1 = `I TRADE UNDER MY OWN NAME (v1)
 I declare that:
 1. I run this store myself, as one person (not a partnership or a company).
 2. The store's name is my true surname, with nothing added except my true first names or their initials.
-3. I have not changed my name, other than by marriage.
+3. I have not changed my name, except where I am a woman whose name changed because of marriage.
 4. Under the Business Names (Registration) Act, Cap. 90:05, section 3, I therefore do not need to register a business name.
 5. If I trade under any other name, I will register it with the Deeds and Commercial Registries Authority (DCRA) and upload the certificate to Swift before I use it.`;
 

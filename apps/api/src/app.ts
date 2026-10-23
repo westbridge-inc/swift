@@ -54,6 +54,7 @@ import { asFastifyTrustProxy } from './config/trust-proxy';
 import { isDevelopment, isProduction } from './utils/runtime-mode';
 import { getMapsProvider } from './providers/maps/maps-provider';
 import { createRoutingProbe } from './providers/maps/routing-probe';
+import { getPlacesHealth, placesProviderName } from './providers/places/places-health';
 
 
 // Process start ≈ API boot. Grace-windows the scheduler "never booted" page so a
@@ -111,6 +112,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   });
   const runtimeReadiness: RuntimeReadinessState = {
     checkRouting,
+    // [PLACES-LOUD] The last real address-search call's outcome: reported, never a failure, no Google call.
+    checkPlaces: () => getPlacesHealth().readiness(placesProviderName()),
     checkQueues: () => false,
     checkConsumers: () => false,
     checkWorker: async () => {
@@ -264,12 +267,21 @@ export async function buildApp(options: BuildAppOptions = {}) {
       return { status, timestamp: new Date().toISOString() };
     }
     const { EXHAUST_CAP, REDISPATCH_DELAY_MS } = await import('./modules/dispatch/dispatch.service');
+    // [Row 312] The upload malware scanner, detail only: 'off' (dark), 'ok', or 'down' (every upload is
+    // refused 503 until it answers; the worker's watch pages ops). It never turns the API's status
+    // degraded: everything but uploads still works, and the probes must not take the API down with it.
+    const { malwareScannerStatus } = await import('./lib/malware-scan');
+    const malwareScanner = (await malwareScannerStatus(process.env, { timeoutMs: 2_000 })).state;
     return {
       status,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       checks,
+      malwareScanner,
       routing,
+      // [PLACES-LOUD] Address search: last known status and the last failure's class and
+      // Google status words (never a key or a query). Detail-gated like the rest.
+      places: getPlacesHealth().detail(placesProviderName()),
       // [F-028-17] THIS process's effective dispatch tuning. The baselines
       // derive their wait math from these numbers, and a baseline shell can
       // carry different env than the server it drives — a cap-3 shell judged

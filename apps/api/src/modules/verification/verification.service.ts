@@ -16,7 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -43,6 +43,7 @@ import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope'
 import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type CustomerIdHoldReason } from './customer-id';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -53,6 +54,8 @@ import {
   reconcileProviderVerifications,
   refreshProviderVerification,
 } from '../services/services.service';
+import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -642,10 +645,11 @@ export class VerificationService {
 
   /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
   private async pageBreakerOnce(profileCode: string, rate: number): Promise<void> {
-    const recent = await this.prisma.notification.findFirst({
+    // [item 20] Any admin's page, read from whoever's extraction tripped the breaker: the named capability under the owner wall.
+    const recent = await ownerWallSystem('verification:breaker-page-once', () => this.prisma.notification.findFirst({
       where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, createdAt: { gt: new Date(Date.now() - 6 * 3_600_000) }, body: { contains: profileCode } },
       select: { id: true },
-    });
+    }));
     if (recent) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: null,
@@ -750,7 +754,9 @@ export class VerificationService {
     if (roleKey === 'MOVER') {
       checklist = await this.moverSubmittableChecklist(user.countryCode, userId);
     } else {
-      const required = await this.checklistFor(userId, user.countryCode, roleKey);
+      const required = roleKey === 'RESTAURANT' || roleKey === 'SUPERMARKET' || roleKey === 'STORE'
+        ? await this.storeSubmittableChecklist(userId, user.countryCode, roleKey)
+        : await this.checklistFor(userId, user.countryCode, roleKey);
       checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
     }
     if (!checklist.includes(docType)) {
@@ -931,7 +937,8 @@ export class VerificationService {
    * (revokeDocument → back to L1). No face match, and no selfie at all: [ROLE-DOCS · owner 21 Oct
    * 2026] a customer never gives a photo (owner 16 Oct), so the selfie store build 9 still sends is
    * dropped by the route before it reaches this method — never resolved, read, stored or linked
-   * (its upload stays an unclaimed object, erased with the account). A document processor that reads
+   * (the route erases that upload right after the intake when it is the caller's own: REVIEW-F S3-1,
+   * user/upload-erasure discardUnusedCustomerSelfie). A document processor that reads
    * documents can still reject (an auto-reject stands) or refer the document to a person.
    */
   async submitIdentity(
@@ -1215,10 +1222,10 @@ export class VerificationService {
           documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
         } });
       }
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
         data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1284,10 +1291,10 @@ export class VerificationService {
     }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
       // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
         data: { kind: 'verification_rejected' },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1850,6 +1857,7 @@ export class VerificationService {
     roleKey: ChecklistRole,
     vehicleHint?: VehicleType,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
@@ -1865,7 +1873,7 @@ export class VerificationService {
     }
     // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
     // unregistered requirement set; everyone else the standard one.
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db), db);
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db, vendorId), db);
   }
 
   /**
@@ -1894,15 +1902,30 @@ export class VerificationService {
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
-  /** UNREGISTERED when any store the owner holds is on that tier; [ROLE-DOCS · owner 21 Oct 2026] OWN_NAME when every
-   *  store of this type the owner holds trades under the owner's own name (a store under any other name keeps the
-   *  business registration: one registration covers them all); otherwise undefined (standard). */
-  private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient): Promise<string | undefined> {
-    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { tier: true, vendorType: true, tradesUnderOwnName: true } } } });
+  /** UNREGISTERED when any store the owner holds is on that tier. [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-G #2046 S2-1,
+   *  COORD 23 Oct: PER STORE] OWN_NAME is a property of ONE store: a store's own gate (`vendorId`) reads that store's
+   *  flag, so a trading-name store of the same type keeps needing its business registration (BNA s.3(b)). Without a
+   *  store (the owner's Documents view) it is OWN_NAME only when every store of the type trades under the owner's own
+   *  name — while any one does not, the registration is asked for. Otherwise undefined (standard). */
+  private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient, vendorId?: string): Promise<string | undefined> {
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, tier: true, vendorType: true, tradesUnderOwnName: true } } } });
     if (!owner) return undefined;
     if (owner.vendors.some((v) => v.tier === 'UNREGISTERED')) return 'UNREGISTERED';
+    if (vendorId !== undefined) {
+      const store = owner.vendors.find((v) => v.id === vendorId);
+      return store && store.vendorType === roleKey && store.tradesUnderOwnName ? OWN_NAME_TIER : undefined;
+    }
     const ofType = owner.vendors.filter((v) => v.vendorType === roleKey);
     return ofType.length > 0 && ofType.every((v) => v.tradesUnderOwnName) ? OWN_NAME_TIER : undefined;
+  }
+
+  /** [ROLE-DOCS · per store] What a store owner may SUBMIT for the role: the owner-level list plus each store's own
+   *  list (an own-name store's declaration while a trading-name store of the type still asks for the registration). */
+  private async storeSubmittableChecklist(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
+    const lists = [await this.checklistFor(userId, countryCode, roleKey)];
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, vendorType: true } } } });
+    for (const v of (owner?.vendors ?? []).filter((x) => x.vendorType === roleKey)) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
+    return [...new Set(lists.flat())];
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
@@ -2060,11 +2083,13 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<boolean> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    // [ROLE-DOCS · per store] a store's gate passes its id: its own name basis decides its list
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.isVerifiedForList(userId, checklist, db);
   }
 
@@ -2118,10 +2143,11 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<Date | null> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.evidenceValidUntilForList(userId, checklist, db);
   }
 
@@ -2167,12 +2193,12 @@ export class VerificationService {
   async activationChecklist(
     userId: string,
     roleKey: ChecklistRole,
-    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient } = {},
+    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient; vendorId?: string } = {},
   ): Promise<ActivationChecklist> {
     const db = options.db ?? this.prisma;
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return { checklist: [], items: [], complete: false };
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db, options.vendorId);
     const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
     const approved = new Set(evidence.map((e) => e.docType));
     const approvedUntil = new Map<string, string | null>();
@@ -2225,7 +2251,7 @@ export class VerificationService {
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
     const ownerUserId = vendor.owner.userId;
-    const checklist = await this.activationChecklist(ownerUserId, role, { db });
+    const checklist = await this.activationChecklist(ownerUserId, role, { db, vendorId });
     const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
     // The projection's own compile, with the same payer and tenant authority it names — and only
     // when the gate is engaged, as in the projection: a disengaged gate decides nothing, so no
@@ -2261,8 +2287,11 @@ export class VerificationService {
         throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
       }
       await this.projectVendorActivation(tx, userId, { vendorId });
-      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
-      if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, suspensionSource: true, isVerified: true } });
+      // [#1541] Live under billing's hold (documents approved, weekly fee unpaid: holdActivationForUnpaidFee) is
+      // this activation too; the payment that clears the fee opens the store.
+      const heldForFee = after.status === 'SUSPENDED' && after.suspensionSource === 'BILLING' && after.isVerified;
+      if (after.status !== 'ACTIVE' && !heldForFee) throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
       await onActivated?.(tx);
     });
   }
@@ -2300,6 +2329,8 @@ export class VerificationService {
       if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
+    // [#1541] Settlement's payer -> subscriptions locks before any fee read or store write (billing-access.ts).
+    await lockVendorActivationBilling(db, userId);
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
       include: {
@@ -2319,13 +2350,13 @@ export class VerificationService {
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      const notice = await db.notification.create({ data: {
+      const notice = await insertNoticeFor(db, {
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your store is now a registered seller',
         body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
         data: { kind: 'vendor_tier_promoted', vendorId },
-      } });
+      });
       this.projectionNotices.get(db)?.push(notice.id);
     });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
@@ -2334,7 +2365,7 @@ export class VerificationService {
     const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
     const disclosureGate = country ? await disclosureGateEngaged(db, country.countryCode) : false;
     for (const vendor of owner.vendors) {
-      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
+      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
       // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
@@ -2351,11 +2382,14 @@ export class VerificationService {
         if (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') {
           await this.subscriptions.startTrialForVendor(vendor.id, db);
         }
-        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
+        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
         await db.vendor.update({
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // [#1541 · #1516 review S4] A store whose weekly fee billing holds goes live UNDER that hold
+        // (billing-access.ts), never open while its fee is unpaid; the promotion below then finds it not pending.
+        if (await holdActivationForUnpaidFee(db, vendor.id)) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
           data: { status: 'ACTIVE' },
@@ -2382,19 +2416,43 @@ export class VerificationService {
     userId: string,
     vendor: { id: string; name: string },
   ): Promise<void> {
-    const already = await db.notification.findFirst({
-      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
-      select: { id: true },
-    });
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const already = ownerRlsBindEnabled()
+      ? await publicPhoneAsked(db, userId, vendor.id)
+      : await db.notification.findFirst({
+        where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+        select: { id: true },
+      });
     if (already) return;
-    const notice = await db.notification.create({ data: {
+    const notice = await insertNoticeFor(db, {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Add the number customers can call',
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
-    } });
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [#1541] The one notice for a store that went live under billing's hold: its documents are approved, and
+   *  paying the weekly fee opens it. Sent on the hold's own edge (PENDING_APPROVAL → SUSPENDED, once per
+   *  activation), whichever path ran the projection — the console's approve sends none of its own for it.
+   *  Delivered after the projection commits. */
+  private async tellOwnerFeeHoldsGoLive(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    // [item 20] The owner's inbox, written inside the projection transaction (often an admin's or a job's): with the
+    // wall on, an INSERT without RETURNING through the one notice helper (notice_write admits it; a read-back would not).
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Documents approved',
+      body: `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`,
+      data: { vendorId: vendor.id },
+    });
     this.projectionNotices.get(db)?.push(notice.id);
   }
 
@@ -2911,6 +2969,9 @@ export class VerificationService {
     for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);
     const lastActivityAt = new Date(last);
     if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
+    // [REVIEW-M S4-3 · COORD] An open fraud, safety, compliance or dispute case keeps the documents, like a hold:
+    // no notice (it would not be true), nothing deleted, until it closes.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     // The application's documents: partner documents of a role never verified, not held, not an AML record.
     const verified = await everVerifiedRoles(this.prisma, userId, (roleKey) => this.everCompletedChecklist(userId, roleKey));
     const config = await this.countryConfig.getByCode(user.countryCode);
@@ -2932,7 +2993,9 @@ export class VerificationService {
       orderBy: { createdAt: 'asc' }, select: { createdAt: true },
     });
     if (!notice) {
-      await this.notifications.send({
+      // [REVIEW-M S4-1] The in-app notice is the inbox row; whether a push also reached a phone is recorded with it,
+      // never assumed.
+      const reach = await this.notifications.sendReach({
         userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
         // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
         ...(candidates.some((d) => d.role === 'VENDOR_OWNER') ? { audience: 'business' as const }
@@ -2940,13 +3003,19 @@ export class VerificationService {
         data: { kind: 'verification_application_abandoned' },
         dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
       });
+      // [REVIEW-G S3-2] sendReach answers a failed inbox write with no id (it never throws, for its other callers). No
+      // inbox row = no notice: throw, so no notice record starts the purge clock; the person is counted as failed and
+      // noticed on the next run.
+      if (!reach.id) throw new Error('abandoned-application notice not written to the inbox');
       await this.prisma.auditLog.create({ data: {
         userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
-        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length },
+        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length, notificationId: reach.id, pushed: reach.pushed },
       } });
       return { noticed: 1, purged: 0 };
     }
     if (now.getTime() < abandonPurgeDueAt(lastActivityAt, notice.createdAt).getTime()) return none;
+    // [COORD 18:5xZ] Checked AGAIN immediately before the purge: a case opened after the notice still keeps everything.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     let purged = 0;
     for (const doc of candidates) {
       const outcome = await this.purgeDocumentNow(doc, ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, now, still: stillAbandoned(lastActivityAt) });
@@ -3296,7 +3365,7 @@ export class VerificationService {
     if (!owner) return;
 
     for (const vendor of owner.vendors) {
-      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole);
+      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, this.prisma, vendor.id);
       if (!stillVerified) {
         await this.prisma.vendor.update({
           where: { id: vendor.id },

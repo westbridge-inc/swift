@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { partnerPriceList } from '../country/partner-pricing';
+import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -162,7 +163,7 @@ export async function authRoutes(app: FastifyInstance) {
   /** [Legal research G2 · R26] POST /legal-acceptance { version, accept: true } — the fresh tick, recorded in the
    *  consent ledger for the Terms, the Privacy Policy and the person's partner agreements at the served version. */
   app.post('/legal-acceptance', { preHandler: [app.authenticate] }, async (request) => {
-    // [ROLE-DOCS · COORD ruling 21 Oct 2026] a same-day second stamp carries a suffix (2026-10-21.1)
+    // [ROLE-DOCS · COORD rulings 21 Oct 2026 + 23 Oct] a same-day second stamp carries a suffix (2026-10-22.1)
     const body = z.object({ version: z.string().regex(/^\d{4}-\d{2}-\d{2}(\.\d{1,3})?$/), accept: z.literal(true) }).parse(request.body);
     if (body.version !== LEGAL_VERSION) {
       throw new AppError(409, 'LEGAL_VERSION_CHANGED', 'The Terms changed again while you were reading. Please read the new version.', { currentVersion: LEGAL_VERSION });
@@ -517,6 +518,9 @@ export async function authRoutes(app: FastifyInstance) {
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
+        // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
+        // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
+        feeTerms: weeklyFeeTerms(),
       },
     });
   });

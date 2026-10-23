@@ -114,6 +114,8 @@ export interface StorefrontDetail extends StorefrontSummary {
   categories: Array<{
     id: string;
     name: string;
+    /** [IMAGES-E2E PR5] The section's own photo (a kept one; absent from an older API). */
+    imageUrl?: string | null;
     items: Array<{
       id: string;
       name: string;
