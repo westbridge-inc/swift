@@ -17,3 +17,9 @@ I declare that:
 export function ownNameStoreType(vendorType: string): boolean {
   return vendorType === 'RESTAURANT' || vendorType === 'SUPERMARKET' || vendorType === 'STORE';
 }
+
+/** [ROLE-DOCS · REVIEW-F #2046 S4-1] The declaration is per store: the line that names the store it is signed for. */
+export function ownNameSigningFor(storeName: string | null | undefined): string | null {
+  const name = storeName?.trim();
+  return name ? `You sign this for “${name}” only.` : null;
+}

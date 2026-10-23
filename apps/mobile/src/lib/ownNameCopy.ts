@@ -27,3 +27,9 @@ export const OWN_NAME_TICK = 'I have read the declaration above and I sign it.';
 export function ownNameApplies(vendorType: string): boolean {
   return vendorType === 'RESTAURANT' || vendorType === 'SUPERMARKET' || vendorType === 'STORE';
 }
+
+/** [ROLE-DOCS · REVIEW-F #2046 S4-1] The declaration is per store: the line that names the store it is signed for. */
+export function ownNameSigningFor(storeName: string | null | undefined): string | null {
+  const name = storeName?.trim();
+  return name ? `You sign this for “${name}” only.` : null;
+}

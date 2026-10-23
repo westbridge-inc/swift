@@ -30,9 +30,12 @@ export function DocumentChecklist({
   isLoading,
   isError,
   onRetry,
+  storeName,
 }: {
   role: string;
   status: any;
+  /** [ROLE-DOCS · per store] the selected store's name, for the own-name card */
+  storeName?: string | null;
   isLoading?: boolean;
   isError?: boolean;
   onRetry?: () => void;
@@ -162,7 +165,7 @@ export function DocumentChecklist({
           return !doc || doc.status === 'REJECTED' ? (
             <View key={docType}>
               {doc ? <T variant="caption" tone="error">{doc.reviewNote ?? 'Your own-name declaration was not accepted.'}</T> : null}
-              <OwnNameCard role={role} mode="sign" />
+              <OwnNameCard role={role} mode="sign" storeName={storeName} />
             </View>
           ) : (
             <View key={docType} style={{ paddingVertical: space.sm }}>
@@ -189,7 +192,7 @@ export function DocumentChecklist({
       })}
       {ownNameApplies(role) && checklist.includes(OWN_NAME_DOC) ? <OwnNameCard role={role} mode="drop" /> : null}
       {ownNameApplies(role) && checklist.includes('business_registration') && latestDoc('business_registration')?.status !== 'APPROVED'
-        ? <OwnNameCard role={role} mode="offer" /> : null}
+        ? <OwnNameCard role={role} mode="offer" storeName={storeName} /> : null}
       {optional.length > 0 ? (
         <View style={{ marginTop: space.md }}>
           <T variant="heading" style={{ marginBottom: space.xs }}>

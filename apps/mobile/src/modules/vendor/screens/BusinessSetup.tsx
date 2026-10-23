@@ -1,5 +1,5 @@
 /** @jsxImportSource react */
-import { BUSINESS_NAME_CHOICE, OWN_NAME_CHOICE, OWN_NAME_DECLARATION_V1, OWN_NAME_HINT, OWN_NAME_QUESTION, OWN_NAME_TICK, ownNameApplies } from '../../../lib/ownNameCopy';
+import { BUSINESS_NAME_CHOICE, OWN_NAME_CHOICE, OWN_NAME_DECLARATION_V1, OWN_NAME_HINT, OWN_NAME_QUESTION, OWN_NAME_TICK, ownNameApplies, ownNameSigningFor } from '../../../lib/ownNameCopy';
 import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
@@ -227,6 +227,7 @@ export function BusinessSetup() {
             {nameBasis === 'OWN_NAME' ? (
               <>
                 <T variant="caption" tone="muted">{OWN_NAME_HINT}</T>
+                {ownNameSigningFor(form.name) ? <T variant="caption" weight="bold">{ownNameSigningFor(form.name)}</T> : null}
                 <T variant="caption">{OWN_NAME_DECLARATION_V1}</T>
                 <BrandCheckbox checked={ownNameTick} onToggle={() => edit((draft) => ({ ownNameTick: !draft.ownNameTick }))} label={OWN_NAME_TICK} />
               </>
@@ -382,7 +383,7 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
             <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
           </>
         ) : null}
-        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
+        <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} storeName={store.name} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
         <PillButton label="Preview your dashboard" variant="soft" style={{ marginTop: space.lg }} onPress={onPreview} />

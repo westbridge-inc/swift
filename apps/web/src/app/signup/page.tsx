@@ -7,7 +7,7 @@ import { ChevronLeft } from 'lucide-react';
 import { sendOtp, sessionProbe } from '@/lib/auth';
 import { LEGAL_URL } from '@/lib/api';
 import { verifyOtp, registerAccount, becomePartner, signOwnName } from '@/lib/customer-account';
-import { OWN_NAME_DECLARATION_WEB, ownNameStoreType } from '@/lib/own-name-copy';
+import { OWN_NAME_DECLARATION_WEB, ownNameSigningFor, ownNameStoreType } from '@/lib/own-name-copy';
 import { clearStorefrontContinuation, storefrontAuthReturn } from '@/lib/storefront-continuation';
 import { useStorefrontAuthJourney } from '@/lib/use-storefront-auth-journey';
 import { useWebOrderingOpen } from '@/lib/use-web-ordering';
@@ -383,6 +383,7 @@ export default function SignupPage() {
                 {nameBasis === 'OWN_NAME' ? (
                   <>
                     <p className={styles.bodyCopy}>The law does not ask you to register your own name as a business name, so you sign a short declaration instead of uploading a business registration. A person on our team checks it against your ID.</p>
+                    {ownNameSigningFor(biz.name) ? <p className={styles.bodyCopy}><strong>{ownNameSigningFor(biz.name)}</strong></p> : null}
                     <pre className={styles.bodyCopy} style={{ whiteSpace: 'pre-wrap' }}>{OWN_NAME_DECLARATION_WEB}</pre>
                     <label><input type="checkbox" checked={ownNameTick} onChange={(e) => setOwnNameTick(e.target.checked)} /> I have read the declaration above and I sign it.</label>
                   </>
