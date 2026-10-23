@@ -407,9 +407,10 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           const stock = s === 'PENDING' ? lineStockWords(it) : null;
           return (
             <div key={it.id} className="text-sm">
-              <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                 <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
-                <span className="flex shrink-0 items-center gap-2">
+                {/* [BUG-GUARDS C8] The row wraps at 360px: the item, then its step and price. */}
+                <span className="flex flex-wrap items-center justify-end gap-2">
                   {!paused && lastLineStanding(o, it) && !lastOut && (
                     <button
                       type="button"
