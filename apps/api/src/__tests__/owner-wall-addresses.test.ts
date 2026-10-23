@@ -162,7 +162,7 @@ describe('[item 20] the owner wall fails closed', () => {
     } }))).rejects.toThrow();
     // The attestation sees the posture this suite runs under.
     const facts = await readOwnerWallFacts(app.prisma);
-    expect(facts).toEqual({ walledLogin: true, bypassLogin: false, unwalledTables: [] });
+    expect(facts).toEqual({ walledLogin: true, bypassLogin: false, unwalledTables: [], walledActions: [] });
     expect(ownerWallRefusal(facts, process.env)).toBeNull();
   });
 });

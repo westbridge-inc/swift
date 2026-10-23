@@ -2817,7 +2817,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
-    // drift again. The hold, the five-minute window, the store rule (owner
+    // drift again. The hold, the one-minute window, the store rule (owner
     // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
     // all live inside it; this file restates none of them.
     // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
@@ -3002,7 +3002,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
         // ONE implementation, shared with the predicate [cancel-policy.ts]:
-        // the moment the five-minute window of a ride, parcel or booking
+        // the moment the one-minute window of a ride, parcel or booking
         // closes; null when there is no countdown (refused, or free for as
         // long as nobody accepts / nobody was found / the order stays late).
         freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,
