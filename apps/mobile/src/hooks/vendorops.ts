@@ -1,4 +1,5 @@
 import { POLL } from '../lib/pollPolicy';
+import { prepareUploadImage } from '../lib/uploadImage';
 import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -25,6 +26,7 @@ import {
 } from '../stores/authStore';
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
@@ -446,9 +448,29 @@ export function useSetOrderFulfillmentMode() {
   });
 }
 
+/** [PERF row 562] lib/storeOpenSwitch: the screen shows the tapped state while
+ *  this is out; the server's answer (both flags) goes into the store at once and
+ *  the re-read runs on its own. An answer it cannot place keeps the switch on
+ *  the tapped state until the re-read (the old wait); a failure re-reads too, so
+ *  the switch goes back to what the server holds. */
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)),
+    // The store this request is for: the header carries the selected store, and
+    // a store switch before the send refuses it (useVendorMutation).
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _open: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after === before) return reread();
+      qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+      return undefined;
+    },
+    onError: () => { void reread(); },
+  });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
@@ -694,6 +716,30 @@ export function useUploadItemImage() {
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
       return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] A menu section's own photo, sized on the phone first (a smaller upload on
+ *  a mobile network); the server checks, scans and redraws it without the camera's data. */
+export function useUploadCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const prepared = await prepareUploadImage(file);
+      const form = new FormData();
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadCategoryPhoto(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] Takes a menu section's photo down. */
+export function useRemoveCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }

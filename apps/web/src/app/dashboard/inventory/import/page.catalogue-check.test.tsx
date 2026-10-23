@@ -43,6 +43,22 @@ describe('bulk import names the rows waiting for a quick check', () => {
     expect(await screen.findByText('…and 119 more')).toBeTruthy();
   });
 
+  it('names the rows imported without their photo address [IMAGES-E2E PR4: photos are uploaded, never imported]', async () => {
+    const note = 'Imported without its photo: a photo address is not used. Add the photo by uploading it in the app or on the website.';
+    mockApi(({ url }) => {
+      if (url.pathname === '/api/v1/vendor/items/import/automap') return { body: { data: preview } };
+      if (url.pathname === '/api/v1/vendor/items/import') return { body: { data: {
+        imported: 3, failedCount: 0, failures: [], notes: [{ row: 3, note }], notesCount: 1,
+      } } };
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    const { user, container } = renderWithQuery(<ImportPage />);
+    await user.upload(container.querySelector('input[type="file"]') as HTMLInputElement, new File(['x'], 'menu.csv', { type: 'text/csv' }));
+    await user.click(await screen.findByRole('button', { name: 'Import 3 items' }));
+    expect(await screen.findByText('1 row was imported without a photo. Photos are uploaded, never imported: add them on each item.')).toBeTruthy();
+    expect(screen.getByText(`Row 3: ${note}`)).toBeTruthy();
+  });
+
   it('says nothing about a check when no row is held (and an older server sends no such field)', async () => {
     mockApi(({ url }) => {
       if (url.pathname === '/api/v1/vendor/items/import/automap') return { body: { data: preview } };
@@ -54,5 +70,6 @@ describe('bulk import names the rows waiting for a quick check', () => {
     await user.click(await screen.findByRole('button', { name: 'Import 3 items' }));
     await waitFor(() => expect(screen.getByText('✓ 3 items imported')).toBeTruthy());
     expect(screen.queryByText(/waiting for a quick check/)).toBeNull();
+    expect(screen.queryByText(/imported without a photo/)).toBeNull();
   });
 });

@@ -145,7 +145,7 @@ async function doorPin(orderId: string, holder: Actor = customer): Promise<strin
 
 async function orderAtTheDoor(rider: Rider) {
   const order = await placeCashOrder();
-  await vendorStep(order.id, 'accept', 'ACCEPTED');
+  await vendorStep(order.id, 'accept', 'PREPARING'); // [O-3] one tap: Accept starts preparation
   await vendorStep(order.id, 'preparing', 'PREPARING');
   await vendorStep(order.id, 'ready', 'READY_FOR_PICKUP');
   const grab = await call('POST', `/api/v1/rider/orders/${order.id}/accept`, rider.token, {});
@@ -410,7 +410,7 @@ describe('GOLD-2 · RIDE-04 — delivery recovery', () => {
   it('two riders race one ready order and exactly one wins; the winner hands it back before pickup and the other rider completes it', async () => {
     const [ria, ben] = [await makeRider('Ria'), await makeRider('Ben')];
     const order = await placeCashOrder();
-    await vendorStep(order.id, 'accept', 'ACCEPTED');
+    await vendorStep(order.id, 'accept', 'PREPARING'); // [O-3] one tap: Accept starts preparation
     await vendorStep(order.id, 'preparing', 'PREPARING');
     await vendorStep(order.id, 'ready', 'READY_FOR_PICKUP');
 
@@ -515,7 +515,7 @@ describe('GOLD-2 · RIDE-04 — [E04] a stale "ready" cannot land on a cancelled
   beforeAll(async () => {
     rider = await makeRider('Eli');
     orderId = (await placeCashOrder()).id;
-    await vendorStep(orderId, 'accept', 'ACCEPTED');
+    await vendorStep(orderId, 'accept', 'PREPARING'); // [O-3] one tap: Accept starts preparation
     const grab = await call('POST', `/api/v1/rider/orders/${orderId}/accept`, rider.token, {});
     expect(grab.statusCode, grab.body).toBe(200);
     expect(await doorFacts(orderId)).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });

@@ -195,16 +195,24 @@ async function staleMilestoneAgainstCancellation(
   }
 }
 
-/** Accept + rider-grab an order into the rider-owned lane with no timestamps. */
-async function riderOwnedOrder(rider: Rider): Promise<string> {
+/** Accept + rider-grab an order into the rider-owned lane with no "ready" stamp.
+ *  [O-3] Accept now starts preparation, so today's order carries preparingAt from
+ *  the accept. `legacy` makes it an order accepted BEFORE the one-tap accept (no
+ *  preparingAt): the only kind on which a "Start preparing" tap can still race. */
+async function riderOwnedOrder(rider: Rider, opts: { legacy?: boolean } = {}): Promise<string> {
   const orderId = (await placeCashOrder()).id;
-  await vendorStep(orderId, 'accept', 'ACCEPTED');
+  await vendorStep(orderId, 'accept', 'PREPARING');
   const grab = await call('POST', `/api/v1/rider/orders/${orderId}/accept`, rider.token, {});
   expect(grab.statusCode, grab.body).toBe(200);
+  if (opts.legacy) {
+    // An order accepted before the one-tap accept: accepted, never started.
+    await sys(() => app.prisma.order.update({ where: { id: orderId }, data: { preparingAt: null } }));
+  }
   const row = await orderRow(orderId);
   expect(row).toMatchObject({ status: 'RIDER_ASSIGNED', riderId: rider.riderId });
   expect(row.readyAt).toBeNull();
-  expect(row.preparingAt).toBeNull();
+  if (opts.legacy) expect(row.preparingAt).toBeNull();
+  else expect(row.preparingAt).not.toBeNull();
   return orderId;
 }
 
@@ -344,7 +352,7 @@ describe('GOLD-2 · RIDE-04 — [E04] a stale kitchen milestone cannot land on a
 
   it('the "preparing" that lost the race is refused: no preparingAt, no "preparing" row after CANCELLED', async () => {
     const rider = await makeRider('Nia');
-    const orderId = await riderOwnedOrder(rider);
+    const orderId = await riderOwnedOrder(rider, { legacy: true });
 
     const preparing = await staleMilestoneAgainstCancellation(
       orderId,

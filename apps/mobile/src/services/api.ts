@@ -902,6 +902,14 @@ export const servicesApi = {
     data: { trade: string; bio?: string; portfolioPhotos?: string[] },
     session?: AuthSessionSnapshot,
   ) => api.post('/services/providers', data, capturedAuthConfig(session)),
+  // [IMAGES-E2E] Photos of the provider's own work: uploaded (the server scans each one and
+  // redraws it without location or camera data), or taken down by file name.
+  uploadPortfolioPhoto: (form: FormData) =>
+    api.post('/services/providers/me/portfolio', form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
       // [ROLE-DOCS · owner 21 Oct 2026] no GEI_LICENCE: an electrician's GEI licence is a required checklist document
@@ -1174,6 +1182,9 @@ export const driverApi = {
   stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
   stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
   stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
+  // [TAXI route line] The road through the ride's own points, for the map
+  // ({ source: 'road' | 'straight', points }); a server from before it answers 404.
+  rideRoute: (id: string) => api.get(`/driver/rides/${id}/route`),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
@@ -1280,6 +1291,14 @@ export const vendorApi = {
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
   updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
   deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
+  // [IMAGES-E2E PR4] A menu section's own photo: uploaded (the server checks it is a photo,
+  // scans it, redraws it without location or camera data and serves it to customers), or taken down.
+  uploadCategoryPhoto: (id: string, form: FormData) =>
+    api.post(`/vendor/categories/${id}/image`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeCategoryPhoto: (id: string) => api.delete(`/vendor/categories/${id}/image`),
   createItem: (
     data: VendorItemInput,
     session?: AuthSessionSnapshot,
@@ -1343,6 +1362,14 @@ export const vendorApi = {
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
   updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
+  // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
+  // redraws it without location or camera data, and serves it to customers), or taken down.
+  uploadStorePhoto: (slot: 'logo' | 'cover', form: FormData) =>
+    api.post(`/vendor/profile/${slot}`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeStorePhoto: (slot: 'logo' | 'cover') => api.delete(`/vendor/profile/${slot}`),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
   // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.

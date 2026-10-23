@@ -1,4 +1,5 @@
 import { billingEffectsReady, requireBillingEffectsReady } from './billing-cutover';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { recordTrialCoverageInTx, stoppedTrialOwesNothingInTx, voluntaryResumeProofInTx } from './obligation-evidence';
 import { reanchorAtReturnInTx, recordUnprovenReturnInTx, resumeVoluntaryObligationInTx, RETURN_REANCHOR_STATUSES, returnReanchorProof, returnWeekStart, weekForgivenByReturnInTx } from './dunning-clock';
 import { verifiedCheckoutCredit } from './confirmation-finance';
@@ -29,7 +30,7 @@ import { activePriceBook, bookAt, priceBookChargeFor, priceBookNoticeKey, rowFor
 import { WEEKLY_RETIER_ON } from './weekly-retier';
 import { batchClock } from '../../utils/batch-clock';
 import { billingErrorCode } from './billing-error-code';
-import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
+import { FEE_RISE_NOTICE_KIND, FEE_RISE_PREFIX, feeDecreaseCopy, feeRiseCopy, feeRiseDedupeKey, feeRiseKey, holdFeeRiseInTx, readHeldFeeRise, riseAppliesFrom, type HeldFeeRise } from './fee-rise-notice';
 import { billingNoticeNote, deliverBillingNoticeByKey, drainPendingBillingNotices, type BillingNotice } from './billing-notice-delivery';
 import { FEE_RESTORE_LINE, feeDueLine, mmgPayLine } from './fee-notice-copy';
 import { checkoutAmountGyd, mmgCheckoutLive } from './fee-pay-actions';
@@ -353,8 +354,35 @@ function unlessFeePaused(error: unknown): typeof FEE_PAUSED_ROW {
   throw error;
 }
 
-/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. */
-export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off: pay this week with MMG on the checkout page';
+/** [R27 · security review] A lower tier is seen on one weekly pass and confirmed on the next one:
+ *  at least 6 days later (so a re-run in the same week never confirms it), at most 13 (a missed week
+ *  starts over). Runtime state, keyed like the held rise; the ':' keeps it out of the config editor. */
+export const RETIER_LOWER_PREFIX = 'billing.retier_lower:';
+export const retierLowerKey = (subscriptionId: string) => `${RETIER_LOWER_PREFIX}${subscriptionId}`;
+const RETIER_LOWER_CONFIRM_MIN_MS = 6 * 86_400_000;
+const RETIER_LOWER_CONFIRM_MAX_MS = 13 * 86_400_000;
+function readRetierLower(value: unknown): { rate: number; tier: string; seenAt: string; basis?: unknown } | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v['rate'] !== 'number' || !(v['rate'] >= 0) || typeof v['tier'] !== 'string' || typeof v['seenAt'] !== 'string' || Number.isNaN(Date.parse(v['seenAt']))) return null;
+  return { rate: v['rate'], tier: v['tier'], seenAt: v['seenAt'], basis: v['basis'] };
+}
+
+/** [R27] What one weekly re-tier pass did to one subscription. */
+type RetierMove = { held?: true; lowered?: { from: number; to: number }; dropped?: HeldFeeRise };
+
+/** [S1 · Option A] The failure note of a week whose plan chose MMG while the push rail is off. It names
+ *  no way to pay: the payment-failed notice's paying sentence (feePayLine) names the MMG checkout only
+ *  while it is live for the partner, otherwise the amount and when it is due. */
+export const MMG_PUSH_OFF_REASON = 'Automatic MMG charges are off';
+
+/** [S1 · Option A · REVIEW-F S3-1] The ordinary payment-failed notice: `<reason>. <retry> <payLine>`.
+ *  A week that failed because the push rail is off promises no retry: a retry fails the same way and
+ *  can never collect, so the partner is told the fee was not collected and the way to pay today. */
+function failedFeeNoticeBody(reason: string, retrySentence: string, payLine: string): string {
+  if (reason === MMG_PUSH_OFF_REASON) return `${MMG_PUSH_OFF_REASON}, so this week's fee was not collected. ${payLine}`;
+  return `${reason}. ${retrySentence} ${payLine}`;
+}
 
 export class BillingService {
   private countryConfig: CountryConfigService;
@@ -3955,7 +3983,7 @@ export class BillingService {
         userId: this.payerUserId(sub), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub),
         title: final ? 'Final warning — payment needed' : 'Subscription payment failed',
         body: final ? `${reason}. Your subscription will be SUSPENDED at ${when} unless the weekly fee is paid. ${payLine}`
-          : `${reason}. We will retry after the remaining retry interval. ${payLine}`,
+          : failedFeeNoticeBody(reason, 'We will retry after the remaining retry interval.', payLine),
         data: { kind: final ? 'billing_final_warning' : 'billing_failed', subscriptionId: sub.id, ...(final ? { suspendsAt: gracePeriodEnd.toISOString() } : {}) },
         feeStageKey: `${final ? 'final-warning' : 'failed'}:a${attempts}`,
         ...(final ? { feeSms: `Swift: your weekly fee is unpaid. Your account will be suspended at ${when} unless you pay. ${payLine}` } : {}),
@@ -4002,7 +4030,7 @@ export class BillingService {
       userId: this.payerUserId(sub),
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Subscription payment failed',
-      body: `${reason}. We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}). ${payLine}`,
+      body: failedFeeNoticeBody(reason, `We will retry tomorrow (attempt ${attempts} of ${MAX_FAILED_ATTEMPTS}).`, payLine),
       audience: this.payerAudience(sub),
       data: { kind: 'billing_failed', subscriptionId: sub.id },
       feeStageKey: `failed:a${attempts}`,
@@ -4876,7 +4904,7 @@ export class BillingService {
    * at signup. Same shape as `recalculateVendorTiers` below, and it shares that
    * method's TIER_CHANGE event so one audit trail covers both.
    */
-  async recalculateMoverTiers(): Promise<number> {
+  async recalculateMoverTiers(now = new Date()): Promise<number> {
     const moverSubs = await this.prisma.subscription.findMany({
       where: { OR: [{ riderId: { not: null } }, { driverId: { not: null } }], status: { in: RETIER_STATUSES } },
       select: { id: true },
@@ -4893,10 +4921,12 @@ export class BillingService {
           const tariff = await moverFeeTariffSubject(tx, authority);
           const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
           const target = this.retierTarget(sub.id, tiers, tariff.subject);
-          if (!target || sub.weeklyRate.equals(target.rate)) return false;
-          return this.applyTierChange(sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`, tx);
+          if (!target) return false;
+          return this.retierInTx(tx, sub, target, `${tariff.subject.kind === 'DRIVER' ? 'taxi driver' : 'rider'} on ${tariff.subject.vehicleType} -> ${target.tier} tier`,
+            { now, basis: { kind: tariff.subject.kind, vehicleType: tariff.subject.vehicleType } });
         });
         if (moved) changed += 1;
+        if (moved) await this.afterRetier(candidate.id, moved);
       } catch (error) { this.holdTierChange(candidate.id, error); }
     }
     return changed;
@@ -4927,7 +4957,8 @@ export class BillingService {
    * can no longer leave a changed bill with no audit row. The rate write is a
    * compare-and-set on the rate this run read: two runs racing over the same
    * subscription (the weekly job and an operator's manual run) move it once
-   * and write one event — the loser matches nothing and writes nothing.
+   * and write one event — the loser matches nothing and writes nothing. It
+   * also requires no negotiated rate and no waived fee [G S4-2].
    *
    * Key policy: `tier:<subscription>:<n>:<from>-><to>` — the n-th tier
    * change of this subscription, counted under the row lock the CAS above
@@ -4945,8 +4976,11 @@ export class BillingService {
     const from = Number(sub.weeklyRate);
     const apply = async (tx: Prisma.TransactionClient) => {
       await lockSubscriptionPayer(tx, sub.id);
+      // [G S4-2] A negotiated rate or a waived fee is a human decision: one set after the caller read
+      // the plan (an operator's waive, the USD migration's customRate) leaves weeklyRate as it was, so
+      // the compare-and-set checks both too and the move loses.
       const won = await tx.subscription.updateMany({
-        where: { id: sub.id, weeklyRate: sub.weeklyRate },
+        where: { id: sub.id, weeklyRate: sub.weeklyRate, customRate: null, feeWaived: false },
         data: { weeklyRate: target.rate },
       });
       if (won.count === 0) return false;
@@ -4964,6 +4998,123 @@ export class BillingService {
       return true;
     };
     return transaction ? apply(transaction) : this.prisma.$transaction(apply);
+  }
+
+  /**
+   * [R27 · F2 · GUARDRAILS §7 standing rule 2] One subscription's move to the
+   * card rate the weekly re-tier found, under the payer's lock:
+   *   - a HIGHER rate is never written: it is held for the 14-day notice
+   *     (fee-rise-notice.ts holdFeeRiseInTx, source WEEKLY_RETIER), told and
+   *     applied by sweepFeeRises from the first weekly fee after the notice;
+   *     'held' only when a new rise was recorded (the same rise again is not a change);
+   *   - a LOWER rate applies from the next weekly fee: the rate moves now, with
+   *     its TIER_CHANGE event (a fee already charged keeps its amount), and the
+   *     caller tells the payer in the app after the commit (tellFeeDecrease).
+   */
+  private async retierInTx(
+    tx: Prisma.TransactionClient,
+    sub: { id: string; weeklyRate: Prisma.Decimal; currencyCode: string },
+    target: PartnerRate,
+    note: string,
+    opts: { now: Date; lowerTarget?: PartnerRate; basis: Record<string, unknown> },
+  ): Promise<RetierMove | false> {
+    const from = Number(sub.weeklyRate);
+    if (target.rate > from) {
+      await lockSubscriptionPayer(tx, sub.id);
+      await this.clearRetierLowerInTx(tx, sub.id, opts, 'HIGHER_AGAIN');
+      const held = await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: target.rate, currencyCode: sub.currencyCode, source: 'WEEKLY_RETIER', sourceRef: note, now: opts.now });
+      return held === 'held' ? { held: true } : false;
+    }
+    // [R27 · security review: shrink-and-restore around one pass] A lower tier moves nothing until it
+    // holds on TWO consecutive weekly passes (RETIER_LOWER_CONFIRM_MIN_MS..MAX_MS apart), at the
+    // HIGHER of the two observations: then a held rise above it is dropped and the fee goes down.
+    // Every observation, confirmation and clearing is an audit row with its basis.
+    const lower = opts.lowerTarget && opts.lowerTarget.rate > target.rate ? opts.lowerTarget : target;
+    const heldRow = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(sub.id) } });
+    const held = heldRow ? readHeldFeeRise(heldRow.value) : null;
+    if (!(lower.rate < from) && !(held && held.to > lower.rate)) {
+      await this.clearRetierLowerInTx(tx, sub.id, opts, 'NOT_LOWER');
+      return false;
+    }
+    await lockSubscriptionPayer(tx, sub.id);
+    const key = retierLowerKey(sub.id);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    const seen = row ? readRetierLower(row.value) : null;
+    const age = seen ? opts.now.getTime() - new Date(seen.seenAt).getTime() : NaN;
+    if (!seen || !(age <= RETIER_LOWER_CONFIRM_MAX_MS) || age < 0) {
+      const value = { rate: lower.rate, tier: lower.tier, seenAt: opts.now.toISOString(), basis: opts.basis };
+      await tx.platformConfig.upsert({ where: { key }, update: { value: value as unknown as Prisma.InputJsonValue }, create: { key, value: value as unknown as Prisma.InputJsonValue } });
+      await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, replaces: seen ?? null } as unknown as Prisma.InputJsonValue } });
+      return false;
+    }
+    if (age < RETIER_LOWER_CONFIRM_MIN_MS) {
+      // A second pass inside the same week: the lower tier must hold at every observation.
+      if (lower.rate > seen.rate) {
+        const value = { ...seen, rate: lower.rate, tier: lower.tier };
+        await tx.platformConfig.update({ where: { key }, data: { value: value as unknown as Prisma.InputJsonValue } });
+        await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_SEEN', entity: 'Subscription', entityId: sub.id, changes: { from, ...value, raisedWithinWeek: opts.basis } as unknown as Prisma.InputJsonValue } });
+      }
+      return false;
+    }
+    const confirmed: PartnerRate = lower.rate >= seen.rate ? lower : { rate: seen.rate, tier: seen.tier as PartnerRate['tier'] };
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_CONFIRMED', entity: 'Subscription', entityId: sub.id,
+      changes: { from, to: confirmed.rate, first: seen, second: { rate: lower.rate, at: opts.now.toISOString(), basis: opts.basis } } as unknown as Prisma.InputJsonValue } });
+    // The card rate is not higher any more: a rise held for a higher one no longer stands (dropped, and
+    // the payer told it will not happen if they were told it would).
+    const dropped = await this.dropStaleFeeRiseInTx(tx, sub.id, confirmed.rate);
+    const lowered = confirmed.rate < from && await this.applyTierChange(sub, confirmed, note, tx);
+    if (!lowered && !dropped) return false;
+    return { ...(lowered ? { lowered: { from, to: confirmed.rate } } : {}), ...(dropped ? { dropped } : {}) };
+  }
+
+  /** [R27] A pending lower-tier observation that no longer stands is cleared, with an audit row. */
+  private async clearRetierLowerInTx(tx: Prisma.TransactionClient, subscriptionId: string, opts: { now: Date; basis: Record<string, unknown> }, why: string): Promise<void> {
+    const key = retierLowerKey(subscriptionId);
+    const row = await tx.platformConfig.findUnique({ where: { key } });
+    if (!row) return;
+    await tx.platformConfig.delete({ where: { key } });
+    await tx.auditLog.create({ data: { action: 'BILLING_RETIER_LOWER_CLEARED', entity: 'Subscription', entityId: subscriptionId,
+      changes: { why, seen: row.value, at: opts.now.toISOString(), basis: opts.basis } as unknown as Prisma.InputJsonValue } });
+  }
+
+  /** [R27] A held rise whose new fee is above what the card now gives: dropped in the caller's transaction. */
+  private async dropStaleFeeRiseInTx(tx: Prisma.TransactionClient, subscriptionId: string, cardRate: number): Promise<HeldFeeRise | null> {
+    const row = await tx.platformConfig.findUnique({ where: { key: feeRiseKey(subscriptionId) } });
+    const held = row ? readHeldFeeRise(row.value) : null;
+    if (!held || !(held.to > cardRate)) return null;
+    await lockSubscriptionPayer(tx, subscriptionId);
+    const sub = await tx.subscription.findUnique({ where: { id: subscriptionId } });
+    return (await this.dropHeldFeeRiseInTx(tx, subscriptionId, held, sub as Subscription | null, !held.noticeAt)) ? held : null;
+  }
+
+  /** [R27] After a re-tier commit: tell a lower fee, and a told rise that will not happen. */
+  private async afterRetier(subscriptionId: string, moved: RetierMove): Promise<void> {
+    if (moved.lowered) await this.tellFeeDecrease(subscriptionId, moved.lowered);
+    if (moved.dropped?.noticeAt) {
+      const sub = await this.prisma.subscription.findUnique({ where: { id: subscriptionId } }).catch(() => null);
+      await this.tellFeeRiseCancelled(subscriptionId, moved.dropped, sub && sub.status !== 'CANCELLED' ? weeklyFeeAmount(sub) : null);
+    }
+  }
+
+  /** [R27] Tell the payer their weekly fee went down (after the commit). A failed
+   *  send is logged: the lower fee already applies, so no one pays more for it. */
+  private async tellFeeDecrease(subscriptionId: string, moved: { from: number; to: number }): Promise<void> {
+    try {
+      const sub = await this.prisma.subscription.findUnique({
+        where: { id: subscriptionId },
+        include: { rider: { select: { userId: true } }, driver: { select: { userId: true } }, vendor: { select: { id: true, owner: { select: { userId: true } } } } },
+      });
+      if (!sub) return;
+      await this.notifications.send({
+        userId: this.payerUserId(sub as SubWithRelations), type: 'SYSTEM_ANNOUNCEMENT', audience: this.payerAudience(sub as SubWithRelations),
+        ...feeDecreaseCopy({ from: moved.from, to: moved.to, currencyCode: sub.currencyCode }),
+        data: { kind: FEE_RISE_NOTICE_KIND, change: 'DECREASE', subscriptionId, weeklyFee: moved.to, previousWeeklyFee: moved.from, currencyCode: sub.currencyCode },
+        dedupeKey: `fee-decrease:${subscriptionId}:${moved.from}->${moved.to}:${new Date().toISOString().slice(0, 10)}`,
+      });
+    } catch (error) {
+      log().warn({ err: error, subscriptionId }, '[R27] the lower weekly fee applies; its notice could not be sent');
+    }
   }
 
   /**
@@ -4987,7 +5138,7 @@ export class BillingService {
    * Weekly tier check: vendor tier comes from catalogue size (active listing
    * count) and CountryConfig rates — NEVER from sales (zero-commission model).
    */
-  async recalculateVendorTiers(): Promise<number> {
+  async recalculateVendorTiers(now = new Date()): Promise<number> {
     const vendorSubs = await this.prisma.subscription.findMany({
       where: { vendorId: { not: null }, status: { in: RETIER_STATUSES } },
       include: {
@@ -5026,10 +5177,23 @@ export class BillingService {
           isService: sub.vendor.vendorType === 'SERVICE',
           activeListings,
         });
-        if (!target || Number(sub.weeklyRate) === target.rate) continue;
+        if (!target) continue;
+        // Nothing to move, and no held rise or lower-tier observation to judge: no transaction.
+        if (Number(sub.weeklyRate) === target.rate
+          && (await this.prisma.platformConfig.count({ where: { key: { in: [feeRiseKey(sub.id), retierLowerKey(sub.id)] } } })) === 0) continue;
+        // [R27 · security review] A LOWER tier is judged on the week's largest catalogue: every listing
+        // available now, or made unavailable (or edited) in the last 7 days. Hiding listings around the
+        // pass never counts.
+        const weekListings = await this.prisma.item.count({
+          where: { vendorId: sub.vendor.id, OR: [{ isAvailable: true }, { updatedAt: { gte: new Date(now.getTime() - 7 * 86_400_000) } }] },
+        });
+        const weekTarget = this.retierTarget(sub.id, tiers, { kind: 'VENDOR', isService: sub.vendor.vendorType === 'SERVICE', activeListings: weekListings }) ?? target;
 
         const note = `${activeListings} active listings -> ${target.tier} tier`;
-        if (await this.applyTierChange(sub, target, note)) changed += 1;
+        const moved = await this.prisma.$transaction((tx) => this.retierInTx(tx, sub, target, note,
+          { now, lowerTarget: weekTarget, basis: { activeListings, weekListings } }));
+        if (moved) changed += 1;
+        if (moved) await this.afterRetier(sub.id, moved);
       } catch (error) {
         this.holdTierChange(sub.id, error);
       }
@@ -5139,7 +5303,9 @@ export class BillingService {
       return 'untold';
     }
     // The inbox row is what the payer was told: a retried send returns the first row, with its own date.
-    const inbox = await this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } });
+    // [item 20] The PAYER's row, read back by whoever runs the rise (an admin, the billing job): under the owner
+    // wall a plain read sees only the reader's own notices, so it names its capability.
+    const inbox = await ownerWallSystem('billing:fee-rise-notice-readback', () => this.prisma.notification.findUnique({ where: { id: inboxId }, select: { createdAt: true, data: true, dedupeKey: true } }));
     const told = (inbox?.data ?? {}) as Record<string, unknown>;
     const iso = (v: unknown) => (typeof v === 'string' && !Number.isNaN(Date.parse(v)) ? v : null);
     const toldFrom = iso(told['appliesFrom']);

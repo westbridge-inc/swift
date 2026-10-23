@@ -14,7 +14,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
-import { REAL_PNG } from './helpers/real-image';
+import sharp from 'sharp';
 import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -165,8 +165,9 @@ describe('CSV import', () => {
     const res = await inject('GET', '/api/v1/vendor/items/import/template', undefined, vendorToken);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/csv');
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] No photo column: photos are uploaded, never imported.
     expect(res.body.split('\n')[0]).toBe(
-      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
+      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment',
     );
   });
 
@@ -359,7 +360,10 @@ describe('Image upload — validated, behind the StorageProvider', () => {
 
   it('accepts a real PNG and stores a URL', async () => {
     // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
-    const png = REAL_PNG;
+    // [IMAGES-E2E] And the route now DRAWS it again (pixels decoded end to end), so it is a
+    // photo whose pixels decode: REAL_PNG's image data fails its checksum, which only a
+    // header read never noticed.
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 200, g: 50, b: 50 } } }).png().toBuffer();
     const { payload, contentType } = multipartBody('burger.png', 'image/png', png);
 
     const res = await app.inject({

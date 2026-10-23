@@ -430,6 +430,30 @@ export function assertMmgFulfilmentAllowed(
 }
 
 /**
+ * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
+ * store order the store has just accepted (or, for MMG, just marked "Paid by
+ * MMG")? Every store type: a restaurant's kitchen and a grocery's pick list
+ * both live inside PREPARING. Never a booking (BOOKING_LAW: it is confirmed,
+ * then completed), never a parcel or a ride (no store), and never an MMG order
+ * the payment-first law still holds (unpaid, or two claims that disagree) —
+ * that order stops at ACCEPTED and "Paid by MMG" starts it. A question, never a
+ * gate: the seam re-decides the next hop with its own gates on the locked row.
+ */
+export function preparationMayStart(
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'>,
+): boolean {
+  if (order.fulfillment === 'APPOINTMENT') return false;
+  if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
+  try {
+    assertMmgFulfilmentAllowed(order, 'PREPARING');
+    return true;
+  } catch (error) {
+    if (error instanceof AppError) return false;
+    throw error;
+  }
+}
+
+/**
  * REFUNDED is intentionally overloaded in the current order model.  The
  * normal state machine uses it after CANCELLED/DELIVERED/COMPLETED as a
  * financial/accounting transition.  The admin cancellation override may use
@@ -689,6 +713,17 @@ export interface CanonicalOrderTransitionInput {
    *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
    *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
   customerCancel?: boolean;
+  /** [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk, taken through THIS
+   *  seam on this lock and in this commit when `when` holds on the row as this
+   *  hop left it — every gate of the next hop applies to it. The hop must be a
+   *  declared forward edge from `target`; both milestones share one instant. */
+  continueTo?: {
+    target: OrderStatus;
+    note?: string;
+    when: (row: Order) => boolean;
+  };
+  /** [O-3] The instant this transition stamps. Set only by a walk's next hop. */
+  at?: Date;
 }
 
 export interface CanonicalOrderTransitionResult {
@@ -2326,7 +2361,7 @@ export class OrderService {
       );
     }
 
-    const now = new Date();
+    const now = input.at ?? new Date();
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
@@ -2454,6 +2489,11 @@ export class OrderService {
     const mmgUnattestedTerminal = operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && source.paymentStatus === 'PENDING';
+    // [O-3] A walk writes two rows in one commit. Their order must never be a
+    // tie the timeline (and "the newest row names the status") reads by luck:
+    // the first hop's row is stamped at the walk's instant, the next hop's one
+    // millisecond after it. Every other transition keeps the default stamp.
+    const walkLogAt = input.continueTo ? now : input.at ? new Date(input.at.getTime() + 1) : undefined;
     await tx.orderStatusLog.create({
       data: {
         orderId: input.orderId,
@@ -2462,6 +2502,7 @@ export class OrderService {
         note: mmgUnattestedTerminal
           ? `${input.note ?? 'Cancelled'} — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly`
           : input.note,
+        ...(walkLogAt ? { createdAt: walkLogAt } : {}),
       },
     });
 
@@ -2481,6 +2522,29 @@ export class OrderService {
     }
 
     if (input.withinTransaction) await input.withinTransaction(tx, source);
+
+    // [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk runs through this
+    // same seam (every gate of that hop: payment-first, booking law, held lines),
+    // on this lock, in this commit — so the two milestones commit or vanish
+    // together, and nothing can observe the order between them.
+    if (input.continueTo) {
+      const next = input.continueTo;
+      if (!ORDER_TRANSITIONS[next.target].includes(input.target)) {
+        throw new Error(`continueTo: ${input.target} -> ${next.target} is not a declared forward edge`);
+      }
+      const reached = await tx.order.findUniqueOrThrow({ where: { id: input.orderId } });
+      if (next.when(reached)) {
+        const hop = await this.stageCanonicalOrderTransition(tx, {
+          orderId: input.orderId,
+          target: next.target,
+          allowedFrom: [input.target],
+          changedBy: input.changedBy,
+          note: next.note,
+          at: now,
+        });
+        if ('handoverFailure' in hop) throw new AppError(hop.handoverFailure.statusCode, hop.handoverFailure.code, hop.handoverFailure.message);
+      }
+    }
 
     const order = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
@@ -2892,6 +2956,10 @@ export class OrderService {
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
+      /** [O-3] See CanonicalOrderTransitionInput.continueTo. The customer is told
+       *  ONCE, in the words of the transition asked for; the live events carry
+       *  the status the order actually reached. */
+      continueTo?: CanonicalOrderTransitionInput['continueTo'];
     },
   ) {
     const target = status as OrderStatus;
@@ -2916,6 +2984,7 @@ export class OrderService {
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
+      ...(opts?.continueTo ? { continueTo: opts.continueTo } : {}),
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
@@ -2925,8 +2994,12 @@ export class OrderService {
 
     if (replayed) return order;
 
-    log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
-    const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    // [O-3] A walk may have gone past the transition asked for: the live events
+    // say where the order IS, so a board or a tracking screen never shows a
+    // stage the order already left.
+    const reached = opts?.continueTo ? order.status : status;
+    log().info({ orderId, orderNumber: order.orderNumber, status: reached, changedBy, vendorId: order.vendorId }, 'order: status changed');
+    const statusEvent = { orderId, status: reached, timestamp: new Date().toISOString() };
     try {
     await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
