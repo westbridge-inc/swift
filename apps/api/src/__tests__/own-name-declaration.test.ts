@@ -2,7 +2,7 @@
  * [ROLE-DOCS · owner ruling 21 Oct 2026] "I trade under my own name" in place of a business registration — ONLY where
  * Guyana law makes registration unnecessary: Business Names (Registration) Act, Cap. 90:05, s.3(b) — one person whose
  * business name is their true surname "without any addition other than his true forenames or the initials thereof"
- * need not register; s.3(c) — unless they changed their name (other than by marriage). (vendor/own-name.ts)
+ * need not register; s.3(c) — unless they changed their name (except, for a woman, in consequence of marriage). (vendor/own-name.ts)
  *
  *  - The sign-up asks the question first; a name that clearly is not the owner's own is refused before a store exists.
  *  - The owner signs the versioned words (consent ledger) and Swift files them as the `own_name_declaration` document.

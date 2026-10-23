@@ -550,7 +550,7 @@ async function requireListingAllowed(
     select: { isVerified: true, vendorType: true, status: true },
   });
   const verified = vendorRecord.isVerified
-    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType);
+    || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendorRecord.vendorType, app.prisma, vendorId);
   if (verified) return;
   const draftableStatus = vendorRecord.status !== 'ACTIVE' && vendorRecord.status !== 'SUSPENDED';
   if (process.env['PREVIEW_MODE'] === '1' && draftableStatus) return;
@@ -864,7 +864,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // never "Reopen it from Account": no such control exists (store-hold.ts).
       throw storeHoldRefusal(vendor);
     }
-    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType));
+    const verified = vendor.isVerified || (await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId));
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED', 'Your store’s documents need verifying before you can work orders — check Documents for anything expired.');
     }
@@ -1402,8 +1402,9 @@ export async function vendorRoutes(app: FastifyInstance) {
    * Refused when the store's name clearly is not the account's own name, when the store is a service business (no
    * registration is asked of it) or on the self-declared tier, and when a business registration is already on file.
    * Records the signature in the consent ledger (words hashed, version pinned), files the signed words as the
-   * `own_name_declaration` document a person reviews against the owner's ID, and marks EVERY store of this type the
-   * owner holds as trading under their own name. Owner only.
+   * `own_name_declaration` document a person reviews against the owner's ID, and marks THIS store — only this one —
+   * as trading under the owner's own name [REVIEW-G #2046 S2-1, COORD 23 Oct: per store, never per type]: another
+   * store of the owner keeps needing its business registration. Owner only.
    */
   app.post('/onboarding/own-name', auth, async (request, reply) => {
     const access = await requireVendor(app, request, 'OWNER');
@@ -1450,8 +1451,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
     const legalName = `${user.firstName} ${user.lastName}`.trim();
     await app.prisma.$transaction(async (tx) => {
-      // Every store of this type the owner holds: one checklist serves them, so they share the basis.
-      await tx.vendor.updateMany({ where: { ownerId: vendor.ownerId, vendorType: vendor.vendorType }, data: { tradesUnderOwnName: true } });
+      // This store only: its name is the one checked, and the one the PDF and this consent row name.
+      await tx.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: true } });
       await recordConsent(tx, {
         subjectType: 'vendor_user', subjectId: userId, documentType: OWN_NAME_CONSENT_TYPE, version: OWN_NAME_DECLARATION_VERSION,
         action: 'granted', surface, ip: request.ip,
@@ -1474,15 +1475,15 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /**
    * [ROLE-DOCS · owner ruling 21 Oct 2026] DELETE /onboarding/own-name — the owner uses a business name after all
-   * (or the reviewer rejected the own-name declaration): every store of this type goes back to needing a business
-   * registration. A declaration on file no longer counts for these stores (their checklist asks for the registration
+   * (or the reviewer rejected the own-name declaration): THIS store goes back to needing a business registration
+   * (per store, as POST). A declaration on file no longer counts for these stores (their checklist asks for the registration
    * again); it is never reused for a later name (POST refuses then: support decides). Owner only.
    */
   app.delete('/onboarding/own-name', auth, async (request) => {
     const access = await requireVendor(app, request, 'OWNER');
     const userId = request.user.userId;
-    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { ownerId: true, vendorType: true } });
-    await app.prisma.vendor.updateMany({ where: { ownerId: vendor.ownerId, vendorType: vendor.vendorType }, data: { tradesUnderOwnName: false } });
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: access.vendorId }, select: { id: true, vendorType: true } });
+    await app.prisma.vendor.update({ where: { id: vendor.id }, data: { tradesUnderOwnName: false } });
     await verification.reprojectVendorActivation(userId);
     const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
     return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
@@ -1807,7 +1808,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // first (this re-read sees the loss and refuses) or this ON write commits
     // first (they simply win afterward).
     const verified = vendor.isVerified
-      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType);
+      || await verification.isRoleVerified(await vendorOwnerUserId(app, vendorId), vendor.vendorType, app.prisma, vendorId);
     if (!verified) {
       throw new AppError(403, 'VERIFICATION_REQUIRED',
         'Your store can take orders once its documents are verified. Check Documents for anything missing or expired.');
@@ -1838,7 +1839,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       // A discovered stale-true is healed post-rollback (a write inside
       // this refusing transaction would roll back with it).
       const toggleOwnerUserId = await vendorOwnerUserId(app, vendorId);
-      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx);
+      const verifiedOk = await verification.isRoleVerified(toggleOwnerUserId, locked.vendorType, tx, vendorId);
       if (!verifiedOk) {
         if (locked.isVerified) staleVerifiedToHeal = true;
         throw new AppError(403, 'VERIFICATION_REQUIRED',
@@ -1879,7 +1880,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           });
           if (!still.isVerified) return;
           const nowVerified = await verification.isRoleVerified(
-            await vendorOwnerUserId(app, vendorId), still.vendorType, tx);
+            await vendorOwnerUserId(app, vendorId), still.vendorType, tx, vendorId);
           if (!nowVerified) {
             await tx.vendor.updateMany({
               where: { id: vendorId, isVerified: true },

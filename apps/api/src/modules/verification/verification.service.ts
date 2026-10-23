@@ -754,7 +754,9 @@ export class VerificationService {
     if (roleKey === 'MOVER') {
       checklist = await this.moverSubmittableChecklist(user.countryCode, userId);
     } else {
-      const required = await this.checklistFor(userId, user.countryCode, roleKey);
+      const required = roleKey === 'RESTAURANT' || roleKey === 'SUPERMARKET' || roleKey === 'STORE'
+        ? await this.storeSubmittableChecklist(userId, user.countryCode, roleKey)
+        : await this.checklistFor(userId, user.countryCode, roleKey);
       checklist = [...required, ...await this.optionalFor(userId, user.countryCode, roleKey, required)];
     }
     if (!checklist.includes(docType)) {
@@ -1855,6 +1857,7 @@ export class VerificationService {
     roleKey: ChecklistRole,
     vehicleHint?: VehicleType,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<string[]> {
     if (roleKey === 'MOVER') {
       const vehicleType = vehicleHint ?? (await this.getMoverVehicleType(userId, db)) ?? 'MOTORCYCLE';
@@ -1870,7 +1873,7 @@ export class VerificationService {
     }
     // [DOC-1 §3.6 · P3-2] A store owner on the UNREGISTERED tier reads the role's
     // unregistered requirement set; everyone else the standard one.
-    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db), db);
+    return this.countryConfig.getDocumentChecklist(countryCode, roleKey, await this.vendorTierOf(userId, roleKey, db, vendorId), db);
   }
 
   /**
@@ -1899,15 +1902,30 @@ export class VerificationService {
     return this.countryConfig.getOptionalDocuments(countryCode, roleKey, required);
   }
 
-  /** UNREGISTERED when any store the owner holds is on that tier; [ROLE-DOCS · owner 21 Oct 2026] OWN_NAME when every
-   *  store of this type the owner holds trades under the owner's own name (a store under any other name keeps the
-   *  business registration: one registration covers them all); otherwise undefined (standard). */
-  private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient): Promise<string | undefined> {
-    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { tier: true, vendorType: true, tradesUnderOwnName: true } } } });
+  /** UNREGISTERED when any store the owner holds is on that tier. [ROLE-DOCS · owner 21 Oct 2026 · REVIEW-G #2046 S2-1,
+   *  COORD 23 Oct: PER STORE] OWN_NAME is a property of ONE store: a store's own gate (`vendorId`) reads that store's
+   *  flag, so a trading-name store of the same type keeps needing its business registration (BNA s.3(b)). Without a
+   *  store (the owner's Documents view) it is OWN_NAME only when every store of the type trades under the owner's own
+   *  name — while any one does not, the registration is asked for. Otherwise undefined (standard). */
+  private async vendorTierOf(userId: string, roleKey: ChecklistRole, db: Prisma.TransactionClient | PrismaClient, vendorId?: string): Promise<string | undefined> {
+    const owner = await db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true, tier: true, vendorType: true, tradesUnderOwnName: true } } } });
     if (!owner) return undefined;
     if (owner.vendors.some((v) => v.tier === 'UNREGISTERED')) return 'UNREGISTERED';
+    if (vendorId !== undefined) {
+      const store = owner.vendors.find((v) => v.id === vendorId);
+      return store && store.vendorType === roleKey && store.tradesUnderOwnName ? OWN_NAME_TIER : undefined;
+    }
     const ofType = owner.vendors.filter((v) => v.vendorType === roleKey);
     return ofType.length > 0 && ofType.every((v) => v.tradesUnderOwnName) ? OWN_NAME_TIER : undefined;
+  }
+
+  /** [ROLE-DOCS · per store] What a store owner may SUBMIT for the role: the owner-level list plus each store's own
+   *  list (an own-name store's declaration while a trading-name store of the type still asks for the registration). */
+  private async storeSubmittableChecklist(userId: string, countryCode: string, roleKey: ChecklistRole): Promise<string[]> {
+    const lists = [await this.checklistFor(userId, countryCode, roleKey)];
+    const owner = await this.prisma.vendorOwner.findUnique({ where: { userId }, select: { vendors: { where: { vendorType: roleKey }, select: { id: true } } } });
+    for (const v of owner?.vendors ?? []) lists.push(await this.checklistFor(userId, countryCode, roleKey, undefined, this.prisma, v.id));
+    return [...new Set(lists.flat())];
   }
 
   async getStatus(userId: string, roleKey: ChecklistRole, vehicleHint?: VehicleType) {
@@ -2065,11 +2083,13 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<boolean> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return false;
 
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    // [ROLE-DOCS · per store] a store's gate passes its id: its own name basis decides its list
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.isVerifiedForList(userId, checklist, db);
   }
 
@@ -2123,10 +2143,11 @@ export class VerificationService {
     userId: string,
     roleKey: ChecklistRole,
     db: Prisma.TransactionClient | PrismaClient = this.prisma,
+    vendorId?: string,
   ): Promise<Date | null> {
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return null;
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, undefined, db, vendorId);
     return this.evidenceValidUntilForList(userId, checklist, db);
   }
 
@@ -2172,12 +2193,12 @@ export class VerificationService {
   async activationChecklist(
     userId: string,
     roleKey: ChecklistRole,
-    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient } = {},
+    options: { vehicleType?: VehicleType; db?: Prisma.TransactionClient | PrismaClient; vendorId?: string } = {},
   ): Promise<ActivationChecklist> {
     const db = options.db ?? this.prisma;
     const user = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true } });
     if (!user) return { checklist: [], items: [], complete: false };
-    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db);
+    const checklist = await this.checklistFor(userId, user.countryCode, roleKey, options.vehicleType, db, options.vendorId);
     const evidence = await this.approvedEvidence(db, userId, checklist, new Date());
     const approved = new Set(evidence.map((e) => e.docType));
     const approvedUntil = new Map<string, string | null>();
@@ -2230,7 +2251,7 @@ export class VerificationService {
     if (!vendor) return null;
     const role = vendor.vendorType as ChecklistRole;
     const ownerUserId = vendor.owner.userId;
-    const checklist = await this.activationChecklist(ownerUserId, role, { db });
+    const checklist = await this.activationChecklist(ownerUserId, role, { db, vendorId });
     const engaged = await disclosureGateEngaged(db, vendor.owner.user.countryCode);
     // The projection's own compile, with the same payer and tenant authority it names — and only
     // when the gate is engaged, as in the projection: a disengaged gate decides nothing, so no
@@ -2344,7 +2365,7 @@ export class VerificationService {
     const country = await db.user.findUnique({ where: { id: userId }, select: { countryCode: true, tenantId: true } });
     const disclosureGate = country ? await disclosureGateEngaged(db, country.countryCode) : false;
     for (const vendor of owner.vendors) {
-      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db);
+      const checklistOk = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
       const verified = checklistOk && (!disclosureGate || (country != null && (await compileActivationDisclosure(db, vendor.id, { accountId: userId, tenantId: country.tenantId })).complete));
       // [owner #51] A FIRST go-live also needs a published phone (vendor/go-live.ts).
       if (verified && awaitingFirstGoLive(vendor) && goLiveMissing(vendor).length > 0) {
@@ -2361,7 +2382,7 @@ export class VerificationService {
         if (!vendor.isVerified || vendor.status === 'PENDING_APPROVAL') {
           await this.subscriptions.startTrialForVendor(vendor.id, db);
         }
-        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db);
+        const activationValidUntil = await this.checklistEvidenceValidUntil(userId, vendor.vendorType as ChecklistRole, db, vendor.id);
         await db.vendor.update({
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
@@ -3344,7 +3365,7 @@ export class VerificationService {
     if (!owner) return;
 
     for (const vendor of owner.vendors) {
-      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole);
+      const stillVerified = await this.isRoleVerified(userId, vendor.vendorType as ChecklistRole, this.prisma, vendor.id);
       if (!stillVerified) {
         await this.prisma.vendor.update({
           where: { id: vendor.id },
