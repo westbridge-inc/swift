@@ -16,7 +16,7 @@ import { HIRE_DRIVER_LICENCE_DOC_TYPE, HIRE_PERMIT_DOC_TYPE, HIRE_SPLIT_DOC_TYPE
 import { compileActivationDisclosure, disclosureGateEngaged } from './storefront-disclosure';
 import { extractWithLadder, l3BreakerOpen, assertKeyServiceForAccess, L3_DISABLED, type DegradedResult } from './degradation';
 import { retentionDaysFor } from './retention-policy';
-import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
+import { ABANDON_NOTICE_ACTION, ABANDON_NOTICE_BODY, ABANDON_NOTICE_DAYS, ABANDON_NOTICE_TITLE, ABANDON_PURGE_ACTOR, abandonPurgeDueAt, EVER_APPROVED_WHERE, everVerifiedRoles, MOVER_ROLES, openCaseKeeps, stillAbandoned, WAITING_ON_SWIFT_WHERE } from './abandoned-application';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from './purge-receipt';
 import { biometricFaceMatchEnabled } from '../../lib/biometric-guard';
 import { recordReaperRun } from '../ops/reaper-freshness';
@@ -43,6 +43,7 @@ import { decryptBuffer, getKeyProvider } from '../../providers/storage/envelope'
 import { customerIdHoldReasons, readCustomerIdFacts, ON_FILE_REVIEWER, type CustomerIdHoldReason } from './customer-id';
 import { FloatService } from '../dispatch/float.service';
 import { SubscriptionService } from '../subscription/subscription.service';
+import { holdActivationForUnpaidFee, lockVendorActivationBilling } from '../billing/billing-access';
 import { SearchService } from '../search/search.service';
 import { approvedIdentityDocumentNumber, ISSUE_DATE_DOC_TYPES, REVIEWER_TYPED_NUMBER_DOC_TYPES, reviewerTypedDocumentSignal } from './identity-signal-policy';
 import { resolveSignupSelfie, resolveVerificationObject, verificationObjectUnavailable } from './object-authority';
@@ -53,6 +54,8 @@ import {
   reconcileProviderVerifications,
   refreshProviderVerification,
 } from '../services/services.service';
+import { insertNoticeFor, publicPhoneAsked } from '../../lib/owner-wall-notices';
+import { ownerRlsBindEnabled, ownerWallSystem } from '../../lib/owner-rls';
 
 /** Checklist keys come from CountryConfig.documentChecklists. */
 export type ChecklistRole = 'MOVER' | 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE' | 'SERVICE_PROVIDER';
@@ -639,10 +642,11 @@ export class VerificationService {
 
   /** One admin page per profile per six hours when the breaker opens — an alarm, not a drumbeat. */
   private async pageBreakerOnce(profileCode: string, rate: number): Promise<void> {
-    const recent = await this.prisma.notification.findFirst({
+    // [item 20] Any admin's page, read from whoever's extraction tripped the breaker: the named capability under the owner wall.
+    const recent = await ownerWallSystem('verification:breaker-page-once', () => this.prisma.notification.findFirst({
       where: { data: { path: ['kind'], equals: 'ops_extraction_breaker_open' }, createdAt: { gt: new Date(Date.now() - 6 * 3_600_000) }, body: { contains: profileCode } },
       select: { id: true },
-    });
+    }));
     if (recent) return;
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: null,
@@ -1194,10 +1198,10 @@ export class VerificationService {
           documentId: decided.id, userId: decided.userId, command: APPROVAL_TAIL,
         } });
       }
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...approvedNotice(decided.docType),
         data: { kind: 'verification_approved', docId, audience: audienceForRole(decided.role) },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -1263,10 +1267,10 @@ export class VerificationService {
     }, { reviewerId: adminId, reasonCode, note: fullReason, fraud }, async (tx, decided) => {
       // [S2-29 · KYC-DECISION-ATOMIC] The notice and the caller's audit rows commit with the
       // rejection. The actor hears the category's text only; for the fraud class that is the generic message.
-      const notice = await tx.notification.create({ data: {
+      const notice = await insertNoticeFor(tx, {
         userId: decided.userId, type: 'SYSTEM_ANNOUNCEMENT', ...rejectedNotice(decided.docType, fraud ? FRAUD_GENERIC_TEXT : fullReason),
         data: { kind: 'verification_rejected' },
-      } });
+      });
       this.projectionNotices.get(tx)?.push(notice.id);
       if (decision.within) await decision.within(tx, decided);
     });
@@ -2230,8 +2234,11 @@ export class VerificationService {
         throw new AppError(409, 'ACTIVATION_HELD', 'The store or owner changed while approving. Refresh its checklist.');
       }
       await this.projectVendorActivation(tx, userId, { vendorId });
-      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true } });
-      if (after.status !== 'ACTIVE') throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
+      const after = await tx.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { status: true, suspensionSource: true, isVerified: true } });
+      // [#1541] Live under billing's hold (documents approved, weekly fee unpaid: holdActivationForUnpaidFee) is
+      // this activation too; the payment that clears the fee opens the store.
+      const heldForFee = after.status === 'SUSPENDED' && after.suspensionSource === 'BILLING' && after.isVerified;
+      if (after.status !== 'ACTIVE' && !heldForFee) throw new AppError(409, 'ACTIVATION_HELD', 'The store was not activated. Refresh its checklist.');
       await onActivated?.(tx);
     });
   }
@@ -2269,6 +2276,8 @@ export class VerificationService {
       if (await accountErasedUnderLock(tx, userId)) return;
       return this.projectVendorActivation(tx, userId, scope);
     });
+    // [#1541] Settlement's payer -> subscriptions locks before any fee read or store write (billing-access.ts).
+    await lockVendorActivationBilling(db, userId);
     const owner = await db.vendorOwner.findUnique({
       where: { userId },
       include: {
@@ -2288,13 +2297,13 @@ export class VerificationService {
     // owner holds — automatic, audited, once. Runs before the activation projection so the
     // promoted store's checklist is read at its new tier.
     await promoteIfRegistered(db, userId, new Date(), async (vendorId, ownerUserId) => {
-      const notice = await db.notification.create({ data: {
+      const notice = await insertNoticeFor(db, {
         userId: ownerUserId,
         type: 'SYSTEM_ANNOUNCEMENT',
         title: 'Your store is now a registered seller',
         body: 'Your business registration is on file. The unregistered-seller limits on orders and weekly sales are lifted, and promoted placement is open to you.',
         data: { kind: 'vendor_tier_promoted', vendorId },
-      } });
+      });
       this.projectionNotices.get(db)?.push(notice.id);
     });
     // [DOC-1 Part XIX · DOC-INV-27 · P19] Once the country's BUSINESS-bucket types are active, a
@@ -2325,6 +2334,9 @@ export class VerificationService {
           where: { id: vendor.id },
           data: { isVerified: true, activationValidUntil, ...(vendor.isVerified ? {} : { acceptingOrders: true }) },
         });
+        // [#1541 · #1516 review S4] A store whose weekly fee billing holds goes live UNDER that hold
+        // (billing-access.ts), never open while its fee is unpaid; the promotion below then finds it not pending.
+        if (await holdActivationForUnpaidFee(db, vendor.id)) await this.tellOwnerFeeHoldsGoLive(db, userId, vendor);
         await db.vendor.updateMany({
           where: { id: vendor.id, status: 'PENDING_APPROVAL' },
           data: { status: 'ACTIVE' },
@@ -2351,19 +2363,43 @@ export class VerificationService {
     userId: string,
     vendor: { id: string; name: string },
   ): Promise<void> {
-    const already = await db.notification.findFirst({
-      where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
-      select: { id: true },
-    });
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const already = ownerRlsBindEnabled()
+      ? await publicPhoneAsked(db, userId, vendor.id)
+      : await db.notification.findFirst({
+        where: { userId, AND: [{ data: { path: ['kind'], equals: NEEDS_PUBLIC_PHONE_KIND } }, { data: { path: ['vendorId'], equals: vendor.id } }] },
+        select: { id: true },
+      });
     if (already) return;
-    const notice = await db.notification.create({ data: {
+    const notice = await insertNoticeFor(db, {
       userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Add the number customers can call',
       body: `${vendor.name} has everything else it needs. Add the phone number customers can call in Account, and your store goes live.`,
       // The literal keeps the kind visible to the cross-app notification census.
       data: { kind: 'vendor_needs_public_phone', vendorId: vendor.id },
-    } });
+    });
+    this.projectionNotices.get(db)?.push(notice.id);
+  }
+
+  /** [#1541] The one notice for a store that went live under billing's hold: its documents are approved, and
+   *  paying the weekly fee opens it. Sent on the hold's own edge (PENDING_APPROVAL → SUSPENDED, once per
+   *  activation), whichever path ran the projection — the console's approve sends none of its own for it.
+   *  Delivered after the projection commits. */
+  private async tellOwnerFeeHoldsGoLive(
+    db: Prisma.TransactionClient | PrismaClient,
+    userId: string,
+    vendor: { id: string; name: string },
+  ): Promise<void> {
+    // [item 20] The owner's inbox, written inside the projection transaction (often an admin's or a job's): with the
+    // wall on, an INSERT without RETURNING through the one notice helper (notice_write admits it; a read-back would not).
+    const notice = await insertNoticeFor(db, {
+      userId,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'Documents approved',
+      body: `${vendor.name}'s documents are approved. Pay the weekly fee to open the store for orders.`,
+      data: { vendorId: vendor.id },
+    });
     this.projectionNotices.get(db)?.push(notice.id);
   }
 
@@ -2880,6 +2916,9 @@ export class VerificationService {
     for (const d of docs) last = Math.max(last, d.createdAt.getTime(), d.reviewedAt?.getTime() ?? 0);
     const lastActivityAt = new Date(last);
     if (now.getTime() - last < ABANDON_NOTICE_DAYS * DAY_MS) return none;
+    // [REVIEW-M S4-3 · COORD] An open fraud, safety, compliance or dispute case keeps the documents, like a hold:
+    // no notice (it would not be true), nothing deleted, until it closes.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     // The application's documents: partner documents of a role never verified, not held, not an AML record.
     const verified = await everVerifiedRoles(this.prisma, userId, (roleKey) => this.everCompletedChecklist(userId, roleKey));
     const config = await this.countryConfig.getByCode(user.countryCode);
@@ -2901,7 +2940,9 @@ export class VerificationService {
       orderBy: { createdAt: 'asc' }, select: { createdAt: true },
     });
     if (!notice) {
-      await this.notifications.send({
+      // [REVIEW-M S4-1] The in-app notice is the inbox row; whether a push also reached a phone is recorded with it,
+      // never assumed.
+      const reach = await this.notifications.sendReach({
         userId, type: 'SYSTEM_ANNOUNCEMENT', title: ABANDON_NOTICE_TITLE, body: ABANDON_NOTICE_BODY,
         // Whose documents screen it opens: the store's, the mover's; a service provider's follows the open app.
         ...(candidates.some((d) => d.role === 'VENDOR_OWNER') ? { audience: 'business' as const }
@@ -2909,13 +2950,19 @@ export class VerificationService {
         data: { kind: 'verification_application_abandoned' },
         dedupeKey: `abandon-notice:${lastActivityAt.toISOString()}`,
       });
+      // [REVIEW-G S3-2] sendReach answers a failed inbox write with no id (it never throws, for its other callers). No
+      // inbox row = no notice: throw, so no notice record starts the purge clock; the person is counted as failed and
+      // noticed on the next run.
+      if (!reach.id) throw new Error('abandoned-application notice not written to the inbox');
       await this.prisma.auditLog.create({ data: {
         userId, action: ABANDON_NOTICE_ACTION, entity: 'user', entityId: userId, createdAt: now,
-        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length },
+        changes: { lastActivityAt: lastActivityAt.toISOString(), purgeDueAt: abandonPurgeDueAt(lastActivityAt, now).toISOString(), documents: candidates.length, notificationId: reach.id, pushed: reach.pushed },
       } });
       return { noticed: 1, purged: 0 };
     }
     if (now.getTime() < abandonPurgeDueAt(lastActivityAt, notice.createdAt).getTime()) return none;
+    // [COORD 18:5xZ] Checked AGAIN immediately before the purge: a case opened after the notice still keeps everything.
+    if (await openCaseKeeps(this.prisma, userId)) return none;
     let purged = 0;
     for (const doc of candidates) {
       const outcome = await this.purgeDocumentNow(doc, ABANDON_PURGE_ACTOR, { requireRetentionElapsed: false, shredFields: true, now, still: stillAbandoned(lastActivityAt) });

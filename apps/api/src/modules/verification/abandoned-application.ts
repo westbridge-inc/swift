@@ -1,5 +1,6 @@
 import type { DocState, Prisma, PrismaClient, UserRole } from '@prisma/client';
 import type { ChecklistRole } from './verification.service';
+import { runAsSystem } from '../../plugins/tenant-context';
 import { DAY_MS } from './retention-rules';
 
 /**
@@ -61,6 +62,101 @@ export function abandonPurgeDueAt(lastActivityAt: Date, noticeAt: Date): Date {
 }
 
 type Db = Pick<PrismaClient, 'rider' | 'driver' | 'vendorOwner' | 'serviceProvider' | 'subscription' | 'moverFeeAuthority'>;
+
+/**
+ * [Row 249 · REVIEW-M S4-3 · COORD rulings 18:4xZ + security review] AN OPEN CASE KEEPS THE DOCUMENTS, like a hold: no
+ * notice, nothing deleted, until it closes (then the 76/90-day clock applies as usual). The census covers EVERY case,
+ * report, dispute and hold model that can name a person, directly or through their rider, driver or store ids, and a
+ * report about something of theirs (their rating, message, store or item). Checked before the notice and again right
+ * before the purge; any lookup error reads as an open case (fail toward keeping).
+ *
+ * Not in the census, with the reason: Strike (a record, not a case: nothing to close), LegalHold (it hangs off an
+ * IncidentCase, covered there), SosRetrigger / SosEscalation (they hang off an SosAlert, covered there), AttributionClaim
+ * (names no person).
+ */
+export const OPEN_CASE_CENSUS = [
+  'fraud_case', 'identity_review_case', 'enforcement_appeal', 'incident_case', 'sos_alert', 'safety_deletion_hold',
+  'doc_legal_hold', 'compliance_review_case', 'compliance_violation', 'review_case', 'rectification_request',
+  'custody_recovery_case', 'content_report', 'rating_report', 'reimbursement_claim', 'support_ticket', 'payment_confirmation_hold',
+] as const;
+export type OpenCaseKind = (typeof OPEN_CASE_CENSUS)[number];
+
+/** Every open case naming this person, by census name. Throws on any lookup error (the caller keeps). */
+export async function openCasesOf(db: PrismaClient, userId: string): Promise<OpenCaseKind[]> {
+  const [docs, rider, driver, owner, member] = await Promise.all([
+    db.verificationDocument.findMany({ where: { userId }, select: { id: true } }),
+    db.rider.findUnique({ where: { userId }, select: { id: true } }),
+    db.driver.findUnique({ where: { userId }, select: { id: true } }),
+    db.vendorOwner.findUnique({ where: { userId }, select: { vendors: { select: { id: true } } } }),
+    db.identityClusterMember.findUnique({ where: { accountId: userId }, select: { clusterId: true } }),
+  ]);
+  const docIds = docs.map((d) => d.id);
+  const moverIds = [rider?.id, driver?.id].filter((id): id is string => !!id);
+  const vendorIds = owner?.vendors.map((v) => v.id) ?? [];
+  const subscriptionIds = (moverIds.length || vendorIds.length ? await db.subscription.findMany({
+    where: { OR: [{ riderId: { in: moverIds } }, { driverId: { in: moverIds } }, { vendorId: { in: vendorIds } }] }, select: { id: true },
+  }) : []).map((x) => x.id);
+  const checks: Record<OpenCaseKind, () => Promise<number>> = {
+    // [REVIEW-G S3-1] A confirmed case also names the subject's identity-cluster members (linkedAccountIds), held for a
+    // founder decision; the legal hold is on the subject only, so a linked account is kept here.
+    fraud_case: () => db.fraudCase.count({ where: { OR: [
+      { subjectUserId: userId }, { submissionId: { in: docIds } }, { linkedAccountIds: { array_contains: [userId] } },
+    ] } }),
+    identity_review_case: async () => member ? db.identityReviewCase.count({ where: { clusterId: member.clusterId, status: 'OPEN' } }) : 0,
+    enforcement_appeal: () => db.enforcementAction.count({ where: { accountId: userId, appeal: 'OPEN' } }),
+    incident_case: () => db.incidentCase.count({ where: {
+      OR: [{ subjectUserId: userId }, { reporterUserId: userId }],
+      AND: [{ OR: [{ status: { not: 'CLOSED' } }, { legalHold: true }, { legalHoldRecord: { isNot: null } }] }],
+    } }),
+    sos_alert: () => db.sosAlert.count({ where: {
+      OR: [{ actorUserId: userId }, { counterpartyUserId: userId }], status: { in: ['TRIGGER_PENDING', 'ACTIVE', 'ACKNOWLEDGED'] },
+    } }),
+    safety_deletion_hold: () => db.safetyDeletionHold.count({ where: { userId, status: 'PENDING' } }),
+    doc_legal_hold: () => db.docLegalHold.count({ where: { OR: [{ subjectUserId: userId }, { ownerId: userId }], releasedAt: null } }),
+    compliance_review_case: () => db.complianceReviewCase.count({ where: { userId, status: 'OPEN' } }),
+    compliance_violation: () => db.complianceViolation.count({ where: { userId, resolvedAt: null } }),
+    review_case: async () => docIds.length ? db.reviewCase.count({ where: { submissionId: { in: docIds }, closedAt: null } }) : 0,
+    rectification_request: () => db.rectificationRequest.count({ where: { OR: [{ userId }, { submissionId: { in: docIds } }], resolvedAt: null } }),
+    custody_recovery_case: () => db.custodyRecoveryCase.count({ where: {
+      OR: [{ ownerUserId: userId }, { holderRiderId: { in: moverIds } }, { relayRiderId: { in: moverIds } }], resolvedAt: null,
+    } }),
+    // A report by them, about them, or about their rating (written or received), message, store or item.
+    content_report: async () => (await db.$queryRaw<Array<{ n: number }>>`
+      SELECT 1 AS n FROM content_reports r
+      WHERE r."status"::text IN ('PENDING', 'REVIEWING') AND (
+        r."reporterId" = ${userId}
+        OR (r."targetType"::text = 'USER' AND r."targetId" = ${userId})
+        OR (r."targetType"::text = 'RATING' AND EXISTS (SELECT 1 FROM ratings x WHERE x."id" = r."targetId" AND (x."raterId" = ${userId} OR x."rateeId" = ${userId})))
+        OR (r."targetType"::text = 'CHAT_MESSAGE' AND EXISTS (SELECT 1 FROM chat_messages m WHERE m."id" = r."targetId" AND m."senderId" = ${userId}))
+        OR (r."targetType"::text = 'VENDOR' AND EXISTS (SELECT 1 FROM vendors v JOIN vendor_owners o ON o."id" = v."ownerId" WHERE v."id" = r."targetId" AND o."userId" = ${userId}))
+        OR (r."targetType"::text = 'ITEM' AND EXISTS (SELECT 1 FROM items i JOIN vendors v ON v."id" = i."vendorId" JOIN vendor_owners o ON o."id" = v."ownerId" WHERE i."id" = r."targetId" AND o."userId" = ${userId}))
+      ) LIMIT 1 /* abandoned-application-open-case-census */
+    `).length,
+    rating_report: async () => (await db.$queryRaw<Array<{ n: number }>>`
+      SELECT 1 AS n FROM rating_reports r LEFT JOIN ratings x ON x."id" = r."ratingId"
+      WHERE r."status" = 'PENDING' AND (r."reporterId" = ${userId} OR x."raterId" = ${userId} OR x."rateeId" = ${userId})
+      LIMIT 1 /* abandoned-application-open-case-census */
+    `).length,
+    reimbursement_claim: () => db.reimbursementClaim.count({ where: {
+      OR: [{ customerId: userId }, { riderId: { in: moverIds } }, { driverId: { in: moverIds } }], status: { in: ['PENDING_REVIEW', 'AUTO_APPROVED', 'APPROVED'] },
+    } }),
+    support_ticket: () => db.supportTicket.count({ where: { userId, status: { in: ['OPEN', 'IN_PROGRESS'] } } }),
+    payment_confirmation_hold: async () => subscriptionIds.length
+      ? db.paymentConfirmationHold.count({ where: { subscriptionId: { in: subscriptionIds }, resolvedAt: null } }) : 0,
+  };
+  const open: OpenCaseKind[] = [];
+  for (const kind of OPEN_CASE_CENSUS) if (await checks[kind]() > 0) open.push(kind);
+  return open;
+}
+
+/** True while any open case names the person; any error reads as an open case (fail toward keeping). */
+export async function openCaseKeeps(db: PrismaClient, userId: string): Promise<boolean> {
+  try {
+    return (await runAsSystem('verification:abandoned-case-census', () => openCasesOf(db, userId))).length > 0;
+  } catch {
+    return true;
+  }
+}
 
 /** A document Swift approved at some point (it may since have lapsed, or its image gone). */
 export const EVER_APPROVED_WHERE: Prisma.VerificationDocumentWhereInput = {

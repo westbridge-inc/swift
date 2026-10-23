@@ -347,6 +347,72 @@ describe('the scan', () => {
     await app.prisma.rideQueueEntry.updateMany({ where: { customerId: c.userId }, data: { status: 'LEFT' } });
   });
 
+  // [TAXI-FLOW 22 Oct 2026] The owner booked and drove with ONE account: he
+  // joined the queue in customer mode, switched to driver and went online, and
+  // the scan counted HIS OWN car as supply — it auto-created a ride that
+  // dispatch (which never offers a ride to its booker) could never fill, and
+  // the phone said "Finding you a driver" for half an hour.
+  it('never counts the queued customer’s OWN driver profile as supply', async () => {
+    const FIELD = { lat: 5.1751, lng: -59.4802 }; // Kaieteur: a field no other suite uses
+    const dual = await makeUserWithSession(['MOVER', 'CUSTOMER'], 'CUSTOMER');
+    // 1) Customer mode, nobody online: they join the queue.
+    const joined = await join(dual.token, { pickup: FIELD, pickupAddress: 'Kaieteur airstrip', dropoff: { lat: 5.1851, lng: -59.4902 } });
+    expect(joined.statusCode).toBe(201);
+    // 2) The same account switches to driver mode and goes online right at
+    //    the pickup — exactly what makeDriver's real drivers look like
+    //    (activeRole MOVER, fresh fix, bound location session).
+    await app.prisma.user.update({ where: { id: dual.userId }, data: { activeRole: 'MOVER' } });
+    const own = await app.prisma.driver.create({
+      data: {
+        userId: dual.userId,
+        vehicleMake: 'Toyota', vehicleModel: 'Premio', vehicleYear: 2019, vehicleColor: 'Silver',
+        licensePlate: `HQ 20${seq}`, driverLicenseUrl: 'x', vehicleInsuranceUrl: 'x',
+        isAvailable: true, isOnline: true, currentLat: FIELD.lat, currentLng: FIELD.lng,
+        lastLocationUpdate: new Date(), locationSessionId: dual.sessionId,
+      } as never,
+    });
+    // Precondition (keeps the test honest): that car IS live supply to anyone
+    // else — the anonymous area read counts it.
+    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: dual.userId }, select: { tenantId: true } });
+    const area = await runWithoutTenant(() => scanDeps().dispatch.getAvailability('DRIVER', FIELD, 0, tenantId));
+    expect(area.level).not.toBe('NONE');
+
+    const result = await runScan();
+    const entry = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: dual.userId } });
+    expect(entry.status).toBe('WAITING');
+    expect(entry.matchedOrderId).toBeNull();
+    expect(await app.prisma.order.count({ where: { customerId: dual.userId, orderType: 'TAXI' } })).toBe(0);
+    expect(result.matched).toBe(0);
+
+    // Control: a DIFFERENT driver in the same field is real supply — the same
+    // entry is auto-requested on the next scan, so only the booker was excluded.
+    await makeDriver(FIELD);
+    const next = await runScan();
+    expect(next.matched).toBe(1);
+    const matched = await app.prisma.rideQueueEntry.findFirstOrThrow({ where: { customerId: dual.userId } });
+    expect(matched.status).toBe('MATCHED');
+
+    // The waiting ride tells the phone its search state (additive keys on
+    // GET /rides/active): nothing came back empty yet, and when the slow lane
+    // would release it — placement + TAXI_WAIT_LIMIT_MIN (30 by default).
+    const ride = await app.prisma.order.findUniqueOrThrow({ where: { id: matched.matchedOrderId! } });
+    const activeOf = async () => (await app.inject({
+      method: 'GET', url: '/api/v1/rides/active', headers: { authorization: `Bearer ${dual.token}` },
+    })).json().data;
+    const waiting = await activeOf();
+    expect(waiting.id).toBe(ride.id);
+    expect(waiting.noDriverFound).toBe(false);
+    expect(Date.parse(waiting.searchReleaseAt) - ride.placedAt.getTime()).toBe(30 * 60_000);
+    // A search came back empty: the phone may stop showing a bare spinner.
+    await app.prisma.dispatchSearch.create({
+      data: { vertical: 'TAXI', subjectType: 'ORDER', subjectId: ride.id, status: 'EXHAUSTED', wave: 3, radiusKm: 15, exhaustedAt: new Date(), resolution: 'RETRIED' },
+    });
+    expect((await activeOf()).noDriverFound).toBe(true);
+    await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: ride.id } });
+    await app.prisma.order.updateMany({ where: { customerId: dual.userId }, data: { status: 'CANCELLED' } });
+    await app.prisma.driver.update({ where: { id: own.id }, data: { isOnline: false, isAvailable: false } });
+  });
+
   it('auto-requests the FIFO head through the REAL request core when a driver frees up', async () => {
     const c = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     await makeDriver(GT); // one free driver in Georgetown

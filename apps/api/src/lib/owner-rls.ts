@@ -28,12 +28,41 @@ type EnvLike = Record<string, string | undefined>;
 export const OWNER_WALL_ROLE = 'swift_owner_wall';
 export const OWNER_POLICY_NAME = 'owner_isolation';
 /** The owner-walled tables, each keyed by its owner column. */
-export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId' };
+export const OWNER_WALLED_TABLES: Readonly<Record<string, 'userId'>> = { addresses: 'userId', device_tokens: 'userId', notifications: 'userId', support_tickets: 'userId' };
 
 /** The USING and WITH CHECK every owner policy carries (the migration writes
  *  exactly this; the boot attestation compares the stored policy with it). */
 export const OWNER_POLICY_EXPRESSION = `pg_has_role(current_user, 'swift_bypass_rls', 'MEMBER') OR NOT pg_has_role(current_user, 'swift_owner_wall', 'MEMBER') OR "userId" = NULLIF(current_setting('app.current_user', true), '')`;
 const OWNER_POLICY_CONTRACT = normalizePolicyExpression(OWNER_POLICY_EXPRESSION) as string;
+
+/** One permissive policy an owner-walled table must carry: its command
+ *  (pg_policy.polcmd: '*' all, r select, a insert, w update, d delete) and its
+ *  normalised USING / WITH CHECK (null = none). */
+interface OwnerPolicyShape { name: string; cmd: '*' | 'r' | 'a' | 'w' | 'd'; using: string | null; check: string | null }
+/** [item 20 · notifications] Anyone may hand a person a notice (the INSERT
+ *  policy checks nothing); only the person reads, updates or deletes it. */
+export const NOTICE_WRITE_POLICY_NAME = 'notice_write';
+/** [item 20 · support tickets] A case may be opened FOR a person; only the person reads, updates or deletes it. */
+export const TICKET_WRITE_POLICY_NAME = 'ticket_write';
+const OWNER_ALL: readonly OwnerPolicyShape[] = [{ name: OWNER_POLICY_NAME, cmd: '*', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT }];
+/** Exactly the permissive policies each owner-walled table carries (the
+ *  migrations write these; any other permissive policy widens the wall). */
+const OWNER_POLICY_LAYOUT: Readonly<Record<string, readonly OwnerPolicyShape[]>> = {
+  addresses: OWNER_ALL,
+  device_tokens: OWNER_ALL,
+  notifications: [
+    { name: OWNER_POLICY_NAME, cmd: 'r', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: `${OWNER_POLICY_NAME}_update`, cmd: 'w', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT },
+    { name: `${OWNER_POLICY_NAME}_delete`, cmd: 'd', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: NOTICE_WRITE_POLICY_NAME, cmd: 'a', using: null, check: 'true' },
+  ],
+  support_tickets: [
+    { name: OWNER_POLICY_NAME, cmd: 'r', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: `${OWNER_POLICY_NAME}_update`, cmd: 'w', using: OWNER_POLICY_CONTRACT, check: OWNER_POLICY_CONTRACT },
+    { name: `${OWNER_POLICY_NAME}_delete`, cmd: 'd', using: OWNER_POLICY_CONTRACT, check: null },
+    { name: TICKET_WRITE_POLICY_NAME, cmd: 'a', using: null, check: 'true' },
+  ],
+};
 
 /** OWNER_RLS_BIND=1: every request binding also sets `app.current_user`. */
 export const ownerRlsBindEnabled = (env: EnvLike = process.env): boolean => env['OWNER_RLS_BIND'] === '1';
@@ -43,9 +72,9 @@ export interface OwnerWallFacts {
   walledLogin: boolean;
   /** Is it a member of swift_bypass_rls (never walled)? */
   bypassLogin: boolean;
-  /** Owner-walled tables missing RLS, FORCE or the canonical owner policy,
-   *  or carrying another permissive policy (permissive policies are OR-ed:
-   *  any other one widens the wall). */
+  /** Owner-walled tables missing RLS, FORCE or one of their canonical owner
+   *  policies, or carrying another permissive policy (permissive policies are
+   *  OR-ed: any other one widens the wall). */
   unwalledTables: string[];
 }
 
@@ -67,10 +96,12 @@ export async function readOwnerWallFacts(db: RawDb): Promise<OwnerWallFacts> {
       LEFT JOIN pg_policy p ON p.polrelid = c.oid`;
   const unwalled = Object.keys(OWNER_WALLED_TABLES).filter((table) => {
     const policies = rows.filter((r) => r.name === table);
-    const canonical = (r: (typeof rows)[number]) => r.polname === OWNER_POLICY_NAME && r.permissive === true && r.cmd === '*' && r.to_public === true
-      && normalizePolicyExpression(r.qual) === OWNER_POLICY_CONTRACT && normalizePolicyExpression(r.with_check) === OWNER_POLICY_CONTRACT;
-    return !policies.some((r) => r.secured === true) || !policies.some(canonical)
-      || policies.some((r) => r.polname !== null && r.polname !== OWNER_POLICY_NAME && r.permissive === true);
+    const layout = OWNER_POLICY_LAYOUT[table] ?? OWNER_ALL;
+    const permissive = policies.filter((r) => r.polname !== null && r.permissive === true);
+    const canonical = (r: (typeof rows)[number], shape: OwnerPolicyShape) => r.polname === shape.name && r.cmd === shape.cmd && r.to_public === true
+      && normalizePolicyExpression(r.qual) === shape.using && normalizePolicyExpression(r.with_check) === shape.check;
+    return !policies.some((r) => r.secured === true) || !layout.every((shape) => permissive.some((r) => canonical(r, shape)))
+      || permissive.some((r) => !layout.some((shape) => shape.name === r.polname));
   });
   return {
     walledLogin: login?.walled ?? false,

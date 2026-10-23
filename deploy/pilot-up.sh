@@ -339,6 +339,13 @@ if [ "$PILOT_ENV" = production ]; then
       *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment and no ads until an attorney signs off (owner ruling, 13 Oct)" ;;
     esac
   done
+  # [Row 312] MALWARE_SCAN: every upload is scanned by the private clamd
+  # service on production (owner, 21 Oct: on for launch). Compose defaults it
+  # to clamd; deploy/.env may only leave it unset or say clamd.
+  case "$(env_setting MALWARE_SCAN)" in
+    "" | clamd) ;;
+    *) die "PILOT_ENV=production needs MALWARE_SCAN unset or exactly clamd: every upload is scanned by the private clamd service (owner ruling, 21 Oct)" ;;
+  esac
   # Address search (the API refuses to boot in production without a provider,
   # #1563): osm, the private Photon service this script then starts, or
   # google, the owner's key in the encrypted store. Which one is the owner's
@@ -583,7 +590,7 @@ if [ "$NO_PUBLIC" -eq 1 ]; then
 fi
 
 # Pull versioned infrastructure images, then build the exact checked-out API.
-"${COMPOSE[@]}" pull postgres redis meilisearch caddy
+"${COMPOSE[@]}" pull postgres redis meilisearch clamd caddy
 "${ROUTING[@]}" pull osrm
 [ "$PLACES_PHOTON" -eq 0 ] || "${ROUTING[@]}" pull photon
 "${COMPOSE[@]}" build api
@@ -663,6 +670,28 @@ if [ "$PLACES_PHOTON" -eq 1 ]; then
     die "address search is not ready: Photon does not answer a Georgetown search yet (its first start downloads and imports a ~6.7 GB index). The running API and the database were not changed; rerun once docker compose -f deploy/docker-compose.routing.yml --profile geocoding logs photon shows it serving"
 fi
 
+# [Row 312] The upload malware scanner, before the running API is stopped:
+# healthy (its signatures loaded; a first start on a new volume can take a few
+# minutes), then proven from the API image on the private network with the
+# API's own gate: the EICAR test string (assembled in the process, harmless by
+# design) must be refused and ordinary bytes passed. Until both hold, nothing
+# was stopped or migrated. The data-only stage starts no API and needs none.
+if [ "$DATA_ONLY" -eq 0 ]; then
+  "${COMPOSE[@]}" up -d --wait --wait-timeout 900 clamd ||
+    die "the upload malware scanner (clamd) did not become healthy with its signatures loaded; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
+  # SCANNER_PROOF
+  docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" -e "
+    const { scanUpload } = require('./dist/lib/malware-scan.js');
+    const env = { MALWARE_SCAN: 'clamd', CLAMD_HOST: 'clamd', CLAMD_PORT: '3310' };
+    const eicar = Buffer.from('X5O!P%@AP[4\\\\PZX54(P^)7CC)7}\$' + 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!\$H+H*');
+    (async () => {
+      if (await scanUpload(Buffer.from('an ordinary file'), { surface: 'admin' }, env) !== 'CLEAN') process.exit(1);
+      try { await scanUpload(eicar, { surface: 'admin' }, env); process.exit(1); }
+      catch (e) { process.exit(e && e.code === 'UPLOAD_REJECTED' ? 0 : 1); }
+    })().catch(() => process.exit(1));" >/dev/null 2>&1 ||
+    die "the upload malware scanner did not refuse the EICAR test string (or did not pass ordinary bytes) through the API's own gate on the private network; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
+  echo "upload malware scanner ready: signatures loaded, EICAR refused through the API's gate"
+fi
 [ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker
 "${COMPOSE[@]}" up -d --force-recreate migrate
 MIGRATE_ID="$("${COMPOSE[@]}" ps -a -q migrate)"

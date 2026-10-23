@@ -8,7 +8,7 @@ import { Card, PillButton, T } from '../../../kit';
 import { PressableScale } from '../../../kit/pressable-scale';
 import { toast } from '../../../kit/toast';
 import { useImportAutomap, useImportItems, useImportFile } from '../../../hooks/vendorops';
-import { importCheckSummary } from '../../../lib/catalogueCheck';
+import { importCheckSummary, importPhotoNotesLine } from '../../../lib/catalogueCheck';
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
@@ -253,6 +253,10 @@ export function VendorBulkImportScreen({ navigation }: any) {
               {failedCount ? ` · ${failedCount} skipped` : ''}
               {importCheckSummary(result)}.
             </T>
+            {/* [IMAGES-E2E PR4] Rows whose photo address was not used (photos are uploaded, never imported). */}
+            {importPhotoNotesLine(result) ? (
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>{importPhotoNotesLine(result)}</T>
+            ) : null}
             <PillButton label="Back to menu" variant="outline" style={{ marginTop: space.md }} onPress={() => navigation?.goBack?.()} />
           </Card>
         ) : null}
