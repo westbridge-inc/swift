@@ -1078,7 +1078,14 @@ explicitly off. Beyond the earlier guards:
   a person. The poller leaves every MMG row
   untouched, and any MMG call refuses with MMG_DISABLED.
   To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
-  together (cash partners pay through the checkout page) and redeploy;
+  together (cash partners pay through the checkout page) and redeploy:
+  production refuses `MMG_DRIVER=live` without `MMG_CHECKOUT_ENABLED=1`,
+  since it never sends MMG charge requests and the checkout page is the
+  only MMG way to pay. The pause also counts MMG as a way to pay only
+  while the checkout is live on EVERY platform (the platform-config row
+  `billing.feeCheckout.platforms`): **never set a platform there to
+  `false` while fees run** unless pausing every partner's fee is intended
+  (one platform off pauses every fee on the server, cash included);
   turning a real card provider on also ends the pause, so do it only when
   partners can open the card pages (note the per-platform card switch: iOS
   is off unless switched on). While the launch lock below holds, production
@@ -1232,6 +1239,34 @@ outside. It refuses outright while Caddy is running (the names already
 serve: use the whole stack), or when Docker cannot say whether it is. Stop
 the two again with `docker compose -f deploy/docker-compose.yml stop api
 worker` before another `--data-only` run, which refuses while they run.
+
+**Address search, live (PLACES_PROVIDER=google).** Before DNS moves, prove the
+owner's key against Google from inside the API container. Three real calls:
+autocomplete "Giftland" restricted to Guyana, place details for the first
+suggestion, and one reverse geocode of a public landmark:
+
+    docker compose -f deploy/docker-compose.yml exec -T api node dist/scripts/places-smoke.js
+
+It prints PASS or FAIL per call with Google's status words only (never the
+key, a place name, an address or Google's own message) and ends with
+`PLACES SMOKE PASS`. It exits 1 when a call fails, and 2 when the container is
+not set up for Google (PLACES_PROVIDER is not `google`, or the key file is not
+wired). A FAIL names the class: `auth` is the key itself (invalid, restricted
+to the apps or to other APIs, the API not enabled in the project, or billing
+off: Places API (New) serves autocomplete and details, the Geocoding API
+serves reverse), then `quota`, `rejected`, `upstream`, `timeout`, `network` or
+`bad_response`. Do not move DNS on a FAIL: every customer search would answer
+"Address search isn't working right now. Set the place on the map."
+
+After launch the API reports the same by itself, without calling Google for
+it: `/ready` names the provider and its last known status (`ok` or `failing`,
+`since` a time; it never makes `/ready` fail), the token-gated `/health`
+detail names the last failure's class and Google status, the metric
+`swift_places_calls_total` counts every call by outcome, each failure is an
+error-level log line `places provider failure` (status words and the query's
+length, never the query), and five failures inside ten minutes open one
+platform page, "Address search is failing", which closes itself once search
+answers again and the failures have aged out of the window.
 
 ### The whole stack
 

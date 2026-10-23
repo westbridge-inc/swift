@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { shownRatingFor, shownSurface } from '../rating/rating-groups';
 import { ownerWallSystem } from '../../lib/owner-rls';
@@ -543,7 +544,7 @@ async function buildCartResponse(
       id: ci.id,
       itemId: ci.itemId,
       name: ci.item.name,
-      imageUrl: ci.item.imageUrl,
+      imageUrl: servedPhotoAddress(ci.item.imageUrl), // [IMAGES-E2E PR4] never an outside host
       basePrice: line.basePrice,
       customerPrice: line.unitPrice,
       quantity: ci.quantity,
@@ -1268,7 +1269,7 @@ export async function customerRoutes(app: FastifyInstance) {
         return {
           ...enrichVendor(card, lat, lng, homeDeliveryRates),
           // [GUARDRAILS §8 · Opus S3-8] A section named for banned goods ("Beers & Wines") is not on a card either.
-          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
         };
@@ -1285,7 +1286,7 @@ export async function customerRoutes(app: FastifyInstance) {
         for (const c of (v.categories ?? [])) {
           // [GUARDRAILS §8] A section named for banned goods is not a Home chip.
           if (classifyText(c.name)) continue;
-          if (!categorySet.has(c.id)) categorySet.set(c.id, c);
+          if (!categorySet.has(c.id)) categorySet.set(c.id, { id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) });
         }
       }
 
@@ -1294,7 +1295,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const popularItems = popularItemRows.filter((it) => !hiddenPopular.has(it.id)).map((it) => ({
         id: it.id,
         name: it.name,
-        imageUrl: it.imageUrl,
+        imageUrl: servedPhotoAddress(it.imageUrl),
         price: Number(it.basePrice),
         vendorId: it.vendorId,
         vendorName: it.vendor?.name ?? '',
@@ -2816,7 +2817,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
-    // drift again. The hold, the five-minute window, the store rule (owner
+    // drift again. The hold, the one-minute window, the store rule (owner
     // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
     // all live inside it; this file restates none of them.
     // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
@@ -3001,7 +3002,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
         // ONE implementation, shared with the predicate [cancel-policy.ts]:
-        // the moment the five-minute window of a ride, parcel or booking
+        // the moment the one-minute window of a ride, parcel or booking
         // closes; null when there is no countdown (refused, or free for as
         // long as nobody accepts / nobody was found / the order stays late).
         freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,

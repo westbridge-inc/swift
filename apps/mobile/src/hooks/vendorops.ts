@@ -1,9 +1,10 @@
 import { POLL } from '../lib/pollPolicy';
+import { prepareUploadImage } from '../lib/uploadImage';
 import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
+import { useMutationState, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
@@ -29,6 +30,7 @@ import { withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenS
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
+import { pendingOrderIds } from '../modules/vendor/boardTaps';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -344,11 +346,15 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
  *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
 export function useVendorOrder(id: string | undefined) {
   const pv = usePreviewDataset();
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
     enabled: !!id && !pv,
     refetchInterval: POLL.vendorOrder,
+    // [STORE-DASH] The order opens at once from the board's own copy of it; the
+    // order's own read replaces it the moment it answers (isPlaceholderData).
+    placeholderData: () => boardOrder(qc.getQueryData(['vendor', 'orders']), id),
   });
   return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }
@@ -485,9 +491,29 @@ export function useSetSelfDelivery() {
   });
 }
 
+/** [STORE-DASH] Every store tap on an order shares this key, so the board can
+ *  tell WHICH orders are waiting for the server (usePendingOrderIds). */
+export const ORDER_ACTION_KEY = ['vendor', 'order-action'] as const;
+
+/** The board copy of one order, when the board holds it. */
+export function boardOrder(board: unknown, id: string | undefined): any {
+  if (!id || !Array.isArray(board)) return undefined;
+  return board.find((o) => o?.id === id) ?? undefined;
+}
+
+/** [STORE-DASH] The orders whose store tap is still out: only those cards wait. */
+export function usePendingOrderIds(): ReadonlySet<string> {
+  const variables = useMutationState({
+    filters: { mutationKey: ORDER_ACTION_KEY, status: 'pending' },
+    select: (m) => m.state.variables,
+  });
+  return useMemo(() => pendingOrderIds(variables), [variables]);
+}
+
 export function useOrderAction() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: ORDER_ACTION_KEY,
     mutationFn: ({
       id,
       action,
@@ -715,6 +741,30 @@ export function useUploadItemImage() {
       form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
       return unwrap(vendorApi.uploadItemImage(id, form, authSession, storeId));
     },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] A menu section's own photo, sized on the phone first (a smaller upload on
+ *  a mobile network); the server checks, scans and redraws it without the camera's data. */
+export function useUploadCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const prepared = await prepareUploadImage(file);
+      const form = new FormData();
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadCategoryPhoto(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] Takes a menu section's photo down. */
+export function useRemoveCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
   });
 }

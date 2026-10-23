@@ -32,7 +32,8 @@ const MIN = 60;
 /** A single-leg ride whose pickup wait lasted `seconds` (closed: the trip started). */
 const pickupOnly = (seconds: number): TaxiWaitClock => ({ status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(seconds), stops: [] });
 const stop = (sequence: number, extra: Partial<TaxiWaitStopClock>): TaxiWaitStopClock =>
-  ({ sequence, status: 'PENDING', arrivedAt: null, departedAt: null, skippedAt: null, ...extra });
+  // [option A] An arrival in these fixtures is one the E19 gate accepted (it counts), unless a case says otherwise.
+  ({ sequence, status: 'PENDING', arrivedAt: null, departedAt: null, skippedAt: null, ...extra, arrivalVerified: 'arrivalVerified' in extra ? extra.arrivalVerified : (extra.arrivedAt ? true : null) });
 const final = (clock: TaxiWaitClock, now = at(3 * 3600)) => tallyTaxiWaiting(clock, GYD, now, 'final');
 
 describe('the edge-case table (the brief, item 5)', () => {
@@ -118,6 +119,27 @@ describe('the live clock (CONTRACT §8.3)', () => {
     const thirteen = liveWaitingPayload(GYD, tallyTaxiWaiting(waiting, GYD, at(13 * MIN + 30), 'live'));
     expect(thirteen).toMatchObject({ pickupWaitMinutes: 13, waitingMinutes: 13, waitingCharge: 300, running: true, nextChargeAt: '2026-10-01T21:20:00.000Z' });
   });
+  it('[option A] an arrival the GPS could not place starts no charged wait: only a verified arrival counts', () => {
+    const clock = (arrivalVerified: boolean | null): TaxiWaitClock => ({
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      stops: [stop(1, { status: 'DEPARTED', arrivedAt: at(20 * MIN), departedAt: at(35 * MIN), arrivalVerified })],
+    });
+    // Verified: 7 min at the pickup + 15 at the stop = 22 → two full blocks.
+    expect(final(clock(true), at(40 * MIN))).toMatchObject({ waitingMinutes: 22, waitingCharge: 2 * GYD.chargePerBlock });
+    // Not verified (or never answered): the stop adds nothing; the pickup's 7 minutes alone are no block.
+    for (const unverified of [false, null]) {
+      const tally = final(clock(unverified), at(40 * MIN));
+      expect(tally, String(unverified)).toMatchObject({ waitingMinutes: 7, waitingCharge: 0 });
+      expect(tally.stops.get(1)).toBeNull();
+    }
+    // Live, waiting at an unverified stop: no clock running, nothing accrues.
+    const live = tallyTaxiWaiting({
+      status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),
+      stops: [stop(1, { status: 'ARRIVED', arrivedAt: at(20 * MIN), arrivalVerified: false })],
+    }, GYD, at(60 * MIN), 'live');
+    expect({ charge: live.waitingCharge, running: live.running }).toEqual({ charge: 0, running: 0 });
+  });
+
   it('at an arrived stop: the closed pickup wait counts toward the next block', () => {
     const atStop: TaxiWaitClock = {
       status: 'RIDE_IN_PROGRESS', driverArrivedAt: T0, pickedUpAt: at(7 * MIN),

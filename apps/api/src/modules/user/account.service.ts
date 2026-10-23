@@ -1,5 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -17,6 +17,7 @@ import {
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
 import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
+import { queueStoresPhotoErasure } from '../vendor/store-photos';
 import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
@@ -154,6 +155,12 @@ export class AccountService {
         );
         await tx.serviceProvider.update({ where: { id: provider.id }, data: { portfolioPhotos: [] } });
       };
+      // [IMAGES-E2E PR4] The photos of the stores this person owns (logo, cover, sections, items:
+      // they can show people) go too, the same way: deletion rows first, then the addresses cleared.
+      const queueStorePhotosBeforePointerClear = async (): Promise<void> => {
+        const stores = await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } });
+        if (stores.length > 0) await queueStoresPhotoErasure(tx, stores.map((v) => v.id), PUBLIC_PHOTO_ACCOUNT_DELETION);
+      };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
         // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
@@ -175,6 +182,7 @@ export class AccountService {
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
         await queuePortfolioBeforePointerClear();
+        await queueStorePhotosBeforePointerClear();
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
@@ -255,11 +263,15 @@ export class AccountService {
       await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
       await queuePortfolioBeforePointerClear();
+      await queueStorePhotosBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
+      // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);

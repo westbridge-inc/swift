@@ -180,7 +180,7 @@ export const EXPORT_REGISTER: readonly ExportEntry[] = [
   },
   {
     category: 'rideRequests', model: 'RideQueueEntry', by: ['customerId'], key: 'id',
-    fields: ['id', 'customerId', 'pickupLat', 'pickupLng', 'pickupAddress', 'dropoffLat', 'dropoffLng', 'dropoffAddress', 'rideClass', 'passengerCount', 'status', 'createdAt', 'expiresAt', 'matchedOrderId', 'expiredNotifiedAt'],
+    fields: ['id', 'customerId', 'pickupLat', 'pickupLng', 'pickupAddress', 'dropoffLat', 'dropoffLng', 'dropoffAddress', 'rideClass', 'passengerCount', 'status', 'createdAt', 'expiresAt', 'matchedOrderId', 'expiredNotifiedAt', 'quotedFare'],
   },
   {
     category: 'supplyWatches', model: 'SupplyWatch', by: ['customerId'], key: 'id',

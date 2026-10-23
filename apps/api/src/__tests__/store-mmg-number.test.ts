@@ -377,7 +377,7 @@ describe('[PAYMENT-SIMPLIFY] the customer pays the store\'s number, after the st
     const refused = await call('POST', `/api/v1/customer/orders/${paidOrder.order.id}/cancel`, customer.token, {});
     expect(refused.statusCode).toBe(409);
     expect(refused.json().error.code).toBe('MMG_CANCEL_UNAVAILABLE'); // the paid-MMG refusal on the locked cancel path
-    expect((await orderRow(paidOrder.order.id)).status).toBe('ACCEPTED');
+    expect((await orderRow(paidOrder.order.id)).status).toBe('PREPARING'); // [O-3] "Paid by MMG" starts preparation
   });
 
   it('a store without a number is not offered, and a number checkout is refused', async () => {

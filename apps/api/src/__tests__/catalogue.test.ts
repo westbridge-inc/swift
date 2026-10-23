@@ -165,8 +165,9 @@ describe('CSV import', () => {
     const res = await inject('GET', '/api/v1/vendor/items/import/template', undefined, vendorToken);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/csv');
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] No photo column: photos are uploaded, never imported.
     expect(res.body.split('\n')[0]).toBe(
-      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
+      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment',
     );
   });
 

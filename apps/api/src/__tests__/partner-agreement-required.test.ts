@@ -17,6 +17,7 @@ import { partnerRoutes, AGREEMENT_REQUIRED } from '../modules/partner/partner.ro
 import { registerErrorHandler } from '../middleware/error-handler';
 import { ACCESS_COOKIE, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
+import { signupQuote, WEEKLY_FEE_ACK_VERSION } from '../modules/partner/weekly-fee-ack';
 
 const NUM = String(Date.now()).slice(-5);
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'partner-agreement-required-test');
@@ -82,7 +83,10 @@ describe('[TA-S1-008] the agreement is a precondition of the authority', () => {
 
   it('the consent row names the surface it was given on: the web for the web app, the platform a native app names, mobile otherwise', async () => {
     const web = await customer(3);
-    const res = await becomeFromWeb(web.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true });
+    // [Row 628] The website also sends "I understand the weekly fee" with the fee it showed (weekly-fee-ack.test.ts).
+    const quote = await system(() => signupQuote(app.prisma, web.id, { role: 'MOVER', vehicleType: 'MOTORCYCLE' }));
+    const weeklyFeeAck = { version: WEEKLY_FEE_ACK_VERSION, amount: quote.amount, currencyCode: quote.currencyCode };
+    const res = await becomeFromWeb(web.token, { role: 'MOVER', vehicleType: 'MOTORCYCLE', acceptAgreement: true, weeklyFeeAck });
     expect([200, 201], res.body).toContain(res.statusCode);
     expect(await surfaceOf(web.id, 'driver_agreement')).toBe('web');
 
