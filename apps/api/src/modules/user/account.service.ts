@@ -1,5 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -10,11 +10,15 @@ import { NotificationService, notifyAdmins, tenantOfUser } from '../notification
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import {
   openAvatarErasureObligationIds,
+  owedPublicPhotoCount,
   queueStorageOrphan,
   recordStorageOrphan,
   retryStorageOrphan,
   retryStorageOrphans,
 } from '../../lib/storage-orphans';
+import { queuePortfolioPhotoDeletions } from '../services/portfolio-photos';
+import { queueStoresPhotoErasure } from '../vendor/store-photos';
+import { PUBLIC_PHOTO_ACCOUNT_DELETION, PUBLIC_PHOTO_DELETE_REASONS } from '../../utils/public-photo-deletion';
 import { shredUnlessHeld, writeDeletionReceipt, NOTHING_STORED } from '../verification/purge-receipt';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, ServiceJobStatus } from '@prisma/client';
@@ -140,6 +144,23 @@ export class AccountService {
           tenantId: user.tenantId,
         });
       };
+      // [IMAGES-E2E · REVIEW-F S2-1] The provider's portfolio photos (they can show a customer's
+      // home or people) go with the account: each Swift-kept photo's deletion row is written with
+      // the pointer clear, under this lock; the objects are deleted after the commit.
+      const queuePortfolioBeforePointerClear = async (): Promise<void> => {
+        const provider = await tx.serviceProvider.findUnique({ where: { userId }, select: { id: true, portfolioPhotos: true } });
+        if (!provider || provider.portfolioPhotos.length === 0) return;
+        await queuePortfolioPhotoDeletions(
+          tx, { id: provider.id, userId }, user.tenantId, provider.portfolioPhotos, PUBLIC_PHOTO_ACCOUNT_DELETION,
+        );
+        await tx.serviceProvider.update({ where: { id: provider.id }, data: { portfolioPhotos: [] } });
+      };
+      // [IMAGES-E2E PR4] The photos of the stores this person owns (logo, cover, sections, items:
+      // they can show people) go too, the same way: deletion rows first, then the addresses cleared.
+      const queueStorePhotosBeforePointerClear = async (): Promise<void> => {
+        const stores = await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } });
+        if (stores.length > 0) await queueStoresPhotoErasure(tx, stores.map((v) => v.id), PUBLIC_PHOTO_ACCOUNT_DELETION);
+      };
       const revokeAccessBeforeCleanup = async () => {
         await tx.session.deleteMany({ where: { userId } });
         // [item 20] An admin's closure or the retry job acts for someone else: the narrow erase action (owner wall).
@@ -160,6 +181,8 @@ export class AccountService {
         await tx.verificationDocument.updateMany({ where: { userId, purgedAt: null }, data: { retentionExpiresAt: new Date() } });
         const avatarOrphan = await queueAvatarBeforePointerClear();
         if (avatarOrphan) await tx.user.update({ where: { id: userId }, data: { avatar: null } });
+        await queuePortfolioBeforePointerClear();
+        await queueStorePhotosBeforePointerClear();
         await revokeAccessBeforeCleanup();
         return { resweep: true, hold: null, avatarOrphanId: avatarOrphan?.id ?? null };
       }
@@ -239,11 +262,16 @@ export class AccountService {
       await tx.vendor.updateMany({ where: { owner: { userId } }, data: { status: 'SUSPENDED', acceptingOrders: false, isCurrentlyOpen: false, suspensionSource: 'WIND_DOWN', ...VENDOR_MMG_DESTINATION_CLEARED } });
       await closeOpenMmgStagesFor(tx, (await tx.vendor.findMany({ where: { owner: { userId } }, select: { id: true } })).map((v) => v.id));
       const avatarOrphan = await queueAvatarBeforePointerClear();
+      await queuePortfolioBeforePointerClear();
+      await queueStorePhotosBeforePointerClear();
       await revokeAccessBeforeCleanup();
       await tx.user.update({
         where: { id: userId },
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
+      // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
+      // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);
@@ -432,6 +460,20 @@ export class AccountService {
     }
     const pendingAvatarObjects = openAvatarObligations.size;
 
+    // [IMAGES-E2E · REVIEW-F S2-1] This person's photos still owed a deletion (the portfolio queued
+    // above, or one an earlier run or a take-down could not delete): deleted now; any still open
+    // keeps the receipt pending, and this sweep's retry (or the standing one) finishes it.
+    // Read as the named system capability: the census sees this person's rows whatever tenant
+    // the request runs in (an admin-run erasure included), so "nothing owed" is never a blind spot.
+    // [REVIEW-G S3-1 / DUP-AUDIT B-4] The census is a proven system-login read (#1953's proof):
+    // unproven (no system login under the wall, a narrowed policy) = still pending, never "deleted".
+    pendingUploads += await owedPublicPhotoCount(prisma, userId, [...PUBLIC_PHOTO_DELETE_REASONS], (id) =>
+      runAsSystem('account-erasure-public-photos', () => retryStorageOrphan(prisma, storage, this.app.log, id)),
+    ).catch((err: unknown) => {
+      this.app.log.error({ err, userId }, 'account public-photo erasure census failed');
+      return 1;
+    });
+
     // 1b. Identity-integrity purge (trial-integrity spec Part 8, DPA 2023):
     //     the account's identity signals — hashed keys, cluster membership,
     //     and the biometric face template — are erased with the person.
@@ -500,7 +542,16 @@ export class AccountService {
     // 3c. [COORD 18 Oct 23:28Z · owner 19 Oct A/A/A] Rows that stay lose what identifies the person: profiles
     //     (vehicle, plate, location, pay link, bio), the checkout replay copy, fraud marks (phone, address key,
     //     appeal text), case and request free text, and closed, unheld safety records (location, address, notes).
-    await deidentifyProfiles(prisma, userId);
+    // [IMAGES-E2E · DUP-AUDIT B-2] A portfolio photo still listed here (normally none: the cut-off
+    // cleared them) got its deletion row before its pointer went; deleted now, or it stays owed.
+    const lateProfilePhotos = await deidentifyProfiles(prisma, userId);
+    if (lateProfilePhotos.length > 0) {
+      pendingUploads += await runAsSystem('account-erasure-public-photos', async () => {
+        let open = 0;
+        for (const id of lateProfilePhotos) if (!(await retryStorageOrphan(prisma, storage, this.app.log, id))) open += 1;
+        return open;
+      }).catch(() => lateProfilePhotos.length);
+    }
     await deidentifyCaseRecords(prisma, userId);
     await deidentifySafetyRecords(prisma, userId);
 

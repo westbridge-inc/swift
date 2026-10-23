@@ -1024,6 +1024,18 @@ export class DispatchService {
      *  size (a food/grocery order's bulk — never parcel work). Omitted = any
      *  vehicle, exactly as before. */
     packageSize?: string | null,
+    /** [TAXI-FLOW 22 Oct 2026] The person the supply is FOR. Dispatch never
+     *  offers a ride to its booker (findCandidates' excludeUserId), so a probe
+     *  made on someone's behalf — the ride queue, "drivers are back" — must not
+     *  count that person's own driver profile as supply either. Omitted = the
+     *  anonymous area read, exactly as before. */
+    excludeUserId?: string | null,
+    /** [TAXI-FLOW · REVIEW-G #2022 S4-3] What THIS ride needs of a car — the
+     *  same filters dispatch applies to its offers (class tier, seats, stops).
+     *  A probe made for a particular ride (the queue scan, the request
+     *  pre-check) counts only cars dispatch could actually offer it to.
+     *  Omitted = any car, exactly as before. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean } | null,
   ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     /** Stable client contract: null when no eligible fresh mover exists. */
@@ -1035,13 +1047,14 @@ export class DispatchService {
       BASE_RADIUS_KM,
       pool,
       floatRequired,
-      null,
+      ride?.rideClass ?? null,
       tenantId,
       packageSize ?? null,
-      undefined,
-      undefined,
+      excludeUserId ?? undefined,
+      ride?.passengerCount ?? undefined,
       undefined,
       false,
+      ride?.taxiStops ?? undefined,
     );
     const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
     return {

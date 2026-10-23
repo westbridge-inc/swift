@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPair, type KeyObject } from 'node:crypto';
+import { generateKeyPair, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,24 @@ import { identitySalt } from '../modules/integrity/normalize';
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
+// [22 Oct, COORD ruling] Production never sends MMG charge requests, so with MMG live the checkout
+// page is the only MMG way to pay: production refuses MMG_DRIVER=live without MMG_CHECKOUT_ENABLED=1.
+// The valid production base therefore carries a complete checkout configuration. The keys are
+// synthetic, generated here; each PEM is written on one line with a literal \n, as an env file
+// (and the preflight's candidate file) carries it.
+const baseCheckoutKeys = generateKeyPairSync('rsa', { modulusLength: 4096 });
+const oneLinePem = (pem: string) => pem.trim().replace(/\n/g, '\\n');
+const baseCheckout: Record<string, string> = {
+  MMG_CHECKOUT_ENABLED: '1',
+  MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
+  MMG_CHECKOUT_MERCHANT_ID: '0000001',
+  MMG_CHECKOUT_CLIENT_ID: 'client-test',
+  MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
+  MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
+  MMG_CHECKOUT_SECRET_KEY: 'not-a-secret',
+  MMG_CHECKOUT_PUBLIC_KEY: oneLinePem(baseCheckoutKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()),
+  MMG_CHECKOUT_PRIVATE_KEY: oneLinePem(baseCheckoutKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()),
+};
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
@@ -51,6 +69,7 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  ...baseCheckout,
   // [PROD-PATH] Production pages a human for every unacknowledged SOS and
   // sends receipts and expiry notices by email: both are required to boot.
   OPS_ONCALL_PHONES: '+5926000001,+15550000002',
@@ -264,7 +283,7 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
   it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses the MMG push rail switch in production (MMG_PUSH_RAIL_ON=%j), whatever the driver', (value) => {
     expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
     expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
-    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: undefined, MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
   });
 
   it.each([undefined, '', '0'])('boots with the MMG push rail switch off (%j)', (value) => {
@@ -864,9 +883,11 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     MMG_CHECKOUT_PRIVATE_KEY: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
 
-  it('off — unset or exactly 0 — changes nothing', () => {
+  it('off — unset or exactly 0 — changes nothing (with MMG off in production, and outside production)', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
-    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    // [22 Oct] Live MMG in production now needs the checkout on (its own describe below); with MMG off, off changes nothing.
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: undefined })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
   });
 
@@ -878,7 +899,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
       .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_URL: undefined })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
   });
 
   it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
@@ -897,6 +918,53 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
       .toThrow(/non-UAT MMG_CHECKOUT_URL/);
+  });
+});
+
+// [22 Oct, COORD ruling on REVIEW-M's note] Production never sends MMG charge
+// requests (MMG_PUSH_RAIL_ON is refused), so with MMG live the checkout page is
+// the only MMG way to pay. Live MMG with the checkout off would leave partners
+// no way to pay with MMG: production refuses to boot it. (The fee pause holds
+// in that state too: fee-pause-pay-path.test.ts.) Nothing else changes: MMG off
+// boots with the checkout off, and outside production nothing new is refused.
+// ---------------------------------------------------------------------------
+describe('[22 Oct] production refuses live MMG without the MMG checkout', () => {
+  const refusal = /MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1/;
+
+  it.each([undefined, '', '0'])('refuses MMG_DRIVER=live with MMG_CHECKOUT_ENABLED=%j, and names the way out', (flag) => {
+    let message = '';
+    try {
+      assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: flag });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(refusal);
+    expect(message).toContain('MMG_DRIVER=disabled');
+    expect(message).toMatch(/Refusing to start\.$/);
+  });
+
+  it('the control: the same base with the checkout on boots', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
+  it('outside production, live MMG without the checkout is not refused by this rule', () => {
+    for (const mode of ['development', 'test']) {
+      let message = '';
+      try {
+        assertSafeBootConfig({ NODE_ENV: mode, MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '0' });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, mode).not.toMatch(refusal);
+    }
+  });
+
+  it('the value-free preflight gives the same verdict', () => {
+    const refused = runPreflight({ ...good, MMG_CHECKOUT_ENABLED: '0' });
+    expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+    expect(refused.stdout).toContain('MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1');
+    const pass = runPreflight(good);
+    expect(pass.status, pass.stdout + pass.stderr).toBe(0);
   });
 });
 
@@ -1038,6 +1106,7 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
 describe('[PROD-PATH] production with MMG fully off', () => {
   const mmgOff: Record<string, string | undefined> = {
     ...cardOff,
+    ...Object.fromEntries(Object.keys(baseCheckout).map((name) => [name, undefined])),
     MMG_DRIVER: 'disabled',
     MMG_API_URL: undefined,
     MMG_API_KEY: undefined,

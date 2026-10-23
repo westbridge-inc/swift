@@ -193,11 +193,18 @@ export async function scanRideQueue(
     const cell = `${e.tenantId}:${cellOf(e.pickupLat, e.pickupLng)}`;
     if ((cellBudget.get(cell) ?? 1) <= 0) continue;
 
+    // [TAXI-FLOW 22 Oct 2026] Supply FOR this customer: their own driver
+    // profile (one account, two modes) can never take their ride, and counting
+    // it created a ride nobody could fill.
     const supply = await dispatch.getAvailability(
       'DRIVER',
       { lat: e.pickupLat, lng: e.pickupLng },
       0,
       e.tenantId,
+      null,
+      e.customerId,
+      // [REVIEW-G #2022 S4-3] A car that can take THIS ride: its class and party.
+      { rideClass: e.rideClass as RideClass, passengerCount: e.passengerCount },
     );
     if (supply.level === 'NONE') continue;
     if (!cellBudget.has(cell)) cellBudget.set(cell, supply.level === 'GOOD' ? 3 : 1);

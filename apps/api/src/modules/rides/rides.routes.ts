@@ -38,6 +38,7 @@ import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } f
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { readNoDriverFoundSinceAssignment, rideSearchFacts } from './search-facts';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
@@ -481,15 +482,24 @@ export async function ridesRoutes(app: FastifyInstance) {
     // when not — the one cancellation verdict, so the app never re-derives it
     // (additive keys; older apps ignore them). A passenger already aboard is
     // the driver's custody: no cancel at all.
+    const aboard = ride ? hasTaxiPassengerCustody(ride) || ride.status === 'RIDE_IN_PROGRESS' : false;
+    const noMoverFound = ride && !aboard ? await readNoMoverFound(app.prisma, ride) : false;
     const cancel = ride
-      ? (hasTaxiPassengerCustody(ride) || ride.status === 'RIDE_IN_PROGRESS'
+      ? (aboard
           ? { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null }
-          : customerCancelView({ ...ride, noMoverFound: await readNoMoverFound(app.prisma, ride), assignedAt: await readAssignedAt(app.prisma, ride) }))
+          : customerCancelView({ ...ride, noMoverFound, assignedAt: await readAssignedAt(app.prisma, ride) }))
       : null;
+    // [TAXI-FLOW 22 Oct 2026] A waiting ride's search, in the server's words
+    // (additive keys; builds 9/11/12 ignore them): an empty search SINCE the
+    // latest driver took the ride, and when the slow lane releases it — never
+    // promised for a ride it holds for a person (search-facts.ts).
+    const search = ride
+      ? rideSearchFacts(ride, await readNoDriverFoundSinceAssignment(app.prisma, ride))
+      : {};
     // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
     // stop's own); nothing while the switch is off.
     const waiting = ride ? await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null) : {};
-    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...cancel, ...waiting } : ride };
+    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...cancel, ...waiting, ...search } : ride };
     // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.

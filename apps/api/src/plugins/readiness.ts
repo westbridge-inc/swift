@@ -4,11 +4,15 @@ import type { WorkerCheck } from '../utils/scheduler-health';
 import { readinessGauge, readyReasonCounter, routedWhileDegradedCounter } from './observability';
 import { positiveDurationMs, withTimeout } from '../utils/async-lifecycle';
 import type { RoutingProbe } from '../providers/maps/routing-probe';
+import type { PlacesReadiness } from '../providers/places/places-health';
 import { runtimeMode } from '../utils/runtime-mode';
 
 export interface RuntimeReadinessState {
   /** Report routing independently: an outage blocks new road quotes, not SOS. */
   checkRouting?: () => Promise<RoutingProbe>;
+  /** [PLACES-LOUD] Address search's provider and last known status (ok / failing since T),
+   *  read from memory: reported only, never a readiness failure, never a call to Google. */
+  checkPlaces?: () => PlacesReadiness;
   checkQueues: () => boolean | Promise<boolean>;
   checkConsumers?: () => boolean | Promise<boolean>;
   checkRealtime?: () => boolean | Promise<boolean>;
@@ -21,6 +25,7 @@ export interface RuntimeReadinessState {
 export interface ReadinessSnapshot {
   ready: boolean;
   routing?: RoutingProbe;
+  places?: PlacesReadiness;
   deps: {
     database: boolean;
     redis: boolean;
@@ -215,6 +220,15 @@ export async function hasRequiredSchema(
   return cutover[0]?.ok === true;
 }
 
+/** [PLACES-LOUD] A places report that cannot be read is "unknown", never a readiness failure. */
+function placesReport(check: () => PlacesReadiness): PlacesReadiness {
+  try {
+    return check();
+  } catch {
+    return { provider: 'unknown', status: 'unknown', since: null };
+  }
+}
+
 function fulfilledBoolean(result: PromiseSettledResult<boolean>): boolean {
   return result.status === 'fulfilled' && result.value;
 }
@@ -291,6 +305,7 @@ export async function evaluateReadiness(
     ...(state.checkRouting ? { routing: routingResult.status === 'fulfilled' && routingResult.value
       ? routingResult.value
       : { status: 'degraded' as const, provider: 'unknown', why: 'The routing probe did not answer.' } } : {}),
+    ...(state.checkPlaces ? { places: placesReport(state.checkPlaces) } : {}),
     deps,
     reasons,
     timestamp: new Date().toISOString(),
@@ -322,7 +337,8 @@ export function registerReadinessRoute(
   state: RuntimeReadinessState,
 ): void {
   // Infra probes are deliberately unauthenticated but expose booleans only
-  // (deps, reasons, a fixed-text routing report, a timestamp: no host,
+  // (deps, reasons, a fixed-text routing report, the address-search
+  // provider's name and last known status, a timestamp: no host,
   // version or credential). The deploy scripts read the status code and the
   // coordinator's gates read the booleans, so the shape stays public.
   const cacheMs = readinessCacheMs();

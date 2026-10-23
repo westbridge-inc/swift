@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { makeDispatchService } from '../modules/dispatch/dispatch.service';
 import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
@@ -206,5 +207,128 @@ describe('taxi hard pre-check (flag-gated)', () => {
     expect([200, 201]).toContain(allowed.statusCode);
     const order = allowed.json().data?.order ?? allowed.json().data;
     if (order?.id) orderIds.push(order.id);
+  });
+
+  // [TAXI-FLOW 22 Oct 2026] One account, two modes: the booker's own online
+  // car can never take their ride (dispatch excludes the booker), so it is not
+  // "a driver nearby" for their own request either.
+  it('the booker’s OWN online car is not supply for their own request; a different driver is', async () => {
+    await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
+    const dual = await app.prisma.user.create({
+      data: {
+        phone: testPhone(),
+        firstName: 'Dual', lastName: 'Booker',
+        roles: ['MOVER', 'CUSTOMER'] as never[], activeRole: 'MOVER' as never,
+        isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L2' as never,
+        customer: { create: {} },
+      },
+    });
+    userIds.push(dual.id);
+    const dualToken = app.jwt.sign({ userId: dual.id, role: 'CUSTOMER', jti: nanoid(8) });
+    const dualSession = await app.prisma.session.create({
+      data: {
+        userId: dual.id, token: dualToken, refreshToken: nanoid(48),
+        deviceId: 'avail-dual', deviceType: 'test',
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+      },
+    });
+    const own = await app.prisma.driver.create({
+      data: {
+        userId: dual.id,
+        vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2020, vehicleColor: 'White',
+        licensePlate: `AV${nanoid(5)}`,
+        driverLicenseUrl: '/uploads/t.jpg', vehicleInsuranceUrl: '/uploads/t.jpg',
+        isOnline: true, isAvailable: true, documentsVerified: true,
+        rideClass: 'ECONOMY' as never,
+        currentLat: SPOT.lat + 0.003, currentLng: SPOT.lng,
+        lastLocationUpdate: new Date(), locationSessionId: dualSession.id,
+      },
+    });
+    driverIds.push(own.id);
+    // Precondition (keeps the test honest): that car IS supply to anyone else.
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
+    expect((await availability()).json().data.level).toBe('LOW');
+
+    const requestAs = () =>
+      app.inject({
+        method: 'POST',
+        url: '/api/v1/rides/request',
+        headers: { authorization: `Bearer ${dualToken}`, 'content-type': 'application/json' },
+        payload: {
+          pickup: SPOT,
+          dropoff: { lat: SPOT.lat + 0.02, lng: SPOT.lng },
+          pickupAddress: 'Remote Pier, Nowhere',
+          dropoffAddress: 'Far Landing, Nowhere',
+          passengerCount: 1,
+          rideClass: 'ECONOMY',
+        },
+      });
+    process.env['DISPATCH_AVAILABILITY'] = '1';
+    process.env['TAXI_ALLOW_REQUEST_ON_NONE'] = '0';
+    try {
+      const blocked = await requestAs();
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error.code).toBe('NO_DRIVERS_NEARBY');
+      expect(await app.prisma.order.count({ where: { customerId: dual.id } })).toBe(0);
+
+      // Control: a DIFFERENT driver in the field is real supply.
+      await makeDriver(0.005);
+      const allowed = await requestAs();
+      expect([200, 201]).toContain(allowed.statusCode);
+      const order = allowed.json().data?.order ?? allowed.json().data;
+      if (order?.id) orderIds.push(order.id);
+    } finally {
+      delete process.env['DISPATCH_AVAILABILITY'];
+      delete process.env['TAXI_ALLOW_REQUEST_ON_NONE'];
+    }
+  });
+
+  // [REVIEW-G #2022 S4-3] "A driver nearby" for a request is a car that can
+  // take THAT ride: dispatch never offers a COMFORT ride to an ECONOMY car,
+  // nor a ride with stops to an app that cannot run them.
+  it('counts only cars that can take this ride: its class (pre-check) and its stops (the probe)', async () => {
+    await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
+    await app.prisma.order.updateMany({
+      where: { customerId: { in: userIds }, orderType: 'TAXI', status: { notIn: ['CANCELLED', 'COMPLETED'] } },
+      data: { status: 'CANCELLED' },
+    });
+    const economy = await makeDriver(0.004);
+    await app.redis.del(AVAILABILITY_CACHE_KEY);
+    expect((await availability()).json().data.level).toBe('LOW'); // precondition: area supply
+
+    const request = (rideClass: string) => app.inject({
+      method: 'POST', url: '/api/v1/rides/request',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      payload: {
+        pickup: SPOT, dropoff: { lat: SPOT.lat + 0.02, lng: SPOT.lng },
+        pickupAddress: 'Remote Pier, Nowhere', dropoffAddress: 'Far Landing, Nowhere',
+        passengerCount: 1, rideClass,
+      },
+    });
+    process.env['DISPATCH_AVAILABILITY'] = '1';
+    process.env['TAXI_ALLOW_REQUEST_ON_NONE'] = '0';
+    try {
+      const blocked = await request('COMFORT');
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error.code).toBe('NO_DRIVERS_NEARBY');
+      // Control: a COMFORT car is real supply for it.
+      const comfort = await makeDriver(0.006);
+      await app.prisma.driver.update({ where: { id: comfort.id }, data: { rideClass: 'COMFORT' as never } });
+      const allowed = await request('COMFORT');
+      expect([200, 201]).toContain(allowed.statusCode);
+      const order = allowed.json().data?.order ?? allowed.json().data;
+      if (order?.id) orderIds.push(order.id);
+    } finally {
+      delete process.env['DISPATCH_AVAILABILITY'];
+      delete process.env['TAXI_ALLOW_REQUEST_ON_NONE'];
+    }
+
+    // Stops: only a driver whose app declared it can run them counts.
+    const dispatch = makeDispatchService(app);
+    const { tenantId } = await app.prisma.user.findUniqueOrThrow({ where: { id: economy.userId }, select: { tenantId: true } });
+    expect((await dispatch.getAvailability('DRIVER', SPOT, 0, tenantId, null, null, { taxiStops: true })).level).toBe('NONE');
+    await app.prisma.driver.update({ where: { id: economy.id }, data: { taxiStopsCapable: true } });
+    expect((await dispatch.getAvailability('DRIVER', SPOT, 0, tenantId, null, null, { taxiStops: true })).level).not.toBe('NONE');
+    await app.prisma.driver.updateMany({ where: { id: { in: driverIds } }, data: { isOnline: false } });
   });
 });
