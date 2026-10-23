@@ -102,7 +102,7 @@ describe('[R12] every weekly-fee receipt names the seller, the partner, what it 
     expect(doc.lines).toContain(`Receipt ${receiptNumber}`);
     expect(doc.lines.some((l) => /^Date: \d{1,2} [A-Z][a-z]+ \d{4}$/.test(l))).toBe(true);
     expect(doc.lines).toContain(`Partner: ${user.firstName} ${user.lastName}`);
-    expect(doc.lines).toContain('Weekly fee: GY$6,000');
+    expect(doc.lines).toContain('Amount paid: GY$6,000');
     expect(doc.lines[doc.lines.length - 1]).toBe(NOT_A_VAT_INVOICE);
     expect(doc).toMatchObject({ receiptNumber, amount: 6000, currencyCode: 'GYD', vat: null });
     expect(doc.lines.some((l) => l.startsWith('TIN'))).toBe(false);

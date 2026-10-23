@@ -3909,10 +3909,39 @@ model FeeReceipt {
   channel        String?
   mmgRef         String?
   issuedAt       DateTime @default(now())
+  /// [R12] True when what this receipt's money paid is recorded in
+  /// fee_receipt_allocations. Receipts issued before that (and by older code)
+  /// keep false and print the "paid toward" line.
+  weeksTracked   Boolean  @default(false)
+  allocations    FeeReceiptAllocation[]
 
   @@index([subscriptionId, issuedAt])
   @@index([tenantId, issuedAt])
   @@map("fee_receipts")
+}
+
+/// [R12 · REVIEW-G #1771 S3-1 option a] Which receipt's money one wallet debit
+/// used, oldest money first (fee-receipt-allocation.ts). Append-only: an UPDATE
+/// is refused by a trigger; a row goes only with its receipt.
+model FeeReceiptAllocation {
+  id             String     @id @default(cuid())
+  receiptId      String
+  subscriptionId String
+  /// WEEK | RETURNED | REFUND_SET_ASIDE | REFUND_RELEASED (CHECK in the migration)
+  kind           String
+  /// Positive, except REFUND_RELEASED (negative: money given back).
+  amount         Decimal    @db.Decimal(12, 2)
+  /// The week bought (WEEK only).
+  periodStart    DateTime?
+  periodEnd      DateTime?
+  billingEventId String
+  createdAt      DateTime   @default(now())
+  receipt        FeeReceipt @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+
+  @@unique([billingEventId, receiptId])
+  @@index([receiptId])
+  @@index([subscriptionId, createdAt])
+  @@map("fee_receipt_allocations")
 }
 
 /// The gapless counter behind FeeReceipt — row-locked per issue [scenario R].
