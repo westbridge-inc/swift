@@ -13,23 +13,26 @@
 // customer cancel is either FREE or REFUSED (the customer contacts the store,
 // the driver, the rider or the provider instead):
 //  - store orders (#46): free while the order waits for the store to accept;
-//  - rides, parcels and bookings (#50): free inside the five-minute window;
+//  - rides, parcels and bookings (#50): free inside the one-minute window
+//    (owner 22 Oct 2026: was five minutes);
 //  - every kind: free while nobody has accepted it yet, free when no mover was
 //    found, and free when it is very late (#52) — nobody is ever stuck with an
 //    order or a ride that never comes.
 // `cancellationVerdict` is that rule.
 // ---------------------------------------------------------------------------
 
-// Kept light on purpose: boot-config imports FREE_CANCEL_WINDOW_MIN from here
-// and the value-free deploy preflight loads boot-config with no services, so
-// nothing heavy (Prisma, queues, notification) may be imported by this file.
+// Kept light on purpose: boot-config and the value-free deploy preflight (which
+// loads boot-config with no services) stay free of services, so nothing heavy (Prisma, queues, notification) may be imported by this file.
 // The food-age fact is read by `readTooLateToDeliver` in dispatch/rescue.ts.
 import { journalAuthorityWhere, poolForOrder } from '../dispatch/dispatch-generation-keys';
 
-/** [owner #50] Minutes after placing during which a ride, a parcel or a
- *  booking cancels free whatever has happened since. Under LIFECYCLE_V2 a held
- *  order's window lasts at least as long as its hold. */
-export const FREE_CANCEL_WINDOW_MIN = 5;
+/** [owner #50 · owner ruling 14 Oct · owner 22 Oct 2026] Minutes after the
+ *  driver, rider or provider ACCEPTED a ride, a parcel or a booking during
+ *  which the customer cancels it free (`freeWindowEnd`). ONE minute since the
+ *  owner's 22 Oct 2026 ruling (was five). Before anyone accepts, the cancel is
+ *  free at any age; under LIFECYCLE_V2 a held order nobody holds is free for
+ *  its whole hold (ORDER_HOLD_MINUTES — a different, unchanged timer). */
+export const FREE_CANCEL_WINDOW_MIN = 1;
 
 /** [owner #52 · #50] How long past its promised moment a RIDE, a PARCEL or a
  *  BOOKING (or the driver, rider or provider serving it) must be before the
@@ -138,7 +141,7 @@ export type FreeCancelReason =
   | 'NO_MOVER' // [Item 64] the mover search came back empty
   | 'AWAITING_STORE' // [owner #46] a store order nobody has accepted yet
   | 'NOT_ACCEPTED' // [owner #50] a ride, parcel or booking nobody has accepted yet
-  | 'IN_WINDOW' // [owner #50] inside the five-minute window (or the hold)
+  | 'IN_WINDOW' // [owner #50 · 22 Oct] inside the one-minute window (or the hold)
   | 'TOO_LATE' // [owner #46/#50/#52] very late
   | 'MMG_UNCONFIRMED'; // [PAYMENT-SIMPLIFY · Q2] an accepted MMG store order the store has not confirmed paid
 
@@ -225,7 +228,7 @@ export interface AssignmentLogReader {
 
 /**
  * [owner ruling 14 Oct 2026] When the current driver, rider or provider took
- * the job — the moment a ride's, a parcel's or a booking's five-minute window
+ * the job — the moment a ride's, a parcel's or a booking's one-minute window
  * starts. No new field: a ride's and a booking's `acceptedAt` (the driver's
  * claim and the provider's accept write it; a release clears it); a parcel
  * has none, so its latest rider-assignment record (orderStatusLog
@@ -266,7 +269,8 @@ function notAcceptedYet(order: CancellationSnapshot): boolean {
 
 /**
  * [owner #50 · owner ruling 14 Oct 2026] When the free window of a ride, a
- * parcel or a booking closes: five minutes after the driver, rider or provider
+ * parcel or a booking closes: one minute (`FREE_CANCEL_WINDOW_MIN`, owner
+ * 22 Oct 2026; was five) after the driver, rider or provider
  * ACCEPTED it (`assignedAt`). Before anyone accepts, cancelling is free at any
  * age (`notAcceptedYet`), so the window only exists once someone took the job.
  * An accepted job whose acceptance moment is unknown (a record older than the
@@ -366,7 +370,7 @@ function windowClosedMessage(order: CancellationSnapshot): string {
  *  - otherwise REFUSED: the customer contacts the store.
  *
  * [owner #50] A RIDE, a PARCEL or a BOOKING once someone has accepted it:
- *  - free for five minutes from that acceptance (`freeWindowEnd`, owner
+ *  - free for one minute from that acceptance (`freeWindowEnd`, owner
  *    ruling 14 Oct — not from placing);
  *  - free when the driver, rider or provider is very late (`isVeryLate`);
  *  - otherwise REFUSED: the customer contacts the driver, rider or provider.
@@ -411,7 +415,7 @@ export function isFreeCancellation(order: CancellationSnapshot, now: Date = new 
  * passed while the server still answers "free". The UI never lies, so the two
  * answers come from one place.
  *
- * Only a ride, a parcel or a booking inside its five-minute window (or hold)
+ * Only a ride, a parcel or a booking inside its one-minute window (or hold)
  * has a moment to count down to. Null otherwise: a refused cancel has no
  * window; a free cancel for any other reason lasts — until someone accepts it
  * (nobody has yet; a store order, until the store accepts), or for as long as
