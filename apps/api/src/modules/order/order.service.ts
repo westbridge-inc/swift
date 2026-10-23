@@ -515,8 +515,10 @@ export function holdWindowMs(): number | null {
   // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
   // env examples say 5 since #792). The code defaulting 2 meant an env that
   // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (FREE_CANCEL_WINDOW_MIN = 5) outlived the hold, putting
-  // orders on the vendor board while still free to cancel.
+  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
+  // putting orders on the vendor board while still free to cancel. The boot
+  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
+  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
   const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
@@ -2770,7 +2772,7 @@ export class OrderService {
           };
           const verdict = cancellationVerdict(policyOrder, now);
           // [owner #46/#50] Not the customer's to cancel any more (the store
-          // accepted, or the five-minute window of a ride, parcel or booking
+          // accepted, or the one-minute window of a ride, parcel or booking
           // has passed): refused before anything is written, in the words the
           // apps show as-is.
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);

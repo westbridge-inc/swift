@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -209,6 +210,16 @@ const PUBLISHED: Record<
     driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
     vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
   },
+  // [Owner ruling 22 Oct 2026 · NON-material pre-launch (COORD 23:14Z)] Terms s.7: a ride, a parcel or a booking
+  // cancels free for one minute after a driver, rider or provider accepts it (was five minutes), as
+  // order/cancel-policy.ts FREE_CANCEL_WINDOW_MIN applies it. Nothing else changed: putting "five minutes" and
+  // 21 October back reproduces all four 2026-10-21 pins exactly. The date re-pins Privacy and the two agreements.
+  '2026-10-22': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: 'ebd6a47d17bdebd135068b1284d48893e1f3d306085e4c04a5e68a90afbe01da',
+    driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -242,6 +253,13 @@ describe('legal version binding [F-035-08]', () => {
     // The app offers a customer Cancel on a service job only while it is a request (REQUESTED/QUOTED), not once booked.
     expect(TERMS).toContain('A service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
     expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
+  });
+
+  it('[owner 22 Oct 2026] the Terms state the free cancel window the server applies: one minute after acceptance', () => {
+    // FREE_CANCEL_WINDOW_MIN is the window cancellationVerdict enforces; the Terms must name that number, never another.
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(TERMS).toContain('A ride, a parcel or a booking can be cancelled free at any time while nobody has accepted it, and for one minute after a driver, rider or provider accepts it; after that, contact your driver, rider or provider.');
+    expect(TERMS).not.toMatch(/five minutes after a driver|5 minutes after a driver/i);
   });
 
   it('the served version is a version this file has pinned', () => {
