@@ -2101,7 +2101,7 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
           narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
         });
-        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
+        if (res.removed + res.withdrawn + res.started + res.cancelled + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;
       }
 

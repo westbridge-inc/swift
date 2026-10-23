@@ -7,7 +7,8 @@ import { AppError, NotFoundError } from '../../utils/errors';
 import { applyStockMovement } from '../inventory/stock';
 import { assertMmgFulfilmentAllowed } from './order.service';
 import { mmgClaimLockObserver } from './mmg-claim.service';
-import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, type AdjustableOrder } from './substitution-view';
+import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, type AdjustableOrder } from './substitution-view';
+import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
@@ -447,8 +448,11 @@ export class PickingService {
         throw new AppError(409, 'CANCEL_INSTEAD', 'To keep this item you can cancel the order instead: nothing has been charged.');
       }
       assertMmgMoneyAdjustable(line.order);
-      const closed = await this.closeLine(line, 'REFUNDED', customerId, { note: `Customer continued without: ${line.name}` });
-      if (closed) return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      const closed = await this.closeLine(line, 'REFUNDED', customerId, { note: `Customer continued without: ${line.name}`, requireOthersLeft: true });
+      if (closed) {
+        await this.tellStoreTheCustomerAnswered(line.order, `${line.name}: the customer continues without it`);
+        return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      }
       const finalLine = await this.prisma.orderItem.findUnique({ where: { id: lineId } });
       if (finalLine && (finalLine.subStatus === 'REFUNDED' || finalLine.subStatus === 'REJECTED')) return finalLine;
       throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
@@ -459,8 +463,11 @@ export class PickingService {
       // MMG that is an unrecorded refund [F-006-02]. Preview fail-fast; the
       // locked transaction inside closeLine re-asserts from the live row.
       assertMmgMoneyAdjustable(line.order);
-      const closed = await this.closeLine(line, 'REJECTED', customerId);
-      if (closed) return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      const closed = await this.closeLine(line, 'REJECTED', customerId, { requireOthersLeft: true });
+      if (closed) {
+        await this.tellStoreTheCustomerAnswered(line.order, `${line.name}: the customer declined the swap, so it comes off`);
+        return this.prisma.orderItem.findUnique({ where: { id: lineId } });
+      }
       // Lost the CAS. A concurrent duplicate reject (or a vendor refund) is
       // the same outcome — idempotent success. Losing to a concurrent
       // APPROVAL is a conflicting decision: the line is now the substitute,
@@ -606,6 +613,7 @@ export class PickingService {
     });
 
     this.emitPickState(approved.vendorId, orderId, lineId, { subStatus: 'APPROVED' });
+    await this.tellStoreTheCustomerAnswered(line.order, `${line.name}: the customer approved the swap`);
     return this.prisma.orderItem.findUnique({ where: { id: lineId } });
   }
 
@@ -615,7 +623,7 @@ export class PickingService {
     line: { id: string; itemId: string | null; substituteItemId: string | null; name: string; quantity: number; totalCustomer: unknown; subStatus: SubstitutionStatus; order: { id: string; status: string; vendorId: string | null } },
     subStatus: 'REFUNDED' | 'REJECTED',
     changedBy: string,
-    opts: { note?: string; decidedBefore?: Date } = {},
+    opts: { note?: string; decidedBefore?: Date; requireOthersLeft?: boolean } = {},
   ): Promise<false | { decTotal: number }> {
     // [REPORT-006 F-006-02/05] One Order-locked transaction: live lifecycle +
     // payment-rail authority come from the LOCKED row (never the caller's
@@ -638,6 +646,13 @@ export class PickingService {
         throw new AppError(409, 'NOT_PICKABLE', `The pick list is closed once the order is ${ord.status}`);
       }
       assertMmgMoneyAdjustable(ord);
+      // [O-4 · REVIEW-F S3-1] On a waiting order a customer's answer never empties it: the only
+      // item left is not removed by "continue" or a declined swap (the customer cancels instead).
+      // Decided on the LOCKED rows: two answers racing on the last two lines cannot both remove.
+      if (opts.requireOthersLeft && ord.status === 'PENDING') {
+        const others = await tx.orderItem.count({ where: { orderId: line.order.id, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+        if (others === 0) throw new AppError(409, 'ONLY_ITEM_LEFT', ONLY_ITEM_LEFT_COPY);
+      }
 
       // Floor the order totals at 0. On a discounted order the stored discount
       // can equal (or exceed) a line's share, so decrementing by the FULL line
@@ -707,7 +722,7 @@ export class PickingService {
    * Every write is a compare-and-set on the open question, so a customer's
    * answer or a store's removal landing first wins and this does nothing.
    */
-  async expireSubstitution(lineId: string, now: Date = new Date()): Promise<'removed' | 'withdrawn' | 'started' | 'skipped'> {
+  async expireSubstitution(lineId: string, now: Date = new Date()): Promise<'removed' | 'withdrawn' | 'started' | 'cancelled' | 'skipped'> {
     const line = await this.prisma.orderItem.findFirst({
       where: { id: lineId, subStatus: 'PENDING', picked: false },
       include: { order: { select: { ...ADJUSTABLE_SELECT, id: true, customerId: true, orderNumber: true, vendorId: true } } },
@@ -752,11 +767,18 @@ export class PickingService {
       return 'withdrawn';
     }
 
+    // [O-4 · REVIEW-F S3-1] The only item left on a waiting order: removing it would empty the
+    // order, so no answer cancels it, free (a system cancellation: never the customer's fault).
+    if (line.order.status === 'PENDING') {
+      const others = await this.prisma.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+      if (others === 0) return this.cancelOnlyItemLeft(line, now);
+    }
     const closed = await this.closeLine(line, 'REFUNDED', changedBy, {
       decidedBefore: now,
       note: removal ? `Line removed, no answer to the out-of-stock question in time: ${line.name}` : `Line removed, no answer to the swap in time: ${line.name}`,
     });
     if (!closed) return 'skipped';
+    if (line.order.status === 'PENDING') await this.tellStoreTheCustomerAnswered(line.order, `${line.name}: no answer in time, so it came off`);
     await this.notifications.send({
       userId: line.order.customerId,
       type: 'ORDER_UPDATE',
@@ -767,6 +789,76 @@ export class PickingService {
       data: { orderId: line.orderId, kind: 'line_refunded', lineId: line.id },
     });
     return 'removed';
+  }
+
+  /**
+   * [O-4 · REVIEW-F S3-1] No answer about the only item left on a waiting order: the order can't
+   * go ahead. One canonical locked PENDING -> CANCELLED, re-decided on the locked rows (the line is
+   * still the open question past its deadline and nothing else is left), cancelledBy unset (never
+   * counted against the customer). Nothing has been charged: before acceptance no payment exists
+   * (an MMG order past that point was WITHDRAWN above, never cancelled here).
+   */
+  private async cancelOnlyItemLeft(
+    line: { id: string; orderId: string; name: string; order: { customerId: string; orderNumber: string; vendorId: string | null } },
+    now: Date,
+  ): Promise<'cancelled' | 'skipped'> {
+    const { OrderService } = await import('./order.service');
+    const reason = `Out of stock: ${line.name} was the only item and the customer did not answer in time`;
+    try {
+      await new OrderService(this.prisma, this.io).transitionOrderAtomically({
+        orderId: line.orderId,
+        target: 'CANCELLED',
+        allowedFrom: ['PENDING'],
+        changedBy: null,
+        note: reason,
+        cancellation: { by: null, reason },
+        releaseStaleMoverPointer: true,
+        withinTransaction: async (tx) => {
+          const still = await tx.orderItem.count({ where: { id: line.id, subStatus: 'PENDING', picked: false, substituteDecideBy: { lte: now } } });
+          const others = await tx.orderItem.count({ where: { orderId: line.orderId, id: { not: line.id }, subStatus: { notIn: ['REFUNDED', 'REJECTED'] } } });
+          if (still === 0 || others > 0) throw new AppError(409, 'NOT_ONLY_ITEM_LEFT', 'The order changed; the question is handled the usual way');
+        },
+        invalidStatus: () => new AppError(409, 'NOT_ONLY_ITEM_LEFT', 'The order is no longer waiting'),
+      });
+    } catch (error) {
+      if (error instanceof AppError && (error.code === 'NOT_ONLY_ITEM_LEFT' || error.code === 'NOT_FOUND')) return 'skipped';
+      throw error;
+    }
+    await emitToOrderRoom(this.prisma, this.io, line.orderId, 'order:status_changed', { orderId: line.orderId, status: 'CANCELLED' });
+    if (line.order.vendorId) await emitToStoreRoom(this.prisma, this.io, line.order.vendorId, 'order:status_changed', { orderId: line.orderId, status: 'CANCELLED' });
+    await this.notifications.send({
+      userId: line.order.customerId,
+      type: 'ORDER_UPDATE',
+      title: `Order #${line.order.orderNumber} cancelled`,
+      body: `${line.name} is out of stock and was the only item on your order, so the order was cancelled. Nothing has been charged.`,
+      data: { orderId: line.orderId, status: 'CANCELLED' },
+    });
+    return 'cancelled';
+  }
+
+  /** [O-4 · REVIEW-G S4-2 on #2043] Asking the customer before accepting answered the store's
+   *  new-order alert. When the customer answers (or the question times out), the store team is
+   *  told at once that the order can be accepted now. One push, no SMS ladder. */
+  private async tellStoreTheCustomerAnswered(
+    order: { id?: string; status: string; vendorId: string | null; orderNumber: string },
+    what: string,
+  ): Promise<void> {
+    if (order.status !== 'PENDING' || !order.vendorId || !order.id) return;
+    try {
+      const team = await storeTeam(this.prisma, order.vendorId);
+      if (!team || !team.ringing) return;
+      for (const userId of ringRecipients(team)) {
+        await this.notifications.send({
+          userId,
+          type: 'ORDER_UPDATE',
+          title: `Order #${order.orderNumber}: the customer answered`,
+          body: `${what}. You can accept the order now.`,
+          data: { kind: 'vendor_customer_answered', orderId: order.id, orderNumber: order.orderNumber, audience: 'business' },
+        });
+      }
+    } catch {
+      // A notice, never the decision: the answer already committed.
+    }
   }
 
   /** Put a line's units back on the shelf (tracked items only) + log it. */
@@ -813,7 +905,7 @@ export async function sweepSubstitutionDeadlines(
     limit?: number;
     narrow?: <T>(orderId: string, fn: () => Promise<T>) => Promise<T>;
   } = {},
-): Promise<{ removed: number; withdrawn: number; started: number; failed: number }> {
+): Promise<{ removed: number; withdrawn: number; started: number; cancelled: number; failed: number }> {
   const now = opts.now ?? new Date();
   const narrow = opts.narrow ?? (<T>(_orderId: string, fn: () => Promise<T>) => fn());
   const due = await prisma.orderItem.findMany({
@@ -827,7 +919,7 @@ export async function sweepSubstitutionDeadlines(
     orderBy: { substituteDecideBy: 'asc' },
     take: opts.limit ?? 200,
   });
-  const result = { removed: 0, withdrawn: 0, started: 0, failed: 0 };
+  const result = { removed: 0, withdrawn: 0, started: 0, cancelled: 0, failed: 0 };
   const picking = new PickingService(prisma, io);
   for (const line of due) {
     try {

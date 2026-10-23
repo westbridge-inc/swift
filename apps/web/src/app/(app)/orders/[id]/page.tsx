@@ -623,15 +623,17 @@ export default function OrderDetailPage() {
               <div>
                 <p className={styles.eyebrow}>The store asks</p>
                 <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>{item.name} is out of stock</h2>
-                <p className={styles.mutedCopy}>{vendorName} can't supply it. Continue without it, or cancel the order. Nothing has been charged.</p>
+                <p className={styles.mutedCopy}>{view?.lastItem ? `${vendorName} can’t supply it.` : `${vendorName} can’t supply it. Continue without it, or cancel the order. Nothing has been charged.`}</p>
                 {lower ? <p className={styles.mutedCopy}><strong>{lower}</strong></p> : null}
                 {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
                 {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
                 {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
                 <div className={styles.confirmActions}>
-                  <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
-                    Continue without it
-                  </button>
+                  {view?.lastItem ? null : (
+                    <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                      Continue without it
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={styles.secondaryButton}

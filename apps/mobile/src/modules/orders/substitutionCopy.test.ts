@@ -90,3 +90,10 @@ describe('the removal question (O-4)', () => {
     expect(removalChangeText({ kind: 'REMOVAL' })).toBeNull();
   });
 });
+
+describe('[O-4 · REVIEW-F S3-1] the only item left', () => {
+  it('no answer cancels the order, and the deadline says so', () => {
+    expect(swapDeadlineText({ decideBy: '2026-10-23T02:30:00.000Z', ifNoAnswer: 'CANCEL' }, () => '10:30 PM'))
+      .toBe("Please answer by 10:30 PM. If you don't, the order is cancelled. Nothing has been charged.");
+  });
+});

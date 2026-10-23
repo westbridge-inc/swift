@@ -459,6 +459,18 @@ describe('[SUBSTITUTION] the store asks the customer about a swap', () => {
     expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('[REVIEW-F S3-1] the only item left: no "Continue", the reason in words, and only the free cancel', async () => {
+    const only = { ...CASH_VIEW, kind: 'REMOVAL', lastItem: true, priceDelta: null, decisions: { approve: false, reject: false },
+      settlementGuidance: "This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.", ifNoAnswer: 'CANCEL' };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(swapOrder(only, { status: 'PENDING', canCancel: true }) as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('heading', { name: 'Fried Rice is out of stock' })).toBeTruthy();
+    expect(screen.getByText("This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.")).toBeTruthy();
+    expect(screen.getByText(/If you don't, the order is cancelled\. Nothing has been charged\./)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Continue without it' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('a removed line reads removed and charges nothing on the receipt preview', async () => {
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'PREPARING', paymentMethod: 'CASH', paymentAction: null, totalAmount: 1900, subtotalCustomer: 1900,

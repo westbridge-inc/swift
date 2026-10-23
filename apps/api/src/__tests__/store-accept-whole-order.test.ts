@@ -14,6 +14,8 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { sweepSubstitutionDeadlines } from '../modules/order/picking.service';
 import { vendorResponseSlaMinutes } from '../modules/order/response-sla';
 import { autoCancelUnresponsiveOrder, type JobContext } from '../jobs/queue';
+import { OrderService } from '../modules/order/order.service';
+import { ONLY_ITEM_LEFT_COPY } from '../modules/order/substitution-view';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 
@@ -104,10 +106,11 @@ const lineOf = async (orderId: string, itemId: string) => (await orderRow(orderI
 const pushes = (orderId: string) => sys(async () => (await app.prisma.notification.findMany({ where: { userId: customer.userId }, orderBy: { createdAt: 'asc' } }))
   .filter((n) => JSON.stringify(n.data ?? {}).includes(orderId)));
 
-/** A real checkout: rice ×1 and beans ×2 from the grocer. */
-async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH') {
+/** A real checkout: rice ×1 and beans ×2 from the grocer (or only the rice). */
+async function placeOrder(paymentMethod: 'MOBILE_MONEY' | 'CASH' = 'CASH', opts: { onlyRice?: boolean } = {}) {
   expect((await call('DELETE', '/api/v1/customer/cart', customer.token)).statusCode).toBe(200);
-  for (const [itemId, quantity] of [[grocer.rice, 1], [grocer.beans, 2]] as const) {
+  const lines: ReadonlyArray<readonly [string, number]> = opts.onlyRice ? [[grocer.rice, 1]] : [[grocer.rice, 1], [grocer.beans, 2]];
+  for (const [itemId, quantity] of lines) {
     const added = await call('POST', '/api/v1/customer/cart/items', customer.token, { vendorId: grocer.vendorId, itemId, quantity });
     expect(added.statusCode, added.body).toBe(201);
   }
@@ -126,8 +129,9 @@ const offerSwap = (orderId: string, lineId: string, substituteItemId: string) =>
   call('POST', `/api/v1/vendor/orders/${orderId}/items/${lineId}/substitute`, grocer.owner.token, { substituteItemId }, as(grocer));
 const answer = (orderId: string, lineId: string, approve: boolean) =>
   call('POST', `/api/v1/customer/orders/${orderId}/items/${lineId}/substitution`, customer.token, { approve });
-const customerView = async (orderId: string, capability = true) => {
-  const res = await call('GET', `/api/v1/customer/orders/${orderId}${capability ? '?swapDecisions=v1' : ''}`, customer.token);
+/** 'v2' = today's clients (they render the removal card); 'v1' = store builds 11/12 (swap card only); none = build 9. */
+const customerView = async (orderId: string, capability: 'v2' | 'v1' | false = 'v2') => {
+  const res = await call('GET', `/api/v1/customer/orders/${orderId}${capability ? `?swapDecisions=${capability}` : ''}`, customer.token);
   expect(res.statusCode, res.body).toBe(200);
   return res.json().data as { totalAmount: number | string; items: Array<Record<string, unknown> & { id: string; name: string }> };
 };
@@ -406,5 +410,100 @@ describe('[O-4] the store is never auto-cancelled for the customer\'s time', () 
     await sys(() => app.prisma.orderItem.update({ where: { id: rice.id }, data: { substituteDecideBy: new Date(Date.now() - (sla + 1) * 60_000) } }));
     expect(await sys(() => autoCancelUnresponsiveOrder(ctx, orderId))).toBe(true);
     expect((await orderRow(orderId)).status).toBe('CANCELLED');
+  });
+});
+
+describe('[O-4 · REVIEW-F S3-1] the only item left: the order can\'t go ahead without it', () => {
+  it('a one-item order: the customer is told and offered only the free cancel; "continue" is refused under the lock', async () => {
+    const orderId = await placeOrder('CASH', { onlyRice: true });
+    const rice = await lineOf(orderId, grocer.rice);
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    const view = (await customerView(orderId)).items.find((i) => i.id === rice.id)!;
+    expect(view['substitution']).toMatchObject({
+      kind: 'REMOVAL', lastItem: true, decisions: { approve: false, reject: false }, ifNoAnswer: 'CANCEL', settlementGuidance: ONLY_ITEM_LEFT_COPY,
+    });
+    const yes = await answer(orderId, rice.id, true);
+    expect(yes.statusCode, yes.body).toBe(409);
+    expect(yes.json().error.code).toBe('ONLY_ITEM_LEFT');
+    expect((await lineOf(orderId, grocer.rice)).subStatus).toBe('PENDING');
+    expect((await call('POST', `/api/v1/customer/orders/${orderId}/cancel`, customer.token, { reason: 'Only item out of stock' })).statusCode).toBe(200);
+  });
+
+  it('the last line left by earlier answers is the only item too; a declined swap on it is refused the same way', async () => {
+    const orderId = await placeOrder();
+    const [rice, beans] = [await lineOf(orderId, grocer.rice), await lineOf(orderId, grocer.beans)];
+    expect((await outOfStock(orderId, beans.id)).statusCode).toBe(200);
+    expect((await answer(orderId, beans.id, true)).statusCode).toBe(200);
+    expect((await offerSwap(orderId, rice.id, grocer.riceB)).statusCode).toBe(200);
+    const view = (await customerView(orderId)).items.find((i) => i.id === rice.id)!;
+    expect(view['substitution']).toMatchObject({ kind: 'SWAP', lastItem: true, decisions: { approve: true, reject: false }, ifNoAnswer: 'CANCEL' });
+    const no = await answer(orderId, rice.id, false);
+    expect(no.statusCode, no.body).toBe(409);
+    expect(no.json().error.code).toBe('ONLY_ITEM_LEFT');
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200); // the swap itself is still welcome
+    expect((await accept(orderId)).statusCode).toBe(200);
+  });
+
+  it('no answer about the only item cancels the order, free and never against the customer', async () => {
+    const orderId = await placeOrder('CASH', { onlyRice: true });
+    const rice = await lineOf(orderId, grocer.rice);
+    expect((await outOfStock(orderId, rice.id)).statusCode).toBe(200);
+    const due = (await lineOf(orderId, grocer.rice)).substituteDecideBy!;
+    const swept = await sys(() => sweepSubstitutionDeadlines(app.prisma, app.io, { now: new Date(due.getTime() + 1_000) }));
+    expect(swept.cancelled).toBeGreaterThanOrEqual(1);
+    const row = await orderRow(orderId);
+    expect({ status: row.status, by: row.cancelledBy }).toEqual({ status: 'CANCELLED', by: null });
+    expect(row.items[0]!.subStatus).toBe('PENDING'); // never "removed" into an empty order
+    const told = (await pushes(orderId)).find((n) => n.title === `Order #${row.orderNumber} cancelled`);
+    expect(told?.body).toBe(`${rice.name} is out of stock and was the only item on your order, so the order was cancelled. Nothing has been charged.`);
+  });
+});
+
+describe('[O-4 · REVIEW-G S4-1] store builds 11/12 (swap card only) never see a removal question as a swap', () => {
+  it('a v1 client gets the truthful legacy line for a removal question, and the swap view for a real swap', async () => {
+    const orderId = await placeOrder();
+    const [rice, beans] = [await lineOf(orderId, grocer.rice), await lineOf(orderId, grocer.beans)];
+    expect((await outOfStock(orderId, beans.id)).statusCode).toBe(200);
+    expect((await offerSwap(orderId, rice.id, grocer.riceB)).statusCode).toBe(200);
+    const items = (await customerView(orderId, 'v1')).items;
+    const removal = items.find((i) => i.id === beans.id)!;
+    expect(removal.name).toBe(`${beans.name} (out of stock: it is being removed and your total will go down)`);
+    expect(removal['subStatus']).toBeUndefined();
+    expect(removal['substitution']).toBeUndefined();
+    expect(items.find((i) => i.id === rice.id)!['substitution']).toMatchObject({ kind: 'SWAP', state: 'PENDING' });
+  });
+});
+
+describe('[O-4 · REVIEW-G S3-1] an Accept can never land over an open question (the locked re-check)', () => {
+  it('a question opened between the accept\'s read and its lock: the accept is refused and the MMG order stays waiting, its total still changeable', async () => {
+    const orderId = await placeOrder('MOBILE_MONEY');
+    const rice = await lineOf(orderId, grocer.rice);
+    const real = OrderService.prototype.updateStatus;
+    const spy = vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementationOnce(async function (this: OrderService, ...args: Parameters<typeof real>) {
+      // The store's other device asks the customer while this accept is on its way to the lock.
+      await sys(() => app.prisma.orderItem.update({ where: { id: rice.id }, data: { subStatus: 'PENDING', substituteDecideBy: new Date(Date.now() + 10 * 60_000) } }));
+      return real.apply(this, args);
+    });
+    try {
+      const refused = await accept(orderId);
+      expect(refused.statusCode, refused.body).toBe(409);
+      expect(refused.json().error.code).toBe('CUSTOMER_DECIDING');
+    } finally { spy.mockRestore(); }
+    const row = await orderRow(orderId);
+    expect({ status: row.status, acceptedAt: row.acceptedAt }).toEqual({ status: 'PENDING', acceptedAt: null });
+    expect((await answer(orderId, rice.id, true)).statusCode).toBe(200); // still adjustable: the customer is never charged for it
+  });
+});
+
+describe('[O-4 · REVIEW-G S4-2] the store hears the customer\'s answer at once', () => {
+  it('after "continue without it" the store team gets one push: the order can be accepted now', async () => {
+    const orderId = await placeOrder();
+    const beans = await lineOf(orderId, grocer.beans);
+    expect((await outOfStock(orderId, beans.id)).statusCode).toBe(200);
+    expect((await answer(orderId, beans.id, true)).statusCode).toBe(200);
+    const number = (await orderRow(orderId)).orderNumber;
+    const told = await sys(() => app.prisma.notification.findMany({ where: { userId: grocer.owner.userId, title: `Order #${number}: the customer answered` } }));
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toBe(`${beans.name}: the customer continues without it. You can accept the order now.`);
   });
 });

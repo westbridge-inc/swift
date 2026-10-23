@@ -73,3 +73,10 @@ it('a removal question gets its own card: "Continue without it" answers yes, "Ca
   expect(cancel).toContain('void openCancelConfirmation();');
   expect(removal).not.toContain('approve: false');
 });
+
+it('[REVIEW-F S3-1] the only item left: the card drops "Continue without it" and keeps the free cancel', () => {
+  const removal = SCREEN.slice(SCREEN.indexOf('isRemovalQuestion(it.substitution) ? ('), SCREEN.indexOf('label="Approve swap"'));
+  expect(removal).toContain('{it.substitution?.lastItem ? null : (');
+  expect(removal.indexOf('{it.substitution?.lastItem ? null : (')).toBeLessThan(removal.indexOf('label="Continue without it"'));
+  expect(removal).toContain('label="Cancel order"');
+});

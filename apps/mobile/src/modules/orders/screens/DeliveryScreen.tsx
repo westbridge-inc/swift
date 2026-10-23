@@ -1084,7 +1084,9 @@ export function DeliveryScreen() {
                   </T>
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-                  {o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.
+                  {it.substitution?.lastItem
+                    ? `${o.vendor?.name ?? 'The store'} can't supply it.`
+                    : `${o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.`}
                 </T>
                 {removalChangeText(it.substitution) ? (
                   <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
@@ -1102,14 +1104,16 @@ export function DeliveryScreen() {
                   </T>
                 ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
-                  <PillButton
-                    label="Continue without it"
-                    size="md"
-                    style={{ flex: 1 }}
-                    loading={decideSub.isPending}
-                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
-                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
-                  />
+                  {it.substitution?.lastItem ? null : (
+                    <PillButton
+                      label="Continue without it"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={decideSub.isPending}
+                      disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                      onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
+                    />
+                  )}
                   <PillButton
                     label="Cancel order"
                     variant="soft"
