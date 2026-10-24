@@ -116,6 +116,16 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
             </Card>;
           }) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No recent checkouts.</T>}
         </View>
+        <View>
+          <T variant="heading">Receipts</T>
+          {/* [owner legal plan R12; OWNER-SESSIONS 22 Oct] Printed by the API, line by line: the same
+              receipt support and the accountant see, and the web console shows (components/weekly-fee.tsx):
+              the seller's company details, the receipt number, the week's amount and "Not a VAT invoice".
+              The phone never showed it. Nothing here is worded or computed on the phone. */}
+          {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <Card key={r.receiptNumber} testID={`fee-receipt-${r.receiptNumber}`} style={{ marginTop: space.md, gap: space.xs }}>
+            {r.lines.map((line, i) => <T key={i} variant="label" weight={i === 0 ? 'semibold' : undefined} selectable>{line}</T>)}
+          </Card>) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No receipts yet.</T>}
+        </View>
       </ScrollView>}
   </Screen>;
 }

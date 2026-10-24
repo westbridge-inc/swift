@@ -19,6 +19,10 @@ import { testPhone } from './fixture-ids';
  */
 
 const seconds = new WeakMap<FastifyInstance, Map<string, Promise<{ userId: string; token: string; at: number }>>>();
+/** Every approver user this helper created, noted the moment the row exists:
+ *  a setup that fails AFTER the user insert (its session) still leaves a user
+ *  that cleanup must remove, and its rejected promise carries no id. */
+const createdUsers = new WeakMap<FastifyInstance, Set<string>>();
 
 /**
  * A second capable admin for this app instance, IN THE APPROVAL'S OWN TENANT,
@@ -41,6 +45,9 @@ function secondAdminToken(app: FastifyInstance, tenantId: string): Promise<strin
           admin: { create: { permissions: ['*'] } },
         },
       }), 'test-second-approver');
+      let made = createdUsers.get(app);
+      if (!made) { made = new Set(); createdUsers.set(app, made); }
+      made.add(user.id);
       return { userId: user.id, ...await signSecond(app, user.id) };
     })();
     byTenant.set(tenantId, existing);
@@ -155,8 +162,15 @@ export async function injectWithApproval(app: FastifyInstance, options: InjectOp
 export async function cleanupSecondApprovers(app: FastifyInstance): Promise<void> {
   const byTenant = seconds.get(app);
   if (!byTenant) return;
-  const ids = (await Promise.all([...byTenant.values()])).map((second) => second.userId);
+  // One tenant's failed setup must not stop the others' clean-up: settle all,
+  // and add every user the helper created (a failed session leaves one).
+  const settled = await Promise.allSettled([...byTenant.values()]);
+  const ids = [...new Set([
+    ...(createdUsers.get(app) ?? []),
+    ...settled.flatMap((s) => (s.status === 'fulfilled' ? [s.value.userId] : [])),
+  ])];
   seconds.delete(app);
+  createdUsers.delete(app);
   await runWithoutTenant(async () => {
     if (!ids.length) return;
     await app.prisma.privilegedApproval.deleteMany({ where: { approvedBy: { in: ids } } }).catch(() => {});

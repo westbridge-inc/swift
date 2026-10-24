@@ -60,6 +60,9 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   // FK-less rider/order references it always had: that EXPAND follow-up stands, it just cannot be listed in
   // PENDING_EXPAND once the model has a tenant-bearing parent.
   ReimbursementClaim: ['CashHandoverEvidence'],
+  // [R12 · REVIEW-M #1963 S2-1] One row per (wallet debit, receipt it used): walled by its receipt (tenantId, RLS,
+  // scoped), deleted only with it (FK cascade), read only through the scoped receipt include (fee-receipt.ts).
+  FeeReceiptAllocation: ['FeeReceipt'],
 };
 
 /** These foreign keys preserve global reservations, not tenant ownership.

@@ -3,7 +3,7 @@ import { assertHirePlate } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
 import { NotificationService } from '../notification/notification.service';

@@ -8,7 +8,7 @@ import { mmgDisputePaused } from '@/lib/mmg-dispute';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useFeedPollInterval } from '@/lib/store-live-feed';
 import { BUCKETS, type BucketKey, completeness, groupOrders } from '@/lib/order-buckets';
-import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
+import { BoardQuiet, FirstOrderGuide, LoadedBoard, ManageGrid, OrderCardActions, PickupCodeCard, RevenuePulse, SelfDeliveryCard, StaffAvailability, StoreHeader, StoreStatusCard, useHubStore } from '@/components/orders-home';
 import { useStoreRole } from '@/lib/store-role';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { focusableIn } from '@/components/modal';
@@ -156,6 +156,8 @@ export default function OrdersPage() {
     {store.data && <div className="grid gap-4 wide:grid-cols-2">
       <StoreStatusCard store={store.data} manager={manager} readFailed={store.isError} onRetryRead={() => void store.refetch()} />
       {manager && storeLive && <SelfDeliveryCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
+      {/* [STORE-DASH · O-2] Shown once the server serves the setting. */}
+      {manager && storeLive && typeof store.data.requirePickupCode === 'boolean' && <PickupCodeCard store={store.data} readFailed={store.isError} onRetryRead={() => void store.refetch()} />}
     </div>}
     <p className="text-center text-[13px] text-[var(--swift-muted)]">You keep 100% of every order — Swift takes no commission.</p>
     {selected && <div ref={dialog} className="sw-scrim items-start overflow-y-auto p-4 pt-[calc(env(safe-area-inset-top)_+_1rem)] wide:items-center" role="dialog" aria-modal="true" aria-label="Order details" onKeyDown={e => { if (e.key === 'Escape') setSelected(null); else trapTab(e); }}>

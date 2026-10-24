@@ -205,7 +205,7 @@ const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
   '/advertiser': 'open', '/advertiser/account': 'open', '/advertiser/notifications': 'open',
   '/advertiser/campaigns/[advertiserId]/[campaignId]': 'open',
   // A link someone was sent (a parcel or trip to follow) and the QR fallback pages: no ordering on them.
-  '/track/[token]': 'open', '/trip/[token]': 'open', '/qr/not-found': 'open', '/qr/retired': 'open', '/qr/unavailable': 'open',
+  '/track/[token]': 'open', '/trip/[token]': 'open', '/safety-check': 'open', '/qr/not-found': 'open', '/qr/retired': 'open', '/qr/unavailable': 'open',
 };
 
 function pageRoutesOnDisk(dir = join(SRC, 'app'), prefix = ''): string[] {

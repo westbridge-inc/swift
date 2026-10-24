@@ -166,6 +166,10 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   // so the tap opened nothing. ActiveJob is the rider's live job; it takes no
   // params because it resolves the active job itself.
   if (kind === 'prep_ready') return { screen: 'ActiveJob' };
+  // [OF-33] "Pick up now or release the order" goes to the RIDER who holds the
+  // job; ActiveJob is where they pick it up or hand it back. Its orderId would
+  // otherwise send it down the generic branch to the CUSTOMER Delivery screen.
+  if (kind === 'pickup_overdue') return { screen: 'ActiveJob' };
   // [AF-MOB-006] Custody recovery. The holder's live job carries the handoff
   // code; the relay rider's task waits on their dashboard until custody is theirs.
   if (kind === 'custody_handoff_code') return { screen: 'ActiveJob' };

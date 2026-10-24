@@ -11,7 +11,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
-import { OrderService, preparationMayStart } from '../modules/order/order.service';
+import { OrderService, SCHEDULED_PREP_LEAD_MINUTES, preparationMayStart } from '../modules/order/order.service';
 import { ORDER_TRANSITIONS, STORE_ACCEPT_PATH } from '../modules/order/order-status';
 import { hashVelocityId } from '../modules/integrity/velocity';
 import { purgeAuditLogs } from '../lib/audit-immutability';
@@ -204,6 +204,13 @@ describe('[O-3] the walk is declared in order-status.ts over edges that already 
     expect(preparationMayStart({ ...mmg, paymentStatus: 'CLAIMED' } as never)).toBe(true);
     expect(preparationMayStart({ ...mmg, paymentStatus: 'CAPTURED' } as never)).toBe(true);
     expect(preparationMayStart({ ...mmg, paymentStatus: 'CLAIMED', mmgClaimMismatchAt: new Date() } as never)).toBe(false);
+    // [REVIEW-F S4-2 on #2024] A pre-order for later is accepted now and prepared near its time.
+    const now = new Date('2026-10-22T12:00:00Z');
+    const at = (minutes: number) => new Date(now.getTime() + minutes * 60_000);
+    expect(preparationMayStart({ ...base, scheduledFor: at(SCHEDULED_PREP_LEAD_MINUTES + 1) } as never, now)).toBe(false);
+    expect(preparationMayStart({ ...base, scheduledFor: at(SCHEDULED_PREP_LEAD_MINUTES) } as never, now)).toBe(true);
+    expect(preparationMayStart({ ...base, scheduledFor: at(-5) } as never, now)).toBe(true);
+    expect(preparationMayStart({ ...base, scheduledFor: null } as never, now)).toBe(true);
   });
 });
 
@@ -311,6 +318,20 @@ describe('[O-3] payment-first is kept: an MMG order is prepared only once the st
     const again = await paidByMmg(diner, orderId);
     expect(again.statusCode, again.body).toBe(200);
     expect((await statusLogs(orderId)).filter((l) => l.status === 'PREPARING')).toHaveLength(1);
+  });
+
+  it('[REVIEW-M S4-1 on #2024] "Paid by MMG" that disagrees with the customer\'s own report: the claim stands, the order stays ACCEPTED (nothing prepared, no rider sought)', async () => {
+    const orderId = await placeOrder(diner, 'MOBILE_MONEY');
+    expect((await accept(diner, orderId)).json().data.status).toBe('ACCEPTED');
+    const said = await call('POST', `/api/v1/customer/orders/${orderId}/payment-claim`, customer.token, { paid: true, reference: reference() });
+    expect(said.statusCode, said.body).toBe(200);
+    const paid = await paidByMmg(diner, orderId); // a different reference
+    expect(paid.statusCode, paid.body).toBe(200);
+    const row = await orderRow(orderId);
+    expect(row.mmgClaimMismatchAt).toBeInstanceOf(Date);
+    expect({ status: row.status, preparingAt: row.preparingAt, paymentStatus: row.paymentStatus }).toEqual({ status: 'ACCEPTED', preparingAt: null, paymentStatus: 'CLAIMED' });
+    expect((await statusLogs(orderId)).some((l) => l.status === 'PREPARING')).toBe(false);
+    expect(await sys(() => app.prisma.dispatchSearch.count({ where: { subjectId: orderId } }))).toBe(0);
   });
 
   it('MMG confirmed before the accept: Accept goes straight to PREPARING', async () => {
