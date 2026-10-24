@@ -182,7 +182,7 @@ describe('[DELETION-INTEGRITY] build 9 never shows a false deletion receipt', ()
     const member = await signedIn(['CUSTOMER']);
     const adv = await app.prisma.advertiser.create({ data: {
       companyName: `Closure Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Synthetic', contactEmail: 'synthetic@example.com',
-      contactPhone: 'synthetic', createdByUserId: member.userId, members: { create: { userId: member.userId, role: 'ANALYST' } },
+      contactPhone: 'synthetic', createdByUserId: member.userId, members: { create: { userId: member.userId, role: 'ANALYST', acceptedAt: new Date() } },
     } });
     advertiserIds.push(adv.id);
     for (const [p, flow] of [[customer, 'DELETE'], [owner, 'REQUEST'], [member, 'REQUEST']] as const) {
