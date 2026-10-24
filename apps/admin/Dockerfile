@@ -16,7 +16,7 @@
 # cookie pair.
 # ---------------------------------------------------------------------------
 
-FROM node:20-slim AS base
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS base
 ENV PNPM_HOME=/pnpm NEXT_TELEMETRY_DISABLED=1
 # A separate instruction: within one ENV, $PNPM_HOME is not yet defined.
 ENV PATH=$PNPM_HOME:$PATH
@@ -54,7 +54,7 @@ RUN pnpm run build
 # The standalone output is the server plus only the node_modules it traced.
 # The console has no public/ directory and writes only its own cache under
 # .next, which the node user owns.
-FROM node:20-slim AS runtime
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0 AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 # Docker sets HOSTNAME to the container id and Next's standalone server binds
 # to $HOSTNAME; pin every interface so Caddy (admin:3000) and the probe both reach it.
