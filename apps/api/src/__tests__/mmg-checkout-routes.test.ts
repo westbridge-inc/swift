@@ -1176,7 +1176,7 @@ describe('[MMG reopen] the partner’s own open checkout', () => {
   it.each(['CONFIRMING', 'HELD', 'EXPIRED', 'NOT_PAID', 'CONFIRMED'] as const)('never reopens %s', async (status) => {
     const p = await makeStore(); const first = await started(p);
     if (status === 'CONFIRMED') {
-      const txn = tx('REOPENPAID'); approved(txn, 2100);
+      const txn = tx('REOPENPAID'); approved(first.row, txn, 2100);
       expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
     } else await app.prisma.mmgCheckoutIntent.update({ where: { id: first.ref }, data: { status } });
     expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
@@ -1267,7 +1267,7 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
     // Another device (or this one before its refresh) still holds the grant it read while C1 was OPEN.
     expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
     if (outcome === 'CONFIRMED') {
-      const txn = tx(`STALEBACK${seq}`); approved(txn, 2100);
+      const txn = tx(`STALEBACK${seq}`); approved(first.row, txn, 2100);
       expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
     } else {
       expect((await ret('error', { token: officialReply(first.row, '6') })).json().data.state).toBe('NOT_PAID');
@@ -1306,7 +1306,7 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
 
   it('[F1] the service itself refuses a resolved checkout even when the grant says yes, and binds no key', async () => {
     const p = await makeStore(); const first = await started(p);
-    const txn = tx(`SVCPAID${seq}`); approved(txn, 2100);
+    const txn = tx(`SVCPAID${seq}`); approved(first.row, txn, 2100);
     expect((await ret('success', { token: officialReply(first.row, '0', txn) })).json().data.state).toBe('CONFIRMED');
     const before = await countsOf(p);
     const service = mmgCheckoutRuntimeOf(app).service;
