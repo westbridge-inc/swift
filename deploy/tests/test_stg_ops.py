@@ -854,10 +854,8 @@ class Q11WebsiteCaddyfile(unittest.TestCase):
             r"reverse_proxy api:3000\n\}\n",
         )
         # Every host that is not the API's (or the console's) is the website:
-        # its catch-all route stays last. [MASTER-051] It caps the public MMG
-        # return's body before forwarding it.
-        self.assertTrue(body.endswith("\nhandle {\n@mmg_return path /pay/mmg/*\nrequest_body @mmg_return {\n"
-                                      "max_size 256KiB\n}\nreverse_proxy web:3000\n}"), body)
+        # its catch-all route stays last.
+        self.assertTrue(body.endswith("\nhandle {\nreverse_proxy web:3000\n}"), body)
 
     def test_the_mmg_return_body_cap_matches_the_route(self):
         # [MASTER-051] The proxy refuses an oversized MMG return body before
@@ -1041,6 +1039,17 @@ class Q11WebsiteCaddyfileRenderedByCaddy(unittest.TestCase):
         self.assertEqual(hosts, [[API_HOST, WEB_HOST]])
         self.assertIn('"dial": "web:3000"', config)
         self.assertIn('"dial": "api:3000"', config)
+
+    def test_the_mmg_return_body_cap_runs_before_every_route(self):
+        # [MASTER-051] In the config Caddy actually runs, the 256 KiB cap on
+        # /pay/mmg/* is the site's first step, ahead of the routes that forward.
+        config = json.loads(self.caddy("adapt", {"API_HOST": API_HOST, "WEB_HOST": WEB_HOST}))
+        site = config["apps"]["http"]["servers"]["srv0"]["routes"][0]
+        steps = [route for handler in site["handle"] if handler["handler"] == "subroute" for route in handler["routes"]]
+        first = [h for h in steps[0]["handle"]]
+        self.assertEqual(first, [{"handler": "request_body", "max_size": 262144}])
+        self.assertEqual(steps[0]["match"], [{"path": ["/pay/mmg/*"]}])
+        self.assertTrue(any(h.get("handler") == "subroute" for step in steps[1:] for h in step["handle"]))
 
 
 LETS_ENCRYPT_DIRECTORY = "https://acme-v02.api.letsencrypt.org/directory"
