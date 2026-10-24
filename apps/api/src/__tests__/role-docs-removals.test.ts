@@ -20,7 +20,7 @@ import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
 import { runWithoutTenant } from '../plugins/tenant-context';
 import { DEFAULT_DOCUMENT_CHECKLISTS, PLATFORM_CONFIG_VERSION } from '../modules/ops/platform-config';
-import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, LICENCE_DISCLOSURE_TYPES, AUTO_APPROVE_EXPIRY_DAYS, RETIRED_REGISTRY_LIST_KEYS, REGISTRY_EFFECTIVE_FROM, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
+import { CATEGORY_GATES, EXTRA_DOC_TYPES, FIELD_CATALOGUE, LICENCE_DISCLOSURE_TYPES, AUTO_APPROVE_EXPIRY_DAYS, RETIRED_DOC_TYPES, RETIRED_REGISTRY_LIST_KEYS, REGISTRY_EFFECTIVE_FROM, registryCode, seedDocRegistry } from '../modules/verification/doc-registry';
 import { CountryConfigService, RETIRED_LIST_KEYS } from '../modules/country/country-config.service';
 
 const MIGRATION = '20261021160000_role_docs_retired_documents';
@@ -79,6 +79,33 @@ describe('[ROLE-DOCS] the lists and the registry no longer ask for the removed d
       expect(AUTO_APPROVE_EXPIRY_DAYS[retired], retired).toBeUndefined();
     }
     expect(CATEGORY_GATES.some((g) => g.categorySlug === 'alcohol' || g.categorySlug === 'pharmacy')).toBe(false);
+  });
+});
+
+describe('[ROLE-DOCS · COORD 24 Oct] a database seeded before the removal (staging, production) has its old liquor-licence row retired by the seed', () => {
+  it('liquor, pharmacy and NIS are retired types: the registry still describes their stored copies, never as a requirement', () => {
+    for (const retired of ['liquor_licence', 'pharmacy_authorisation', 'nis_employer_reg']) expect(RETIRED_DOC_TYPES, retired).toContain(retired);
+  });
+
+  it('the old row (annual printed expiry, as the earlier seed wrote it) reads no expiry after the seed, with no requirement and no gate', async () => {
+    await system(async () => {
+      await seedDocRegistry(app.prisma);
+      const code = registryCode('GY', 'liquor_licence');
+      // What staging and production hold today (CI's fresh database never has this row, so the test writes it).
+      const old = { hasExpiry: true, defaultValidityDays: 365, expirySource: 'PRINTED' };
+      if (await app.prisma.docType.findUnique({ where: { code }, select: { code: true } })) {
+        await app.prisma.docType.update({ where: { code }, data: old });
+      } else {
+        const sibling = await app.prisma.docType.findFirstOrThrow({ where: { countryCode: 'GY', bucket: 'BUSINESS', NOT: { code } } });
+        await app.prisma.docType.create({ data: { ...sibling, code, legacyCode: 'liquor_licence', displayName: 'Liquor licence', issuer: 'GRA / District Licensing Board', isActive: false, ...old } });
+      }
+      await seedDocRegistry(app.prisma);
+      const row = await app.prisma.docType.findUniqueOrThrow({ where: { code }, include: { requirementItems: true, categoryGates: true } });
+      expect({ hasExpiry: row.hasExpiry, defaultValidityDays: row.defaultValidityDays, expirySource: row.expirySource })
+        .toEqual({ hasExpiry: false, defaultValidityDays: null, expirySource: 'NONE' });
+      expect(row.requirementItems).toEqual([]);
+      expect(row.categoryGates).toEqual([]);
+    });
   });
 });
 

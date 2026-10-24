@@ -757,13 +757,14 @@ describe('GOLD-2 · VEND-03 — grocery substitution on an MMG order', () => {
     const before = await orderRow(orderId);
     expect(await shelf(market.rice)).toBe(riceBefore - 2);
 
-    // The bag cannot close with an open question in it.
-    const openQuestion = await storeStep(orderId, 'ready', marketOwner, marketId);
-    expect(openQuestion.statusCode).toBe(409);
-    expect(openQuestion.json().error.code).toBe('PICKING_INCOMPLETE');
     const proposed = await call('POST', `/api/v1/vendor/orders/${orderId}/items/${riceLineId}/substitute`, marketOwner.token, { substituteItemId: market.riceOther }, asStore(marketId));
     expect(proposed.statusCode, proposed.body).toBe(200);
     expect(proposed.json().data.subStatus).toBe('PENDING');
+    // The bag cannot close with an open question in it. [O-4 · owner 22 Oct 2026] An unticked line no
+    // longer holds it (ticking is optional), so the refusal is checked once the question is open.
+    const openQuestion = await storeStep(orderId, 'ready', marketOwner, marketId);
+    expect(openQuestion.statusCode).toBe(409);
+    expect(openQuestion.json().error.code).toBe('PICKING_INCOMPLETE');
     const notTheirs = await call('POST', `/api/v1/customer/orders/${orderId}/items/${riceLineId}/substitution`, stranger.token, { approve: true });
     expect(notTheirs.statusCode).toBe(404);
     const approved = await call('POST', `/api/v1/customer/orders/${orderId}/items/${riceLineId}/substitution`, customer.token, { approve: true });

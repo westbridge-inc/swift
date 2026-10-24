@@ -6,7 +6,7 @@ import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-ca
 import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -651,6 +651,31 @@ const VENDOR_ORDER_ITEMS = {
 function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
   const { selectedOptions, ...rest } = line;
   return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
+}
+
+/** [O-4 · owner 22 Oct 2026] An order with an open "Out of stock" question (a swap or a removal
+ *  the customer has not answered yet) is not accepted: the customer agrees to the changed order
+ *  first. The refusal names the item and how long the answer can take. An order whose every line
+ *  came off has nothing to accept: the store rejects it instead (with its reason). */
+export function assertNoOpenCustomerQuestion(
+  lines: ReadonlyArray<{ name: string; subStatus: string; substituteDecideBy?: Date | null }>,
+  now: Date = new Date(),
+): void {
+  const open = lines.find((line) => line.subStatus === 'PENDING');
+  if (!open) {
+    if (lines.length > 0 && lines.every((line) => line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED')) {
+      throw new AppError(409, 'NOTHING_TO_ACCEPT', 'Every item on this order was removed. Reject the order instead, with the reason.');
+    }
+    return;
+  }
+  const minutes = open.substituteDecideBy
+    ? Math.max(1, Math.ceil((open.substituteDecideBy.getTime() - now.getTime()) / 60_000))
+    : null;
+  throw new AppError(
+    409,
+    'CUSTOMER_DECIDING',
+    `The customer is still deciding about ${open.name}${minutes ? ` (up to ${minutes} more minute${minutes === 1 ? '' : 's'})` : ''}. Accept the order after they answer.`,
+  );
 }
 
 /**
@@ -2045,6 +2070,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // below is never reserved for an order that cannot proceed; the canonical
     // transition seam re-checks on the locked row.
     assertMmgFulfilmentAllowed(order, 'ACCEPTED');
+    // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order — after the customer answered every
+    // "Out of stock" question asked before acceptance (early answer; the authority is the locked
+    // re-check inside the transition below).
+    assertNoOpenCustomerQuestion(order.items);
     const body = acceptOrderSchema.parse(request.body ?? {});
 
     // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
@@ -2069,6 +2098,11 @@ export async function vendorRoutes(app: FastifyInstance) {
         // reached it: accepting takes it out of the sweep's reach, so the
         // acceptance releases it — counted for the store once, here.
         await releaseLapsedHoldInTransaction(tx, order.id);
+        // [O-4] On the locked row: a question asked after the route's read is seen here.
+        assertNoOpenCustomerQuestion(await tx.orderItem.findMany({
+          where: { orderId: order.id },
+          select: { name: true, subStatus: true, substituteDecideBy: true },
+        }));
         if (appointmentItemId && order.appointmentSlot) {
           await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
         }
@@ -2245,7 +2279,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (v && ['SUPERMARKET', 'STORE'].includes(v.vendorType)) {
         const state = await picking.readiness(order.id);
         if (state.unresolved > 0) {
-          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} line${state.unresolved === 1 ? '' : 's'} still need picking or a substitution decision`);
+          // [O-4] Ticks are optional: only an open customer question holds the bag.
+          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} item${state.unresolved === 1 ? ' is' : 's are'} still waiting for the customer's answer`);
         }
         // [W-28] Settled is not fulfilled. If every line was refunded or the
         // customer rejected every substitute, the bag is empty: marking this
@@ -2376,9 +2411,10 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
 
@@ -2386,10 +2422,22 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
+    // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
+
+  /** [O-4] A store that asked the customer about an item before accepting has answered its new-order
+   *  alert: the "still waiting" ladder stops (the same ack an accept or a reject gives). */
+  async function ackPreAcceptQuestion(order: { id: string; status: OrderStatus }, userId: string) {
+    if (order.status !== 'PENDING') return;
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
+    await ackVendorAlert(app, userId, order.id);
+  }
 
   /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
    *  atomic and logged. The audit trail behind quantity-on-hand. */

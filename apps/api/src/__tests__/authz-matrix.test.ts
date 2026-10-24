@@ -206,6 +206,10 @@ const PUBLIC_BY_DESIGN = new Set([
   // account — the 128-bit CSPRNG token IS the credential; it grants only the
   // narrow public payload and dies at trip end + grace (or revocation).
   'GET /api/v1/safety/public/trip/:token',
+  // [WEB-TAXI] Trip Guardian's texted answer link: a passenger no push reached
+  // answers the waiting check-in without signing in — the one-time secret of
+  // ONE ask IS the credential; it answers only that check, misses are one 404.
+  'POST /api/v1/safety/public/checkin',
   // [T1] Guest browse (customer.routes.ts PUBLIC_BROWSE, the same four URLs):
   // optional auth by design, the public catalogue a guest may look around.
   'GET /api/v1/customer/home',

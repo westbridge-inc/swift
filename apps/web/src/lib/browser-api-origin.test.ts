@@ -25,6 +25,7 @@ const browserConsumerFiles = [
   'src/lib/customer.ts',
   'src/app/track/[token]/track-client.tsx',
   'src/app/trip/[token]/trip-share-client.tsx',
+  'src/app/safety-check/safety-check-client.tsx',
   'src/app/dashboard/inventory/import/page.tsx',
 ] as const;
 

@@ -492,7 +492,7 @@ export const customerApi = {
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   // This client renders the server's swap permissions and refusal guidance.
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2' } }), // [O-4] v2 = renders the removal question
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.
@@ -1282,6 +1282,8 @@ export const vendorApi = {
   setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
     api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
+  /** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
+  handedToRider: (id: string) => api.put(`/vendor/orders/${id}/handed-to-rider`, {}),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
@@ -1367,7 +1369,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.

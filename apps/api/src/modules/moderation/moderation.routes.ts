@@ -1,6 +1,6 @@
 import { resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { getTenantId } from '../../plugins/tenant-context';
 import { activateUserBlock, deactivateUserBlock } from './user-block.service';
 import { assertRoomAccess } from '../chat/chat-authority';

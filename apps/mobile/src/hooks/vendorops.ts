@@ -2,7 +2,7 @@ import { POLL } from '../lib/pollPolicy';
 import { prepareUploadImage } from '../lib/uploadImage';
 import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
 import { runBillingMutation } from '../lib/billingMutation';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Vibration } from 'react-native';
 import { useMutationState, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi, vendorDiscoveryApi } from '../services/api';
@@ -31,6 +31,7 @@ import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
 import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
 import { pendingOrderIds } from '../modules/vendor/boardTaps';
+import { answeredSinceAsked } from '../modules/vendor/storeOrderRules';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -335,6 +336,30 @@ export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = fa
     }, { serverAdmits: ownsStore });
   }, [vendorId, ownsStore, qc, previewType]);
 
+  // [STORE-DASH · REVIEW-F S3-1 on #2048] The customer answered the store's "Out of stock" question:
+  // the server sends no push (only order:pick_state, which re-reads the board) and the store's response
+  // clock restarts from the answer. Watch the board: an order that was waiting on the customer and is
+  // the store's decision again takes the new-order screen again (as the web popup does).
+  const askedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!vendorId || previewType) return;
+    const check = () => {
+      const { answered, deciding } = answeredSinceAsked(askedRef.current, qc.getQueryData(['vendor', 'orders']));
+      askedRef.current = deciding;
+      if (answered.length === 0) return;
+      Vibration.vibrate(400);
+      // The takeover opens on the board's fresh copy (useVendorOrder's placeholder), never on a
+      // stale copy of the order that still shows the question (which would settle it at once).
+      for (const a of answered) qc.removeQueries({ queryKey: ['vendor', 'orders', 'detail', a.orderId], exact: true });
+      setTakeover((q) => [...q, ...answered.filter((a) => !q.some((x) => x.orderId === a.orderId))]);
+    };
+    check();
+    return qc.getQueryCache().subscribe((event) => {
+      const key = event?.query?.queryKey;
+      if (event?.type === 'updated' && Array.isArray(key) && key.length === 2 && key[0] === 'vendor' && key[1] === 'orders') check();
+    });
+  }, [vendorId, previewType, qc]);
+
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
     [],
@@ -481,6 +506,19 @@ export function useToggleOrders() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
+/** [STORE-DASH · O-2] The store's "Ask for the pickup code" setting (owner/manager; rides the store profile). */
+export function useSetRequirePickupCode() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (requirePickupCode: boolean) => unwrap(vendorApi.updateProfile({ requirePickupCode })),
+    // The orders carry pickupCodeRequired: re-read them too, so the cards switch with the setting.
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    ]),
+  });
+}
+
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 export function useSetSelfDelivery() {
@@ -521,7 +559,7 @@ export function useOrderAction() {
       reason,
     }: {
       id: string;
-      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+      action: 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
       code?: string;
       /** reject only — the server records it and tells the customer why. */
       reason?: string;
@@ -532,6 +570,9 @@ export function useOrderAction() {
       if (action === 'ready') return unwrap(vendorApi.ready(id));
       if (action === 'delivered') return unwrap(vendorApi.delivered(id));
       if (action === 'complete-pickup') return unwrap(vendorApi.completePickup(id, code));
+      // [STORE-DASH · O-2] The store's pickup code is off: no code is sent (the server completes the hand-over).
+      if (action === 'handed-to-customer') return unwrap(vendorApi.completePickup(id));
+      if (action === 'handed-to-rider') return unwrap(vendorApi.handedToRider(id));
       if (action === 'complete-appointment') return unwrap(vendorApi.completeAppointment(id));
       // [E10] Never send a bare rejection: the API refuses it, and the customer
       // must be told why. Every screen collects a preset before it gets here.
@@ -550,7 +591,7 @@ export function useOrderAction() {
 }
 
 /** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
-const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt'] as const;
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt', 'handedToRiderAt'] as const;
 
 /** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
 export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {

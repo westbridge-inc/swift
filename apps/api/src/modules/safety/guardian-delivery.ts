@@ -30,14 +30,54 @@ export interface CheckinDeliveryObserver {
   beforeDeliver?: (row: { sessionId: string; cycleId: string; level: GuardianCheckinLevel; recipient: GuardianCheckinRecipient; attempts: number }) => Promise<void>;
 }
 
-export type CheckinPayload = { title: string; body: string; data: Record<string, unknown> };
+export type CheckinPayload = {
+  title: string; body: string; data: Record<string, unknown>;
+  /** [WEB-TAXI] Passenger asks only: the secret of this ask's one-time answer
+   *  link (the cycle keeps only its hash). It travels ONLY in the text message
+   *  — never in the push, the inbox row or a socket — and leaves the delivery
+   *  row once the row is done, like the driver's nonce. */
+  answerToken?: string;
+};
 
 /** The passenger's ask — one text for the ladder and the backfill. */
-export function passengerAsk(session: { id: string; orderId: string }, cycleId: string, level: GuardianCheckinLevel, respondBy: Date | null): CheckinPayload {
-  return level === 'SOFT'
+export function passengerAsk(session: { id: string; orderId: string }, cycleId: string, level: GuardianCheckinLevel, respondBy: Date | null, answerToken?: string): CheckinPayload {
+  const ask: CheckinPayload = level === 'SOFT'
     ? { title: 'Safety check-in', body: 'Everything OK on your trip? Open Swift to respond.', data: { kind: 'guardian_checkin', level: 'SOFT', sessionId: session.id, orderId: session.orderId, cycleId } }
     : { title: 'Safety check-in — please respond', body: 'Please confirm you are OK in the app.', data: { kind: 'guardian_checkin', level: 'HARD', sessionId: session.id, orderId: session.orderId, cycleId, respondBy: respondBy?.toISOString() ?? null } };
+  return answerToken ? { ...ask, answerToken } : ask;
 }
+
+/**
+ * [WEB-TAXI · owner 21 Oct 2026] The passenger's ask as a TEXT MESSAGE, for a
+ * passenger no push reached — a rider who booked on the website has no app to
+ * push to, and a phone whose push is off or gone is in the same place. One
+ * GSM-7 part: no name, no place, nothing about the trip but the link.
+ *
+ * The link answers the check-in without signing in (a sign-in code would eat
+ * the whole deadline): `/safety-check#<session>.<secret>`, the secret after
+ * the `#` so it never reaches a server log. An ask with no secret (the
+ * backfill) links to the ride's own page instead.
+ */
+export function passengerCheckinSms(payload: CheckinPayload, level: GuardianCheckinLevel, base = process.env['APP_PUBLIC_URL'] ?? 'https://swiftgy.com'): string {
+  const origin = base.replace(/\/+$/, '');
+  const sessionId = String(payload.data['sessionId'] ?? '');
+  const orderId = String(payload.data['orderId'] ?? '');
+  const link = payload.answerToken && sessionId
+    ? `${origin}/safety-check#${sessionId}.${payload.answerToken}`
+    : `${origin}/orders/${encodeURIComponent(orderId)}`;
+  return level === 'HARD'
+    ? `Swift safety check on your ride. Please answer now: ${link} In danger? Call 911.`
+    : `Swift safety check: is everything OK on your ride? Answer here: ${link} In danger? Call 911.`;
+}
+
+/** [WEB-TAXI] Neither a push nor a text reached the passenger. Retried a few
+ *  times, then the row FAILS, so the ladder's explicit no-delivery policy runs
+ *  on the phone's own timetable instead of waiting out the full retry budget. */
+export class PassengerUnreachedError extends Error {
+  constructor() { super('passenger not reached: no push accepted and no text accepted'); }
+}
+/** Attempts before an unreached passenger row fails: about 30 s of retries (10 s, 20 s). */
+export const UNREACHED_MAX_ATTEMPTS = 3;
 /** The driver's low-key prompt (§5.3) carrying the cycle's one-time nonce. */
 export function driverAsk(session: { id: string; orderId: string }, cycleId: string, nonce: string, respondBy: Date): CheckinPayload {
   return { title: 'Trip status check', body: 'Please confirm your trip status in the app.', data: { kind: 'guardian_driver_confirm', sessionId: session.id, orderId: session.orderId, cycleId, nonce, respondBy: respondBy.toISOString() } };
@@ -58,7 +98,7 @@ export async function stageCheckinDeliveries(
   return { staged: res.count };
 }
 
-type Claimed = { id: string; sessionId: string; cycleId: string; level: GuardianCheckinLevel; recipient: GuardianCheckinRecipient; userId: string; attempts: number; maxAttempts: number; payload: CheckinPayload };
+type Claimed = { id: string; tenantId: string; sessionId: string; cycleId: string; level: GuardianCheckinLevel; recipient: GuardianCheckinRecipient; userId: string; attempts: number; maxAttempts: number; payload: CheckinPayload };
 
 async function claimNext(prisma: PrismaClient, leaseMs: number, sessionIds?: string[]): Promise<Claimed | null> {
   const filter = sessionIds?.length ? Prisma.sql`AND "sessionId" IN (${Prisma.join(sessionIds)})` : Prisma.empty;
@@ -72,7 +112,7 @@ async function claimNext(prisma: PrismaClient, leaseMs: number, sessionIds?: str
     UPDATE "guardian_checkin_deliveries" AS d
     SET "leaseExpiresAt" = CURRENT_TIMESTAMP + (${leaseMs} * INTERVAL '1 millisecond'), "attempts" = d."attempts" + 1, "updatedAt" = CURRENT_TIMESTAMP
     FROM candidate WHERE d."id" = candidate."id"
-    RETURNING d."id", d."sessionId", d."cycleId", d."level", d."recipient", d."userId", d."attempts", d."maxAttempts", d."payload"`);
+    RETURNING d."id", d."tenantId", d."sessionId", d."cycleId", d."level", d."recipient", d."userId", d."attempts", d."maxAttempts", d."payload"`);
   return rows[0] ?? null;
 }
 
@@ -105,9 +145,13 @@ export async function drainCheckinDeliveries(
         // answered, cleared, or asked again — this prompt would only confuse.
         result = { status: 'SKIPPED', receipt: { skipped: 'cycle-over', currentCycleId: cycle?.id ?? null } };
       } else {
-        const notificationId = await notifications.send({ userId: row.userId, type: 'SAFETY', title: row.payload.title, body: row.payload.body, data: row.payload.data as never });
-        if (!notificationId) throw new Error('notification not persisted');
-        result = { status: 'SENT', receipt: { notificationId } };
+        if (row.recipient === 'PASSENGER') {
+          result = { status: 'SENT', receipt: await reachPassenger(prisma, notifications, row) };
+        } else {
+          const notificationId = await notifications.send({ userId: row.userId, type: 'SAFETY', title: row.payload.title, body: row.payload.body, data: row.payload.data as never });
+          if (!notificationId) throw new Error('notification not persisted');
+          result = { status: 'SENT', receipt: { notificationId } };
+        }
         if (row.level === 'HARD' && row.recipient === 'PASSENGER') {
           // The deadline is measured from DELIVERY: a late delivery still
           // gives the full window. Only ever moves later.
@@ -115,20 +159,22 @@ export async function drainCheckinDeliveries(
           await prisma.$executeRaw`UPDATE "TripSafetySession" SET "checkinDeadlineAt" = ${deadline}, "updatedAt" = CURRENT_TIMESTAMP WHERE "id" = ${row.sessionId} AND "status" = 'CHECKIN_PENDING' AND ("checkinDeadlineAt" IS NULL OR "checkinDeadlineAt" < ${deadline})`;
         }
       }
-      // The driver's one-time nonce leaves the row once it has travelled.
-      const scrubbed = row.recipient === 'DRIVER' ? { ...row.payload, data: { ...row.payload.data, nonce: undefined } } : row.payload;
+      // The driver's one-time nonce leaves the row once it has travelled; so
+      // does the passenger's answer-link secret.
+      const scrubbed = row.recipient === 'DRIVER' ? { ...row.payload, data: { ...row.payload.data, nonce: undefined } } : { ...row.payload, answerToken: undefined };
       await prisma.guardianCheckinDelivery.update({ where: { id: row.id }, data: { status: result.status, receipt: result.receipt as Prisma.InputJsonValue, deliveredAt: now, leaseExpiresAt: null, lastError: null, payload: scrubbed as Prisma.InputJsonValue } });
       if (result.status === 'SENT') { delivered += 1; guardianDeliveryCounter.labels('sent').inc(); } else { skipped += 1; guardianDeliveryCounter.labels('skipped').inc(); }
     } catch (err) {
       failed += 1;
       const message = (err instanceof Error ? err.message : String(err)).slice(0, 2_000);
-      const exhausted = row.attempts >= row.maxAttempts;
+      const exhausted = row.attempts >= row.maxAttempts || (err instanceof PassengerUnreachedError && row.attempts >= UNREACHED_MAX_ATTEMPTS);
       const backoffMs = Math.min(5 * 60_000, 5_000 * 2 ** Math.min(row.attempts, 6));
       await prisma.$executeRaw(Prisma.sql`
         UPDATE "guardian_checkin_deliveries"
         SET "leaseExpiresAt" = NULL, "lastError" = ${message}, "updatedAt" = CURRENT_TIMESTAMP,
             "availableAt" = CURRENT_TIMESTAMP + (${backoffMs} * INTERVAL '1 millisecond'),
-            "status" = ${exhausted ? 'FAILED' : 'PENDING'}::"GuardianDeliveryStatus"
+            "status" = ${exhausted ? 'FAILED' : 'PENDING'}::"GuardianDeliveryStatus",
+            "payload" = CASE WHEN ${exhausted} THEN "payload" - 'answerToken' ELSE "payload" END
         WHERE "id" = ${row.id}`).catch((e) => log().error({ err: e, id: row.id }, '[S-06] could not record the failed attempt'));
       guardianDeliveryCounter.labels(exhausted ? 'dead_letter' : 'failed').inc();
       if (exhausted) deadLettered += 1;
@@ -136,6 +182,39 @@ export async function drainCheckinDeliveries(
     }
   }
   return { delivered, skipped, failed, deadLettered };
+}
+
+/**
+ * [WEB-TAXI · owner 21 Oct 2026] Reach the passenger, or say it did not.
+ *
+ * An inbox row is a record the person may read later, never proof they were
+ * asked (AUD-L8b-008). The check-in used to count the inbox row as delivered,
+ * so a rider with no app to push to — anyone who booked on the website — was
+ * never asked at all, the hard deadline ran anyway, and the ladder raised an
+ * automatic SOS about someone who never saw a question.
+ *
+ * Now: the push, and when no push was accepted for any of the person's
+ * devices, a text to their VERIFIED phone carrying the one-time answer link.
+ * A text is a service safety message (not marketing), sent only when the push
+ * did not land, at most once per accepted ask. Neither landed: the attempt
+ * fails and is retried (PassengerUnreachedError), and after a few attempts the
+ * row FAILS — the ladder then runs its explicit no-delivery policy and says
+ * why, exactly as for a phone that cannot be reached. The inbox row is written
+ * once per ask (dedupe on the delivery row), so a retry re-texts but never
+ * piles up inbox copies.
+ */
+async function reachPassenger(prisma: PrismaClient, notifications: NotificationService, row: Claimed): Promise<Record<string, unknown>> {
+  const sent = await notifications.sendReach({ userId: row.userId, type: 'SAFETY', title: row.payload.title, body: row.payload.body, data: row.payload.data as never, dedupeKey: `guardian-ask:${row.id}` });
+  if (!sent.id) throw new Error('notification not persisted');
+  if (sent.pushed) return { notificationId: sent.id, channel: 'push' };
+  const person = await prisma.user.findUnique({ where: { id: row.userId }, select: { phone: true, isPhoneVerified: true } });
+  if (person?.phone && person.isPhoneVerified
+    && await notifications.smsReach(person.phone, passengerCheckinSms(row.payload, row.level), row.tenantId)) {
+    guardianDeliveryCounter.labels('sms_fallback').inc();
+    return { notificationId: sent.id, channel: 'sms' };
+  }
+  guardianDeliveryCounter.labels('passenger_unreached').inc();
+  throw new PassengerUnreachedError();
 }
 
 export type DeliveryState = 'SENT' | 'PENDING' | 'FAILED' | 'SKIPPED' | 'UNKNOWN';

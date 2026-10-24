@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { bindBrowseTenant, requireRequestTenant } from '../search/search-scope';
 import { customerPoint } from './customer-point';
 import { legacyCategoryMark } from './legacy-category-mark';
