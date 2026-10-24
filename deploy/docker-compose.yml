@@ -413,6 +413,11 @@ services:
       # The build refuses an origin that is not https.
       args:
         NEXT_PUBLIC_API_URL: https://${API_HOST:-localhost}
+        # [ADMIN-TILES] The Live Ops map uses the SAME MapTiler browser key as the
+        # website: WEB_MAPTILER_KEY in deploy/.env (the owner's hidden prompt), with
+        # the console's origin added to the key's allowed origins in MapTiler.
+        # Empty: the map draws no tiles and says so, never OpenStreetMap's.
+        NEXT_PUBLIC_MAPTILER_KEY: ${WEB_MAPTILER_KEY:-}
     image: swift-admin:${SWIFT_TAG:-local}
     restart: unless-stopped
     environment:

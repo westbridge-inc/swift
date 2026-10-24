@@ -38,6 +38,10 @@ FROM deps AS build
 # Which API the browser calls. No default: next.config.ts refuses an image
 # build without an https origin here.
 ARG NEXT_PUBLIC_API_URL
+# [ADMIN-TILES] The MapTiler browser key for the Live Ops map: public by design (inlined
+# into the bundle) and restricted in MapTiler to the console's origin. Empty: the map
+# draws no tiles and says so (src/lib/map-tiles.ts), never OpenStreetMap's or CARTO's.
+ARG NEXT_PUBLIC_MAPTILER_KEY
 # next.config.ts: the standalone server; the type check and lint stay with CI
 # (its Lint & Type Check and Admin Build jobs run on every main commit, and
 # deploy/pilot-up.sh builds only main commits).
