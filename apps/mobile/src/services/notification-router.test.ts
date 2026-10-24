@@ -290,6 +290,7 @@ const CENSUS: Case[] = [
   { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
   { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]. [Q10] It carries the auto-cancel deadline its push rings until, and the business audience' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
+  { k: 'vendor_customer_answered', d: { ...O, orderNumber: 'SW-1', audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store team — [O-4] the customer answered an out-of-stock question asked before acceptance; the order desk holds Accept [audience rule]' },
   { k: 'mmg_customer_says_paid', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [owner 18 Oct] the customer says they paid and the store has not tapped Paid by MMG 30 minutes after accepting; the order desk holds the Paid by MMG button [audience rule]' },
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
