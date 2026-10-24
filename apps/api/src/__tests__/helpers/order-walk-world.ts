@@ -48,12 +48,13 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
 import { makeDispatchService, reconcileStuckDispatch } from '../../modules/dispatch/dispatch.service';
+import { isTerminalOrderStatus } from '../../modules/order/order-status';
 import { autoCancelUnresponsiveOrder, inTenantOf, releaseHeldOrdersJob } from '../../jobs/queue';
 import { NotificationService } from '../../modules/notification/notification.service';
 import { loginWithOtp } from './otp';
 import { testPhone, fixtureTag, wordFreeTag } from './fixture-ids';
 import { TEST_ADMIN_REASON } from './admin-reason';
-import { injectWithApproval } from './admin-approval';
+import { cleanupSecondApprovers, injectWithApproval } from './admin-approval';
 
 export type QueueName = 'dispatch' | 'offer' | 'order' | 'notification';
 export interface WalkJob {
@@ -136,6 +137,8 @@ export interface WalkWorld {
   /** Wall-clock ms when the admin's access token was issued (it lives 15
    *  minutes of REAL time: the walk clock never fakes Date). */
   adminTokenAt: number;
+  /** Every cast made in this world, so a suite can release them all (releaseWorld). */
+  casts: Cast[];
   /** Every user and order a walk made, for ageing and cleanup. */
   userIds: Set<string>;
   orderIds: Set<string>;
@@ -186,7 +189,7 @@ export async function buildWalkWorld(): Promise<WalkWorld> {
     app, sched,
     admin: { userId: adminUser.id, token: adminToken, phone: adminPhone }, adminTokenAt: Date.now(),
     userIds: new Set([adminUser.id]), orderIds: new Set(), vendorIds: new Set(), onTick: null,
-    clockMs: 0, jobErrors: [],
+    clockMs: 0, jobErrors: [], casts: [],
   };
   return world;
 }
@@ -238,7 +241,19 @@ export async function castWalk(w: WalkWorld, riderCount: number): Promise<Cast> 
     });
     riders.push({ ...p, riderId: rider.id, lat, lng });
   }
-  return { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
+  const cast: Cast = { customer, vendorOwner, vendorId: vendor.id, itemId: item.id, riders };
+  w.casts.push(cast);
+  return cast;
+}
+
+/** The customer checks out ONE item, cash, through the real cart and checkout doors. */
+export async function placeCashOrder(w: WalkWorld, cast: Cast): Promise<{ orderId: string | null; status: number; body: string }> {
+  await call(w, 'DELETE', '/api/v1/customer/cart', cast.customer.token);
+  await call(w, 'POST', '/api/v1/customer/cart/items', cast.customer.token, { vendorId: cast.vendorId, itemId: cast.itemId, quantity: 1 });
+  const co = await call(w, 'POST', '/api/v1/customer/checkout', cast.customer.token, { paymentMethod: 'CASH' });
+  const orderId = co.statusCode === 200 ? (co.json()?.data?.order?.id as string | undefined) ?? null : null;
+  if (orderId) w.orderIds.add(orderId);
+  return { orderId, status: co.statusCode, body: co.body };
 }
 
 async function accessTokenFor(app: FastifyInstance, phone: string): Promise<string> {
@@ -282,6 +297,43 @@ export async function adminCall(w: WalkWorld, method: 'PUT' | 'POST', url: strin
   return refuseExpired(res, method, url);
 }
 
+/** Leave nothing of a cast that another walk or another suite could dispatch
+ *  to or list: its riders go offline (no current order) and its store closes
+ *  for good (CLOSED: browse lists closed-today stores too, by rating, and a
+ *  suite sharing the database reads only the first page). */
+export async function releaseCast(w: WalkWorld, cast: Cast): Promise<void> {
+  for (const r of cast.riders) {
+    await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
+  }
+  await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false, status: 'CLOSED' } }).catch(() => {});
+}
+
+/** Delete one unfinished order (a finished one stays: nothing dispatches it). */
+export async function deleteUnfinished(w: WalkWorld, orderId: string): Promise<void> {
+  const o = await w.app.prisma.order.findUnique({ where: { id: orderId }, select: { status: true } }).catch(() => null);
+  if (!o || isTerminalOrderStatus(o.status)) return;
+  await w.app.prisma.$executeRawUnsafe('DELETE FROM dispatch_searches WHERE "subjectId" = $1', orderId).catch(() => {});
+  await w.app.prisma.order.delete({ where: { id: orderId } }).then(() => w.orderIds.delete(orderId)).catch(() => {});
+}
+
+/** A suite's afterAll: release every cast, delete every unfinished order, and
+ *  retire the world's admins. Ops pages go to EVERY admin, so admins left by
+ *  earlier runs would multiply each page (and slow the walk) on a reused DB. */
+export async function releaseWorld(w: WalkWorld): Promise<void> {
+  w.onTick = null;
+  w.sched.pending = [];
+  for (const cast of w.casts) await releaseCast(w, cast);
+  // A loud ops page about one of the world's orders (OF-33's long store wait)
+  // must not stay open for another suite's escalation sweep to pick up.
+  const numbers = await w.app.prisma.order.findMany({ where: { id: { in: [...w.orderIds] } }, select: { orderNumber: true } }).catch(() => []);
+  for (const { orderNumber } of numbers) {
+    await w.app.prisma.opsAlert.updateMany({ where: { body: { contains: orderNumber }, closedAt: null }, data: { closedAt: new Date(), closeReason: 'walk teardown' } }).catch(() => {});
+  }
+  for (const id of [...w.orderIds]) await deleteUnfinished(w, id);
+  await w.app.prisma.user.update({ where: { id: w.admin.userId }, data: { roles: ['CUSTOMER'] as never, activeRole: 'CUSTOMER' as never } }).catch(() => {});
+  await cleanupSecondApprovers(w.app).catch(() => {});
+}
+
 // ─── Time ──────────────────────────────────────────────────────────────────
 
 let timestampColumns: Map<string, string[]> | null = null;
@@ -321,6 +373,9 @@ function ageTargets(): Array<[string, string, 'orders' | 'users']> {
     ['orders', 'id', 'orders'],
     ...orderChildTables!.map((t): [string, string, 'orders'] => [t, 'orderId', 'orders']),
     ['dispatch_searches', 'subjectId', 'orders'],
+    // A decision about a walk order is part of its history: the riderless
+    // cutoff's grace runs from one (rescue.ts RIDERLESS_TOLD_OUTCOME).
+    ['algo_decisions', 'subjectId', 'orders'],
     ['notifications', 'userId', 'users'],
   ];
 }
@@ -335,16 +390,27 @@ async function ageRows(w: WalkWorld, ms: number): Promise<void> {
     })
     .filter((x): x is string => x !== null);
   if (parts.length === 0) return;
-  try {
-    await w.app.prisma.$transaction(async (tx) => {
-      // Replica mode skips ordinary triggers for this transaction only, so the
-      // append-only guards on status logs and evidence do not refuse the clock.
-      await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
-      // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
-      await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
-    });
-  } catch (err) {
-    throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${err instanceof Error ? err.message : String(err)})`);
+  // [REVIEW-G S4-1] One statement touches many tables in no fixed order, so a
+  // product transaction holding some of the same rows can deadlock with it
+  // (40P01; seen once locally). Postgres aborts the clock's side and nothing
+  // was aged: retrying is exact. Any other error, or a third deadlock, fails.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await w.app.prisma.$transaction(async (tx) => {
+        // Replica mode skips ordinary triggers for this transaction only, so the
+        // append-only guards on status logs and evidence do not refuse the clock.
+        await tx.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
+        // ONE round trip: every UPDATE as a data-modifying CTE of one statement.
+        await tx.$executeRawUnsafe(`WITH ${parts.join(', ')} SELECT 1`, ms / 1000, orders, users);
+        // Prisma's 5 s interactive default is a client setting, not a product
+        // limit: on a loaded shared database one aging statement can exceed it.
+      }, { maxWait: 10_000, timeout: 60_000 });
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (attempt < 3 && /40P01|deadlock detected/.test(message)) continue;
+      throw new Error(`walk clock: could not age the walk's rows by ${ms} ms (${message})`);
+    }
   }
 }
 
@@ -435,6 +501,10 @@ export async function runSweeps(w: WalkWorld): Promise<void> {
   await guarded(w, 'stale-movers:delivery-watchdog', async () => {
     const { recoverStrandedDeliveries } = await import('../../modules/dispatch/delivery-watchdog');
     await recoverStrandedDeliveries(w.app.prisma, w.app.redis, w.app.io, enqueue);
+  });
+  await guarded(w, 'stale-movers:pickup-overdue', async () => {
+    const { sweepPickupOverdue } = await import('../../modules/dispatch/pickup-overdue');
+    await sweepPickupOverdue({ prisma: w.app.prisma, redis: w.app.redis, io: w.app.io, notifications: notifications() }, enqueue);
   });
   await guarded(w, 'stale-movers:food-age', async () => {
     const { sweepFoodAge } = await import('../../modules/dispatch/rescue');

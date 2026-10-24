@@ -1,3 +1,5 @@
+import { customerDeciding } from './storeOrderRules';
+
 /**
  * [E20 · DS234] The takeover's "time left to accept", as a person reads it.
  *
@@ -11,8 +13,10 @@
  * device answered it, the no-response timer reaped it — is settled, and the
  * takeover stops ringing for it. Not yet loaded is not settled.
  */
-export function takeoverSettled(order: { status?: unknown } | null | undefined): boolean {
-  return typeof order?.status === 'string' && order.status !== 'PENDING';
+export function takeoverSettled(order: { status?: unknown; items?: unknown } | null | undefined): boolean {
+  // [STORE-DASH · O-4] Waiting on the CUSTOMER's "Out of stock" answer is not the store's decision:
+  // the takeover stops ringing; the order stays on the board, where Accept returns with the answer.
+  return typeof order?.status === 'string' && (order.status !== 'PENDING' || customerDeciding(order));
 }
 
 export function acceptClockLabel(remainSecs: number): string {

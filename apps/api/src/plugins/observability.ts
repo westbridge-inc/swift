@@ -494,6 +494,21 @@ export const osrmOutcomeCounter = new client.Counter({
   registers: [registry],
 });
 
+// [PLACES-LOUD 22 Oct 2026] Address search through the PlacesProvider seam. A
+// Google failure (a refused or restricted key, quota, an API not enabled, a
+// timeout) used to come back as an empty suggestion list, which the apps show
+// as "No matches": nobody at Swift could tell a broken key from a quiet day.
+// Every call is counted by outcome. Labels are bounded: provider = local | osm
+// | google | unknown; op = autocomplete | details | reverse; outcome = ok |
+// no_results | a failure class (auth, quota, rejected, upstream, timeout,
+// network, bad_response). Never a query, a place or a key.
+export const placesCallsCounter = new client.Counter({
+  name: 'swift_places_calls_total',
+  help: 'Address-search provider calls by provider, operation and outcome (ok, no_results, or a failure class)',
+  labelNames: ['provider', 'op', 'outcome'] as const,
+  registers: [registry],
+});
+
 // Notification delivery failures [SWIFT-100]: channel sends fail-soft (they must
 // never break the request path), but a SILENT failure of the last-resort rung
 // means a vendor/ops nudge vanished with no trace. Count every post-retry

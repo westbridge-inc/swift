@@ -287,9 +287,13 @@ const CENSUS: Case[] = [
   { k: 'dispatch_retrying', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — still looking for a mover' },
   { k: 'converted_to_pickup', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — the order became a pickup [audience rule]' },
   { k: 'dispatch_exhausted', d: { ...O, audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — no mover found' },
+  { k: 'riderless_cutoff', d: { ...O, orderNumber: 'SW-1', audience: 'customer', canCancelFree: true, cancelsInMinutes: 15 }, to: DELIVERY('o1'), why: 'customer — [OF-01/17] no rider yet, they can cancel for free; the cancel is on their tracking screen' },
+  { k: 'rider_no_show', d: { ...O, orderNumber: 'SW-1', status: 'READY_FOR_PICKUP', audience: 'customer' }, to: DELIVERY('o1'), why: 'customer — [OF-33] their rider did not come; a new rider is being found, on their tracking screen (the store copy, audience business, takes the order desk by the audience rule)' },
+  { k: 'rider_waiting', d: { ...O, orderNumber: 'SW-1', audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store — [OF-33] their rider is at the counter and the order is not marked ready; the order desk (audience rule)' },
   { k: 'mover_session_revocation', d: { ...O, audience: 'customer', status: 'PICKED_UP', action: 'REOPEN' }, to: DELIVERY('o1'), why: 'customer — their mover lost custody' },
   { k: 'vendor_order_alert', d: { ...O, orderNumber: 'SW-1', status: 'PENDING', audience: 'business', respondBy: '2026-09-24T20:10:00.000Z' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1', orderNumber: 'SW-1' } }, why: 'store — THE new-order alert [fixed here]. [Q10] It carries the auto-cancel deadline its push rings until, and the business audience' },
   { k: 'mmg_unattested_cancellation', d: { ...O, audience: 'business' }, to: { screen: 'Main' }, why: 'store — a cancelled order may still hold an MMG payment; their Main is the dashboard' },
+  { k: 'vendor_customer_answered', d: { ...O, orderNumber: 'SW-1', audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store team — [O-4] the customer answered an out-of-stock question asked before acceptance; the order desk holds Accept [audience rule]' },
   { k: 'mmg_customer_says_paid', d: { ...O, audience: 'business' }, to: { screen: 'VendorOrderDetail', params: { orderId: 'o1' } }, why: 'store owner — [owner 18 Oct] the customer says they paid and the store has not tapped Paid by MMG 30 minutes after accepting; the order desk holds the Paid by MMG button [audience rule]' },
   // `d` must mirror what the API actually SENDS. The drift check compares only
   // `kind` strings, so a payload that grows a field goes unnoticed here and the
@@ -315,6 +319,9 @@ const CENSUS: Case[] = [
   { k: 'ops_delivery_rider_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_dispatch_exhausted', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_food_too_old', d: O, to: DELIVERY('o1'), why: 'admins — [ALG-06] an order too old to deliver was cancelled by the system and needs a person' },
+  { k: 'ops_rider_no_show', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider accepted and never picked up; the order went back to dispatch' },
+  { k: 'ops_rider_waiting', d: { ...O, riderId: 'r1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] a rider is waiting at a store that has not marked the order ready' },
+  { k: 'ops_rider_waiting_long', d: { ...O, riderId: 'r1', waitedMinutes: 61, opsAlertId: 'a1' }, to: DELIVERY('o1'), why: 'admins — [OF-33] the loud ops-alert page: a rider has waited 3 release windows at a store that is not ready; a person decides' },
   { k: 'ops_taxi_driver_dropped', d: O, to: DELIVERY('o1'), why: 'admins' },
   { k: 'ops_custody_case', d: { ...O, event: 'opened', caseId: 'c1', state: 'SUPPORT_HOLD' }, to: DELIVERY('o1'), why: 'admins — [AF-MOB-006] a custody recovery case opened, went overdue, lost its relay rider or locked its handoff; the case console is an ops surface' },
   { k: 'ops_cash_door_short', d: { ...O, due: 3500, collected: 2800, shortfall: 700 }, to: DELIVERY('o1'), why: 'admins — [L02 row 34] a cash order was handed over for less than due; the mismatch is held for review' },
@@ -333,6 +340,7 @@ const CENSUS: Case[] = [
   { k: 'mover_job_cancelled', d: { ...O, status: 'CANCELLED', audience: 'earner' }, to: { screen: 'Main' }, why: 'RIDER — [L07] the customer cancelled the delivery they held; the job is gone, so their dashboard, never the customer Delivery screen its orderId used to send it to' },
   { k: 'custody_relay_assigned', d: { caseId: 'c1' }, to: { screen: 'Main' }, why: 'RELAY RIDER — [AF-MOB-006] asked to take an order over; the order is not theirs until the code is verified, so it opens their dashboard, never the order' },
   { k: 'prep_ready', d: { ...O, audience: 'earner' }, to: { screen: 'ActiveJob' }, why: 'RIDER — the kitchen marked the bag ready; ActiveJob is their live job, which MoverStack mounts [Q10]. It sat in the customer group aimed at Delivery, which MoverStack never mounts, so the tap opened nothing' },
+  { k: 'pickup_overdue', d: { ...O, orderNumber: 'SW-1', audience: 'earner', releasesInMinutes: 10 }, to: { screen: 'ActiveJob' }, why: 'RIDER — [OF-33] pick up now or hand it back; ActiveJob is their live job (MoverStack mounts it), never the customer Delivery screen' },
 
   // ── Bookings + service jobs [the S0 this pass closed].
   { k: 'booking_requested', d: { jobId: 'j1' }, to: { screen: 'ServiceJobs' }, why: 'provider — a customer asked them to quote; the first rung of the ladder, and the one that used to send nothing at all' },
@@ -442,6 +450,9 @@ const CENSUS: Case[] = [
   // ETA and dispatch ranking has quietly reverted to straight-line distance.
   // Admin-only, and the action is on the OSRM host, not in any app.
   { k: 'ops_osrm_fallback', to: null, why: 'admins — the fix is on the routing host, not on a screen' },
+  // [PLACES-LOUD] Address search (Google) keeps failing: customers are told search is not
+  // working and set places on the map. The fix is the key / Google Cloud console, not a screen.
+  { k: 'ops_places_failing', to: null, why: 'admins — the fix is the Google key and console, not a screen' },
   { k: 'ops_scheduler_stall', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'ops_scheduler_never_booted', to: null, why: 'admins — kind built from a ternary', scan: false },
   { k: 'billing_dunning_ops_task', to: null, why: 'admins' },

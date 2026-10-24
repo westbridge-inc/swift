@@ -13,6 +13,9 @@ import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
+import {
+  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+} from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
@@ -111,7 +114,7 @@ export class PartnerService {
     userId: string,
     input: BecomePartnerInput,
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
-    consent?: { accepted: boolean; ip?: string | null; surface: ConsentSurface },
+    consent?: { accepted: boolean; ip?: string | null; surface: ConsentSurface; weeklyFeeAck?: WeeklyFeeAck },
   ): Promise<{ result: PartnerProvisionResult; authorityCleanup: TCleanup }> {
     this.validateInput(input);
     // [DCR-1] Publish (hash-anchor) the role agreement BEFORE the transaction,
@@ -127,7 +130,18 @@ export class PartnerService {
         renderedText: agreement.renderedText,
       });
     }
+    // [Row 628] The weekly-fee tick anchors to its own published words, the same way.
+    const feeAck = consent?.weeklyFeeAck;
+    if (feeAck) {
+      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    }
+    const feeSubject = input.role === 'VENDOR'
+      ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
+      : { role: 'MOVER' as const, vehicleType: input.vehicleType! };
     const combined = await this.prisma.$transaction(async (tx) => {
+      // [Row 628] The fee the partner saw is the quote now, or nothing is written (WEEKLY_FEE_CHANGED).
+      const quote = feeAck ? await signupQuote(tx, userId, feeSubject) : null;
+      if (feeAck && quote) assertSawQuote(feeAck, quote);
       const result = await this.provisionLocked(tx, userId, input);
       const authorityCleanup = await transitionAuthority(tx, result.targetRole);
       // [DCR-1 INV-NR1a] The agreement consent rides the SAME transaction that
@@ -145,6 +159,24 @@ export class PartnerService {
           surface: consent.surface,
           ip: consent.ip ?? null,
           evidence: { control: 'agreement_checkbox', path: 'partner/become', kind: result.kind },
+        });
+      }
+      // [Row 628] "I understand the weekly fee", in the same transaction, with the amount the partner saw (= the
+      // quote). Only when the client sent it: a phone build that never showed it records nothing.
+      if (feeAck && quote) {
+        await recordConsent(tx, {
+          subjectType: agreement.subjectType,
+          subjectId: userId,
+          documentType: WEEKLY_FEE_ACK_TYPE,
+          version: WEEKLY_FEE_ACK_VERSION,
+          action: 'granted',
+          surface: consent!.surface,
+          ip: consent!.ip ?? null,
+          evidence: {
+            control: 'weekly_fee_checkbox', path: 'partner/become', kind: result.kind,
+            ...(feeSubject.role === 'VENDOR' ? { vendorType: feeSubject.vendorType } : { vehicleType: feeSubject.vehicleType }),
+            weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier },
+          },
         });
       }
       return { result, authorityCleanup };

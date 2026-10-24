@@ -18,7 +18,7 @@ import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
@@ -54,7 +54,7 @@ import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
-import { legacySwapItemFields, lineOptionsAsMade, substitutionView } from '../order/substitution-view';
+import { isRemovalQuestion, legacySwapItemFields, lineOptionsAsMade, onlyItemLeft, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -154,14 +154,14 @@ const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
   itemId: z.string().min(1),
   quantity: z.number().int().min(1).max(99).optional(),
-  selectedOptions: z.record(z.unknown()).optional(),
+  selectedOptions: z.record(z.string(), z.unknown()).optional(),
   specialInstructions: z.string().max(500).optional(),
 });
 
 const updateCartItemSchema = z.object({
   // <= 0 removes the item, so no lower bound here
   quantity: z.number().int().max(99),
-  selectedOptions: z.record(z.unknown()).optional(),
+  selectedOptions: z.record(z.string(), z.unknown()).optional(),
   specialInstructions: z.string().max(500).optional(),
 });
 
@@ -181,7 +181,7 @@ const MAX_TIP_GYD = 50_000;
 // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts. [E01] ONE schema
 // for the checkout body and the cart quote, so the preview accepts exactly the
 // choices checkout does.
-const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
+const fulfillmentSelectionsSchema = z.record(z.string(), z.enum(['DELIVERY', 'PICKUP']));
 
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
@@ -2684,7 +2684,12 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     // Only clients that render server decision permissions opt in. Build 9 /
     // Android vc5 omit this capability and retain the pre-feature item shape.
-    const supportsSwapDecisions = (request.query as { swapDecisions?: unknown }).swapDecisions === 'v1';
+    const swapDecisionsLevel = (request.query as { swapDecisions?: unknown }).swapDecisions;
+    // [O-4 · REVIEW-G S4-1 on #2043] v2 = a client that renders the pre-accept REMOVAL question (its
+    // own card). A v1 client (store builds 11/12) has only the swap card, which would read "suggests
+    // (nothing) instead": for it a removal question is served in the truthful legacy shape below.
+    const supportsSwapDecisions = swapDecisionsLevel === 'v1' || swapDecisionsLevel === 'v2';
+    const supportsRemovalQuestion = swapDecisionsLevel === 'v2';
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
@@ -2817,7 +2822,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
-    // drift again. The hold, the five-minute window, the store rule (owner
+    // drift again. The hold, the one-minute window, the store rule (owner
     // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
     // all live inside it; this file restates none of them.
     // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
@@ -2887,13 +2892,13 @@ export async function customerRoutes(app: FastifyInstance) {
           // them it is switched on only when every word of that card is true
           // (legacySwapItemFields); otherwise the line's name says what is
           // happening [SUBSTITUTION · owner 17 Oct: the customer is always told].
-          ...(supportsSwapDecisions ? {
+          ...(supportsSwapDecisions && (supportsRemovalQuestion || !isRemovalQuestion(i)) ? {
             options: lineOptionsAsMade(i),
             subStatus: i.subStatus,
             substituteName: i.substituteName,
             substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
-            substitution: substitutionView(i, order),
-          } : legacySwapItemFields(i, order)),
+            substitution: substitutionView(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) }),
+          } : legacySwapItemFields(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) })),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),
@@ -3002,7 +3007,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
         // ONE implementation, shared with the predicate [cancel-policy.ts]:
-        // the moment the five-minute window of a ride, parcel or booking
+        // the moment the one-minute window of a ride, parcel or booking
         // closes; null when there is no countdown (refused, or free for as
         // long as nobody accepts / nobody was found / the order stays late).
         freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,

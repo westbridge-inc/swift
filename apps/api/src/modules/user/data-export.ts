@@ -40,8 +40,10 @@ function portable(row: Row): Row {
 }
 
 async function readCategory(db: PrismaClient, entry: ExportEntry, ids: string[], ceiling: number, fold: Date) {
-  // Bounded to the person: the register's own columns, equal to the person's own ids, only.
-  const person = { OR: entry.by.flatMap((column) => ids.map((id) => ({ [column]: id }))) };
+  // Bounded to the person: the register's own columns, equal to the person's own ids, only (on the parent row
+  // for a child table read `through` it).
+  const own = entry.by.flatMap((column) => ids.map((id) => ({ [column]: id })));
+  const person = { OR: entry.through ? own.map((clause) => ({ [entry.through!]: clause })) : own };
   const fixed = [entry.where, entry.foldedBefore && { [entry.foldedBefore]: { lt: fold } }].filter(Boolean);
   const match = fixed.length ? { AND: [person, ...fixed] } : person;
   const select = Object.fromEntries([...entry.fields, entry.key].map((f) => [f, true]));

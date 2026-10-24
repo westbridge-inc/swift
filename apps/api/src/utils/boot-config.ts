@@ -5,7 +5,6 @@ import { firstInvalidTwilioConfig } from './twilio-identity';
 import { PUBLIC_API_HOST, assertDisabledCardRailConfig } from './card-rail';
 import { powerTranzConfigFromEnv } from '../providers/card/powertranz-provider';
 import { testControlEnabled } from '../modules/ops/test-control';
-import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { assertMmgCheckoutConfig } from '../providers/mmg/mmg-checkout';
 import { assertSettlementPublicationLeaseConfig } from '../modules/billing/settlement-publication-lease';
 import { assertQrConfig, scanRawRetentionDays } from '../modules/qr/qr-config';
@@ -178,6 +177,12 @@ export function assertWallLoginConfig(env: Record<string, string | undefined>): 
   }
 }
 
+/** [DS214 D1 · B1/S4 · CANCEL-WINDOW 22 Oct 2026] The shortest LIFECYCLE_V2 order hold production boots with:
+ *  the settled five-minute hold (Total Audit build order; ORDER_HOLD_MINUTES default 5). Its own number since the
+ *  owner cut the free-cancel window AFTER acceptance to one minute (FREE_CANCEL_WINDOW_MIN): the hold BEFORE
+ *  acceptance did not change, so neither does this boot floor. */
+export const ORDER_HOLD_FLOOR_MIN = 5;
+
 export function assertSafeBootConfig(env: Record<string, string | undefined> = process.env): void {
   // [R2 C2] Applies to loadtest builds, so it runs before the production gate.
   assertTestControlConfig(env);
@@ -235,13 +240,18 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
   // When the hold is on, a set-but-unparseable window makes holdWindowMs()
   // return null — the same silent hold-off — so that too refuses, never
   // silently defaults. [DS214 D1] And the hold may never be SHORTER than the
-  // free-cancel window it protects (FREE_CANCEL_WINDOW_MIN): a shorter hold
-  // puts an order on the vendor board while the customer may still cancel it
-  // free, which is exactly the REPORT-036 defect (order.service.ts holdWindowMs).
+  // settled five-minute hold (ORDER_HOLD_FLOOR_MIN): a shorter hold puts an
+  // order on the vendor board early, which is exactly the REPORT-036 defect
+  // (order.service.ts holdWindowMs).
+  // [CANCEL-WINDOW · owner 22 Oct 2026] This floor used to read
+  // FREE_CANCEL_WINDOW_MIN, which was also five. The free-cancel window after
+  // acceptance is now ONE minute; the hold before acceptance is a different
+  // timer the owner did not change, so the floor keeps its own number and
+  // this guard refuses exactly what it refused before (never relaxed silently).
   if (lifecycleV2 === '1' && env['ORDER_HOLD_MINUTES'] !== undefined) {
     const holdMinutes = Number(env['ORDER_HOLD_MINUTES']);
-    if (!Number.isFinite(holdMinutes) || holdMinutes < FREE_CANCEL_WINDOW_MIN) {
-      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the ${FREE_CANCEL_WINDOW_MIN}-minute free-cancel window when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor while the customer may still cancel free. Set ORDER_HOLD_MINUTES=${FREE_CANCEL_WINDOW_MIN} or unset it. Refusing to start.`);
+    if (!Number.isFinite(holdMinutes) || holdMinutes < ORDER_HOLD_FLOOR_MIN) {
+      throw new Error(`FATAL: ORDER_HOLD_MINUTES must be a number of minutes no shorter than the settled ${ORDER_HOLD_FLOOR_MIN}-minute order hold when LIFECYCLE_V2=1 — an invalid value silently disables the order hold, and a shorter one shows orders to the vendor before the hold the app counts down has ended. Set ORDER_HOLD_MINUTES=${ORDER_HOLD_FLOOR_MIN} or unset it. Refusing to start.`);
     }
   }
 
@@ -354,6 +364,12 @@ export function assertSafeBootConfig(env: Record<string, string | undefined> = p
     const mmgUrl = env['MMG_API_URL'];
     if (!mmgUrl || !/^https:\/\//i.test(mmgUrl) || /mmgtest|\buat\b|sandbox/i.test(mmgUrl)) {
       throw new Error('FATAL: production MMG requires an explicit non-UAT HTTPS MMG_API_URL. Refusing to start.');
+    }
+    // [22 Oct, COORD ruling] Production never pushes (refused below), so with MMG live the checkout
+    // page is the only MMG way to pay: live MMG with the checkout off would leave no partner a way to
+    // pay with MMG. The fee pause also holds then (fee-pause.ts); this refusal is the belt to that brace.
+    if (env['MMG_CHECKOUT_ENABLED'] !== '1') {
+      throw new Error('FATAL: MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1: production never sends MMG charge requests, so the MMG checkout page is the only MMG way to pay. Switch both on together, or set MMG_DRIVER=disabled (every weekly fee is then paused). Refusing to start.');
     }
   }
 

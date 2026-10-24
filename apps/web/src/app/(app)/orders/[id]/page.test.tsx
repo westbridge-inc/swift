@@ -447,6 +447,32 @@ describe('[SUBSTITUTION] the store asks the customer about a swap', () => {
     expect(screen.getByText(/If it isn't approved by .+, the store settles this item with you directly\./)).toBeTruthy();
   });
 
+  // [O-4 · owner 22 Oct 2026] Nothing to swap, asked before the store accepted.
+  it('a removal question: "Continue without it" answers yes; "Cancel order" opens the checked cancel; no decline is offered', async () => {
+    const removal = { ...CASH_VIEW, kind: 'REMOVAL', priceDelta: -1500, decisions: { approve: true, reject: false } };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(swapOrder(removal, { status: 'PENDING', canCancel: true }) as never);
+    const decide = vi.spyOn(orders, 'decideSubstitution').mockResolvedValue({} as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('heading', { name: 'Fried Rice is out of stock' })).toBeTruthy();
+    expect(screen.getByText('Continuing without it lowers your total by $1,500. You pay only the new total.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Continue without it' }));
+    expect(decide).toHaveBeenCalledWith('order-1', 'line-1', true);
+    expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('[REVIEW-F S3-1] the only item left: no "Continue", the reason in words, and only the free cancel', async () => {
+    const only = { ...CASH_VIEW, kind: 'REMOVAL', lastItem: true, priceDelta: null, decisions: { approve: false, reject: false },
+      settlementGuidance: "This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.", ifNoAnswer: 'CANCEL' };
+    vi.spyOn(orders, 'getOrder').mockResolvedValue(swapOrder(only, { status: 'PENDING', canCancel: true }) as never);
+    render(<OrderDetailPage />);
+    expect(await screen.findByRole('heading', { name: 'Fried Rice is out of stock' })).toBeTruthy();
+    expect(screen.getByText("This was the only item on your order, so the order can't go ahead. Cancel it — nothing has been charged.")).toBeTruthy();
+    expect(screen.getByText(/If you don't, the order is cancelled\. Nothing has been charged\./)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Continue without it' })).toBeNull();
+    expect((screen.getByRole('button', { name: 'Cancel order' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('a removed line reads removed and charges nothing on the receipt preview', async () => {
     vi.spyOn(orders, 'getOrder').mockResolvedValue({
       ...ORDER, status: 'PREPARING', paymentMethod: 'CASH', paymentAction: null, totalAmount: 1900, subtotalCustomer: 1900,
@@ -468,7 +494,8 @@ it('[SUBSTITUTION] the web opts in to the server swap view and posts the answer 
   const auth = await import('@/lib/auth');
   const fetchSpy = vi.spyOn(auth, 'apiFetch').mockResolvedValue({ data: {} } as never);
   await orders.getOrder('order-9');
-  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v1');
+  // [O-4] v2: this page renders the pre-accept removal question too (a v1 client is served a legacy line).
+  expect(fetchSpy).toHaveBeenCalledWith('/api/v1/customer/orders/order-9?swapDecisions=v2');
   await orders.decideSubstitution('order-9', 'line-3', false);
   expect(fetchSpy).toHaveBeenLastCalledWith('/api/v1/customer/orders/order-9/items/line-3/substitution', { method: 'POST', body: JSON.stringify({ approve: false }) });
 });

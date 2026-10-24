@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { VendorType } from '@prisma/client';
 import { tenantCacheKey } from '../../utils/tenant-cache';
 

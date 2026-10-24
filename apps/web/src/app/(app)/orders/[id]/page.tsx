@@ -27,7 +27,7 @@ import { validPoint } from '@/lib/live-tracking';
 import type { TaxiSafetyFacts } from '@/components/taxi-trip-safety';
 import { fareBreakdownOf, liveWaiting, type FareBreakdown, type WaitingLive } from '@/lib/taxi-waiting';
 import { cancelOrder, decideSubstitution, getOrder } from '@/lib/customer-orders';
-import { lineRemoved, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
+import { isRemovalQuestion, lineRemoved, removalChangeText, swapChangeText, swapDeadlineText, swapPermissions, type SwapView } from '@/lib/substitution-copy';
 import { lineDisplayAmount } from '@/lib/money';
 import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '@/lib/app-rules';
 import styles from './tracking.module.css';
@@ -47,7 +47,7 @@ type OrderLine = {
   quantity: number;
   lineTotal?: number;
   customerPrice?: number;
-  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v1). */
+  /** [SUBSTITUTION] The store's swap question on this line (swapDecisions=v2 since O-4: the removal question too). */
   subStatus?: string | null;
   substituteName?: string | null;
   substitutePrice?: number | null;
@@ -628,6 +628,43 @@ export default function OrderDetailPage() {
         const change = swapChangeText(view);
         const deadline = swapDeadlineText(view);
         const lineId = item.id as string;
+        if (isRemovalQuestion(view)) {
+          // [O-4 · owner 22 Oct 2026] Asked before the store accepted, nothing to swap: the customer
+          // agrees to the changed order before paying, or cancels it.
+          const lower = removalChangeText(view);
+          return (
+            <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
+              <div>
+                <p className={styles.eyebrow}>The store asks</p>
+                <h2 id={`swap-title-${lineId}`} className={styles.cardTitle}>{item.name} is out of stock</h2>
+                <p className={styles.mutedCopy}>{view?.lastItem ? `${vendorName} can’t supply it.` : `${vendorName} can’t supply it. Continue without it, or cancel the order. Nothing has been charged.`}</p>
+                {lower ? <p className={styles.mutedCopy}><strong>{lower}</strong></p> : null}
+                {view?.settlementGuidance ? <p className={styles.mutedCopy}>{view.settlementGuidance}</p> : null}
+                {deadline ? <p className={styles.mutedCopy}><strong>{deadline}</strong></p> : null}
+                {swapError ? <p className={styles.mutedCopy} role="alert">{swapError}</p> : null}
+                <div className={styles.confirmActions}>
+                  {view?.lastItem ? null : (
+                    <button type="button" className={styles.primaryButton} disabled={swapBusy !== null || !allowed.approve} onClick={() => void decideSwap(lineId, true)}>
+                      Continue without it
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    disabled={!canOfferCancellation}
+                    onClick={(event) => {
+                      cancelReturnFocus.current = event.currentTarget;
+                      setConfirmingCancel(true);
+                      window.requestAnimationFrame(() => cancelConfirmButton.current?.focus());
+                    }}
+                  >
+                    Cancel order
+                  </button>
+                </div>
+              </div>
+            </section>
+          );
+        }
         return (
           <section key={`swap-${lineId}`} className={styles.holdCard} aria-labelledby={`swap-title-${lineId}`}>
             <div>
