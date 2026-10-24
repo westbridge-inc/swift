@@ -1,7 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { customAlphabet, nanoid } from 'nanoid';
-import { Prisma, type UserRole } from '@prisma/client';
+import type { UserRole } from '@prisma/client';
 import { expect, vi } from 'vitest';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../../plugins/prisma';
 import { redisPlugin } from '../../plugins/redis';
@@ -15,6 +15,7 @@ import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { authRoutes } from '../../modules/auth/auth.routes';
 import { assertFixtureReferences, discoverFixtureParents, lockFixtureParents } from '../helpers/cleanup-parents';
 import { auditClientInCleanup } from '../helpers/cleanup-transaction';
+import { trackMessageInserts } from '../helpers/insert-ownership';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
 
 // GOLD-7 shares the GOLD-2/6 composition and fixture helpers, not product
@@ -33,8 +34,8 @@ export function createGolden(phonePrefix: string, fixture: string) {
   const nextPhone = () => `${phonePrefix}${phoneRun}${String(++seq).padStart(3, '0')}`;
   const createdIds = new Set<string>();
   const savedClusterIds = new Set<string>();
-  const createdAlertIds = new Set<string>();
-  const createdNotificationIds = new Set<string>();
+  let createdAlertIds = new Set<string>();
+  let createdNotificationIds = new Set<string>();
   const createdOrderIds = new Set<string>();
   const restoreTracking: Array<() => void> = [];
   let disposal: Promise<void> | undefined;
@@ -197,40 +198,16 @@ export function createGolden(phonePrefix: string, fixture: string) {
     await app.register(authRoutes, { prefix: '/api/v1/auth' });
     if (extra) await extra(app);
     await app.ready();
-    // [G7-01] Track both production write paths, for every alert kind. A single
-    // create owns its ID only after success (including calls that select no ID).
-    // Bulk RETURNING captures only rows actually inserted, so skipDuplicates
-    // cannot claim a peer's keyed alert, even if it wins a concurrent insert.
-    const alerts = app.prisma.alertDelivery;
-    const create = alerts.create.bind(alerts);
-    const createManyAndReturn = alerts.createManyAndReturn.bind(alerts);
-    const singleTracking = vi.spyOn(alerts, 'create').mockImplementation((async (args: Prisma.AlertDeliveryCreateArgs) => {
-      const id = args.data.id ?? `${fixturePrefix}-alert-${nanoid(16)}`;
-      const result = await create({ ...args, data: { ...args.data, id } });
-      createdAlertIds.add(id);
-      return result;
-    }) as unknown as typeof create);
-    const bulkTracking = vi.spyOn(alerts, 'createMany').mockImplementation((async (args: Prisma.AlertDeliveryCreateManyArgs) => {
-      const inserted = await createManyAndReturn({ ...args, select: { id: true } });
-      for (const row of inserted) createdAlertIds.add(row.id);
-      return { count: inserted.length };
-    }) as unknown as typeof alerts.createMany);
-    restoreTracking.push(() => singleTracking.mockRestore(), () => bulkTracking.mockRestore());
-    const notifications = app.prisma.notification;
-    const createNotification = notifications.create.bind(notifications);
-    const createNotifications = notifications.createManyAndReturn.bind(notifications);
-    const singleNotificationTracking = vi.spyOn(notifications, 'create').mockImplementation((async (args: Prisma.NotificationCreateArgs) => {
-      const id = args.data.id ?? `${fixturePrefix}-notification-${nanoid(16)}`;
-      const result = await createNotification({ ...args, data: { ...args.data, id } });
-      createdNotificationIds.add(id);
-      return result;
-    }) as unknown as typeof createNotification);
-    const bulkNotificationTracking = vi.spyOn(notifications, 'createMany').mockImplementation((async (args: Prisma.NotificationCreateManyArgs) => {
-      const inserted = await createNotifications({ ...args, select: { id: true } });
-      for (const row of inserted) createdNotificationIds.add(row.id);
-      return { count: inserted.length };
-    }) as unknown as typeof notifications.createMany);
-    restoreTracking.push(() => singleNotificationTracking.mockRestore(), () => bulkNotificationTracking.mockRestore());
+    // [G7-01] Track every production write path, for every alert kind
+    // (helpers/insert-ownership): a single create owns its ID only after
+    // success, bulk RETURNING captures only rows actually inserted (so
+    // skipDuplicates cannot claim a peer's keyed alert), and the notices main
+    // writes inside interactive transactions (upsert / createMany on a tx
+    // client) are recorded as well.
+    const tracking = trackMessageInserts(app.prisma);
+    createdAlertIds = tracking.alertIds;
+    createdNotificationIds = tracking.notificationIds;
+    restoreTracking.push(tracking.restore);
     await purge();
   }
 
