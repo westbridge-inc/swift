@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect, type ReactNode } from 'react';
-import { useMutation } from '@tanstack/react-query';
 import { Alert, RefreshControl, ScrollView, View } from 'react-native';
 import { Image } from 'expo-image';
 import { color, radius, space } from '@swift/ui';
@@ -31,7 +31,7 @@ import { getAuthSessionSnapshot, requireAuthSessionForPrincipal, requireAuthSess
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { money, moneyExact } from '../../../lib/money';
-import { mediaUrl } from '../../../lib/images';
+import { isKeptPhoto, storePhotoUrl } from '../../../lib/images';
 import {
   captureVendorCashSettlementConfirmation,
   requireCurrentCashSettlementConfirmation,
@@ -159,9 +159,9 @@ function TopItemsCard({ items, sample }: { items: any[]; sample: boolean }) {
             <T variant="numM" tone="muted" style={{ width: space['2xl'] }}>
               {i + 1}
             </T>
-            {item.imageUrl ? (
+            {isKeptPhoto(item.imageUrl) ? (
               <Image
-                source={{ uri: mediaUrl(item.imageUrl)! }}
+                source={{ uri: storePhotoUrl(item.imageUrl, 160)! }}
                 style={{ width: space['4xl'], height: space['4xl'], borderRadius: radius.sm }}
                 contentFit="cover"
                 accessibilityLabel={`${item.name} photo`}
@@ -379,10 +379,21 @@ function VendorStandingSection() {
                 <T variant="caption" numberOfLines={1} style={{ flex: 1 }}>
                   {r.name}
                 </T>
-                <T variant="caption" tone="muted">
-                  👎 {r.down}
-                  {r.up > 0 ? `  ·  👍 ${r.up}` : ''}
-                </T>
+                <View
+                  accessible
+                  accessibilityLabel={`${r.down} thumbs down${r.up > 0 ? `, ${r.up} thumbs up` : ''}`}
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}
+                >
+                  <Feather name="thumbs-down" size={12} color={color.text.muted} />
+                  <T variant="caption" tone="muted">{r.down}</T>
+                  {r.up > 0 ? (
+                    <>
+                      <T variant="caption" tone="muted">{'  ·  '}</T>
+                      <Feather name="thumbs-up" size={12} color={color.text.muted} />
+                      <T variant="caption" tone="muted">{r.up}</T>
+                    </>
+                  ) : null}
+                </View>
               </View>
             ))}
           </View>
@@ -680,7 +691,7 @@ export function VendorInsightsScreen() {
   const q = useVendorAnalytics();
   const readOnly = !!useVendorPreview((state) => state.previewType);
   // Signed short-lived link (the JWT can't ride an in-app browser).
-  const statement = useMutation({
+  const statement = useVendorMutation({
     mutationFn: async () => {
       const owner = requireAuthSessionSnapshot();
       const r = await vendorApi.salesStatement(owner);

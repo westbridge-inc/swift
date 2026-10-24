@@ -1,7 +1,8 @@
 /** @jsxImportSource react */
+import './lib/crashReportingBoot';
 import 'react-native-gesture-handler';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View } from 'react-native';
+import { AppState, StatusBar, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { QueryClientProvider } from '@tanstack/react-query';
@@ -33,7 +34,11 @@ import { bindQueryCacheScope } from './lib/appQueryPolicy';
 import { initSecureStorage } from './lib/storage';
 import { track } from './lib/analytics';
 import { PermissionPrimeSheet } from './components/PermissionPrimeSheet';
-import { useAuthStore } from './stores/authStore';
+import { StoreAlertElsewhere } from './components/StoreAlertElsewhere';
+import { UpdateRequiredGate } from './components/UpdateRequiredGate';
+import { getAuthSessionSnapshot, useAuthStore } from './stores/authStore';
+import { refreshSessionAhead } from './services/api';
+import { keepSessionFresh } from './lib/sessionRefreshAhead';
 import { useLocationStore } from './stores/locationStore';
 import { useAppStore } from './stores/appStore';
 import { useDeviceLocation } from './hooks/useDeviceLocation';
@@ -56,6 +61,25 @@ installGlobalErrorHandler();
 // OS request lives behind an in-context pickup primer [first-open SO-5].
 function LocationBootstrap() {
   useDeviceLocation();
+  return null;
+}
+
+// [PERF #9] Refreshes the signed-in session just before its access token
+// lapses while the app is on screen, and at once on coming back to the screen
+// with a lapsed token, so the next tap does not wait for a 401 and a refresh.
+function SessionRefreshAhead() {
+  useEffect(() => keepSessionFresh({
+    current: getAuthSessionSnapshot,
+    refresh: refreshSessionAhead,
+    isActive: () => AppState.currentState === 'active',
+    onAppStateChange: (listener) => {
+      const subscription = AppState.addEventListener('change', listener);
+      return () => subscription.remove();
+    },
+    onSessionChange: (listener) => useAuthStore.subscribe((state, previous) => {
+      if (state.accessToken !== previous.accessToken) listener();
+    }),
+  }), []);
   return null;
 }
 
@@ -267,6 +291,11 @@ export default function App() {
     <ErrorBoundary>
       <GestureHandlerRootView style={{ flex: 1 }} onLayout={onLayoutRootView}>
         <SafeAreaProvider>
+          {/* [ANDROID-QA A3] Edge-to-edge Android draws the app under a
+              transparent status bar, and nothing set its icon colour, so the
+              clock and icons were white on Swift's light paper. Every screen
+              is light, so the icons are dark everywhere. */}
+          <StatusBar barStyle="dark-content" translucent backgroundColor="transparent" />
           <AppSurface>
             {storageStatus === 'error' ? (
               <SecureStorageRecovery
@@ -276,11 +305,16 @@ export default function App() {
             ) : (
               <QueryClientProvider client={queryClient}>
                 <LocationBootstrap />
+                <SessionRefreshAhead />
                 <ConnectivityBoundary>
                   <RootNavigator />
                 </ConnectivityBoundary>
                 <ToastHost />
                 <PermissionPrimeSheet />
+                {/* [STORE-ALERT] A new order for this person's store while another app is open. */}
+                <StoreAlertElsewhere />
+                {/* [Row 3] build 12 on: a build older than the API's minimum is asked to update */}
+                <UpdateRequiredGate />
               </QueryClientProvider>
             )}
           </AppSurface>

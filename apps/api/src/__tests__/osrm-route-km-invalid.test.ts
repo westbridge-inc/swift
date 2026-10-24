@@ -15,6 +15,7 @@ import { DEFAULT_DELIVERY_RATES } from '../utils/markup';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
 import { osrmOutcomeCounter } from '../plugins/observability';
 import { AppError } from '../utils/errors';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
 
 // ---------------------------------------------------------------------------
 // [money] A single-leg route that OSRM answers with a PRESENT but invalid
@@ -39,6 +40,8 @@ const PHONE_PREFIX = '+5923421';
 const OSRM = 'http://osrm.test';
 const PICKUP = { lat: 6.90, lng: -58.10 };
 const DROPOFF = { lat: 6.95, lng: -58.05 };
+// [ZONE-FARES] Central → South carries a 2000 zone fare this suite plants for
+// itself (helpers/zone-fare-fixture); the seed no longer does.
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 
@@ -95,6 +98,7 @@ async function refusal(p: Promise<unknown>): Promise<AppError> {
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -159,9 +163,11 @@ beforeAll(async () => {
   }
   await purgeFixtures(app);
   token = await makeCustomer(app);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
 });
 
 afterAll(async () => {
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });

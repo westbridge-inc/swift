@@ -27,6 +27,8 @@ const PAGES = [
   { path: '/legal/privacy', priority: 0.5, changeFrequency: 'yearly' as const },
   { path: '/legal/terms', priority: 0.5, changeFrequency: 'yearly' as const },
   { path: '/legal/child-safety', priority: 0.5, changeFrequency: 'yearly' as const },
+  { path: '/legal/refunds', priority: 0.5, changeFrequency: 'yearly' as const },
+  { path: '/legal/delivery', priority: 0.5, changeFrequency: 'yearly' as const },
 ];
 
 export default function sitemap(): MetadataRoute.Sitemap {

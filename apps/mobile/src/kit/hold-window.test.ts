@@ -15,9 +15,10 @@ describe('hold ring — rail-aware cancellation honesty', () => {
     expect(holdRingActive(future, Date.now(), false)).toBe(true);
     const caption = holdRingCaption(false);
     expect(caption.toLowerCase()).toContain('cancel');
-    // INV-7: no "free"/"no charge" promise from a device clock — the app shows
-    // the real cost at confirmation, which the server computes.
-    expect(caption).toContain('shows any cost before you confirm');
+    // INV-7: no "free"/"no charge" promise from a device clock. [owner
+    // #46/#50, 13–14 Oct] No cost exists to show at confirmation any more:
+    // the copy says the server-side fact that holds whatever the clock says.
+    expect(caption).toContain('Swift never charges for cancelling');
     expect(caption.toLowerCase()).not.toContain('free');
   });
 

@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -561,6 +562,7 @@ describe('PUT /admin/orders/:id/cancel — journal close [SWIFT-095]', () => {
         floatLimit: 100_000,
       },
     });
+    await currentMoverDocuments(app.prisma, mover.id, 'MOTORCYCLE');
     const order = await app.prisma.order.create({
       data: {
         orderNumber: `AVIS-R-${nanoid(8)}`, orderType: 'FOOD_DELIVERY',

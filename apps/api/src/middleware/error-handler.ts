@@ -2,9 +2,11 @@ import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from
 import { AppError } from '../utils/errors';
 import { ZodError } from 'zod';
 import { isDevelopment } from '../utils/runtime-mode';
+import { requestLogContext } from '../utils/logger-config';
+import { captureError } from '../plugins/observability';
 
 export function registerErrorHandler(app: FastifyInstance) {
-  app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
+  const respond = (error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
     // Zod validation errors
     if (error instanceof ZodError) {
       const details: Record<string, string[]> = {};
@@ -73,7 +75,7 @@ export function registerErrorHandler(app: FastifyInstance) {
     }
 
     // Unknown errors
-    app.log.error({ err: error, url: request.url, method: request.method }, 'Unhandled error');
+    request.log.error({ err: error, ...requestLogContext(request) }, 'Unhandled error');
     // SWIFT-AUD-D7-02: an error-rate SPIKE pages (dedup'd via the exact-count
     // trigger + a redis NX guard). Per-minute window counter; fire-and-caught
     // — accounting must never slow the error response, and minimal test
@@ -115,6 +117,23 @@ export function registerErrorHandler(app: FastifyInstance) {
         message: isDevelopment() ? error.message : 'An unexpected error occurred',
       },
     });
+  };
+
+  app.setErrorHandler((error: FastifyError | AppError | ZodError, request: FastifyRequest, reply: FastifyReply) => {
+    const sent = respond(error, request, reply);
+    // [OBS-1] The ONE HTTP capture site: 5xx = our fault → the error tracker;
+    // 4xx is the caller's problem and stays out. Decided on the status this
+    // handler just SET, not the thrown error's own statusCode — a ZodError
+    // (400) or a Prisma not-found (404) has none. Route TEMPLATE, never the
+    // raw URL: /track/:token must not leak its token [REPORT-013 F-013-04].
+    if (reply.statusCode >= 500) {
+      try {
+        captureError(error, { method: request.method, url: request.routeOptions?.url ?? 'unmatched', requestId: request.id });
+      } catch {
+        // The tracker must never break the error response already on its way.
+      }
+    }
+    return sent;
   });
 
   // 404 handler. Echo only the path — never the query string (reflected

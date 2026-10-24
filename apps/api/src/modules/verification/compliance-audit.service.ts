@@ -62,7 +62,7 @@ export class ComplianceAuditService {
     let violations = 0;
     for (const s of subjects) {
       const live = await this.verification.getLiveOperationStatus(s.userId, {
-        vehicleType: s.vehicleType as never,
+        vehicleType: s.vehicleType as never, kind: s.moverKind,
         legacyVerified: s.legacyVerified,
       });
       if (live.allowed) continue;
@@ -216,13 +216,12 @@ export class ComplianceAuditService {
     if (!v) throw new NotFoundError('Violation');
     if (v.resolvedAt) return v;
 
-    const kind = await this.prisma.driver.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } });
-    const vehicleType = kind
-      ? kind.vehicleType
-      : (await this.prisma.rider.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } }))?.vehicleType;
-    if (!vehicleType) throw new AppError(400, 'NOT_A_MOVER', 'This user has no mover profile.');
-
-    const live = await this.verification.getLiveOperationStatus(v.userId, { vehicleType: vehicleType as never });
+    const moverKind = v.moverKind === 'RIDER' ? 'RIDER' : 'DRIVER';
+    const profile = moverKind === 'DRIVER'
+      ? await this.prisma.driver.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } })
+      : await this.prisma.rider.findUnique({ where: { userId: v.userId }, select: { vehicleType: true } });
+    if (!profile) throw new AppError(400, 'NOT_A_MOVER', 'This user has no mover profile.');
+    const live = await this.verification.getLiveOperationStatus(v.userId, { vehicleType: profile.vehicleType, kind: moverKind });
     if (!live.allowed) {
       throw new AppError(400, 'STILL_NON_COMPLIANT', 'Their checklist still fails — fix the documents first.');
     }

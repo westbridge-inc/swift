@@ -8,17 +8,18 @@
  * definition applied to reviewer and subject — enforced here, server-side, at
  * claim time AND at decision time, never in the UI (DOC-INV-8).
  */
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
-import { clusterMemberIds } from '../integrity/identity.service';
+import { requireIdentityAuthority } from '../integrity/identity-review';
 
-export async function isRecused(prisma: PrismaClient, reviewerId: string, subjectUserId: string): Promise<boolean> {
+export async function isRecused(prisma: PrismaClient | Prisma.TransactionClient, reviewerId: string, subjectUserId: string): Promise<boolean> {
   if (reviewerId === subjectUserId) return true;
-  const sameCluster = await clusterMemberIds(prisma, reviewerId);
+  const sameCluster = (await requireIdentityAuthority(prisma, reviewerId)).memberIds;
+  await requireIdentityAuthority(prisma, subjectUserId);
   return sameCluster.includes(subjectUserId);
 }
 
-export async function assertNotRecused(prisma: PrismaClient, reviewerId: string, subjectUserId: string): Promise<void> {
+export async function assertNotRecused(prisma: PrismaClient | Prisma.TransactionClient, reviewerId: string, subjectUserId: string): Promise<void> {
   if (await isRecused(prisma, reviewerId, subjectUserId)) {
     throw new AppError(403, 'REVIEWER_RECUSED', 'You share an identity signal with this person — another reviewer must take this case (DOC-1 §8.6)');
   }

@@ -1,3 +1,4 @@
+import { grantStepUp } from '../helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type InjectOptions } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
@@ -23,6 +24,7 @@ import { assertFixtureReferences, lockFixtureParents } from '../helpers/cleanup-
 import { auditClientInCleanup } from '../helpers/cleanup-transaction';
 import { purgeAuditLogs } from '../../lib/audit-immutability';
 import { startGoldenWorker } from './gold-7-worker';
+import { cleanupBillingClocks } from '../helpers/billing-clock-cleanup';
 
 
 // ---------------------------------------------------------------------------
@@ -172,6 +174,8 @@ async function purgeFixtures() {
       const discoveredSubIds = (await tx.subscription.findMany({ where: { vendorId: { in: discoveredVendorIds } }, select: { id: true } })).map((s) => s.id);
       if (discoveredSubIds.some((id) => !subIds.includes(id))) throw new Error('GOLD-7 VEND04: foreign subscriptions block fixture cleanup');
       const cleanupSubIds = [...subIds];
+      // The synthetic stores own their clock evidence (RESTRICT in production): remove it first.
+      await cleanupBillingClocks(tx, cleanupSubIds);
       await tx.mmgAgentPayment.deleteMany({ where: { externalId: { in: [...txnIds] } } });
       await tx.providerPayment.deleteMany({ where: { providerTxnId: { in: [...txnIds] } } });
       await tx.privilegedApproval.deleteMany({ where: { OR: [{ requestedBy: { in: ids } }, { approvedBy: { in: ids } }] } });
@@ -346,8 +350,10 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
     advanceTo(born.trialEndDate!.getTime() + 1);
     await tick('convert-trials');
     const converted = await subRow(p.subId);
+    // [#1393] The first fee is due at the trial's own end, not whenever the
+    // conversion job happened to run.
     expect({ status: converted.status, isTrialActive: converted.isTrialActive, due: converted.nextBillingDate.getTime() })
-      .toEqual({ status: 'ACTIVE', isTrialActive: false, due: Date.now() });
+      .toEqual({ status: 'ACTIVE', isTrialActive: false, due: born.trialEndDate!.getTime() });
     const period = converted.nextBillingDate;
     const periodKey = period.toISOString().slice(0, 10);
     const ladder = ['PAST_DUE', 'PAST_DUE', 'SUSPENDED'];
@@ -367,20 +373,24 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
       expect(row.nextRetryAt!.getTime()).toBe(Date.now() + DAY);
     }
     const notices = await noticesTo(p.owner.userId);
-    for (const title of ['Subscription payment failed', 'Final warning — payment needed', 'Subscription suspended', 'Subscription billing history']) {
+    for (const title of ['Subscription payment failed', 'Final warning — payment needed', 'Subscription suspended']) {
       expect(notices.filter((n) => n === title)).toHaveLength(1);
     }
     expect(await countEvents(p.subId, 'CHARGE_ATTEMPT')).toBe(3);
     expect(await countEvents(p.subId, 'CHARGE_FAILED')).toBe(3);
     expect(await countEvents(p.subId, 'SUSPENDED')).toBe(1);
-    expect((await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`))).toHaveLength(1);
+    // [#1393] The reinstatement nudges run on the shared clock's active time:
+    // the first comes one day after the suspension notice, never with it.
+    const nudges = async () => (await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`));
+    expect(await nudges()).toHaveLength(0);
+    expect(notices.filter((n) => n === 'Subscription billing history')).toHaveLength(0);
     expect(await sys(() => app.prisma.notification.count({ where: { userId: admin.userId, title: 'Dunning — final warning issued', data: { path: ['subscriptionId'], equals: p.subId } } }))).toBe(1);
     expect(await vendorRow(p.vendorId)).toEqual({ status: 'SUSPENDED', acceptingOrders: false });
     const suspended = await moneySnapshot(p.subId);
     await tick('process-billing');
     expect(await moneySnapshot(p.subId)).toEqual(suspended);
     expect(await noticesTo(p.owner.userId)).toEqual(notices);
-    expect((await eventsOf(p.subId)).filter((e) => e.key.startsWith(`nudge:${p.subId}:`))).toHaveLength(1);
+    expect(await nudges()).toHaveLength(0); // (the nudge cadence itself: billing-dunning-depth.test.ts)
 
     // The owner can still reach the payment screen. The agent's real signed
     // inquiry and receipt are the boundary; physical collection is excluded.
@@ -422,6 +432,7 @@ describe('GOLD-7 · VEND-04 — production worker billing journey', () => {
 
     // Stopping is idempotent and preserves the paid week. Only the production
     // process-billing composition can lapse it; a direct cycle call cannot.
+    await grantStepUp(app, p.owner.token);
     for (let i = 0; i < 2; i += 1) {
       const stopped = await call('PUT', '/api/v1/vendor/subscription/billing-method', p.owner.token, { method: 'NONE' }, headers);
       expect(stopped.statusCode, stopped.body).toBe(200);

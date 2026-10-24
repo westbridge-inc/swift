@@ -121,6 +121,9 @@ export const VEND_01: Journey<Ctx> = {
   },
 };
 
+/** How long VEND-02 waits for the release sweep's new-order alert (two sweeps). */
+export const VEND02_ALERT_WAIT_MS = 20_000;
+
 export const VEND_02: Journey<Ctx> = {
   id: 'VEND-02',
   title: 'Accept order → ready (H-1 close)',
@@ -153,8 +156,12 @@ export const VEND_02: Journey<Ctx> = {
     await waitForRelease(ctx.roster.customers.C1!.session, A);
     const board = await GET('/vendor/orders?limit=50', R2.session.token);
     rec.check('after the hold the order is on the store board', JSON.stringify(board.json?.data ?? []).includes(A), '');
-    const alerts = await GET('/vendor/alerts/pending', R2.session.token);
-    rec.check('the store has an unread new-order alert for it', JSON.stringify(alerts.json?.data ?? []).includes(A), `→ ${brief(alerts)}`);
+    // The alert row is written by the release sweep (every 10 s), not at the
+    // hold's end, so wait for it (bounded) before the unchanged check.
+    const alertFor = (r: Awaited<ReturnType<typeof GET>>) => JSON.stringify(r.json?.data ?? []).includes(A);
+    let alerts = await GET('/vendor/alerts/pending', R2.session.token);
+    const alerted = alertFor(alerts) || !!(await waitFor(async () => alertFor(alerts = await GET('/vendor/alerts/pending', R2.session.token)), VEND02_ALERT_WAIT_MS, 1_000));
+    rec.check('the store has an unread new-order alert for it', alertFor(alerts), `→ ${brief(alerts)}${alerted ? '' : ` — no alert row ${VEND02_ALERT_WAIT_MS / 1000} s after the hold ended (the release sweep runs every 10 s)`}`);
     const acc = await PUT(`/vendor/orders/${A}/accept`, { estimatedPrepTime: 15 }, R2.session.token);
     rec.expect('the store accepts', acc, 200, undefined, `status=${acc.json?.data?.status}`);
     const bare = await PUT(`/vendor/orders/${B1}/reject`, {}, R2.session.token);
@@ -224,22 +231,27 @@ export const VEND_02: Journey<Ctx> = {
 export const VEND_03: Journey<Ctx> = {
   id: 'VEND-03',
   estimateSeconds: 30,
-  title: 'MMG pay-link set + confirm payment',
-  cases: 'link cool-off; MMG claim; duplicate/reference conflict; disputed payment hold',
+  title: 'MMG number set + confirm payment (the pay link is off)',
+  cases: 'number cool-off (pay link off); MMG claim; duplicate/reference conflict; disputed payment hold',
   async run(rec, ctx) {
     const R3 = ctx.roster.vendors.R3!;
+    // [PAYMENT-SIMPLIFY #1848] The pay link is replaced by the store's MMG number: a new link is refused before
+    // any step-up; the number needs the owner's fresh step-up (the same protection the link had).
     const set = await PUT('/vendor/profile', { mmgPayUrl: 'https://pay.example.invalid/vendor/test' }, R3.session.token);
-    rec.deny('a pay link cannot be set without a fresh step-up', set, [400, 403, 503], ['STEP_UP_REQUIRED', 'INVALID_MMG_PAY_URL', 'MMG_PAY_LINKS_NOT_CONFIGURED'], `→ ${codeOf(set)}`);
+    rec.deny('a new pay link is refused (the store MMG number replaces it), before any step-up', set, [409], ['MMG_PAY_LINK_OFF'], `→ ${codeOf(set)}`);
+    const number = await PUT('/vendor/profile', { mmgNumber: '+5920000000' }, R3.session.token);
+    rec.deny("the store's MMG number takes only a Guyana mobile: a fixture number is refused, nothing is written (its step-up is proven in CI: store-mmg-number.test)", number, [400], ['INVALID_MMG_NUMBER'], `→ ${codeOf(number)}`);
     const send = await POST('/auth/step-up', {}, R3.session.token);
     rec.check('the step-up code is sent to the phone on the account', send.ok || send.status === 429, `→ ${brief(send)} sentTo=${send.json?.data?.sentTo ?? ''}`);
     const dev = await POST('/auth/step-up/verify', { code: '000000' }, R3.session.token);
     rec.deny('the dev OTP code does not satisfy step-up', dev, [400], ['INVALID_CODE']);
     const pend = await req('DELETE', '/vendor/profile/mmg-pay-url/pending', { token: R3.session.token });
     rec.check('cancelling a pending link (none pending) is harmless', pend.ok && pend.json?.data?.cancelled === false, `→ ${brief(pend)} ${JSON.stringify(pend.json?.data ?? null)}`);
+    const pendNumber = await req('DELETE', '/vendor/profile/mmg-number/pending', { token: R3.session.token });
+    rec.check('cancelling a pending MMG number (none pending) is harmless', pendNumber.ok && pendNumber.json?.data?.cancelled === false, `→ ${brief(pendNumber)} ${JSON.stringify(pendNumber.json?.data ?? null)}`);
     const cart = await GET('/customer/cart', ctx.roster.customers.C2!.session.token);
-    rec.check('the cart reports MMG unavailable for a store with no link', cart.json?.data?.paymentCapabilities?.mmg?.available !== true, JSON.stringify(cart.json?.data?.paymentCapabilities ?? null));
-    const unconfigured = codeOf(set) === 'MMG_PAY_LINKS_NOT_CONFIGURED';
-    rec.skipAll(`every case needs a live vendor pay link. ${unconfigured ? 'Pay links are not configured on this target (MMG_PAY_URL_ALLOWED_HOSTS unset, 503), and even' : 'Setting one'} needs a step-up whose code reaches the owner only by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply); Phase A has no SMS provider. Phase B (Twilio + a consented owner phone${unconfigured ? ' + the MMG host allowlist' : ''}) unlocks it`);
+    rec.check('the cart offers no MMG for a store with no link and no number', cart.json?.data?.paymentCapabilities?.mmg?.available !== true && cart.json?.data?.paymentCapabilities?.mmgStoreNumber?.available !== true, JSON.stringify(cart.json?.data?.paymentCapabilities ?? null));
+    rec.skipAll("every case needs a store with a live MMG number. Setting one needs a step-up whose code reaches the owner only by SMS (POST /auth/step-up/verify checks the real code; DEV_OTP_BYPASS does not apply); Phase A has no SMS provider. Phase B (Twilio + a consented owner phone) unlocks it");
     void sleep;
   },
 };
@@ -255,13 +267,17 @@ export const VEND_04: Journey<Ctx> = {
     rec.check('the store has a subscription with its weekly rate and cash account number', !!sub?.status && Number(sub?.weeklyFeeGyd ?? sub?.weeklyRate) > 0 && !!sub?.san,
       `status=${sub?.status} weekly=${sub?.weeklyFeeGyd ?? sub?.weeklyRate} san=${sub?.sanFormatted ?? sub?.san} due=${sub?.amountDueGyd}`);
     const cash = await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token);
-    rec.expect('the owner pays by agent cash (idempotent choice)', cash, 200);
-    rec.deny('MMG billing without the payer number', await PUT('/vendor/subscription/billing-method', { method: 'MOBILE_MONEY' }, R1.session.token), [400], ['MSISDN_REQUIRED']);
+    if (cash.status === 403 && codeOf(cash) === 'STEP_UP_REQUIRED') {
+      rec.deny('billing-method changes require this session to complete step-up', cash, [403], ['STEP_UP_REQUIRED']);
+      rec.skipCase('stop billing', 'Positive billing-method and payer-number cases require a legitimately verified session; this journey does not initiate SMS or bypass step-up.');
+    } else {
+      rec.expect('the owner pays by agent cash (idempotent choice)', cash, 200);
+      rec.deny('MMG billing without the payer number', await PUT('/vendor/subscription/billing-method', { method: 'MOBILE_MONEY' }, R1.session.token), [400], ['MSISDN_REQUIRED']);
+      const stop = await PUT('/vendor/subscription/billing-method', { method: 'NONE' }, R1.session.token);
+      rec.expect('a verified partner can stop weekly billing self-serve (E12)', stop, 200);
+      if (stop.ok) rec.expect('restore agent cash after the stop-billing check', await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token), 200);
+    }
     rec.deny('a customer cannot read a store’s subscription', await GET('/vendor/subscription', ctx.roster.customers.C2!.session.token), [403, 404]);
-    const stop = await PUT('/vendor/subscription/billing-method', { method: 'NONE' }, R1.session.token);
-    rec.check('a partner can stop weekly billing self-serve (E12)', stop.ok,
-      stop.ok ? `→ ${brief(stop)}` : `no stop option: billing-method refuses a stop (→ ${brief(stop)}) and no other route exists; the only way out is account deletion — E12 open`);
-    if (stop.ok) await PUT('/vendor/subscription/billing-method', { method: 'CASH' }, R1.session.token);
     const inquiry = await req('POST', '/billing/mmg/inquiry', { body: { accountNumber: String(sub?.san ?? '0') } });
     rec.check('the agent-cash channel refuses an unsigned inquiry (dark or signature-gated)', inquiry.status === 503 || inquiry.status === 401, `→ ${inquiry.status} ${inquiry.text.slice(0, 120)}`);
     rec.skipAll('the weekly bill runs from the hourly billing job only after the 14-day trial ends, and suspension follows three failed charges 24 h apart; a run cannot advance the clock (no HTTP trigger). Agent-cash receipts need the webhook secret, which the runner must not hold');

@@ -1,3 +1,4 @@
+import { captureMmgPayer } from './capture-hooks';
 import type { PrismaClient } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import { normalizePhone, normalizeEmail, normalizePlate } from './normalize';
@@ -13,7 +14,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 // What is backfillable today: PHONE (unique per user — cannot union, still
 // captured for future links), EMAIL (SOFT — flag-only by law), PLATE
 // (drivers — HARD: one plate, one active vehicle account), MMG_PAYER
-// (subscription rails — HARD: the money doesn't lie). ID document numbers
+// (subscription rails — advisory declaration only). ID document numbers
 // were never persisted raw anywhere (by design) and CANNOT be backfilled —
 // they accumulate from new verifications onward.
 
@@ -61,6 +62,7 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
   const rails = await prisma.subscription.findMany({
     where: { mmgPayerMsisdn: { not: null } },
     select: {
+      id: true,
       mmgPayerMsisdn: true,
       rider: { select: { userId: true } },
       driver: { select: { userId: true } },
@@ -71,7 +73,7 @@ export async function runIdentityBackfill(prisma: PrismaClient): Promise<Backfil
     const userId = r.rider?.userId ?? r.driver?.userId ?? r.vendor?.owner.userId;
     if (!userId || !r.mmgPayerMsisdn) continue;
     const role = r.rider ? 'RIDER' : r.driver ? 'DRIVER' : 'VENDOR';
-    await identity.capture({ accountId: userId, actorRole: role, type: 'MMG_PAYER', normalizedValue: normalizePhone(r.mmgPayerMsisdn), source: 'BACKFILL' });
+    await captureMmgPayer(prisma, { userId, role, payerMsisdn: r.mmgPayerMsisdn, subscriptionId: r.id, backfill: true });
     captured += 1;
   }
 

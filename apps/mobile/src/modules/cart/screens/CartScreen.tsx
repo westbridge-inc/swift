@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
+import { Alert, AppState, Platform, Pressable, ScrollView, View, type ViewStyle } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { color, radius, space } from '@swift/ui';
@@ -14,11 +14,14 @@ import {
   useCheckoutRecovery,
   CheckoutAlreadyPlacedError,
   CheckoutInFlightError,
+  CheckoutOutcomeUnknownError,
+  CHECKING_ORDER_MESSAGE,
   useRemoveCartItem,
   useRemoveCartPromo,
   useSetCartTip,
   useUpdateCartItem,
 } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { maybePrimeNotifications } from '../../../services/notification-priming';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore } from '../../../stores/bookingStore';
@@ -52,6 +55,7 @@ import type { MmgDirectPaymentAction } from '@swift/types';
 import { CartPaymentOptions } from '../CartPaymentOptions';
 import { checkoutTipAmount } from '../checkout-tip';
 import {
+  cartLineMeta,
   cartStaleCheckoutCode,
   cartPricingChoices,
   checkoutErrorMessage,
@@ -60,11 +64,13 @@ import {
   pickupRetryChoices,
   pickupStoreNames,
   pricedTip,
+  pricesAsSeen,
   quoteStoreIds,
   quotedRiderTip,
   shortStores,
 } from '../cartQuote';
 import {
+  checkoutPaymentFields,
   checkoutPaymentMethod,
   normalizeCartPaymentCapabilities,
   paymentActionForCheckout,
@@ -73,6 +79,7 @@ import {
   selectCartPaymentMethod,
   type CartPaymentSelection,
 } from '../cartPayment';
+import { touchTarget } from '../../../kit/touch-target';
 
 const GUTTER = space['2xl'];
 const TIP_PRESETS = [0, 200, 500, 1000];
@@ -106,7 +113,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
         {onBack ? (
           // A plain glyph, no filled circle — hitSlop keeps the tap target at
           // 44pt, which is the whole reason the chip existed.
-          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back">
+          <Pressable onPress={onBack} hitSlop={14} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(24)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="chevron-left" size={24} color={color.text.primary} />
@@ -118,7 +125,7 @@ function CartHeader({ onBack, onMenu }: { onBack?: () => void; onMenu?: () => vo
           Cart
         </T>
         {onMenu ? (
-          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options">
+          <Pressable onPress={onMenu} hitSlop={14} accessibilityRole="button" accessibilityLabel="Cart options" style={touchTarget(22)}>
             {({ pressed }) => (
               <View style={{ opacity: pressed ? 0.6 : 1 }}>
                 <Feather name="more-horizontal" size={22} color={color.text.primary} />
@@ -142,6 +149,8 @@ export function CartScreen() {
 
   const updateItem = useUpdateCartItem();
   const removeItem = useRemoveCartItem();
+  // [BUG-GUARDS C2] One remove per line at a time; another line's trash still goes while it sends.
+  const removeLine = useRowHold();
   const clearCart = useClearCart();
   const setTip = useSetCartTip();
   const removePromo = useRemoveCartPromo();
@@ -159,8 +168,10 @@ export function CartScreen() {
   const [pendingTrackId, setPendingTrackId] = useState<string | null>(null);
   useEffect(() => {
     if (placeOrder.isSuccess || !pendingTrackId) return;
+    // iOS navigates from onDismissed below; this fallback is for Android,
+    // where that callback never fires.
+    if (Platform.OS === 'ios') return;
     const id = pendingTrackId;
-    setPendingTrackId(null);
     // WAS: InteractionManager.runAfterInteractions(...).
     //
     // React Native 0.85 turned InteractionManager into a stub whose
@@ -176,7 +187,13 @@ export function CartScreen() {
     // waits two frames instead of pretending.
     let raf2 = 0;
     const raf1 = requestAnimationFrame(() => {
-      raf2 = requestAnimationFrame(() => navigation.navigate('Delivery', { orderId: id }));
+      raf2 = requestAnimationFrame(() => {
+        // [ANDROID-QA] Clear the staged id only HERE. Clearing it before the
+        // frames re-ran this effect, and its cleanup cancelled both frames:
+        // "Track order" closed the ceremony and went nowhere on Android.
+        setPendingTrackId(null);
+        navigation.navigate('Delivery', { orderId: id });
+      });
     });
     return () => { cancelAnimationFrame(raf1); if (raf2) cancelAnimationFrame(raf2); };
   }, [placeOrder.isSuccess, pendingTrackId, navigation]);
@@ -204,6 +221,8 @@ export function CartScreen() {
   const [placedHeld, setPlacedHeld] = useState(false);
   const [placedSubmittedMethod, setPlacedSubmittedMethod] = useState<'CASH' | 'MOBILE_MONEY'>('CASH');
   const [placedPaymentAction, setPlacedPaymentAction] = useState<MmgDirectPaymentAction | null>(null);
+  // [PAYMENT-SIMPLIFY] The placed order pays the store's MMG number (shown on the order once it accepts).
+  const [placedMmgPayTo, setPlacedMmgPayTo] = useState<'STORE_NUMBER' | undefined>(undefined);
   // The cart empties after placement — remember it was a booking for the popup.
   const [placedAppt, setPlacedAppt] = useState(false);
   // The chevron only renders when there is somewhere to go: Cart is a tab, so
@@ -322,7 +341,8 @@ export function CartScreen() {
   // the new one loads) and not being refreshed after a cart change — including
   // while a promo apply/remove is in flight, so the code in the body is the
   // code the quote on screen was priced with.
-  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removePromo.isPending && !applyPromo.isPending;
+  // removeLine.busy: with two lines removing, removeItem.isPending follows only the latest call.
+  const quoteSettled = !cart.isFetching && !cart.isPlaceholderData && !updateItem.isPending && !removeItem.isPending && !removeLine.busy && !removePromo.isPending && !applyPromo.isPending;
 
   const items: any[] = c?.items ?? [];
 
@@ -377,9 +397,12 @@ export function CartScreen() {
     // pickup retry has no rider either.
     const submittedTip = pickupRetry ? 0 : pricedTip(pricing, c);
     const submittedMethod = checkoutPaymentMethod(effectivePaySelection, paymentCapabilities);
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG goes to the store's number when the server offers it.
+    const paymentFields = checkoutPaymentFields(effectivePaySelection, paymentCapabilities);
+    const submittedMmgPayTo = 'mmgPayTo' in paymentFields ? paymentFields.mmgPayTo : undefined;
     placeOrder.mutate(
       {
-        paymentMethod: submittedMethod,
+        ...paymentFields,
         // [E01-B] The applied promo code — the charge must carry the code the
         // quote discounted with, and only while one is applied (removal drops
         // it from this same `pricing` object).
@@ -390,6 +413,9 @@ export function CartScreen() {
         ...(pricing.fulfillmentSelections ? { fulfillmentSelections: pricing.fulfillmentSelections } : {}),
         ...(apptPayload.length ? { appointments: apptPayload } : {}),
         ...(instructions.trim() && !pickup ? { deliveryInstructions: instructions.trim() } : {}),
+        // [L09 · price lock] The total and line prices the customer saw: the
+        // cart's quote, or for a pickup retry the pickup quote they confirmed.
+        ...pricesAsSeen(pickupRetry ? pickupQuote.data : c),
         ...(extra ?? {}),
         tipAmount: submittedTip,
       },
@@ -404,6 +430,7 @@ export function CartScreen() {
           setPlacedAppt(apptPayload.length > 0);
           setPlacedSubmittedMethod(submittedMethod);
           setPlacedPaymentAction(paymentAction);
+          setPlacedMmgPayTo(submittedMmgPayTo);
           if (apptPayload.length) clearAppointments();
           // First order = the first moment notifications are obviously useful
           // [first-open SO-5]; primes once, never at boot.
@@ -467,6 +494,9 @@ export function CartScreen() {
     if (pickupQuote.isFetching || pickupQuote.isPlaceholderData || !pickupQuote.data || pickupConfirmShown.current) return;
     const pickupTotal = Number(pickupQuote.data.totalAmount);
     if (!Number.isFinite(pickupTotal)) return;
+    // Capture the quote the alert displays before a reconnect can replace it.
+    const confirmedPrices = pricesAsSeen(pickupQuote.data);
+    const storeIds = quoteStoreIds(pickupQuote.data.items);
     pickupConfirmShown.current = true;
     Alert.alert(
       'Order for pickup instead?',
@@ -480,9 +510,8 @@ export function CartScreen() {
             // [E01] Every store in the basket collects — not just the one
             // `cart.vendor` happens to track (the rest would still wait for a
             // rider).
-            const storeIds = quoteStoreIds(c?.items);
             if (storeIds.length === 0) return;
-            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])) });
+            onOrderLatest.current({ fulfillmentSelections: Object.fromEntries(storeIds.map((id) => [id, 'PICKUP'])), ...confirmedPrices });
           },
         },
       ],
@@ -495,6 +524,35 @@ export function CartScreen() {
     pickupConfirmShown.current = false;
     setConfirmPickup(true);
     setPickupAttempt((n) => n + 1);
+  };
+
+  // [row 5 · ANDROID-QA 5 Oct] A lost reply whose order went through. The
+  // server empties the cart inside the order's own transaction, so when the
+  // phone learns "placed" (the receipt probe, or a replayed key) the refetched
+  // cart is EMPTY — and "Your cart is empty" hid the only line that said the
+  // order exists. The empty cart now says the order went through, with a way
+  // to it. The outcome is one-off: it is acknowledged when the customer opens
+  // the order, or when the cart, once seen emptied by that order, has new
+  // things in it — a new intent, which must not inherit "already placed" and
+  // a dead Place order button.
+  const placedOutcome: object | null = placeOrder.error instanceof CheckoutAlreadyPlacedError ? placeOrder.error : recovery.placedOrderIds;
+  const [acknowledgedOutcome, setAcknowledgedOutcome] = useState<object | null>(null);
+  const placedOutcomeLive = placedOutcome !== null && placedOutcome !== acknowledgedOutcome;
+  const placedOrderIds: string[] = !placedOutcomeLive ? []
+    : placeOrder.error instanceof CheckoutAlreadyPlacedError ? placeOrder.error.orderIds : (recovery.placedOrderIds ?? []);
+  const cartEmpty = !c || items.length === 0;
+  const emptiedByOutcome = useRef<object | null>(null);
+  useEffect(() => {
+    if (!placedOutcomeLive || cart.isLoading || cart.isFetching) return;
+    if (cartEmpty) emptiedByOutcome.current = placedOutcome;
+    else if (emptiedByOutcome.current === placedOutcome) setAcknowledgedOutcome(placedOutcome);
+  }, [placedOutcomeLive, placedOutcome, cartEmpty, cart.isLoading, cart.isFetching]);
+  // No placeOrder.reset() here: resetting and navigating in one tick is the
+  // ceremony P0 above, and an acknowledged outcome is simply not shown.
+  const openPlacedOrder = () => {
+    setAcknowledgedOutcome(placedOutcome);
+    if (placedOrderIds.length === 1) navigation.navigate('Delivery', { orderId: placedOrderIds[0] });
+    else navigation.navigate('OrdersHistory');
   };
 
   if (!isAuthenticated) {
@@ -515,17 +573,24 @@ export function CartScreen() {
   // [MOB-020] The two answers that are NOT failures: the order already exists
   // (a replayed key under a changed body, or a resolved earlier intent) and
   // the order is still being placed (a concurrent twin). Neither is retried.
-  const alreadyPlaced = placeOrder.error instanceof CheckoutAlreadyPlacedError || recovery.placedOrderIds !== null;
+  const alreadyPlaced = placedOutcomeLive;
   const stillPlacing = placeOrder.error instanceof CheckoutInFlightError;
+  // [AX372 R1] Nor is an order whose outcome is unknown while the phone asks
+  // the server what became of it (after a timeout, a 5xx, or on a restart).
+  const checkingOutcome = placeOrder.checkingOutcome || recovery.recovering || placeOrder.error instanceof CheckoutOutcomeUnknownError;
   const orderErr = alreadyPlaced
     ? 'This order was already placed — it is in your orders.'
-    : stillPlacing
-      ? 'This order is already being placed — hold on a moment.'
-      : placeOrder.isError
-        // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
-        // the message checkout returned — exactly what the web cart shows.
-        ? checkoutErrorMessage(placeOrder.error)
-        : undefined;
+    : checkingOutcome
+      ? CHECKING_ORDER_MESSAGE
+      : stillPlacing
+        ? 'This order is already being placed — hold on a moment.'
+        // [row 5] "Already placed" is an outcome, never a failure: once it is
+        // acknowledged it says nothing at all.
+        : placeOrder.isError && !(placeOrder.error instanceof CheckoutAlreadyPlacedError)
+          // [E01-B] A refusal at CHECKOUT (promo refusals included) is shown as
+          // the message checkout returned — exactly what the web cart shows.
+          ? checkoutErrorMessage(placeOrder.error)
+          : undefined;
   // Availability spec §2: zero riders online → the server refuses delivery
   // honestly; pickup is the same food without the wait for a rider.
   const noRiders = (placeOrder.error as any)?.response?.data?.error?.code === 'DELIVERY_NO_RIDERS';
@@ -547,6 +612,22 @@ export function CartScreen() {
         // keeps the cart it already has — lines, Remove pills and all — and
         // the next focus or foreground tries again. (null data = an empty cart.)
         <ErrorState onRetry={() => cart.refetch()} />
+      ) : cartEmpty && alreadyPlaced ? (
+        <EmptyState
+          picto="orders"
+          title="Your order went through"
+          body="The reply was lost on the way back, but the order reached the store. It is in your orders."
+          actionLabel={placedOrderIds.length === 1 ? 'Track your order' : 'See your orders'}
+          onAction={openPlacedOrder}
+        />
+      ) : cartEmpty && checkingOutcome ? (
+        <EmptyState
+          picto="orders"
+          title="Checking your order"
+          body={CHECKING_ORDER_MESSAGE}
+          actionLabel="See your orders"
+          onAction={() => navigation.navigate('OrdersHistory')}
+        />
       ) : !c || items.length === 0 ? (
         <EmptyState
           picto="groceries"
@@ -662,7 +743,7 @@ export function CartScreen() {
             {promoMsg && !promoMsg.ok ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.sm, paddingLeft: space.lg }}>
                 <Feather name="alert-circle" size={13} color={color.error} />
-                <T variant="caption" tone="error">
+                <T variant="caption" tone="error" style={{ flex: 1 }}>
                   {promoMsg.text}
                 </T>
               </View>
@@ -705,7 +786,7 @@ export function CartScreen() {
               // server already sends `lineTotal` (unitPrice × quantity) and it
               // is what sums into "Items (n)". If a response ever omits it we
               // fall back to exactly what shipped before rather than printing a
-              // confident $0 — money() has no missing-value face.
+              // confident $0 (money() now prints a dash for a missing amount).
               // `Number(null)` is 0 and `Number.isFinite(0)` is TRUE, so the
               // obvious guard passes for a MISSING line total and prints a
               // confident $0 — the exact thing the comment above says it is
@@ -722,12 +803,7 @@ export function CartScreen() {
               const hasTotal = Number.isFinite(shownTotal);
               // The unit price is not lost: it moves to the muted meta line,
               // where it is labelled and unambiguous.
-              const meta = [
-                it.selectedOptionNames?.length ? it.selectedOptionNames.join(', ') : null,
-                Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null,
-              ]
-                .filter(Boolean)
-                .join(' · ');
+              const meta = cartLineMeta(it, Number.isFinite(unitPrice) && qty > 1 ? `${money(unitPrice)} each` : null);
               return (
               <View key={it.id}>
                 {idx > 0 ? <View style={RULE} /> : null}
@@ -736,9 +812,12 @@ export function CartScreen() {
                       paying — it must show what they are actually buying, or
                       nothing. Photography carries its own corner radius and
                       sits on the page ground, unboxed. */}
+                  {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+                      beside the tile; squeezed into 64pt it broke across lines. */}
                   <Photo
                     uri={itemPhoto(it)}
                     label={it.name}
+                    showLabel={false}
                     transition={150}
                     style={{ width: 64, height: 64, borderRadius: radius.md }}
                     contentFit="cover"
@@ -766,7 +845,8 @@ export function CartScreen() {
                     {!it.isAvailable ? (
                       <>
                         <T variant="caption" tone="error" style={{ marginTop: 2 }}>
-                          No longer available — remove to continue
+                          {/* [F4] The server's reason when a choice sold out. */}
+                          {it.unavailableReason || 'No longer available — remove to continue'}
                         </T>
                         {/* [E07] One tap to recover: the SAME remove-line
                             mutation as the trash glyph, labelled so the path
@@ -803,10 +883,11 @@ export function CartScreen() {
                         {/* Removing a line is an ordinary action, not an error —
                             it stops being red. hitSlop holds the 44pt target. */}
                         <Pressable
-                          onPress={() => removeItem.mutate(it.id)}
+                          onPress={() => removeLine(it.id, () => removeItem.mutateAsync(it.id))}
                           hitSlop={14}
                           accessibilityRole="button"
                           accessibilityLabel={`Remove ${it.name}`}
+                          style={touchTarget(18)}
                         >
                           {({ pressed }) => (
                             <View style={{ opacity: pressed ? 0.6 : 1 }}>
@@ -844,6 +925,8 @@ export function CartScreen() {
                     label={t === 0 ? 'No tip' : money(t)}
                     selected={(selectedTip ?? Number(c.tipAmount)) === t}
                     onPress={() => {
+                      // [BUG-GUARDS C2] One tip at a time: two in flight could land in either order.
+                      if (setTip.isPending) return;
                       setSelectedTip(t);
                       setTip.mutate(t);
                     }}
@@ -905,7 +988,7 @@ export function CartScreen() {
                     Jumps the dispatch queue · +{money(c.expressSurcharge)} — all of it goes to your rider.
                   </T>
                 </View>
-                <BrandSwitch value={express} onChange={() => setExpress((v) => !v)} />
+                <BrandSwitch label="Express delivery" value={express} onChange={() => setExpress((v) => !v)} />
               </View>
               <View style={RULE} />
             </View>
@@ -952,7 +1035,7 @@ export function CartScreen() {
                   appointments[i.itemId] ? (
                     <View key={i.itemId} style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                       <Feather name="calendar" size={13} color={color.text.muted} />
-                      <T variant="caption" tone="muted">
+                      <T variant="caption" tone="muted" style={{ flex: 1 }}>
                         {i.name} — {formatAppointmentSlot(appointments[i.itemId]!.slotStart)}
                         {appointments[i.itemId]!.mode === 'MOBILE' ? ' · at your address' : ''}
                       </T>
@@ -990,7 +1073,7 @@ export function CartScreen() {
           {!c.meetsMinimum && short.length === 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 This store has a minimum order of {money(c.minimumOrderAmount)}.
               </T>
             </View>
@@ -998,7 +1081,7 @@ export function CartScreen() {
           {unslotted.length > 0 ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="calendar" size={14} color={color.warning} />
-              <T variant="label" tone="warning">
+              <T variant="label" tone="warning" style={{ flex: 1 }}>
                 Pick a time for {unslotted[0].name} before ordering.
               </T>
             </View>
@@ -1006,7 +1089,7 @@ export function CartScreen() {
           {orderErr ? (
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: space.md }}>
               <Feather name="alert-circle" size={14} color={color.error} />
-              <T variant="label" tone="error">
+              <T variant="label" tone="error" style={{ flex: 1 }}>
                 {orderErr}
               </T>
             </View>
@@ -1064,6 +1147,7 @@ export function CartScreen() {
             label="Clear cart"
             size="md"
             onPress={() => {
+              if (clearCart.isPending) return; // [BUG-GUARDS C2] one clear per tap
               clearCart.mutate();
               setMenuOpen(false);
             }}
@@ -1122,6 +1206,7 @@ export function CartScreen() {
             held: placedHeld,
             submittedMethod: placedSubmittedMethod,
             paymentAction: placedPaymentAction,
+            mmgPayTo: placedMmgPayTo,
           })}
         </T>
         {placedPaymentAction ? (

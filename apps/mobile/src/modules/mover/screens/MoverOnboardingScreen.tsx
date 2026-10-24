@@ -3,16 +3,20 @@ import React, { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { Card, LabeledInput, LinkText, PillButton, Screen, T, useLogoutConfirm } from '../../../kit';
-import { SwiftMark } from '../../../components/SwiftLogo';
+import { Card, LabeledInput, LinkText, PillButton, T, useLogoutConfirm } from '../../../kit';
+import { BackToSwiftButton } from '../../../components/onboarding/BackToSwiftButton';
+import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { TAXI_TWO_LICENCES } from '../../../components/onboarding/taxiDocumentCopy';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
+import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useVerificationStatus, useBecomePartner, useChangeVehicle } from '../../../hooks';
 import { useStepUp, type MutationGuard } from '../../../hooks/useStepUp';
 import { StepUpDismissed } from '../../../lib/stepUp';
 import { VEHICLE_COPY, vehicleOffered } from '../../../lib/vehicleOffer';
+import { taxiPlateMessage } from '../../../lib/taxiPlate';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, moverQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { API_URL, DRIVER_VEHICLE_KINDS, type VehicleKind } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { useAuthStore } from '../../../stores/authStore';
@@ -96,6 +100,9 @@ function VehicleRow({ v, active, onPress }: { v: (typeof VTYPES)[number]; active
  * takes the mover offline and retires the old vehicle's papers. A verified
  * mover steps up first (`guard`).
  */
+/** Car and wagon car: the taxi checklist (buses are hidden at launch). */
+const TAXI_SIGNUP_KINDS: VehicleKind[] = ['CAR', 'WAGON_CAR'];
+
 export function VehicleSetup({
   vt, setVt, onDone, mode = 'join', current = null, guard,
 }: {
@@ -119,7 +126,10 @@ export function VehicleSetup({
   // exact version at provisioning, the same way signup records the Terms.
   const [agree, setAgree] = useState(false);
   const needsDetails = DRIVER_VEHICLE_KINDS.includes(vt);
-  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate);
+  // [Owner ruling 11 Oct 2026 — H-PLATE] A taxi plate starts with H: said under the field, and a
+  // non-H taxi plate cannot be saved (the server refuses it too, in the same words).
+  const plateMessage = needsDetails ? taxiPlateMessage(vt, plate) : null;
+  const valid = !needsDetails || (!!make && !!model && !!year && !!colr && !!plate && !plateMessage?.error);
   // The agreement was recorded when the first vehicle was saved; a change does not re-ask.
   const needsAgreement = mode === 'join';
   const sameAsSaved = mode === 'change' && vt === current && !needsDetails;
@@ -136,6 +146,13 @@ export function VehicleSetup({
   useEffect(() => {
     if (stale) void refetchPricing();
   }, [stale, refetchPricing]);
+  // [Row 628] The weekly fee, said before the vehicle is saved (join only — a change does not
+  // re-ask): the server's words and the amount above, and the tick given to exactly that amount,
+  // so a new vehicle or a new price clears it. An API with no words asks nothing and gets nothing.
+  const fee = needsAgreement ? feeTick(pricing.data, gate.ok ? gate.quote.rate : null) : ({ kind: 'none' } as const);
+  const [feeTickedFor, setFeeTickedFor] = useState<string | null>(null);
+  const feeTicked = fee.kind === 'tick' && feeTickedFor === fee.key;
+  const feeAsk = fee.kind === 'invalid' ? FEE_TICK_COPY.invalid : fee.kind === 'tick' && !feeTicked ? FEE_TICK_COPY.ask : null;
   // Only the vehicles Swift takes on today (the price list's `offered`, else the launch list).
   const offered = VTYPES.filter((v) => vehicleOffered(v.key, pricing.data));
   useEffect(() => {
@@ -144,17 +161,22 @@ export function VehicleSetup({
   }, [vt, pricing.data, offered, setVt]);
   const saveError = saving.error instanceof StepUpDismissed
     ? null
-    : ((saving.error as any)?.response?.data?.error?.message as string | undefined) ?? (saving.isError ? 'Couldn’t save. Try again.' : null);
+    : feeTickError(saving.error) ?? ((saving.error as any)?.response?.data?.error?.message as string | undefined) ?? (saving.isError ? 'Couldn’t save. Try again.' : null);
 
   const submit = () => {
     if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
     if (!vehicleOffered(vt, pricing.data)) return; // the picker lists only offered vehicles; restated for the same reason
+    if (feeAsk) return; // the weekly-fee tick, restated for the same reason
     const vehicle = needsDetails ? { make, model, year: Number(year) || 0, color: colr, licensePlate: plate } : undefined;
     if (mode === 'change') {
       changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });
       return;
     }
-    become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });
+    become.mutate(
+      { role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) },
+      // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
+      { onSuccess: () => onDone(true), onError: (e) => { if (feeTickError(e)) void refetchPricing(); } },
+    );
   };
 
   return (
@@ -170,22 +192,28 @@ export function VehicleSetup({
       </View>
       {needsDetails ? (
         <View style={{ gap: space.md, marginTop: space.md }}>
+          {/* [Owner ruling 11 Oct 2026] what a taxi driver will upload, said at sign-up */}
+          {TAXI_SIGNUP_KINDS.includes(vt) ? <T variant="label" tone="muted">{TAXI_TWO_LICENCES}</T> : null}
           <LabeledInput value={make} onChangeText={setMake} placeholder="Make (e.g. Toyota)" />
           <LabeledInput value={model} onChangeText={setModel} placeholder="Model (e.g. Allion)" />
           <View style={{ flexDirection: 'row', gap: space.md }}>
             <LabeledInput containerStyle={{ flex: 1 }} value={year} onChangeText={setYear} placeholder="Year" keyboardType="number-pad" />
             <LabeledInput containerStyle={{ flex: 1 }} value={colr} onChangeText={setColr} placeholder="Colour" />
           </View>
-          <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" />
+          <LabeledInput value={plate} onChangeText={setPlate} placeholder="Licence plate" autoCapitalize="characters" error={plateMessage?.error ? plateMessage.text : undefined} />
+          {plateMessage && !plateMessage.error ? (
+            <T variant="caption" tone="muted">{plateMessage.text}</T>
+          ) : null}
         </View>
       ) : null}
+      <WeeklyFeeTerms fee={fee} ticked={feeTicked} onToggle={() => fee.kind === 'tick' && setFeeTickedFor(feeTicked ? null : fee.key)} />
       {needsAgreement ? (
       <Pressable
         accessibilityRole="checkbox"
         accessibilityState={{ checked: agree }}
         accessibilityLabel="I agree to the Mover Agreement"
         onPress={() => setAgree((v) => !v)}
-        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, minHeight: 48 }}
       >
         <MaterialCommunityIcons
           name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}
@@ -214,11 +242,13 @@ export function VehicleSetup({
           ? QUOTE_GATE_COPY[gate.why]
           : !valid
             ? 'Fill in the vehicle details'
-            : needsAgreement && !agree
-              ? 'Agree to the Mover Agreement first'
-              : mode === 'change' ? VEHICLE_COPY.saveNew : 'Save vehicle'}
+            : feeAsk
+              ? feeAsk
+              : needsAgreement && !agree
+                ? 'Agree to the Mover Agreement first'
+                : mode === 'change' ? VEHICLE_COPY.saveNew : 'Save vehicle'}
         loading={saving.isPending}
-        disabled={!gate.ok || !valid || (needsAgreement && !agree) || sameAsSaved}
+        disabled={!gate.ok || !valid || feeAsk !== null || (needsAgreement && !agree) || sameAsSaved}
         style={{ marginTop: space.md }}
         onPress={submit}
       />
@@ -235,6 +265,10 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
     body: 'Anything you’ve saved or uploaded stays with your account. Vehicle details you haven’t saved yet are cleared.',
   });
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [Owner, 1 Oct] Never a one-way door: "‹ Swift", Android's back and the iOS
+  // edge swipe go back to ordering. The saved vehicle and every uploaded
+  // document stay on the server.
+  const back = useBackToSwift('mover');
   const savedVehicle: VehicleKind | null = status?.vehicleType ?? null;
   // Default the vehicle from what they picked on the entry screen: a taxi
   // driver starts on Car, a rider on Motorcycle. A saved vehicle always wins.
@@ -254,9 +288,9 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
   const checklistStatus = preview ?? status;
 
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: GUTTER, height: 56 }}>
-        <SwiftMark size={28} />
+        <BackToSwiftButton onPress={back.leave} busy={back.leaving} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.lg }}>
           <LinkText label="Switch app" onPress={() => setSwitcherOpen(true)} />
           <LinkText label="Log out" tone="muted" onPress={requestLogout} />
@@ -267,7 +301,7 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
           Start earning with Swift
         </T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Set up your vehicle and documents — we verify within 24 hours, then you go online and start earning.
+          Set up your vehicle and documents — we review them Monday to Saturday, 8:00–20:00 Guyana time, then you go online and start earning.
         </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg }}>
           <ValuePill icon="check-decagram" label="Keep 100%" />
@@ -337,6 +371,6 @@ export function MoverOnboardingScreen({ status }: { status: any }) {
       <RoleSwitcherSheet visible={switcherOpen} current="mover" onClose={() => setSwitcherOpen(false)} />
       {stepUp.sheet}
       {logoutDialog}
-    </Screen>
+    </BackToSwiftScreen>
   );
 }

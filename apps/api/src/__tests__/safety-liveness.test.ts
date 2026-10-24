@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -12,6 +12,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { LivenessService, assertShiftLiveness } from '../modules/safety/liveness.service';
 import type { KycProvider } from '../providers/kyc/kyc-provider';
 import { syntheticLocationOwner } from './helpers/online-mover';
+import { REAL_PNG } from './helpers/real-image';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -214,7 +215,7 @@ describe('LivenessService.check — the §7.1 outcome ladder', () => {
 });
 
 describe('POST /api/v1/safety/liveness-check (multipart)', () => {
-  const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+  // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
   function multipartBody(filename: string, mime: string, content: Buffer) {
     const boundary = `----swift${nanoid(8)}`;
     const head = Buffer.from(`--${boundary}\r\ncontent-disposition: form-data; name="file"; filename="${filename}"\r\ncontent-type: ${mime}\r\n\r\n`);
@@ -243,5 +244,43 @@ describe('POST /api/v1/safety/liveness-check (multipart)', () => {
     const anon = multipartBody('a.png', 'image/png', REAL_PNG);
     const res2 = await app.inject({ method: 'POST', url: '/api/v1/safety/liveness-check', payload: anon.payload, headers: { 'content-type': anon.contentType } });
     expect(res2.statusCode).toBe(401);
+  });
+});
+
+
+// [Owner ruling, row 54] Face-matching is deliberately OFF at launch. A selfie check then keeps the
+// EXISTING policy — the BORDERLINE rung (online + a person compares the selfie) — with an explicit
+// "biometrics off" reason. It is not an analyzer outage: no outage page, no error, whatever the
+// outage policy says, and no new persisted outcome.
+describe('selfie check while face-matching is deliberately off', () => {
+  it.each(['FAIL_OPEN_FLAGGED', 'FAIL_CLOSED'])('under %s: manual review, online allowed, never an outage page', async (policy) => {
+    await makeUser(['ADMIN']); // someone to receive admin notices
+    const { userId, driver } = await makeDriver();
+    const verifyIdentity = vi.fn(async () => ({ status: 'approved' as const }));
+    const provider = { verifyIdentity, verifyDocument: vi.fn(), getStatus: vi.fn() } as unknown as KycProvider;
+    const notices = (kind: string) => app.prisma.notification.findMany({
+      where: { AND: [{ data: { path: ['kind'], equals: kind } }, { data: { path: ['userId'], equals: userId } }] },
+      select: { title: true, body: true, data: true },
+    });
+    process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '0';
+    process.env['LIVENESS_ANALYZER_OUTAGE_POLICY'] = policy;
+    try {
+      const result = await new LivenessService(app.prisma, app.io, provider).check({ userId, profile: 'DRIVER', selfieUrl: 'https://cdn.test/liveness/synthetic.jpg' });
+      expect(result).toMatchObject({ outcome: 'BORDERLINE', allowedOnline: true });
+      expect(verifyIdentity).not.toHaveBeenCalled();
+      expect(await app.prisma.livenessCheck.findUniqueOrThrow({ where: { id: result.checkId } })).toMatchObject({ outcome: 'BORDERLINE', reviewRequired: true });
+      expect((await app.prisma.driver.findUniqueOrThrow({ where: { id: driver.id } })).lastLivenessPassAt).toBeInstanceOf(Date);
+      expect(await notices('liveness_outage')).toEqual([]);
+      const review = await notices('liveness_review');
+      expect(review.length).toBeGreaterThan(0);
+      for (const n of review) {
+        expect(n.data).toMatchObject({ reason: 'BIOMETRICS_OFF', outcome: 'BORDERLINE' });
+        expect(n.body).toMatch(/switched off on purpose/);
+        expect(n.body).not.toMatch(/outage/i);
+      }
+    } finally {
+      process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
+      delete process.env['LIVENESS_ANALYZER_OUTAGE_POLICY'];
+    }
   });
 });

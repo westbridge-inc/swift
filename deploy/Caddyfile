@@ -1,3 +1,23 @@
+{
+    # Runtime proxy failures log requests even when access logging is off.
+    # Neither path credentials nor signed queries/headers belong in logs.
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers delete
+            }
+        }
+    }
+    # [CERT-ISSUER] The ONLY certificate issuer: Let's Encrypt's production
+    # ACME directory. The apps pin api.swiftgy.com to Let's Encrypt's roots
+    # (ISRG Root X1/X2; GTS Root R1 as backup), and Caddy's built-in issuers
+    # can fall back to a CA outside that pin set. Every site here (staging and
+    # production) uses this one issuer. caddy-cert-issuer.test.ts holds it.
+    cert_issuer acme https://acme-v02.api.letsencrypt.org/directory
+}
+
 # API_HOST is a single staging DNS name set in deploy/.env. A hostname site
 # address enables Caddy's automatic certificate issuance and renewal.
 #
@@ -10,13 +30,126 @@
 # is always set; every other host on this site is the website, and with
 # WEB_HOST unset there is no other host. The website sends its own security
 # headers (apps/web/next.config.ts); none are added or overridden here.
-{$API_HOST} {$WEB_HOST} {
+#
+# [STORE-1] API_ALIAS_HOST (optional, deploy/.env) is a SECOND DNS name for the
+# same API. The store build of the app is fixed to the production API name; until
+# a production stack exists, that name points at this stack. It gets its own
+# certificate like any site address, and it MUST be in the @api matcher: any
+# host missing from the matcher is served the website. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+#
+# [Item 8] WEB_ALIAS_HOSTS (optional, deploy/.env) is a space-separated list of
+# extra DNS names for the WEBSITE — the public swiftgy.com and www.swiftgy.com
+# while no production stack exists. Each gets its own certificate and, being
+# absent from the @api matcher, reaches the website. www is redirected to the
+# apex by the website itself (apps/web/next.config.ts), which keeps the app-link
+# files on www unredirected; no redirect belongs here. Unset or empty, it
+# expands to nothing and this file is exactly what it was without it.
+#
+# [ADMIN-CONSOLE] ADMIN_HOST (optional, deploy/.env) is the admin console's DNS
+# name (apps/admin, the `admin` service). It joins this site for the reason
+# WEB_HOST does, gets its own certificate, and its route comes FIRST, keyed on
+# its own matcher. That matcher always carries `admin.invalid` as well: a host
+# matcher left with no argument parses, then stops Caddy loading the WHOLE
+# configuration, the API included. .invalid is reserved (RFC 2606) and is never
+# one of this site's addresses, so with ADMIN_HOST empty no request reaches the
+# console, and the API and the website are routed exactly as before.
+#
+# The console's own sign-in (a staff phone and a one-time code; the API admits
+# ADMIN and SUPER_ADMIN only) can sit behind an OPTIONAL second gate: HTTP
+# basic authentication on every path of the console's host, on when
+# deploy/.env sets ADMIN_BASIC_AUTH_HASH (a bcrypt hash; the password never
+# reaches this host). Compose derives the gate's user from that one setting
+# (`admin` when the hash is set, empty when not) and the gate keys on the
+# user: both empty is no gate, and one without the other cannot be parsed, so
+# a half-configured gate stops Caddy instead of serving the console ungated.
+# The gate's credential ends here: it is stripped before the console.
+#
+# [WEB-GATE] The staging website's own name can sit behind a password too:
+# HTTP basic authentication on WEB_HOST, on when deploy/.env sets
+# WEB_BASIC_AUTH_HASH (a bcrypt hash; the password never reaches this host).
+# Compose derives its user the same way (`tester` when the hash is set, empty
+# when not) and the gate keys on that user exactly as the console's does, so
+# a half-configured gate stops Caddy instead of serving the site ungated. Its
+# host matcher carries `web.invalid` for the reason the console's carries
+# `admin.invalid`. Only WEB_HOST is gated. The public names (WEB_ALIAS_HOSTS)
+# stay open: the stores' privacy-policy and account-deletion links point
+# there. So do two path families on WEB_HOST itself: /pay/mmg/*, where MMG
+# sends the payer back in the middle of a payment (a self-contained page),
+# and /.well-known/*, the app-link files the phones fetch. Caddy matches the
+# CLEANED path, and with an encoded slash a `..` can clean into an open
+# prefix while the website routes it elsewhere, so a path that climbs (`..`
+# spelt any way, before the query) is never open. The credential ends here
+# on the requests the gate checked; every other website request reaches the
+# catch-all exactly as it did without the gate.
+#
+# [WEB-GATE-SW] While the gate is on, two more answers on WEB_HOST alone.
+# 1. /sw.js is a retiring worker, sent without the password and never from
+#    the website. A phone that visited before the gate keeps the site's
+#    worker, which fetches pages itself; a worker's fetch never brings up the
+#    password box, so the page came back blank. The browser checks /sw.js on
+#    every visit; this one clears the site's caches and unregisters itself,
+#    and the next load asks for the password. It reloads nothing: the site
+#    registers /sw.js on every load, so a reload would never end. It is a
+#    fixed answer, so a path that climbs to it reaches nothing of the site.
+# 2. A refused request gets a short page saying so, not a blank one. The
+#    password box still comes up: the challenge header is kept.
+# Their `header` lines set only these two fixed answers; no response from the
+# website passes through them, so the website keeps its own headers.
+{$API_HOST} {$API_ALIAS_HOST} {$WEB_HOST} {$WEB_ALIAS_HOSTS} {$ADMIN_HOST} {
     encode zstd gzip
-    @api host {$API_HOST}
+    @admin host {$ADMIN_HOST} admin.invalid
+    handle @admin {
+        @admin_gate expression `"{$ADMIN_BASIC_AUTH_USER}" != ""`
+        basic_auth @admin_gate {
+            {$ADMIN_BASIC_AUTH_USER} {$ADMIN_BASIC_AUTH_HASH}
+        }
+        reverse_proxy admin:3000 {
+            header_up -Authorization
+        }
+    }
+    @api host {$API_HOST} {$API_ALIAS_HOST}
     handle @api {
         @metrics path /metrics
         respond @metrics 403
         reverse_proxy api:3000
+    }
+    handle_errors 401 {
+        @web_refused host {$WEB_HOST} web.invalid
+        handle @web_refused {
+            header Content-Type "text/html; charset=utf-8"
+            header Cache-Control no-store
+            header X-Content-Type-Options nosniff
+            header Content-Security-Policy "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+            respond `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Swift test site</title></head><body style="margin:0;padding:48px 24px;font-family:-apple-system,system-ui,sans-serif;background:rgb(251,251,249);color:rgb(33,26,26)"><h1 style="font-size:22px;margin:0 0 8px">Swift test site</h1><p style="font-size:16px;line-height:1.5;margin:0;color:rgb(120,108,108)">This test site needs the tester password. Reload the page to sign in.</p></body></html>` 401
+        }
+    }
+    @web_retire_worker {
+        host {$WEB_HOST} web.invalid
+        expression `"{$WEB_BASIC_AUTH_USER}" != ""`
+        path /sw.js
+    }
+    handle @web_retire_worker {
+        header Content-Type "text/javascript; charset=utf-8"
+        header Cache-Control no-store
+        header X-Content-Type-Options nosniff
+        respond `self.addEventListener('install', () => self.skipWaiting()); self.addEventListener('activate', (event) => event.waitUntil(caches.keys().then((names) => Promise.all(names.filter((name) => name.startsWith('swift-')).map((name) => caches.delete(name)))).then(() => self.registration.unregister())));` 200
+    }
+    @web_gate {
+        host {$WEB_HOST} web.invalid
+        expression `"{$WEB_BASIC_AUTH_USER}" != ""`
+        not {
+            path /pay/mmg/* /.well-known/*
+            not expression `{http.request.orig_uri}.matches("(?i)^[^?]*([.]|%2e)([.]|%2e)")`
+        }
+    }
+    handle @web_gate {
+        basic_auth {
+            {$WEB_BASIC_AUTH_USER} {$WEB_BASIC_AUTH_HASH}
+        }
+        reverse_proxy web:3000 {
+            header_up -Authorization
+        }
     }
     handle {
         reverse_proxy web:3000

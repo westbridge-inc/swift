@@ -146,7 +146,7 @@ async function main() {
       { slug: 'georgetown-pizza-co', name: 'Georgetown Pizza Co.', cuisines: ['Pizza', 'Italian'], rating: 4.5, ratings: 421, eta: 30, cover: 'https://images.unsplash.com/photo-1513104890138-7c749659a591?w=600&q=80', items: [{ name: 'Margherita', description: 'Tomato, mozzarella, basil', price: 2600 }, { name: 'Pepperoni', description: 'Loaded pepperoni & cheese', price: 3000 }, { name: 'Garlic Knots (6)', description: 'Buttery, herby', price: 1000 }] },
       { slug: 'spice-route', name: 'Spice Route', cuisines: ['Chinese', 'Asian'], rating: 4.7, ratings: 256, eta: 28, cover: 'https://images.unsplash.com/photo-1455619452474-d2be8b1e70cd?w=600&q=80', items: [{ name: 'Sweet & Sour Chicken', description: 'Crispy, peppers & pineapple', price: 2100 }, { name: 'Beef Lo Mein', description: 'Stir-fried noodles', price: 2300 }, { name: 'Veg Spring Rolls (4)', description: 'Crisp & golden', price: 900 }] },
       { slug: 'sea-breeze-seafood', name: 'Sea Breeze Seafood', cuisines: ['Seafood', 'Caribbean'], rating: 4.9, ratings: 143, eta: 40, cover: 'https://images.unsplash.com/photo-1559737558-2f5a35f4523b?w=600&q=80', items: [{ name: 'Garlic Butter Shrimp', description: 'Sautéed with herbs', price: 3400 }, { name: 'Fish & Bakes', description: 'Fried fish, festival bakes', price: 2400 }, { name: 'Crab Curry', description: 'Rich coconut curry', price: 3600 }] },
-      { slug: 'sweet-tooth-bakery', name: 'Sweet Tooth Bakery', cuisines: ['Bakery', 'Desserts'], rating: 4.6, ratings: 209, eta: 20, cover: 'https://images.unsplash.com/photo-1486427944299-d1955d23e34d?w=600&q=80', items: [{ name: 'Pine Tart (3)', description: 'Flaky pastry, pineapple', price: 700 }, { name: 'Black Cake Slice', description: 'Rum-soaked Guyanese classic', price: 1200 }, { name: 'Cheese Roll', description: 'Buttery, savoury', price: 500 }] },
+      { slug: 'sweet-tooth-bakery', name: 'Sweet Tooth Bakery', cuisines: ['Bakery', 'Desserts'], rating: 4.6, ratings: 209, eta: 20, cover: 'https://images.unsplash.com/photo-1486427944299-d1955d23e34d?w=600&q=80', items: [{ name: 'Pine Tart (3)', description: 'Flaky pastry, pineapple', price: 700 }, { name: 'Black Cake Slice', description: 'Guyanese Christmas classic, rich with fruit', price: 1200 }, { name: 'Cheese Roll', description: 'Buttery, savoury', price: 500 }] },
       { slug: 'green-bowl', name: 'Green Bowl', cuisines: ['Healthy', 'Vegetarian'], rating: 4.4, ratings: 97, eta: 22, cover: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?w=600&q=80', items: [{ name: 'Buddha Bowl', description: 'Greens, chickpeas, tahini', price: 2000 }, { name: 'Avocado Toast', description: 'Sourdough, chili flakes', price: 1500 }, { name: 'Fresh Juice', description: 'Cold-pressed daily', price: 800 }] },
     ];
     for (let i = 0; i < MORE_RESTAURANTS.length; i++) {
@@ -652,8 +652,11 @@ async function main() {
   // Universal signup selfie (master plan §3): seeded QA accounts get a profile
   // photo so demo flows don't dead-end at the selfie gate. Real signups capture
   // theirs in-app with the camera. Deterministic per-phone portrait for dev.
+  // [PLAT-3] Selected by the seed's own marker, never by the +592600 range: that
+  // is a live carrier range, and a real person's number in it must not be given
+  // a fake photo or a passed selfie gate.
   const selfieless = await prisma.user.findMany({
-    where: { phone: { startsWith: '+592600' }, selfieCapturedAt: null },
+    where: { syntheticRunId: 'seed-demo', selfieCapturedAt: null },
     select: { id: true, phone: true },
   });
   for (const u of selfieless) {
@@ -701,7 +704,7 @@ async function main() {
   const seededVendorUser = await prisma.user.findUnique({ where: { phone: '+5926002000' } });
   if (seededVendorUser) {
     await ensureApprovedDocs(seededVendorUser.id, 'VENDOR_OWNER', [
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo', 'police_clearance',
     ]);
   }
@@ -727,7 +730,7 @@ async function main() {
     if (!drv) continue;
     await ensureApprovedDocs(drv.id, 'MOVER', [
       'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-      'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+      'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
     ], hireInsurance);
   }
 

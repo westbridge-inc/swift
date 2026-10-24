@@ -14,6 +14,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getChannels } from '../providers/notifications/channels';
 import { escalateOverdueOpsAlerts, syncOpsAlertReadReceipts, scanOpsAlerts, runOpsAlertDrillIfDue, acknowledgeOpsAlert } from '../modules/safety/ops-alert';
 import { devChannelLog, resetDevChannelLog } from '../providers/notifications/channels';
+import { testPhone } from './helpers/fixture-ids';
 
 // Trip Guardian M4c — the graduated check-in ladder (§5.3, self-test §14-E):
 // L2 soft check-in → L3 hard check-in with a server deadline → L4 auto-SOS.
@@ -106,7 +107,7 @@ const io = { to: () => ({ emit: () => {} }), in: () => ({ fetchSockets: async ()
 const sos = () => new SosService(app.prisma, io);
 const notifications = () => new NotificationService(app.prisma, io);
 const alertIds: string[] = []; const opsAlertIds: string[] = [];
-const ONCALL = `+5927${String(Date.now()).slice(-8)}`;
+const ONCALL = testPhone();
 const opsAlertFor = (sosAlertId: string) => app.prisma.opsAlert.findFirstOrThrow({ where: { sosAlertId }, include: { recipients: true } });
 const escalationPushes = (userId: string) => app.prisma.notification.count({ where: { userId, data: { path: ['kind'], equals: 'ops_alert_escalated' } } });
 const oncallTexts = () => devChannelLog.filter((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL).length;
@@ -130,6 +131,9 @@ describe('[S-19] the register’s red test: a connected socket that never acknow
   it('the page is a durable obligation with per-recipient delivery; nobody acknowledges; by the deadline it escalates — re-push, on-call text, level up — and keeps escalating', async () => {
     const { admin, alert, page } = await activeSos();
     expect(page.kind).toBe('SOS'); expect(page.acknowledgedAt).toBeNull();
+    // [144] the on-call list is texted when the page opens, not only once nobody acknowledges
+    expect(oncallTexts()).toBe(1);
+    expect(devChannelLog.find((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL)).toMatchObject({ body: expect.stringContaining('SOS ACTIVE') });
     const me = page.recipients.find((r) => r.userId === admin.userId)!;
     expect(me).toBeDefined(); expect(me.deliveredAt).not.toBeNull(); expect(me.notificationId).toBeTruthy(); expect(me.ackedAt).toBeNull();
     // the room had a socket the whole time; that is not receipt
@@ -144,8 +148,8 @@ describe('[S-19] the register’s red test: a connected socket that never acknow
     expect(first.escalated).toContain(page.id);
     expect((await opsAlertFor(alert.id)).escalationLevel).toBe(1);
     expect(await escalationPushes(admin.userId)).toBe(1);
-    expect(oncallTexts()).toBe(1);
-    expect(devChannelLog.find((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL)).toMatchObject({ body: expect.stringContaining('UNACKNOWLEDGED') });
+    expect(oncallTexts()).toBe(2);
+    expect(devChannelLog.filter((e) => e.channel === 'sms' && (e as { to?: string }).to === ONCALL).at(-1)).toMatchObject({ body: expect.stringContaining('UNACKNOWLEDGED') });
     // too soon to repeat
     const soon = await escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(t1.getTime() + 10_000) });
     expect(soon.escalated).not.toContain(page.id);
@@ -200,10 +204,11 @@ describe('[S-19] seen is not acknowledged; the emergency ending; the rollback; d
   it('the rollback pauses escalation and never downgrades the record to acknowledged', async () => {
     const { alert, page } = await activeSos();
     process.env['OPS_ALERT_ESCALATION_KILL'] = '1';
+    const textsAtOpen = oncallTexts(); // [144] the page itself texts on-call when it opens
     const res = await escalateOverdueOpsAlerts(app.prisma, notifications(), getChannels().sms, { now: new Date(page.ackDeadlineAt.getTime() + 1000) });
     expect(res.escalated).not.toContain(page.id);
     expect(await opsAlertFor(alert.id)).toMatchObject({ acknowledgedAt: null, escalationLevel: 0 });
-    expect(oncallTexts()).toBe(0);
+    expect(oncallTexts()).toBe(textsAtOpen); // the paused escalation texts nobody
   });
 
   it('drills run the same path on schedule, once per interval, and the last drill’s acknowledgement latency is a gauge', async () => {

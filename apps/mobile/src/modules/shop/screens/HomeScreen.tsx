@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
 import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
@@ -31,6 +32,7 @@ import { money } from '../../../lib/money';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
+import { trackRouteFor } from '../../../lib/orderTrackRoute';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
@@ -49,6 +51,8 @@ import {
   T,
   VendorRow,
 } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '../../../lib/pricePromiseCopy';
 // Per-vertical identity colour lives in the KIT [F-263] — it was a local hex
 // map here once and the no-literal-hex-in-screens rule cleaned it away, which
 // is how the grid ended up as eight identical squares.
@@ -267,7 +271,12 @@ function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProj
             label="Track"
             variant="dark"
             size="sm"
-            onPress={() => navigation.navigate('Delivery', { orderId: order.id })}
+            // [TAXI-FLOW 22 Oct] A ride tracks on the ride screen, never the
+            // store's: the server's orderType picks (orderTrackRoute.ts).
+            onPress={() => {
+              const target = trackRouteFor(order);
+              navigation.navigate(target.screen, target.params);
+            }}
           />
         </View>
 
@@ -346,6 +355,7 @@ export function HomeScreen() {
     [refreshForAttention],
   ));
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
@@ -371,7 +381,9 @@ export function HomeScreen() {
       promptLogin();
       return;
     }
-    toggleFav.mutate({ vendorId, isFavorite });
+    // [BUG-GUARDS C2] A double tap on the heart sent two add/remove requests: one per store at a time
+    // (another store's heart still goes while this one sends).
+    holdRow(vendorId, () => toggleFav.mutateAsync({ vendorId, isFavorite }));
   };
 
   const feed = home.data;
@@ -458,11 +470,12 @@ export function HomeScreen() {
                 hitSlop={14}
                 accessibilityRole="button"
                 accessibilityLabel="Notifications"
+                style={touchTarget(22)}
               >
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
               <Pressable
-                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}
+                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' }, { pop: true })}
                 accessibilityRole="button"
                 accessibilityLabel="Profile"
               >
@@ -651,7 +664,7 @@ export function HomeScreen() {
         <CategoryRail
           data={discovery.data}
           loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
 
@@ -727,9 +740,10 @@ export function HomeScreen() {
               <View style={{ paddingHorizontal: GUTTER, flexDirection: 'row', alignItems: 'flex-start', gap: space.sm }}>
                 <Feather name="check-circle" size={16} color={color.success} style={{ marginTop: 2 }} />
                 <View style={{ flex: 1 }}>
-                  <T variant="bodyStrong">0% fees, always.</T>
+                  {/* [Legal research A12] the research's price promise; "0% fees" was not true next to a delivery fee */}
+                  <T variant="bodyStrong">{PRICE_PROMISE_TITLE}</T>
                   <T variant="caption" tone="muted" style={{ marginTop: 2 }}>
-                    Swift never marks up your order — pay cash when it arrives.
+                    {PRICE_PROMISE_BODY}
                   </T>
                 </View>
               </View>

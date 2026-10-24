@@ -4,8 +4,9 @@ import { ZodError } from 'zod';
 import { AppError } from '../utils/errors';
 import { FareService, formulaFare } from '../modules/rides/fare.service';
 import { planTaxiStops, taxiMaxStops } from '../modules/rides/taxi-stops-flag';
-import { DEFAULT_TAXI_RATES } from '../modules/country/pricing-config';
-import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
+import { LEGACY_GY_TAXI_CARD } from './helpers/legacy-taxi-card';
+import { GoogleMapsProvider, HaversineMapsProvider, OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type RouteLegsEstimate, type RouteSource } from '../providers/maps/maps-provider';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Pricing a ride with stops, service-free: the WHOLE
@@ -15,6 +16,12 @@ import { OsrmMapsProvider, type LatLng, type MapsProvider, type RouteLeg, type R
 // (503), never priced from a guess; a route the zone table prices is refused
 // (409) before anything is routed. Default GY rates throughout: base 1000,
 // perKm 300, perMin 25, minimum 1500; Comfort ×1.35, Group ×2.5.
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts, its included kilometres once per trip
+// with stops too). The fake Guyana row below carries the card these numbers
+// were derived from (LEGACY_GY_TAXI_CARD, which names no included kilometres):
+// the formula with included kilometres must price every one of them unchanged.
 // ---------------------------------------------------------------------------
 
 const PICKUP = { lat: 6.90, lng: -58.10 };
@@ -44,15 +51,16 @@ function engine(legs: RouteLeg[], opts: { km?: number; minutes?: number | null; 
 }
 
 /** The slice of Prisma the pricing path reads, with no zones by default and
- *  GY at its declared defaults (a null rates column reads as the defaults). */
+ *  GY on the legacy card (a valid column, recorded as a version on first read). */
 function fakePrisma(zones: { rows?: unknown[]; fares?: Array<{ fromZoneId: string; toZoneId: string }> } = {}) {
   const reads: string[] = [];
   const prisma = {
     zone: { findMany: async () => { reads.push('zone'); return zones.rows ?? []; } },
     zoneFare: { findMany: async () => { reads.push('zoneFare'); return zones.fares ?? []; } },
     countryConfig: {
-      findUnique: async () => { reads.push('countryConfig'); return { code: 'GY', currencyCode: 'GYD', taxiRates: null, taxiClassRates: null }; },
+      findUnique: async () => { reads.push('countryConfig'); return { code: 'GY', currencyCode: 'GYD', taxiRates: LEGACY_GY_TAXI_CARD, taxiClassRates: null }; },
     },
+    pricingConfigVersion: { findFirst: async () => null, create: async (args: { data: unknown }) => args.data },
   } as unknown as PrismaClient;
   return { prisma, reads };
 }
@@ -77,32 +85,32 @@ describe('the formula is applied once, to the whole route', () => {
   it('the plan’s worked example: 10.15 km / 27 min → 4720 → Economy 4700, Comfort 6345 → 6300', async () => {
     const { maps } = engine([{ km: 4, minutes: 10 }, { km: 6.15, minutes: 17 }], { km: 10.15, minutes: 27 });
     const est = await price([STOP_1], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est).toMatchObject({ billableKm: 10.15, distanceKm: 10.2, durationMin: 27, routeSource: 'osrm', currencyCode: 'GYD' });
     expect(est.tiers.every((t) => t.source === 'formula')).toBe(true);
     // Pricing each leg as its own trip would have charged 2500 + 3300.
-    expect(formulaFare(DEFAULT_TAXI_RATES, 4, 10) + formulaFare(DEFAULT_TAXI_RATES, 6.15, 17)).toBe(5800);
+    expect(formulaFare(LEGACY_GY_TAXI_CARD, 4, 10) + formulaFare(LEGACY_GY_TAXI_CARD, 6.15, 17)).toBe(5800);
   });
 
   it('the base fare once: four short legs are one 2 km trip (1700), not four trips (4 × 1500)', async () => {
     const leg = { km: 0.5, minutes: 1 };
     const { maps } = engine([leg, leg, leg, leg]);
     const est = await price([STOP_1, STOP_2, STOP_3], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300, GROUP: 4300 });
+    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300 });
     expect(est).toMatchObject({ billableKm: 2, durationMin: 4 });
   });
 
   it('the minimum once: a short trip with a stop costs the minimum, once', async () => {
     const { maps } = engine([{ km: 0.1, minutes: 0.3 }, { km: 0.1, minutes: 0.3 }]);
     const est = await price([STOP_1], maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1500, COMFORT: 2000, GROUP: 3800 });
+    expect(fares(est)).toEqual({ ECONOMY: 1500, COMFORT: 2000 });
   });
 
   it('no fee per stop: the same road with more stops on it costs the same', async () => {
     const two = await price([STOP_1], engine([{ km: 3, minutes: 6 }, { km: 3, minutes: 6 }]).maps);
     const four = await price([STOP_1, STOP_2, STOP_3], engine([{ km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }, { km: 1.5, minutes: 3 }]).maps);
     expect(fares(four)).toEqual(fares(two));
-    expect(fares(two)['ECONOMY']).toBe(formulaFare(DEFAULT_TAXI_RATES, 6, 12)); // 1000 + 1800 + 300 = 3100
+    expect(fares(two)['ECONOMY']).toBe(formulaFare(LEGACY_GY_TAXI_CARD, 6, 12)); // 1000 + 1800 + 300 = 3100
   });
 });
 
@@ -188,7 +196,7 @@ describe('fails closed: never a price from a guess', () => {
 
   it('one leg of 0 m is real (two points across one road snap to one node): the route is priced', async () => {
     const est = await price([STOP_1], engine([{ km: 2, minutes: 4 }, { km: 0, minutes: 0 }]).maps);
-    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300, GROUP: 4300 }); // 1000 + 600 + 100
+    expect(fares(est)).toEqual({ ECONOMY: 1700, COMFORT: 2300 }); // 1000 + 600 + 100
     expect(est.legs[1]).toEqual({ from: 'STOP_1', to: 'DESTINATION', meters: 0, seconds: 0 });
   });
 
@@ -230,7 +238,7 @@ describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (
 
   it('a valid body prices the worked example: the raw path is live (4700 / 6300)', async () => {
     const est = await osrmPrice(body('600', '1020', '1620'));
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est.legs.map((l) => l.seconds)).toEqual([600, 1020]);
   });
 
@@ -250,8 +258,51 @@ describe('provider → fare: a RAW OSRM body, parsed as the provider parses it (
   it('ABSENT durations (null, or no key at all) fall back to the speed model, as today: 10.15 km → 25 min → 4670 → 4700', async () => {
     const est = await osrmPrice('{"code":"Ok","routes":[{"distance":10150,"duration":null,"legs":[{"distance":4000,"duration":null},{"distance":6150}]}]}');
     expect(est).toMatchObject({ billableKm: 10.15, durationMin: 25, routeSource: 'osrm' });
-    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300, GROUP: 11800 });
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
     expect(est.legs.map((l) => l.seconds)).toEqual([null, null]);
+  });
+});
+
+describe('production prices a ride with stops only from the real road (DS981)', () => {
+  // The straight-line estimate is never a production fare, with stops or
+  // without. A provider whose routes ARE that estimate (the straight-line
+  // provider, or Google, whose routes delegate to it) answers degraded: false,
+  // so the refusal must read the source, as the single-leg quote does.
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
+  const realRoad = '{"code":"Ok","routes":[{"distance":10150,"duration":1620,"legs":[{"distance":4000,"duration":600},{"distance":6150,"duration":1020}]}]}';
+
+  it.each([
+    ['the straight-line provider', () => new HaversineMapsProvider()],
+    ['the Google provider (its routes are the straight-line estimate)', () => new GoogleMapsProvider('k')],
+  ])('%s is refused in production: 503 ROUTE_UNAVAILABLE, never a price', async (_label, provider) => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const err = await refusal(price([STOP_1], provider()));
+    expect([err.statusCode, err.code, err.details]).toEqual([503, 'ROUTE_UNAVAILABLE', { stopCount: 1 }]);
+    expect(err.message).toMatch(/try again/i);
+  });
+
+  it('any engine answer from the straight-line source is refused in production, even one not marked degraded', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    const { maps, asked } = engine([{ km: 4, minutes: 10 }, { km: 6.15, minutes: 17 }], { source: 'haversine', degraded: false });
+    const err = await refusal(price([STOP_1], maps));
+    expect([err.statusCode, err.code]).toEqual([503, 'ROUTE_UNAVAILABLE']);
+    expect(asked).toHaveLength(1);
+  });
+
+  it('the real road still prices a ride with stops in production (4700 / 6300)', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(realRoad, { status: 200, headers: { 'content-type': 'application/json' } })));
+    const est = await price([STOP_1], new OsrmMapsProvider('http://osrm.test'));
+    // [VERIFY-DOCS · owner ruling 9 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
+    expect(fares(est)).toEqual({ ECONOMY: 4700, COMFORT: 6300 });
+    expect(est).toMatchObject({ billableKm: 10.15, durationMin: 27, routeSource: 'osrm' });
+  });
+
+  it.each(['development', 'test'])('%s keeps the deterministic estimate for a ride with stops, as for one without', async (mode) => {
+    vi.stubEnv('NODE_ENV', mode);
+    const est = await price([STOP_1], new HaversineMapsProvider());
+    expect(est.routeSource).toBe('haversine');
+    expect(est.billableKm).toBeGreaterThan(0);
   });
 });
 

@@ -57,9 +57,23 @@ describe('both screens wire the same seam', () => {
   });
 
   it('the client hits the exact server routes', () => {
-    expect(api).toContain("stepUp: () => api.post('/auth/step-up')");
-    expect(api).toContain("verifyStepUp: (code: string) => api.post('/auth/step-up/verify', { code })");
+    // [SAFE-B] The step-up calls carry the captured session, so a retry verifies the SAME session it began on.
+    expect(api).toContain("stepUp: (session?: AuthSessionSnapshot) => api.post('/auth/step-up', undefined, capturedAuthConfig(session))");
+    expect(api).toContain("verifyStepUp: (code: string, session?: AuthSessionSnapshot) => api.post('/auth/step-up/verify', { code }, capturedAuthConfig(session))");
     expect(api).toContain("api.delete('/vendor/profile/mmg-pay-url/pending')");
     expect(api).toContain("api.delete('/driver/profile/mmg-pay-url/pending')");
+  });
+});
+
+describe('who pays a taxi driver (owner, 11 Oct)', () => {
+  it('the driver card names passengers, never riders', () => {
+    // Only a taxi driver sees this card (MoverAccountScreen renders it under
+    // isDriver). A driver's customers are passengers; in Swift "riders" are
+    // delivery partners, so "Riders can pay you" told a driver the wrong thing.
+    // [PAYMENT-SIMPLIFY 17 Oct] ...and only while the server's DRIVER_MMG_PAY_LINK switch is on.
+    expect(mover).toMatch(/\{isDriver && [^\n]*mmgPayLinkEnabled === true \? \(\s*<MmgPayLinkCard\s+who="rides"/);
+    expect(card).toContain("const payer = who === 'store' ? 'Customers' : 'Passengers';");
+    expect(card).toContain("const payerLower = who === 'store' ? 'customers' : 'passengers';");
+    expect(card).not.toMatch(/'Riders'|'riders'/);
   });
 });

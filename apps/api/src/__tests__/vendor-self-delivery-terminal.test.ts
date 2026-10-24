@@ -1,3 +1,4 @@
+import { currentMoverDocuments } from './helpers/current-mover-documents';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -168,6 +169,8 @@ beforeAll(async () => {
       floatLimit: 1_000_000,
     },
   });
+  // Likewise the current-document gate every new-custody boundary re-checks.
+  await currentMoverDocuments(app.prisma, ru.id, 'MOTORCYCLE');
   riderId = rider.id;
   riderUserId = ru.id;
 });
@@ -189,8 +192,8 @@ describe('[F-0026] the self-delivery lane has a terminal', () => {
     const order = await makeOrder('VENDOR_DELIVERY', 'PENDING');
 
     for (const [path, expected] of [
-      ['accept', 'ACCEPTED'],
-      ['preparing', 'PREPARING'],
+      ['accept', 'PREPARING'], // [O-3] one tap: Accept starts preparation
+      ['preparing', 'PREPARING'], // [O-3] an older build's "Start preparing": 200 no-op, no second row
       ['ready', 'READY_FOR_PICKUP'],
       ['delivered', 'DELIVERED'],
     ] as const) {
@@ -495,7 +498,7 @@ describe('[DA-01/02/03] locked delivery authority survives adversarial timing', 
       const response = await accepting;
       expect(response.statusCode).toBe(200);
       const after = await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-      expect(after.status).toBe('ACCEPTED');
+      expect(after.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
       expect(after.fulfillmentMode).toBe('PLATFORM_RIDER');
       expect(after.fulfillmentModeVersion).toBe(1);
     } finally {

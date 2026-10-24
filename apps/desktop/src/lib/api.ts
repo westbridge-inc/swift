@@ -438,10 +438,13 @@ export const documentViewUrl = (id: string) =>
     return resolved;
   });
 
-/** Mirrors the server's RejectionReasonCode enum (verification.service). */
+/** Mirrors the server's REJECTION_REASON_CODES (verification.service): the codes a reviewer may
+ *  choose for a new decision. A census test keeps the two identical. NOT_YELLOW is retired (owner
+ *  ruling 2026-10-01: a taxi may be any colour) and is never offered; the H plate keeps WRONG_PLATE_CLASS. */
 export const REASON_CODES = [
   'EXPIRED', 'UNREADABLE', 'WRONG_DOCUMENT', 'FACE_MISMATCH', 'NAME_MISMATCH',
-  'INSURANCE_NOT_HIRE', 'NOT_YELLOW', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'INSURANCE_NOT_HIRE', 'SUSPECTED_TAMPERING', 'DUPLICATE', 'INCOMPLETE',
+  'WRONG_PLATE_CLASS',
 ] as const;
 
 // ── Live Ops ─────────────────────────────────────────────────────────────────

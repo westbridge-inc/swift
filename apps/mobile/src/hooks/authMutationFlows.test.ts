@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 
 const mocks = vi.hoisted(() => ({
+  prepareImage: vi.fn(async (file: { uri: string; name: string; type: string }) => file),
   BoundaryError: class TestAuthSessionBoundaryError extends Error {},
   current: null as AuthSessionSnapshot | null,
   user: null as any,
@@ -9,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   setUserIfCurrent: vi.fn(),
   switchRole: vi.fn(),
   driverGoOnline: vi.fn(),
+  rideCapabilities: vi.fn(),
   driverUploadVehicle: vi.fn(),
   riderHandover: vi.fn(),
   lastKnownPosition: vi.fn(),
@@ -25,6 +27,11 @@ const mocks = vi.hoisted(() => ({
   primeNotifications: vi.fn(),
   track: vi.fn(),
 }));
+
+vi.mock('../lib/uploadImage', () => ({ prepareUploadImage: mocks.prepareImage }));
+// The courier hook keeps each parcel's Idempotency-Key in device storage
+// (lib/courierRequestAttemptStore); this suite runs without the native MMKV.
+vi.mock('../lib/storage', () => ({ zustandStorage: { getItem: () => null, setItem() {}, removeItem() {} } }));
 
 const accountA: AuthSessionSnapshot = {
   generation: 1,
@@ -87,6 +94,7 @@ vi.mock('../services/api', () => ({
     uploadVehiclePhoto: mocks.driverUploadVehicle,
   },
   riderApi: { handover: mocks.riderHandover },
+  rideApi: { capabilities: mocks.rideCapabilities },
   verificationApi: {
     upload: mocks.uploadVerification,
     submitDocument: mocks.submitDocument,
@@ -171,6 +179,8 @@ beforeEach(() => {
     append() {}
   });
   mocks.current = { ...accountA };
+  // An older server: no capability read (404) — go-online is exactly today's.
+  mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } });
   mocks.user = {
     id: accountA.userId,
     firstName: 'Account',
@@ -295,7 +305,7 @@ describe('multi-step authenticated mutation ownership', () => {
       docType: 'GOVERNMENT_ID',
       file: { uri: 'file://id.jpg', name: 'id.jpg', type: 'image/jpeg' },
     });
-    expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadVerification).toHaveBeenCalledWith(expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-id.jpg' } } });
 
@@ -345,7 +355,7 @@ describe('multi-step authenticated mutation ownership', () => {
     }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://proof.jpg' });
-    expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/private/a-proof.jpg' } } });
 
@@ -378,7 +388,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     await expect(mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' })).resolves.toEqual({ status: 'PICKED_UP' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     expect(mocks.confirmCourierPickupProof).toHaveBeenCalledWith(
       'order-a',
       { proofPhotoUrl: '/uploads/courier-proof/order-a/pickup/a.jpg', gps: { lat: 6.81, lng: -58.155 } },
@@ -392,7 +402,7 @@ describe('multi-step authenticated mutation ownership', () => {
     const mutation = useCourierPickupProof() as unknown as CapturedMutation<{ orderId: string; uri: string }>;
 
     const result = mutation.mutationFn({ orderId: 'order-a', uri: 'file://pickup.jpg' });
-    expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA);
+    await vi.waitFor(() => expect(mocks.uploadCourierPickupProof).toHaveBeenCalledWith('order-a', expect.anything(), accountA));
     mocks.current = { ...accountB };
     upload.resolve({ data: { data: { url: '/uploads/courier-proof/order-a/pickup/a.jpg' } } });
 
@@ -462,6 +472,33 @@ describe('multi-step authenticated mutation ownership', () => {
 // "Save vehicle" does; a result that lands after the account changed is never
 // applied to the next account; a retry that changed nothing leaves the session.
 // ---------------------------------------------------------------------------
+describe('[TAXI multi-stop] go-online declares stops only to a server that offers them', () => {
+  function arrangeOnline() {
+    mocks.switchRole.mockResolvedValue({ data: { data: { activeRole: 'DRIVER' } } });
+    mocks.driverGoOnline.mockResolvedValue({ data: { data: { online: true } } });
+  }
+
+  it('the server advertises stops (maxStops 2): the capability goes with the go-online', async () => {
+    mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 2 } } });
+    arrangeOnline();
+    await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+    expect(mocks.rideCapabilities).toHaveBeenCalledWith(expect.objectContaining({ userId: accountA.userId }));
+    expect(mocks.driverGoOnline).toHaveBeenCalledWith(6.8, -58.1, expect.objectContaining({ userId: accountA.userId }), ['TAXI_STOPS_V1']);
+  });
+
+  it.each([
+    ['stops switched off (maxStops 0)', () => mocks.rideCapabilities.mockResolvedValue({ data: { data: { maxStops: 0 } } })],
+    ['an older server without the read (404)', () => mocks.rideCapabilities.mockRejectedValue({ response: { status: 404 } })],
+    ['the read fails', () => mocks.rideCapabilities.mockRejectedValue(new Error('offline'))],
+  ])('%s: exactly today’s go-online call, no capability', async (_label, arrange) => {
+    arrange();
+    arrangeOnline();
+    await (useGoOnline('DRIVER') as unknown as CapturedMutation<{ latitude: number; longitude: number }>).mutationFn({ latitude: 6.8, longitude: -58.1 });
+    expect(mocks.driverGoOnline).toHaveBeenCalledTimes(1);
+    expect(mocks.driverGoOnline.mock.calls[0]).toHaveLength(3);
+  });
+});
+
 describe('changing the vehicle follows the session that asked', () => {
   type ChangeVars = { vehicleType: 'CAR' | 'BICYCLE'; vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string } };
   const car: ChangeVars = { vehicleType: 'CAR', vehicle: { make: 'Toyota', model: 'Axio', year: 2019, color: 'White', licensePlate: 'PAB 1234' } };

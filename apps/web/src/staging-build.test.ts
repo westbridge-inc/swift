@@ -1,6 +1,8 @@
 import { PHASE_PRODUCTION_BUILD } from 'next/constants';
 import type { NextConfig } from 'next';
+import { unstable_getResponseFromNextConfig } from 'next/experimental/testing/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { SITE_DOMAIN } from './site.domain';
 import {
   buildBrowserContentSecurityPolicy,
   RELEASE_BROWSER_API_ORIGIN,
@@ -33,6 +35,17 @@ async function siteWideHeaders(config: NextConfig): Promise<Header[]> {
 
 const headerOf = (headers: Header[], key: string) => headers.find((header) => header.key === key)?.value;
 
+/** The X-Robots-Tag a real request to this host and path gets, through Next's own header matching. */
+async function robotsTagOf(config: NextConfig, host: string, path: string): Promise<string | null> {
+  const url = `https://${host.replace(/:\d+$/, '').toLowerCase()}${path}`;
+  const response = await unstable_getResponseFromNextConfig({ url, headers: { host }, nextConfig: config });
+  return response.headers.get('x-robots-tag');
+}
+
+/** The staging stack's own website name (deploy/.env WEB_HOST), and pages of every kind. */
+const STAGING_HOST = `staging.${SITE_DOMAIN}`;
+const PAGES = ['/', '/about', '/pricing', '/legal/refunds', '/legal/delivery', '/launching-soon', '/store/census-store', '/cart'];
+
 const STAGING = { NEXT_PUBLIC_API_URL: STAGING_BROWSER_API_ORIGIN, SWIFT_WEB_CHANNEL: 'staging' };
 const PUBLIC_SITE = { NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN };
 
@@ -54,7 +67,10 @@ describe('[Q11] the staging website build', () => {
   });
 
   it('asks crawlers not to index the whole staging copy; the public site limits that header to QR scan and MMG return links', async () => {
-    expect(headerOf(await siteWideHeaders(await productionConfig(STAGING)), 'X-Robots-Tag')).toBe('noindex, nofollow');
+    // [DS628] Asserted on the staging HOST's responses rather than read off one
+    // rule: the same image may also answer the public names (next case).
+    const staging = await productionConfig(STAGING);
+    for (const path of PAGES) expect(await robotsTagOf(staging, STAGING_HOST, path), path).toBe('noindex, nofollow');
     const publicRules = await (await productionConfig(PUBLIC_SITE)).headers!();
     // [AX303 F3] Public content stays indexable; /s/ needs a
     // response noindex because its external resolver returns a redirect.
@@ -62,13 +78,32 @@ describe('[Q11] the staging website build', () => {
     expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag')))
       .toEqual(expect.arrayContaining([
         { source: '/s/:path*', headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] },
-        { source: '/pay/mmg/:outcome', headers: [
+        { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },
         ] },
       ]));
     expect(publicRules.filter((rule) => rule.headers.some((header) => header.key === 'X-Robots-Tag'))).toHaveLength(2);
+  });
+
+  it('[DS628] the same staging image never marks the public names noindex: swiftgy.com and www stay indexable', async () => {
+    // The deploy stack can serve the public names from this image (WEB_ALIAS_HOSTS).
+    const image = await productionConfig({ ...STAGING, SWIFT_WEB_IMAGE_BUILD: '1' });
+    for (const path of PAGES) {
+      expect(await robotsTagOf(image, STAGING_HOST, path), `${STAGING_HOST}${path}`).toBe('noindex, nofollow');
+      for (const host of [SITE_DOMAIN, `www.${SITE_DOMAIN}`, SITE_DOMAIN.toUpperCase(), `${SITE_DOMAIN}:443`]) {
+        expect(await robotsTagOf(image, host, path), `${host}${path}`).toBeNull();
+      }
+    }
+    // Any other name this image answers is treated as staging: noindex is the safe default.
+    expect(await robotsTagOf(image, 'preview.example.com', '/about')).toBe('noindex, nofollow');
+    // A look-alike of a public name is not that name (the dots are literal, not "any character").
+    for (const lookAlike of [`www-${SITE_DOMAIN}`, SITE_DOMAIN.replace('.', '-')]) {
+      expect(await robotsTagOf(image, lookAlike, '/about'), lookAlike).toBe('noindex, nofollow');
+    }
+    // On the public names, the QR scan links keep their own noindex.
+    expect(await robotsTagOf(image, SITE_DOMAIN, '/s/census-code')).toBe('noindex, nofollow');
   });
 
   it('keeps every security header the public site sends, unchanged but for the API it connects to', async () => {
@@ -102,11 +137,44 @@ describe('[Q11] the staging website build', () => {
   it('Vercel and CI (no channel, no image switch) get exactly the config they had', async () => {
     const config = await productionConfig(PUBLIC_SITE);
     expect(Object.keys(config).sort()).toEqual(
-      ['env', 'headers', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages'].sort(),
+      // `images` is the photo optimiser every build carries (W2b, owner ruling h4); the
+      // image-build-only keys (output, typescript, eslint) must still be absent.
+      // `webpack` adds one client chunk group for the customer app's shared code (size budget,
+      // PERF 21 Oct); see the chunking test below.
+      ['env', 'headers', 'images', 'logging', 'poweredByHeader', 'redirects', 'rewrites', 'transpilePackages', 'webpack'].sort(),
     );
     expect(config.env).toEqual({ NEXT_PUBLIC_API_URL: RELEASE_BROWSER_API_ORIGIN });
     expect(headerOf(await siteWideHeaders(config), 'Content-Security-Policy')).toBe(
       buildBrowserContentSecurityPolicy('production'),
     );
+  });
+});
+
+describe('[Size budget] the customer app\u2019s shared code is one chunk', () => {
+  type Group = { name: string; minChunks: number; minSize: number; chunks: (_c: { name?: string | null }) => boolean; test: (_m: { type?: string; nameForCondition?: () => string | null }) => boolean };
+  const run = async (isServer: boolean) => {
+    const config = await productionConfig(PUBLIC_SITE);
+    const base = { optimization: { splitChunks: { cacheGroups: { framework: { name: 'framework' } } } } };
+    const out = (config.webpack as (_c: unknown, _o: { isServer: boolean }) => typeof base)(structuredClone(base), { isServer });
+    return out.optimization.splitChunks.cacheGroups as Record<string, unknown>;
+  };
+
+  it('the browser build gains one group; Next\u2019s own groups stay; the server build is untouched', async () => {
+    const client = await run(false);
+    expect(Object.keys(client).sort()).toEqual(['customerAppShared', 'framework']);
+    expect(Object.keys(await run(true))).toEqual(['framework']);
+  });
+
+  it('customer pages only, the app\u2019s own JavaScript (and its icons), shared by at least 12 pages, one chunk', async () => {
+    const group = (await run(false))['customerAppShared'] as Group;
+    expect(group).toMatchObject({ name: 'customer-app-shared', minChunks: 12, minSize: 0 });
+    expect(group.chunks({ name: 'app/(app)/checkout/page' })).toBe(true);
+    expect(group.chunks({ name: 'app/(app)/layout' })).toBe(true);
+    for (const name of ['app/dashboard/layout', 'app/portal/page', 'app/login/page', 'app/layout', null]) expect(group.chunks({ name })).toBe(false);
+    const mod = (path: string, type = 'javascript/auto') => ({ type, nameForCondition: () => path });
+    expect(group.test(mod('/w/apps/web/src/lib/basket-state.ts'))).toBe(true);
+    expect(group.test(mod('/w/node_modules/.pnpm/lucide-react@0.475.0/node_modules/lucide-react/dist/esm/icons/x.js'))).toBe(true);
+    expect(group.test(mod('/w/node_modules/.pnpm/react-dom@19/node_modules/react-dom/index.js'))).toBe(false);
+    expect(group.test(mod('/w/apps/web/src/app/(app)/cart/cart.module.css', 'css/mini-extract'))).toBe(false);
   });
 });

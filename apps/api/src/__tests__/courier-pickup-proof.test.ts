@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -14,6 +14,9 @@ import { riderRoutes } from '../modules/rider/rider.routes';
 import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { REAL_PNG } from './helpers/real-image';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [E16] Courier pickup custody proof.
@@ -40,25 +43,34 @@ let seq = 0;
 // are fixed blocks +59200…/+592013…; the random +592 draws start 1–9, carry a
 // 13-digit timestamp, or are 8 nanoid characters). Keyed so cleanup also
 // clears a crashed run's leftovers.
-const PHONE_PREFIX = '+592036';
-const phoneBase = 5_920_360_000;
+// [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names, so the
+// phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('13');
 
 async function purgeFixtures() {
   const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
   const userIds = users.map((u) => u.id);
   if (userIds.length === 0) return;
-  await app.prisma.order.deleteMany({ where: { OR: [{ customerId: { in: userIds } }, { rider: { userId: { in: userIds } } }] } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: userIds } } });
+  const orderIds = (await app.prisma.order.findMany({ where: { OR: [{ customerId: { in: userIds } }, { rider: { userId: { in: userIds } } }] }, select: { id: true } })).map((o) => o.id);
+  // [SAFE-B · retained history] A job with an issued drop-off proof is kept with the people it names; the rest
+  // goes as before, in one transaction, and what stays is taken out of service.
+  await app.prisma.$transaction(async (tx) => {
+    const kept = await retainedCohort(tx, { orderIds });
+    const goneUserIds = without(userIds, kept.userIds);
+    await tx.order.deleteMany({ where: { id: { in: without(orderIds, kept.orderIds) } } });
+    await tx.rider.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await tx.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await tx.session.deleteMany({ where: { userId: { in: userIds } } });
+    await tx.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(tx, kept);
+  }, { timeout: 60_000 });
 }
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Pkp',
       lastName: `U${seq}`,
       roles,
@@ -91,7 +103,7 @@ async function makeCourierOrder(
       orderNumber: `PKP-${nanoid(8)}`, orderType: 'COURIER', customerId, riderId, status, fulfillment: 'DELIVERY',
       pickupAddress: 'a', pickupLat: PICKUP_GPS.lat, pickupLng: PICKUP_GPS.lng, deliveryAddress: 'b', deliveryLat: 6.82, deliveryLng: -58.16,
       subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500,
-      paymentMethod: 'CASH', courierPayer: payer, courierTrackingToken: nanoid(16),
+      paymentMethod: 'CASH', courierPayer: payer,
     },
   });
 }
@@ -105,7 +117,7 @@ async function atPickup(status: OrderStatus = 'RIDER_ARRIVED_PICKUP', payer: 'SE
   return { sender, mover, rider, order };
 }
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function multipartBody(filename: string, mime: string, content: Buffer) {
   const boundary = `----swift${nanoid(8)}`;
@@ -329,6 +341,50 @@ describe('[E16] pickup is confirmed only with the issued photo and a location', 
     })).toBe(true);
   });
 
+  it('a pickup photo issued to an earlier assignment never proves the current one: released, given back, refused [Opus review 14 Oct #1695 S3-1]', async () => {
+    const { mover, rider, order } = await atPickup();
+    const up = await uploadPickupPhoto(order.id, mover.token);
+    expect(up.statusCode, up.body).toBe(200);
+    const firstAssignmentUrl = up.json().data.url as string;
+    // The rider hands the job back, then is given it again (A -> none -> A).
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
+
+    const stale = await confirmPickup(order.id, mover.token, { proofPhotoUrl: firstAssignmentUrl, gps: PICKUP_GPS });
+    expect(stale.statusCode, stale.body).toBe(400);
+    expect(stale.json().error.code).toBe('PICKUP_PROOF_NOT_ISSUED');
+    expect(await pickupRow(order.id)).toMatchObject({ status: 'RIDER_ARRIVED_PICKUP', courierPickupProofIssuedUrl: null });
+
+    // A photo taken in THIS assignment still takes custody.
+    const fresh = (await uploadPickupPhoto(order.id, mover.token)).json().data.url as string;
+    const ok = await confirmPickup(order.id, mover.token, { proofPhotoUrl: fresh, gps: PICKUP_GPS });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().data.status).toBe('PICKED_UP');
+  });
+
+  it('a release and re-assignment while the pickup proof is in flight is refused as a changed assignment, with no custody [Opus review 14 Oct #1695 S3-1]', async () => {
+    const { mover, rider, order } = await atPickup();
+    const issued = (await uploadPickupPhoto(order.id, mover.token)).json().data.url as string;
+    let entered!: () => void; let resume!: () => void;
+    const waiting = new Promise<void>((r) => { entered = r; }); const gate = new Promise<void>((r) => { resume = r; });
+    const original = OrderService.prototype.updateStatus;
+    const paused = vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementationOnce(async function (this: OrderService, ...args) {
+      entered(); await gate; return original.apply(this, args);
+    });
+    try {
+      const pending = confirmPickup(order.id, mover.token, { proofPhotoUrl: issued, gps: PICKUP_GPS });
+      await waiting;
+      try {
+        await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+        await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
+      } finally { resume(); }
+      const res = await pending;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('ACTOR_NOT_ASSIGNED');
+    } finally { paused.mockRestore(); }
+    expect(await pickupRow(order.id)).toMatchObject({ status: 'RIDER_ARRIVED_PICKUP', pickedUpAt: null, courierPickupProofPhotoUrl: null });
+  });
+
   it('refuses a fabricated pickup-proof URL that the server never issued', async () => {
     const { mover, order } = await atPickup();
 
@@ -454,7 +510,11 @@ describe('[E16] who can see the pickup photo', () => {
     expect(detail.statusCode, detail.body).toBe(200);
     expect(detail.json().data.courierPickupProofPhotoUrl).toBe(issuedUrl);
 
-    const track = await app.inject({ method: 'GET', url: `/api/v1/courier/track/${order.courierTrackingToken}` });
+    const rotated = await app.inject({ method: 'POST', url: `/api/v1/courier/order/${order.id}/tracking`, headers: { authorization: `Bearer ${sender.token}` } });
+    expect(rotated.statusCode, rotated.body).toBe(200);
+    const trackingToken = rotated.json().data.trackingToken as string;
+    expect((await app.prisma.order.findUniqueOrThrow({ where: { id: order.id } })).courierTrackingToken).not.toBe(trackingToken);
+    const track = await app.inject({ method: 'GET', url: `/api/v1/courier/track/${trackingToken}` });
     expect(track.statusCode, track.body).toBe(200);
     expect(track.json().data.status).toBe('PICKED_UP');
     expect(track.body).not.toContain('/pickup/');

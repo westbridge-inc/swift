@@ -1,5 +1,13 @@
 import type { ExpoConfig } from 'expo/config';
 
+// Expo still consumes this native-build flag, while the installed ExpoConfig
+// declaration does not yet include it. Keep the runtime configuration typed
+// without removing the setting from generated native builds.
+interface SwiftExpoConfig extends ExpoConfig {
+  newArchEnabled: boolean;
+  [key: string]: unknown;
+}
+
 // One "Swift" app. The role you pick on the entry screen ("How will you use
 // Swift?") chooses the experience at runtime — there is no longer a build-time
 // variant. Background location + push belong to the driver/rider flow and are
@@ -26,11 +34,17 @@ const photosPermission =
  * declared here instead: `app.config.ts` is the only file that survives a
  * prebuild, because `ios/` is gitignored and regenerated.
  *
- * Everything below is `AppFunctionality` and nothing is tracking, which is the
- * honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
- * `src/lib/analytics.ts`, which is a deliberate no-op. If a crash reporter is
- * ever wired up, Diagnostics must be added here in the SAME change that adds
- * it, not afterwards.
+ * Everything below is `AppFunctionality` (the phone number and e-mail also
+ * `DeveloperAdvertising`: Swift's own opt-in marketing messages) and nothing
+ * is tracking, which is the honest answer: Swift ships no analytics SDK, no ad SDK and no IDFA — see
+ * `src/lib/analytics.ts`, which is a deliberate no-op. The crash reporter
+ * (L13 item 7, off unless a crash-report address is configured) is declared
+ * below as CrashData, not linked to the person, in the same change that added
+ * it. The app hangs it also reports are declared as PerformanceData, not linked.
+ *
+ * This list must match the App Privacy answers in App Store Connect, and it
+ * ships inside the binary: a correction needs a new build, never an update
+ * over the air. src/__tests__/ota-updates-config.test.ts holds the list.
  *
  * The accessed-API reasons stay as Expo generates them (FileTimestamp C617.1,
  * UserDefaults CA92.1, SystemBootTime 35F9.1). `DiskSpace` is deliberately NOT
@@ -48,6 +62,11 @@ const collected = (
   NSPrivacyCollectedDataTypePurposes: purposes,
 });
 
+const marketingToo = [
+  'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+  'NSPrivacyCollectedDataTypePurposeDeveloperAdvertising',
+];
+
 const privacyManifests = {
   NSPrivacyTracking: false,
   NSPrivacyTrackingDomains: [],
@@ -58,17 +77,51 @@ const privacyManifests = {
   ],
   NSPrivacyCollectedDataTypes: [
     collected('Name'), // account holder, shown to the courier/driver on a job
-    collected('PhoneNumber'), // the login identity itself
-    collected('EmailAddress'), // optional at registration
+    // The login identity itself (and optional at registration). Both also carry
+    // the marketing texts / e-mails a person opts in to (Account > Marketing
+    // messages; withdrawn = none sent), so they name that purpose too.
+    collected('PhoneNumber', marketingToo),
+    collected('EmailAddress', marketingToo),
     collected('PhysicalAddress'), // delivery + pickup addresses
     collected('PreciseLocation'), // pickup, dispatch, live tracking
     collected('PhotosorVideos'), // delivery proof, document scans, chat images
-    collected('SensitiveInfo'), // government ID documents + verification selfie
+    // Government ID photos (a partner's, or a customer's when an ID check is
+    // needed) and a partner's selfie: checked by a person at Swift only, with
+    // no outside identity company and no face matching.
+    collected('SensitiveInfo'),
     collected('OtherUserContent'), // chat messages, review comments
     collected('CustomerSupport'), // support conversations
     collected('UserID'),
     collected('DeviceID'), // push token
     collected('PurchaseHistory'), // order and trip history
+    // [BUILD-12] A store's own MMG number, its MMG pay link and the MMG
+    // transaction reference it records for a payment it received. No card or
+    // bank number is ever collected (cards go through a hosted page).
+    collected('OtherFinancialInfo'),
+    // [BUILD-12] The emergency contacts a person saves for SOS (name + phone),
+    // kept on Swift's servers so an alert can reach them.
+    collected('Contacts'),
+    // [BUILD-12] A driver's vehicle details (make, model, year, colour,
+    // licence plate) and the document types a partner files.
+    collected('OtherDataTypes'),
+    // [L13 item 7] Crash reports: diagnostics only, scrubbed on the phone and
+    // carrying no user, so NOT linked to the person (src/lib/crash-scrub.ts).
+    {
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    },
+    // [BUILD-12] The same crash SDK also reports app hangs (iOS App Hang
+    // Tracking and Android ANR detection are on by default and
+    // crashSdkOptions does not turn them off). Apple counts a hang as
+    // performance data. Same scrubbing, no user: NOT linked to the person.
+    {
+      NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePerformanceData',
+      NSPrivacyCollectedDataTypeLinked: false,
+      NSPrivacyCollectedDataTypeTracking: false,
+      NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+    },
   ],
 };
 /** The brand ground. Splash and the Android adaptive-icon background are the
@@ -98,6 +151,10 @@ const linkDomain = process.env['SWIFT_LINK_DOMAIN'] ?? 'swiftgy.com';
  * would be the gate doing more harm than the bug.
  */
 const androidMapsApiKey = process.env['ANDROID_GOOGLE_MAPS_API_KEY'];
+// EAS materialises the sensitive FILE_BASE64 variable as a local file and
+// exposes its path here during the Android build. Local builds intentionally
+// omit the field: Expo then does not try to resolve a Firebase config file.
+const googleServicesFile = process.env['GOOGLE_SERVICES_JSON'];
 const isDistributableBuild =
   process.env['EAS_BUILD'] === 'true' || process.env['CI'] === 'true';
 
@@ -128,7 +185,7 @@ if (!androidMapsApiKey && buildsAndroidArtifact) {
   console.warn(`[swift] WARNING — ${consequence} Maps screens will crash in this local build.`);
 }
 
-const config: ExpoConfig = {
+const config: SwiftExpoConfig = {
   // Native project/module name — 'Swift' itself is reserved by Apple's
   // standard library, so the Xcode target needs a distinct name. What users
   // see is CFBundleDisplayName below: 'Swift'.
@@ -136,6 +193,22 @@ const config: ExpoConfig = {
   slug: 'swift',
   scheme: 'swift',
   version: '1.0.0',
+  // [L13 item 7 · owner decision 4] Over-the-air updates. The runtime is pinned
+  // explicitly to the app version: an update published for 1.0.0 only reaches
+  // binaries built as 1.0.0, so JavaScript never lands on native code it was
+  // not built against. The channel comes from the EAS build profile
+  // (eas.json: production / staging / preview). Launch never waits on the
+  // network: the embedded or cached bundle starts at once and a downloaded
+  // update applies on the next launch.
+  runtimeVersion: { policy: 'appVersion' },
+  updates: process.env['EAS_PROJECT_ID']
+    ? {
+        enabled: true,
+        url: `https://u.expo.dev/${process.env['EAS_PROJECT_ID']}`,
+        checkAutomatically: 'ON_LOAD',
+        fallbackToCacheTimeout: 0,
+      }
+    : { enabled: false },
   icon: './assets/icon.png',
   orientation: 'portrait',
   userInterfaceStyle: 'light',
@@ -153,6 +226,16 @@ const config: ExpoConfig = {
     bundleIdentifier: 'gy.swift.app',
     supportsTablet: true,
     associatedDomains: [`applinks:${linkDomain}`, `applinks:www.${linkDomain}`],
+    // [RINGER · owner ruling 15 Oct] A new order or a job offer may break
+    // through a Focus the partner allows Swift in (the job push carries
+    // interruptionLevel 'time-sensitive', sent only to builds that have this
+    // entitlement). Time-sensitive, NOT critical alerts: critical alerts need
+    // Apple's approval and ignore the ring/silent switch; the owner ruled them
+    // out. The partner controls it in Settings > Notifications > Swift >
+    // Time Sensitive Notifications, and per Focus.
+    entitlements: {
+      'com.apple.developer.usernotifications.time-sensitive': true,
+    },
     privacyManifests,
     infoPlist: {
       CFBundleDisplayName: 'Swift',
@@ -205,6 +288,7 @@ const config: ExpoConfig = {
   },
   android: {
     package: 'gy.swift.app',
+    ...(googleServicesFile ? { googleServicesFile } : {}),
     // Android adaptive icon [LAUNCH-3]. Only `backgroundColor` was set, and it
     // was WHITE behind a maroon brand mark — but it never showed, because with
     // no `foregroundImage` Expo emits no adaptive icon at all and the launcher
@@ -270,10 +354,10 @@ const config: ExpoConfig = {
     ],
     // Permissions pulled in transitively for capabilities Swift does not have.
     // Play scrutinises both: RECORD_AUDIO arrives with expo-camera/image-picker
-    // even though no audio API is used anywhere (no expo-av, no Audio.Recording,
-    // no expo-media-library), and SYSTEM_ALERT_WINDOW is a special permission
-    // nothing here asks for. Shipping a permission you cannot justify is a
-    // policy finding on its own.
+    // even though nothing records audio (expo-audio only PLAYS the job ring,
+    // its recorder is never used; no expo-av, no expo-media-library), and
+    // SYSTEM_ALERT_WINDOW is a special permission nothing here asks for.
+    // Shipping a permission you cannot justify is a policy finding on its own.
     blockedPermissions: [
       'android.permission.RECORD_AUDIO',
       'android.permission.SYSTEM_ALERT_WINDOW',
@@ -290,8 +374,57 @@ const config: ExpoConfig = {
         resizeMode: 'contain',
       },
     ],
-    ['expo-notifications', { color: '#803B3B' }],
-    'react-native-maps',
+    [
+      'expo-notifications',
+      {
+        // The runtime registers this same channel before asking Expo for the
+        // device token. It is the safe default for background FCM v1 messages;
+        // the job ring posts to its own 'job_offers' channel (services/push.ts).
+        defaultChannel: 'default',
+        // Android notification icons are white silhouettes on transparency.
+        icon: './assets/notification-icon.png',
+        color: brandMaroon,
+        // [RINGER] Swift's own job ring (scripts/make-job-ring.mjs synthesizes
+        // it). Copied into the iOS bundle (a job push names it as its sound)
+        // and Android res/raw (the 'job_offers' channel plays it).
+        sounds: ['./assets/sounds/swift_job_ring.wav'],
+      },
+    ],
+    // [RINGER] expo-audio loops the job ring while a new order or an offer is
+    // on screen. Playback only: no microphone purpose string and no
+    // RECORD_AUDIO (Swift never records, as for expo-camera below), and no
+    // background audio: the ring stops when the app leaves the screen, and a
+    // closed app rings through the notification instead.
+    [
+      'expo-audio',
+      {
+        microphonePermission: false,
+        recordAudioAndroid: false,
+        enableBackgroundPlayback: false,
+        enableBackgroundRecording: false,
+      },
+    ],
+    // react-native-maps ships its own config plugin, and Expo gives IT the
+    // manifest instead of the built-in step that reads
+    // `android.config.googleMaps.apiKey` above. That plugin writes
+    // com.google.android.geo.API_KEY only from `androidGoogleMapsApiKey`, and
+    // REMOVES it when the option is absent. Without this option a build that
+    // HAS the key still ships a keyless manifest (it happened with the
+    // 1 Oct preview and Play builds). android-maps-key-manifest.test.ts
+    // compiles the real manifest to keep it that way.
+    //
+    // Only when EAS says the build IS Android (it sets EAS_BUILD_PLATFORM on
+    // the builder, where prebuild writes the manifest): plugin options, unlike
+    // android.config, survive into the public config the app embeds, and iOS
+    // has no Google Maps. An unset platform (CI, a local `expo export`) gets
+    // no option, while the missing-key gate above stays strict for it. A local
+    // Android build that needs maps sets EAS_BUILD_PLATFORM=android too.
+    [
+      'react-native-maps',
+      androidMapsApiKey && process.env['EAS_BUILD_PLATFORM'] === 'android'
+        ? { androidGoogleMapsApiKey: androidMapsApiKey }
+        : {},
+    ],
     'expo-image',
     'expo-secure-store',
     'expo-video',

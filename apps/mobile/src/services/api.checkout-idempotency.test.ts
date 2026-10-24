@@ -15,11 +15,11 @@ import type { AuthSessionSnapshot } from '../lib/authSession';
 const env = vi.hoisted(() => {
   const previousApiUrl = process.env['EXPO_PUBLIC_API_URL'];
   process.env['EXPO_PUBLIC_API_URL'] = 'https://api.test';
-  return { previousApiUrl };
+  return { previousApiUrl, current: null as AuthSessionSnapshot | null };
 });
 
 vi.mock('../stores/authStore', () => ({
-  getAuthSessionSnapshot: (): AuthSessionSnapshot | null => null,
+  getAuthSessionSnapshot: (): AuthSessionSnapshot | null => env.current,
   isAuthSessionSnapshotCurrent: () => false,
   useAuthStore: { getState: () => ({ rotateTokensIfCurrent: () => null, logoutIfCurrent: () => false }) },
 }));
@@ -47,6 +47,7 @@ function capturing(): { seen: InternalAxiosRequestConfig[]; adapter: AxiosAdapte
 afterEach(() => {
   axios.defaults.adapter = originalAxiosAdapter;
   api.defaults.adapter = originalApiAdapter;
+  env.current = null;
 });
 
 afterAll(() => {
@@ -71,5 +72,21 @@ describe('customerApi.placeOrder', () => {
     await customerApi.placeOrder({ paymentMethod: 'CASH' }, 'chk_same_0123456789');
     await customerApi.placeOrder({ paymentMethod: 'CASH' }, 'chk_same_0123456789');
     expect(seen.map((c) => c.headers.get('Idempotency-Key'))).toEqual(['chk_same_0123456789', 'chk_same_0123456789']);
+  });
+});
+
+
+describe('[SX391] checkout transport captures its authorizing session', () => {
+  it('POST and receipt probe preserve captured Authorization through the interceptor', async () => {
+    const { seen, adapter } = capturing(); api.defaults.adapter = adapter;
+    const captured = { userId: 'captured-account', generation: 1, accessToken: 'captured-access', refreshToken: 'captured-refresh' };
+    // The caller owns A's captured session even if B is current before the
+    // API helper runs. The current interceptor is synchronous, so switching
+    // after invoking this helper would not exercise the captured binding.
+    env.current = { userId: 'new-account', generation: 2, accessToken: 'new-access', refreshToken: 'new-refresh' };
+    await Reflect.apply(customerApi.placeOrder, customerApi, [{ paymentMethod: 'CASH' }, 'chk_captured_0123456789', captured]);
+    await Reflect.apply(customerApi.checkoutReceipt, customerApi, ['chk_captured_0123456789', captured]);
+    expect(seen).toHaveLength(2);
+    for (const request of seen) expect(request.headers.get('Authorization')).toBe('Bearer captured-access');
   });
 });

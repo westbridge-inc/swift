@@ -9,6 +9,9 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] POST /rides/estimate with stops, through the real
@@ -19,6 +22,12 @@ import { ridesRoutes } from '../modules/rides/rides.routes';
 // configured routing engine cannot route it. The same ride without stops is
 // today's estimate (pinned byte for byte in taxi-estimate-single-leg-pin).
 // Phone prefix +5923418 (grepped: unused elsewhere).
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts, its included kilometres once per trip
+// with stops too). This file puts the card these bytes were derived from —
+// which names no included kilometres — on the Guyana row and restores the
+// seeded card after: every byte below must stand unchanged under it.
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
@@ -30,7 +39,7 @@ const STOP_1 = { lat: 6.8143, lng: -58.1443, address: 'Camp Street' };
 const STOP_2 = { lat: 6.825, lng: -58.15, address: 'Sheriff Street' };
 const STOP_3 = { lat: 6.805, lng: -58.17, address: 'Stabroek Market' };
 const DESTINATION = { lat: 6.82, lng: -58.16 };
-// The seeded Central ↔ South zone fare (2000), and a point in neither zone.
+// The Central ↔ South zone fare (2000, planted by this suite: helpers/zone-fare-fixture), and a point in neither zone.
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 const EAST_OF_ZONES = { lat: 6.78, lng: -58.10, address: 'East Bank Road' };
@@ -42,11 +51,11 @@ const FAR_DESTINATION = { lat: 6.95, lng: -58.05 };
 /** P → S1 → F on the deterministic estimate: legs 2454 m + 2399 m, one trip of
  *  4.85 km / 12 min → 2755 → Economy 2800. Priced leg by leg it would be
  *  1900 + 1900 = 3800: the base fare twice. */
-const ONE_STOP_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2800,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":3800,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":7000,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":4.9,"durationMin":12,"billableKm":4.85,"routeSource":"haversine","legs":[{"from":"PICKUP","to":"STOP_1","meters":2454,"seconds":null},{"from":"STOP_1","to":"DESTINATION","meters":2399,"seconds":null}],"maxStops":3,"stopCount":1}}';
+const ONE_STOP_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2800,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":3800,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":4.9,"durationMin":12,"billableKm":4.85,"routeSource":"haversine","legs":[{"from":"PICKUP","to":"STOP_1","meters":2454,"seconds":null},{"from":"STOP_1","to":"DESTINATION","meters":2399,"seconds":null}],"maxStops":3,"stopCount":1}}';
 /** The plan's worked example over a real OSRM route: legs 4000 m / 600 s and
  *  6150 m / 1020 s, the route 10 150 m / 1620 s → 10.15 km / 27 min → 4720 →
  *  Economy 4700; Comfort 6345 → 6300. */
-const WORKED_EXAMPLE_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":11800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm","legs":[{"from":"PICKUP","to":"STOP_1","meters":4000,"seconds":600},{"from":"STOP_1","to":"DESTINATION","meters":6150,"seconds":1020}],"maxStops":3,"stopCount":1}}';
+const WORKED_EXAMPLE_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm","legs":[{"from":"PICKUP","to":"STOP_1","meters":4000,"seconds":600},{"from":"STOP_1","to":"DESTINATION","meters":6150,"seconds":1020}],"maxStops":3,"stopCount":1}}';
 
 async function buildApp(): Promise<FastifyInstance> {
   const built = Fastify({ logger: false });
@@ -64,6 +73,8 @@ async function buildApp(): Promise<FastifyInstance> {
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -111,11 +122,15 @@ beforeAll(async () => {
   delete process.env['MAPS_PROVIDER'];
   delete process.env['OSRM_URL'];
   app = await buildApp();
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });
@@ -146,11 +161,11 @@ describe('a ride without stops answers the same bytes with the switch off AND on
   // main: the formula, the Central → South zone fare, the minimum fare.
   const PINNED: Array<[string, { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }, string]> = [
     ['formula', { pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 } },
-      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1900,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2600,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":4800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":2.5,"durationMin":6,"billableKm":2.45,"routeSource":"haversine"}}'],
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1900,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2600,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":2.5,"durationMin":6,"billableKm":2.45,"routeSource":"haversine"}}'],
     ['zone table', { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.755, lng: -58.155 } },
-      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2000,"capacity":4,"source":"zone_table"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2700,"capacity":4,"source":"zone_table"},{"rideClass":"GROUP","multiplier":2.5,"fare":5000,"capacity":14,"source":"zone_table"}],"currencyCode":"GYD","distanceKm":8,"durationMin":20,"billableKm":7.95,"routeSource":"haversine"}}'],
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2000,"capacity":4,"source":"zone_table"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2700,"capacity":4,"source":"zone_table"}],"currencyCode":"GYD","distanceKm":8,"durationMin":20,"billableKm":7.95,"routeSource":"haversine"}}'],
     ['minimum', { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.8105, lng: -58.155 } },
-      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1500,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2000,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":3800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":0.1,"durationMin":1,"billableKm":0.07,"routeSource":"haversine"}}'],
+      '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1500,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2000,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":0.1,"durationMin":1,"billableKm":0.07,"routeSource":"haversine"}}'],
   ];
 
   it.each(['', '0', '1', '2', '3', 'garbage'])('TAXI_MAX_STOPS=%j: the pinned bytes, for absent, null and empty stops alike', async (flag) => {
@@ -187,7 +202,7 @@ describe('switched on (TAXI_MAX_STOPS=3)', () => {
     const res = await estimate(app, token, { pickup: PICKUP, dropoff: DESTINATION, stops: [STOP_1, STOP_2, STOP_3] });
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
-    expect(data.tiers.map((t: { fare: number }) => t.fare)).toEqual([4900, 6600, 12300]);
+    expect(data.tiers.map((t: { fare: number }) => t.fare)).toEqual([4900, 6600]);
     expect(data).toMatchObject({ billableKm: 10.88, distanceKm: 10.9, durationMin: 27, routeSource: 'haversine', maxStops: 3, stopCount: 3 });
     expect(data.legs.map((l: { from: string; to: string; meters: number }) => [l.from, l.to, l.meters])).toEqual([
       ['PICKUP', 'STOP_1', 2454], ['STOP_1', 'STOP_2', 1750], ['STOP_2', 'STOP_3', 4074], ['STOP_3', 'DESTINATION', 2600],
@@ -199,7 +214,7 @@ describe('switched on (TAXI_MAX_STOPS=3)', () => {
     const res = await estimate(app, token, { pickup: PICKUP, dropoff: PICKUP, stops: [STOP_1] });
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
-    expect(data.tiers.map((t: { fare: number }) => t.fare)).toEqual([2800, 3800, 7000]);
+    expect(data.tiers.map((t: { fare: number }) => t.fare)).toEqual([2800, 3800]);
     expect(data).toMatchObject({ billableKm: 4.91, durationMin: 12, stopCount: 1 });
     expect(data.legs.map((l: { from: string; to: string; meters: number }) => [l.from, l.to, l.meters])).toEqual([['PICKUP', 'STOP_1', 2454], ['STOP_1', 'DESTINATION', 2454]]);
     // A stop revisited later in the trip (errands, a drop-and-return) is allowed too.
@@ -258,9 +273,11 @@ describe('every point of a route with stops lies where Swift works (400 STOP_OUT
     expect(res.json().error).toMatchObject({ code: 'STOP_OUT_OF_MARKET', details: { place: 'DESTINATION' } });
   });
 
-  it('KNOWN GAP, a follow-up: without stops the same destination is still quoted as today (the zero-stop path is untouched)', async () => {
+  it('without stops the same outside destination is also refused before quoting', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
-    expect((await estimate(app, token, { pickup: PICKUP, dropoff: PORT_OF_SPAIN })).statusCode).toBe(200);
+    const res = await estimate(app, token, { pickup: PICKUP, dropoff: PORT_OF_SPAIN });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatchObject({ code: 'ROUTE_OUT_OF_MARKET', details: { place: 'DESTINATION' } });
   });
 });
 
@@ -294,7 +311,7 @@ describe('zone-priced routes are refused with stops (409 MULTI_STOP_ZONE_PRICED)
     const res = await estimate(app, token, { pickup: SOUTH, dropoff: CENTRAL, stops: [EAST_OF_ZONES] });
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
-    expect(data.tiers.map((t: { fare: number; source: string }) => [t.fare, t.source])).toEqual([[7400, 'formula'], [10000, 'formula'], [18500, 'formula']]);
+    expect(data.tiers.map((t: { fare: number; source: string }) => [t.fare, t.source])).toEqual([[7400, 'formula'], [10000, 'formula']]);
     expect(data).toMatchObject({ billableKm: 17.69, durationMin: 43, stopCount: 1 });
     expect(data.legs.map((l: { meters: number }) => l.meters)).toEqual([8683, 9007]);
   });

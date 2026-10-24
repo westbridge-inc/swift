@@ -1,16 +1,22 @@
+import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
+import { MapCredits } from '../../../components/MapCredits';
+import { uploadHandoverPhoto } from '../../../hooks/mover';
+import type { AuthSessionSnapshot } from '../../../lib/authSession';
 /** @jsxImportSource react */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Linking, Platform, Pressable, View } from 'react-native';
+import { Platform, Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT, Polyline } from 'react-native-maps';
 import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useRideSos } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useDriverRouteLine } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
+import { CustodyRecoverySection } from '../CustodyRecoverySection';
 import { useMoverPreview } from '../../../stores/moverPreview';
 import { toast } from '../../../kit/toast';
 import { useLocationStore } from '../../../stores/locationStore';
@@ -25,10 +31,15 @@ import { jobAmount, RoutePair } from '../shared';
 import { haptic } from '../../../lib/haptics';
 import { dk, withAlpha, DCard } from '../surface';
 import { openExternal } from '../../../lib/openExternal';
-import { currentMarketDial, emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
+import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emergencyPolicy';
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
-import { telUrl } from '../../../lib/emergencyPolicy';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
+import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
+import { driverMapLine } from '../../../lib/routeLine';
+import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { afterDismiss } from '../../../kit/after-dismiss';
+import { moverStatusLabel } from '../../../lib/orderStatus';
+import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
 const RIDE_PIN_LENGTH = 6;
@@ -105,6 +116,18 @@ function railFor(status: string | undefined, isDriver: boolean): { steps: Timeli
   return { steps, currentIndex };
 }
 
+/** [TAXI multi-stop] A map region that frames every point of a route. */
+function regionAround(points: { latitude: number; longitude: number }[]) {
+  const lats = points.map((p) => p.latitude);
+  const lngs = points.map((p) => p.longitude);
+  return {
+    latitude: (Math.min(...lats) + Math.max(...lats)) / 2,
+    longitude: (Math.min(...lngs) + Math.max(...lngs)) / 2,
+    latitudeDelta: Math.max(0.02, (Math.max(...lats) - Math.min(...lats)) * 2.2),
+    longitudeDelta: Math.max(0.02, (Math.max(...lngs) - Math.min(...lngs)) * 2.2),
+  };
+}
+
 export function ActiveJobScreen({ navigation }: any) {
   const insets = useSafeAreaInsets();
   const { kind } = useMoverKind();
@@ -123,10 +146,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const [selectedLegId, setSelectedLegId] = useState<string | null>(null);
   const [ratePopup, setRatePopup] = useState<{ orderId: string; name: string; mmg: boolean } | null>(null);
   const [stars, setStars] = useState(5);
-  // Driver-raised SOS on an active taxi ride — the backend authorizes the driver
-  // participant on /rides/:id/sos (same route the passenger's SOS uses).
-  const sos = useRideSos();
-  // [MOB-018] The signed-in market decides the emergency number the popup names and dials.
+  // [MOB-018] The signed-in market decides the emergency number the preview popup names.
   const sosCountry = useAuthStore((st) => st.countryCode);
   const [sosConfirm, setSosConfirm] = useState(false);
   // The popup owns a ride snapshot until its native dismissal completes. The
@@ -148,6 +168,12 @@ export function ActiveJobScreen({ navigation }: any) {
   // [M-29] The unpaid sheet — the failed fare outcome (driver) or failed
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const capturedProofs = useRef(new RetainedUploadPhotos());
+  const captureGeneration = useAuthStore((state) => state.sessionGeneration);
+  useEffect(() => { capturedProofs.current.clear(); }, [captureGeneration]);
+  const [handoverPhoto, setHandoverPhoto] = useState<{ orderId: string; kind: string; url: string; owner: AuthSessionSnapshot } | null>(null);
+  const activePhotoBoundary = useRef('');
   // [M-28] The sender-pays courier job that ends at pickup: the fee was not
   // paid, so the parcel is never taken.
   const [senderRefusedSheet, setSenderRefusedSheet] = useState(false);
@@ -166,6 +192,15 @@ export function ActiveJobScreen({ navigation }: any) {
   const canDriverHandback = isDriver && canDriverHandbackRide(liveJob);
   const retainDriverHandbackHost = driverHandbackFlow?.phase === 'submitting' || driverHandbackFlow?.phase === 'dismissing';
   const job: any = liveJob ?? (retainDriverHandbackHost ? driverHandbackFlow?.job : null) ?? null;
+  // [TAXI waiting charge §8.3] The live wait on a taxi trip, from the driver's
+  // arrival on — the same figures the passenger sees. Null without the field.
+  const waitingClock = useWaitingClock(isDriver ? liveJob : null);
+  // [TAXI multi-stop · part 4] With a stop open, the passenger-didn't-come-back
+  // outcome opens only at the server's grace time for that stop.
+  const noShowOpen = useNoShowOpen(isDriver ? liveJob : null);
+  // [TAXI route line] The road through the ride's own points when the server
+  // has one (read once per ride, never polled); else the straight heading.
+  const roadLine = useDriverRouteLine(isDriver ? liveJob : null);
 
   // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
   // changes — a stacked-leg switch, a leg dropped from the run (the
@@ -208,9 +243,20 @@ export function ActiveJobScreen({ navigation }: any) {
   }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
+    // [BUG-GUARDS C3] Until the job read answers (loading, or failed with nothing cached) this is not
+    // "No active job": a driver mid-trip must never be told they have none.
+    const unanswered = active.data === undefined && (active.isLoading || active.isError);
     return (
       <Screen>
-        <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        {unanswered && active.isError ? (
+          <ErrorState message="We couldn't load your job. Check your connection and try again." onRetry={() => void active.refetch()} />
+        ) : unanswered ? (
+          <View accessibilityLabel="Loading your job" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Spinner size="large" />
+          </View>
+        ) : (
+          <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        )}
         <View style={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
           <PillButton label="Back" variant="soft" onPress={() => navigation?.goBack?.()} />
         </View>
@@ -220,8 +266,16 @@ export function ActiveJobScreen({ navigation }: any) {
 
   const pickup = job?.pickupLat != null ? { latitude: Number(job.pickupLat), longitude: Number(job.pickupLng) } : null;
   const drop = job?.deliveryLat != null ? { latitude: Number(job.deliveryLat), longitude: Number(job.deliveryLng) } : null;
+  // [TAXI multi-stop] A driver's taxi trip with stops: the stops in order, and
+  // the points the map draws between pickup and drop-off (none without stops).
+  const itinerary = isDriver ? rideStops(job) : [];
+  const itineraryPoints = itinerary.flatMap((s) => (s.lat != null && s.lng != null ? [{ sequence: s.sequence, latitude: s.lat, longitude: s.lng }] : []));
+  const routePoints = pickup && drop ? [pickup, ...itineraryPoints.map(({ latitude, longitude }) => ({ latitude, longitude })), drop] : [];
+  const mapLine = driverMapLine(isDriver ? roadLine.data : null, routePoints);
   const region =
-    pickup && drop
+    itineraryPoints.length > 0 && pickup && drop
+      ? regionAround(routePoints)
+      : pickup && drop
       ? {
           latitude: (pickup.latitude + drop.latitude) / 2,
           longitude: (pickup.longitude + drop.longitude) / 2,
@@ -232,7 +286,24 @@ export function ActiveJobScreen({ navigation }: any) {
         ? { ...pickup, latitudeDelta: 0.02, longitudeDelta: 0.02 }
         : undefined;
 
-  const busy = driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
+  activePhotoBoundary.current = `${job?.id}:${kind}`;
+  const busy = photoBusy || driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
+  const captureProof = async (purpose: string, owner: AuthSessionSnapshot | null) => {
+    const key = `${owner?.userId}:${owner?.generation}:${job.id}:${kind}:${purpose}`;
+    const uri = await capturedProofs.current.capture(key, async () => {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!permission.granted) {
+        toast.error('Camera access is needed to capture this photo.');
+        return null;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      return shot.canceled ? null : shot.assets?.[0]?.uri ?? null;
+    });
+    if (owner) requireAuthSessionForPrincipal(owner);
+    return uri ? { uri, key } : null;
+  };
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -246,19 +317,13 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureCourierProof = async (outcome?: 'paid' | FailedOutcome) => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture proof of delivery.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof(`delivery:${outcome ?? 'delivered'}`, owner);
+      if (!captured) return;
       courierProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, outcome, authSession: owner ?? undefined },
         {
           onSuccess: (res: any) => {
+            capturedProofs.current.forget(captured.key);
             if (outcome && outcome !== 'paid') {
               const claim = res?.claim?.status;
               toast.show(
@@ -273,7 +338,7 @@ export function ActiveJobScreen({ navigation }: any) {
           },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -318,22 +383,15 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureCourierPickupProof = async () => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture proof of pickup.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof('pickup', owner);
+      if (!captured) return;
       courierPickupProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, authSession: owner ?? undefined },
         {
-          onSuccess: () => active.refetch?.(),
+          onSuccess: () => { capturedProofs.current.forget(captured.key); active.refetch?.(); },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -370,12 +428,22 @@ export function ActiveJobScreen({ navigation }: any) {
   const custName = cust ? [cust.firstName, cust.lastName].filter(Boolean).join(' ') : null;
   const inProgress = String(job?.status ?? '').toUpperCase() === 'RIDE_IN_PROGRESS';
   const riderToDrop = !isDriver && pickedUp;
-  const navTarget = inProgress || riderToDrop ? drop : pickup;
-  const targetLabel = inProgress || riderToDrop ? 'drop-off' : 'pickup';
+  // [TAXI multi-stop] While a stop is still open the trip heads for it, one leg
+  // at a time; the stop step replaces "Fare collected", which the server
+  // refuses until every stop is done (409 STOPS_REMAINING).
+  const stopGate = isDriver && inProgress && hasOpenStop(job);
+  const nextItineraryStop = stopGate ? itinerary.find((s) => s.sequence === nextStopSequence(job)) ?? null : null;
+  const nextStopPoint = nextItineraryStop && nextItineraryStop.lat != null && nextItineraryStop.lng != null
+    ? { latitude: nextItineraryStop.lat, longitude: nextItineraryStop.lng }
+    : null;
+  const navTarget = nextStopPoint ?? (inProgress || riderToDrop ? drop : pickup);
+  const targetLabel = nextStopPoint ? `stop ${nextItineraryStop!.sequence}` : inProgress || riderToDrop ? 'drop-off' : 'pickup';
+  // The phone's own maps, turn-by-turn: Apple Maps on iOS, Google Maps on
+  // Android (the web map when the app link cannot open) — one opener for the
+  // nav pill, the Navigate link and every stop's Navigate.
   const openNav = () => {
     if (!navTarget) return;
-    const q = `${navTarget.latitude},${navTarget.longitude}`;
-    Linking.openURL(`maps://?daddr=${q}`).catch(() => openExternal(`https://maps.google.com/?daddr=${q}`, "Couldn't open maps on this phone."));
+    void openStopNavigation({ lat: navTarget.latitude, lng: navTarget.longitude });
   };
   const step = isDriver && job ? driverStep(job) : null;
 
@@ -397,6 +465,9 @@ export function ActiveJobScreen({ navigation }: any) {
       {
         onError: (e: any) => {
           if (step.pin) haptic.failure();
+          // [TAXI multi-stop] The part-3 guard: a stop is still open. Re-read
+          // the trip so its stop step is what the driver sees next.
+          if (e?.response?.data?.error?.code === 'STOPS_REMAINING') active.refetch?.();
           // [E19] The arrival gate refuses a status claim, never the driver:
           // say why, and when the server offers it, name the passenger escape.
           if (step.action === 'arrived') {
@@ -424,9 +495,31 @@ export function ActiveJobScreen({ navigation }: any) {
   // [M-29] The failed outcome, on either rail: the server captures this GPS
   // as evidence, strikes the customer and opens the guarantee claim in one
   // commit — nothing here is optimistic, and the answer names the claim.
+  const addHandoverPhoto = async () => {
+    if (preview || !job?.id || !kind || photoBusy) return;
+    const owner = requireAuthSessionSnapshot();
+    const orderId = job.id;
+    const boundary = `${orderId}:${kind}`;
+    setPhotoBusy(true);
+    try {
+      const captured = await captureProof('handover', owner);
+      if (!captured || activePhotoBoundary.current !== boundary) return;
+      const url = await uploadHandoverPhoto(kind, orderId, captured.uri, owner);
+      capturedProofs.current.forget(captured.key);
+      if (activePhotoBoundary.current === boundary) setHandoverPhoto({ orderId, kind, url, owner });
+    } catch (error) {
+      if (!(error instanceof AuthSessionBoundaryError)) toast.show('Photo could not be saved. Retry or record the outcome without it for review.');
+    } finally { setPhotoBusy(false); }
+  };
   const recordUnpaid = (outcome: FailedOutcome) => {
     setUnpaidSheet(false);
     if (preview || !job?.id) return;
+    // [TAXI multi-stop] A stop is still open: only "didn't come back", and only
+    // after the server's grace — never an early ending from a stale sheet.
+    if (stopGate && (outcome !== 'no_show' || !noShowOpen)) return;
+    const photo = handoverPhoto && handoverPhoto.orderId === job.id && handoverPhoto.kind === kind ? handoverPhoto : null;
+    if (photo) { try { requireAuthSessionForPrincipal(photo.owner); } catch { setHandoverPhoto(null); return; } }
+    const proof = photo ? { photoUrl: photo.url, authSession: photo.owner } : {};
     const recorded = isDriver ? 'Unpaid fare recorded' : 'Failed delivery recorded';
     const onSuccess = (res: any) => {
       const claim = res?.claim?.status;
@@ -438,11 +531,9 @@ export function ActiveJobScreen({ navigation }: any) {
       navigation?.goBack?.();
     };
     const onError = (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the outcome — try again or call support.");
-    if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
-    // [M-28] A courier's failed outcome is recorded WITH the proof photo —
-    // the camera opens next, and the photo is the claim's evidence.
-    else if (isCourier) void captureCourierProof(outcome);
-    else riderAct.mutate({ id: job.id, action: 'handover', outcome }, { onSuccess, onError });
+    if (isDriver) driverAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });
+    // Failed courier outcomes use the same optional issued-photo evidence path.
+    else riderAct.mutate({ id: job.id, action: 'handover', outcome, ...proof }, { onSuccess, onError });
   };
 
   // [M-28] The sender's fee, recorded at pickup. 'paid' captures it (the door's
@@ -461,7 +552,7 @@ export function ActiveJobScreen({ navigation }: any) {
             active.refetch?.();
             return;
           }
-          toast.show(res?.status === 'CANCELLED' ? 'Job ended — the sender didn’t pay. Their account takes a strike.' : 'Recorded.');
+          toast.show(res?.status === 'CANCELLED' ? 'Job ended — the sender didn’t pay. The report is recorded for review.' : 'Recorded.');
           navigation?.goBack?.();
         },
         onError: (e: any) => toast.show(e?.response?.data?.error?.message ?? "Couldn't record the sender's payment — try again or call support."),
@@ -492,26 +583,20 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureReturnProof = async () => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture the return proof.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof('return', owner);
+      if (!captured) return;
       courierReturnProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, authSession: owner ?? undefined },
         {
           onSuccess: () => {
+            capturedProofs.current.forget(captured.key);
             haptic.success();
             toast.show('Return complete', 'The parcel is back with the sender — return proof saved.');
             active.refetch?.();
           },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -521,9 +606,12 @@ export function ActiveJobScreen({ navigation }: any) {
     }
   };
 
+  // [UI-SWEEP U04] The trip-complete popup closes in its own tick; Back waits
+  // for the modal's teardown (#910's law, kit/after-dismiss). Closing and going
+  // back in one tick can leave an invisible window over Home eating every tap.
   const closeRating = () => {
     setRatePopup(null);
-    navigation?.goBack?.();
+    afterDismiss(() => navigation?.goBack?.());
   };
 
   // The one big action at the bottom (reference "Arrived" button).
@@ -575,12 +663,17 @@ export function ActiveJobScreen({ navigation }: any) {
         >
           {pickup ? <Marker coordinate={pickup} title="Pickup" /> : null}
           {drop ? <Marker coordinate={drop} title="Drop-off" pinColor={color.brand[500]} /> : null}
+          {itineraryPoints.map(({ sequence, latitude, longitude }) => (
+            <Marker key={`stop-${sequence}`} coordinate={{ latitude, longitude }} title={`Stop ${sequence}`} pinColor={color.info} />
+          ))}
           {pickup && drop ? (
             <>
-              {/* Bold route line: white halo under the accent stroke. Geodesic
-                  connector — a heading, not turn-by-turn. */}
-              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
-              <Polyline coordinates={[pickup, drop]} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
+              {/* Bold route line: white halo under the accent stroke. [TAXI route
+                  line] The road the server's routing engine gives, through the
+                  stops in order; without one, the geodesic heading through the
+                  same points, as before (a heading, not turn-by-turn). */}
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={color.brand[500]} strokeWidth={5} />
             </>
           ) : null}
         </MapView>
@@ -589,7 +682,8 @@ export function ActiveJobScreen({ navigation }: any) {
       )}
 
       <View style={{ position: 'absolute', top: insets.top, left: 0, right: 0, zIndex: 10, flexDirection: 'row', alignItems: 'center', padding: space.lg }}>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(40)}>
           {({ pressed }) => (
             <View style={[{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
               <Feather name="chevron-left" size={22} color={dk.text} />
@@ -625,7 +719,11 @@ export function ActiveJobScreen({ navigation }: any) {
           backgroundStyle={{ backgroundColor: dk.bg, borderTopLeftRadius: 20, borderTopRightRadius: 20 }}
           handleIndicatorStyle={{ backgroundColor: dk.faint }}
         >
+          <MapCredits />
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+            {photoBusy || courierProof.isPending || courierPickupProof.isPending || courierReturnProof.isPending ? (
+              <T variant="label" style={{ color: dk.muted, marginBottom: space.md }}>Still uploading — keep this screen open. If it fails, tap again to retry the saved photo.</T>
+            ) : null}
             {stacked ? (
               <View style={{ marginBottom: space.md }}>
                 <View style={{ flexDirection: 'row', gap: space.sm }}>
@@ -659,7 +757,8 @@ export function ActiveJobScreen({ navigation }: any) {
                   {job.orderNumber ? `ORDER #${job.orderNumber}` : 'CURRENT JOB'}
                 </T>
                 <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
-                  {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
+                  {/* [UI-SWEEP U73] the status in words, never the code */}
+                  {moverStatusLabel(job.status)}
                 </T>
               </View>
               <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>
@@ -686,9 +785,23 @@ export function ActiveJobScreen({ navigation }: any) {
               ) : null}
               <StatusRail onDark {...railFor(job.status, isDriver)} style={{ marginTop: space.md }} />
               <View style={{ marginTop: space.md }}>
-                <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
+                {itinerary.length > 0 ? (
+                  // [TAXI multi-stop] Pickup, each stop, drop-off — the current one
+                  // highlighted, every stop with its own Navigate.
+                  <DriverItinerary job={job} />
+                ) : (
+                  <RoutePair pickup={job.pickupAddress ?? 'Pickup'} dropoff={job.deliveryAddress ?? job.dropoffAddress ?? 'Drop-off'} />
+                )}
               </View>
             </DCard>
+
+            {/* [TAXI waiting charge] The live wait, once the driver has arrived. */}
+            {waitingClock ? (
+              <DriverWaiting
+                view={waitingClock}
+                tripFare={inProgress && !stopGate && !waitingClock.running && job?.taxiFareTotal != null ? Number(job.taxiFareTotal) : null}
+              />
+            ) : null}
 
             {/* Passenger / customer */}
             {cust ? (
@@ -769,7 +882,9 @@ export function ActiveJobScreen({ navigation }: any) {
                       flight. Failure keeps its own language: CodeInput already
                       shakes ±6dp ×3 on error. */}
                   {step.action === 'start' ? <LockIn label="Code accepted — locked in." style={{ marginBottom: space.md }} /> : null}
-                  {bigButton(step.label, runDriverStep, {
+                  {stopGate ? (
+                    <TaxiStopActions job={job} disabled={busy} onGetHelp={() => navigation.navigate('GetHelp' as never)} />
+                  ) : bigButton(step.label, runDriverStep, {
                     loading: busy,
                     disabled: busy || (!!step.pin && pin.length < RIDE_PIN_LENGTH),
                     lockedIn: step.action === 'start',
@@ -777,9 +892,20 @@ export function ActiveJobScreen({ navigation }: any) {
                   {/* [M-29] The other outcome at the destination. Never a plain
                       "complete" — the server refuses a cash ride without a
                       recorded fare (PAYMENT_NOT_CAPTURED). */}
-                  {step.action === 'handover' ? (
+                  {step.action === 'handover' && !stopGate ? (
                     <PillButton
                       label="Passenger didn't pay"
+                      variant="soft"
+                      style={{ marginTop: space.sm }}
+                      disabled={busy}
+                      onPress={() => setUnpaidSheet(true)}
+                    />
+                  ) : null}
+                  {/* [TAXI multi-stop] A stop is still open: the only ending is
+                      the passenger not coming back, after the server's grace. */}
+                  {step.action === 'handover' && stopGate && noShowOpen ? (
+                    <PillButton
+                      label="Passenger didn't come back"
                       variant="soft"
                       style={{ marginTop: space.sm }}
                       disabled={busy}
@@ -1009,10 +1135,17 @@ export function ActiveJobScreen({ navigation }: any) {
               </>
             )}
 
+            {/* [AF-MOB-006] After pickup the rider's problem is an owned case:
+                report it, then follow the decision (hold, return, or hand the
+                order to a relay rider with the code shown here). */}
+            {!isDriver && job?.id && !preview && (pickedUp || returning) ? (
+              <CustodyRecoverySection orderId={job.id} inCustody />
+            ) : null}
+
             {/* SOS after the action — anyone alone with a stranger on a cash
-                job needs an emergency path (driver AND rider; the general
-                /safety/sos route authorises both — see the SosCeremony split
-                below). */}
+                job needs an emergency path (driver AND rider, one ceremony: a
+                taxi ride on its own /rides/:id/sos route, every other job on
+                /safety/sos — see the SosCeremony below). */}
             {job?.id ? (
               <PillButton
                 label="Emergency — get help now"
@@ -1046,20 +1179,25 @@ export function ActiveJobScreen({ navigation }: any) {
         </BottomSheet>
       ) : null}
 
-      {/* SOS — deliberate two-step. Two routes, one button: a taxi ride keeps
-          /rides/:id/sos (live, proven, IMMEDIATE server-side — never
-          re-plumbed for consistency's sake); every other job takes the shared
-          LIVE ceremony [REPORT-035] — the popup stays open through the raise,
-          failure is loud, and "Page Swift NOW" skips the grace wait. */}
-      {!isDriver && job?.id && !preview ? (
+      {/* SOS — deliberate two-step, ONE ceremony for every mover [REPORT-035 ·
+          AUD-L5b-009]: the popup stays open through the raise and shows the
+          server's answer, failure is loud with a retry and the emergency call,
+          and once pressed a stray tap outside never hides it. Two routes: a
+          taxi ride keeps /rides/:id/sos (live, proven, IMMEDIATE server-side —
+          the driver's route is unchanged for every build in the field); a
+          delivery or courier job takes /safety/sos with its order, where
+          "Alert Swift now" skips the grace wait. */}
+      {job?.id && !preview ? (
         <SosCeremony
           visible={sosConfirm}
           onClose={() => setSosConfirm(false)}
-          context={{ orderId: job.id }}
-          recordNoun="job"
+          context={isDriver ? { rideId: job.id } : { orderId: job.id }}
+          recordNoun={isDriver ? 'trip' : 'job'}
           getCoords={() => (me ? { lat: me.latitude, lng: me.longitude } : undefined)}
         />
       ) : (
+        // The read-only preview (R3): the popup is browsable, but it never
+        // dials and never records.
         <PopupCard visible={sosConfirm} onClose={() => setSosConfirm(false)}>
           <DecorativeIcon style={{ width: 72, height: 72, borderRadius: 36, alignItems: 'center', justifyContent: 'center', backgroundColor: color.error }}>
             <Feather name="alert-triangle" size={32} color={color.white} />
@@ -1073,22 +1211,7 @@ export function ActiveJobScreen({ navigation }: any) {
           <PillButton
             label="Yes — get help now"
             style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
-            disabled={sos.isPending}
-            onPress={() => {
-              setSosConfirm(false);
-              if (preview) return; // read-only preview never dials or records
-              // 911 is THE action — dial first, never behind anything else. Swift
-              // records evidence; it is not an emergency responder and the copy
-              // must never imply a staffed safety desk [liability shield].
-              // [MOB-018] The market's emergency number, not a hard-coded 911: a
-              // verified number dials at once, an unverified candidate dials on this
-              // explicit tap (the popup named it), no number means the manual sheet.
-              const emergency = currentMarketDial('police');
-              if (emergency.kind !== 'manual') void openExternal(telUrl(emergency.number), `Couldn't start the call — dial ${emergency.number} directly.`);
-              const coords = me ? { lat: me.latitude, lng: me.longitude } : undefined;
-              if (!job?.id) return;
-              sos.mutate({ id: job.id, coords });
-            }}
+            onPress={() => setSosConfirm(false)}
           />
           <PillButton label="Close" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSosConfirm(false)} />
         </PopupCard>
@@ -1102,18 +1225,21 @@ export function ActiveJobScreen({ navigation }: any) {
         <PopupTitle variant="title" center>{isDriver ? 'The passenger didn’t pay?' : isCourier ? 'The recipient didn’t pay?' : 'The customer didn’t pay?'}</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
           {isDriver
-            ? 'Your location is recorded as evidence, the passenger’s account takes a strike, and the Swift guarantee reviews the fare. Pick what happened:'
+            ? 'Record what happened. Your evidence and fare claim will be reviewed; a missing photo does not stop you recording the outcome.'
             : isCourier
-              ? 'Next you’ll photograph the parcel at the door as evidence. Your location is recorded, the sender’s account takes a strike, and the Swift guarantee reviews the fee. Pick what happened:'
-              : 'Your location is recorded as evidence, the customer’s account takes a strike, and the Swift guarantee reviews the amount. Pick what happened:'}
+              ? 'Record what happened at the door. Add a photo if available; incomplete evidence goes to review.'
+              : 'Record what happened. Add a photo if available; missing or insufficient evidence goes to review.'}
         </T>
-        <PillButton
-          label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
-          variant="outline"
-          style={{ alignSelf: 'stretch', marginTop: space.md }}
-          disabled={busy}
-          onPress={() => recordUnpaid('refused')}
-        />
+        {<PillButton label={photoBusy ? 'Saving photo…' : handoverPhoto?.orderId === job?.id ? 'Replace photo' : 'Add photo'} disabled={busy} onPress={() => void addHandoverPhoto()} />}
+        {stopGate ? null : (
+          <PillButton
+            label={isDriver || isCourier ? 'Refused to pay' : 'Refused to pay at the door'}
+            variant="outline"
+            style={{ alignSelf: 'stretch', marginTop: space.md }}
+            disabled={busy}
+            onPress={() => recordUnpaid('refused')}
+          />
+        )}
         <PillButton
           label={isDriver ? 'Left without paying' : isCourier ? 'Nobody there' : 'Nobody at the door'}
           variant="outline"
@@ -1130,7 +1256,7 @@ export function ActiveJobScreen({ navigation }: any) {
       <PopupCard visible={senderRefusedSheet} onClose={() => setSenderRefusedSheet(false)}>
         <PopupTitle variant="title" center>The sender didn’t pay?</PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          Don’t take the parcel. The job ends here — your location is recorded and the sender’s account takes a strike.
+          Don’t take the parcel. The job ends here with the unpaid outcome recorded. Support can review any disagreement.
         </T>
         <PillButton
           label="Sender refused to pay"
@@ -1259,7 +1385,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Trip complete
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Cash collected — 100% yours.'} How was {ratePopup?.name}?
+          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Fare collected — 100% yours.'} How was {ratePopup?.name}?
         </T>
         <View style={{ marginTop: space.lg }}>
           <Stars value={stars} size={34} gap={6} onRate={setStars} />

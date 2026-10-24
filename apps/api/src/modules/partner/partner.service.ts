@@ -4,13 +4,20 @@ import { AppError, ValidationError } from '../../utils/errors';
 import { VEHICLE_CLASSES, VEHICLE_NOT_OFFERED, isVehicleOffered, moverRoleFor, type MoverRole } from '../../config/vehicle-classes';
 import { riderLiveLegCount } from '../dispatch/concurrency-policy';
 import { BUCKET_OF } from '../verification/doc-registry';
+import { alignStoredVehicleKind, papersUnderSecondReview, requireFreshVehicleReview } from '../verification/vehicle-retirement';
+import { vehicleIdentityChanged } from '../verification/vehicle-identity';
 import { hopDocState } from '../verification/doc-state';
 import { normalizeRegistrationMark, rootSubjectId } from '../verification/subjects';
+import { assertHirePlate } from '../verification/hire-plate';
 import { FloatService } from '../dispatch/float.service';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
-import { publishLegalDocumentOnce, recordConsent } from '../legal/consent.service';
+import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '../legal/consent.service';
 import { LEGAL_VERSION, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../legal/legal.routes';
+import {
+  assertSawQuote, signupQuote, WEEKLY_FEE_ACK_TEXT_V1, WEEKLY_FEE_ACK_TYPE, WEEKLY_FEE_ACK_VERSION, type WeeklyFeeAck,
+} from './weekly-fee-ack';
 import { assertStorePinInMarket } from '../vendor/store-pin';
+import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
 
 // ---------------------------------------------------------------------------
 // Partner provisioning (deterministic code — hard rule #1). `register` appends
@@ -107,7 +114,7 @@ export class PartnerService {
     userId: string,
     input: BecomePartnerInput,
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
-    consent?: { accepted: boolean; ip?: string | null },
+    consent?: { accepted: boolean; ip?: string | null; surface: ConsentSurface; weeklyFeeAck?: WeeklyFeeAck },
   ): Promise<{ result: PartnerProvisionResult; authorityCleanup: TCleanup }> {
     this.validateInput(input);
     // [DCR-1] Publish (hash-anchor) the role agreement BEFORE the transaction,
@@ -123,7 +130,18 @@ export class PartnerService {
         renderedText: agreement.renderedText,
       });
     }
+    // [Row 628] The weekly-fee tick anchors to its own published words, the same way.
+    const feeAck = consent?.weeklyFeeAck;
+    if (feeAck) {
+      await publishLegalDocumentOnce(this.prisma, { documentType: WEEKLY_FEE_ACK_TYPE, version: WEEKLY_FEE_ACK_VERSION, renderedText: WEEKLY_FEE_ACK_TEXT_V1 });
+    }
+    const feeSubject = input.role === 'VENDOR'
+      ? { role: 'VENDOR' as const, vendorType: input.business!.vendorType }
+      : { role: 'MOVER' as const, vehicleType: input.vehicleType! };
     const combined = await this.prisma.$transaction(async (tx) => {
+      // [Row 628] The fee the partner saw is the quote now, or nothing is written (WEEKLY_FEE_CHANGED).
+      const quote = feeAck ? await signupQuote(tx, userId, feeSubject) : null;
+      if (feeAck && quote) assertSawQuote(feeAck, quote);
       const result = await this.provisionLocked(tx, userId, input);
       const authorityCleanup = await transitionAuthority(tx, result.targetRole);
       // [DCR-1 INV-NR1a] The agreement consent rides the SAME transaction that
@@ -138,9 +156,27 @@ export class PartnerService {
           documentType: agreement.documentType,
           version: LEGAL_VERSION,
           action: 'granted',
-          surface: 'mobile',
+          surface: consent.surface,
           ip: consent.ip ?? null,
           evidence: { control: 'agreement_checkbox', path: 'partner/become', kind: result.kind },
+        });
+      }
+      // [Row 628] "I understand the weekly fee", in the same transaction, with the amount the partner saw (= the
+      // quote). Only when the client sent it: a phone build that never showed it records nothing.
+      if (feeAck && quote) {
+        await recordConsent(tx, {
+          subjectType: agreement.subjectType,
+          subjectId: userId,
+          documentType: WEEKLY_FEE_ACK_TYPE,
+          version: WEEKLY_FEE_ACK_VERSION,
+          action: 'granted',
+          surface: consent!.surface,
+          ip: consent!.ip ?? null,
+          evidence: {
+            control: 'weekly_fee_checkbox', path: 'partner/become', kind: result.kind,
+            ...(feeSubject.role === 'VENDOR' ? { vendorType: feeSubject.vendorType } : { vehicleType: feeSubject.vehicleType }),
+            weeklyFee: { amount: quote.amount, currencyCode: quote.currencyCode, tier: quote.tier },
+          },
         });
       }
       return { result, authorityCleanup };
@@ -157,9 +193,9 @@ export class PartnerService {
       return;
     }
     if (!input.vehicleType) throw new ValidationError('Vehicle type is required to move with Swift');
-    // [Launch vehicle list] Canters and box trucks are not taken on yet (config/vehicle-classes).
+    // [Launch vehicle list] Buses, canters and box trucks are not taken on yet (config/vehicle-classes).
     if (!isVehicleOffered(input.vehicleType)) {
-      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Choose another vehicle.');
+      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
     // Passenger-capable vehicles (car → Economy, wagon → Comfort, bus → Group)
     // provision a Driver at their tier so the vehicle earns on the higher-value
@@ -169,17 +205,22 @@ export class PartnerService {
     if (rideClass && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
   }
 
   private async provisionLocked(tx: Tx, userId: string, input: BecomePartnerInput): Promise<PartnerProvisionResult> {
-    const rows = await tx.$queryRaw<Array<{ id: string; roles: UserRole[] }>>`
-      SELECT "id", "roles"
-      FROM "users"
-      WHERE "id" = ${userId}
-      FOR UPDATE
+    const rows = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; tenantKind: string }>>`
+      SELECT u."id", u."roles", t."kind"::text AS "tenantKind"
+      FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId"
+      WHERE u."id" = ${userId}
+      FOR UPDATE OF u
     `;
     const user = rows[0];
     if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+    // [REVIEW-PARTNER] Every provisioning entry point passes this lock: a demo (REVIEW) account
+    // never gains a rider, driver or store role — before any profile, store or consent row.
+    if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
 
     if (input.role === 'VENDOR') {
       return this.provisionVendor(tx, user.id, user.roles, input.business!);
@@ -303,20 +344,25 @@ export class PartnerService {
     transitionAuthority: (tx: Tx, targetRole: UserRole) => Promise<TCleanup>,
   ): Promise<{ result: VehicleChangeResult; authorityCleanup: TCleanup | null }> {
     if (!isVehicleOffered(input.vehicleType)) {
-      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking canters and box trucks yet. Choose another vehicle.');
+      throw new AppError(422, VEHICLE_NOT_OFFERED, 'Swift is not taking buses, canters or box trucks yet. Choose another vehicle.');
     }
     const target = moverRoleFor(input.vehicleType);
     if (target === 'DRIVER' && !input.vehicle) {
       throw new ValidationError('Vehicle details (make, model, year, colour, licence plate) are required to drive');
     }
+    // [Owner ruling 11 Oct 2026] A taxi's plate is H-series, said where it is typed.
+    if (input.vehicle) assertHirePlate(input.vehicleType, input.vehicle.licensePlate);
     return this.prisma.$transaction(async (tx) => {
       const now = new Date();
       // The global lock order (mover-authority): User, then Rider, then Driver.
-      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string }>>`
-        SELECT "id", "roles", "lastMoverRole", "countryCode" FROM "users" WHERE "id" = ${userId} FOR UPDATE
+      const users = await tx.$queryRaw<Array<{ id: string; roles: UserRole[]; lastMoverRole: string | null; countryCode: string; tenantKind: string }>>`
+        SELECT u."id", u."roles", u."lastMoverRole", u."countryCode", t."kind"::text AS "tenantKind"
+        FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${userId} FOR UPDATE OF u
       `;
       const user = users[0];
       if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'User not found');
+      // [REVIEW-PARTNER] A demo account's vehicle (and so its mover role) is the pack's, never swapped.
+      if (user.tenantKind === 'REVIEW') throw new ReviewDemoRoleRefusedError();
       await tx.$queryRaw`SELECT "id" FROM "riders" WHERE "userId" = ${userId} FOR UPDATE`;
       await tx.$queryRaw`SELECT "id" FROM "drivers" WHERE "userId" = ${userId} FOR UPDATE`;
       const rider = await tx.rider.findUnique({ where: { userId } });
@@ -408,11 +454,28 @@ export class PartnerService {
       }
       // The other profile, if any, goes offline too and loses the legacy grant: its GO now
       // re-checks the evidence it still has (which follows its own plate).
+      // [Opus 12 Oct · H-plate follow-up] The same plate moved to the other kind of work (a motorbike
+      // re-declared as a car, or back): the retired profile no longer carries it, so the vehicle the mover
+      // really uses — not one they no longer drive — decides how that plate's papers are judged.
+      const movedPlate = (retiredPlate: string | null) => normalizeRegistrationMark(retiredPlate ?? '') !== ''
+        && samePlate(retiredPlate, details.licensePlate);
       if (target === 'DRIVER' && rider) {
-        await tx.rider.update({ where: { id: rider.id }, data: { ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } });
+        await tx.rider.update({ where: { id: rider.id }, data: {
+          ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
+          ...(movedPlate(rider.licensePlate) ? { licensePlate: null } : {}),
+        } });
       }
       if (target === 'RIDER' && driver) {
-        await tx.driver.update({ where: { id: driver.id }, data: { ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null } });
+        await tx.driver.update({ where: { id: driver.id }, data: {
+          ...retire, documentsVerified: false, documentsVerifiedAt: null, documentsVerifiedBy: null,
+          // A Driver row always has a plate column; empty means "no vehicle on file" (it cannot go online as a taxi).
+          ...(movedPlate(driver.licensePlate) ? { licensePlate: '' } : {}),
+        } });
+      }
+
+      // The vehicle on this plate is now this class (motorbike re-declared as a car, or back).
+      if (input.vehicleType !== previousVehicleType || target !== current) {
+        await alignStoredVehicleKind(tx, userId, user.countryCode, details.licensePlate, input.vehicleType);
       }
 
       // A plate change (or a move to the other kind of work) closes the open vehicle
@@ -458,11 +521,17 @@ export class PartnerService {
       // racing a reviewer's claim waits for it instead of deadlocking.
       const awaitingIds = toRetire.filter((p) => !p.committed).map((p) => p.id);
       if (awaitingIds.length > 0) {
-        await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) FOR UPDATE`;
+        await tx.$queryRaw`SELECT "id" FROM "review_case" WHERE "submissionId" = ANY(${awaitingIds}) ORDER BY "id" FOR UPDATE`;
+        // Then the papers themselves (the escalation's order): a paper with no open case still serializes with an
+        // escalation, so the second-review read below sees one that committed first [DS1064 S3].
+        await tx.$queryRaw`SELECT "id" FROM "verification_documents" WHERE "id" = ANY(${awaitingIds}) ORDER BY "id" FOR UPDATE`;
       }
+      // [DOC-1 §24.2] A paper under a second review is frozen too: its confirmation opens the fraud case.
+      const underSecondReview = await papersUnderSecondReview(tx, awaitingIds);
       const superseded: string[] = [];
       const withdrawn: string[] = [];
       for (const paper of toRetire) {
+        if (underSecondReview.has(paper.id)) continue;
         if (paper.committed) {
           if (await hopDocState(tx, { id: paper.id, userId }, 'COMMITTED', 'SUPERSEDED', { reviewNote: 'SUPERSEDED: the mover changed vehicle' })) superseded.push(paper.id);
         } else if (await hopDocState(tx, { id: paper.id, userId }, [...AWAITING_REVIEW], 'EXPIRED', { status: 'EXPIRED', reviewNote: 'WITHDRAWN: the mover changed vehicle' })) {
@@ -475,6 +544,20 @@ export class PartnerService {
       }
       if (withdrawn.length > 0) {
         await tx.reviewCase.updateMany({ where: { submissionId: { in: withdrawn }, closedAt: null }, data: { closedAt: now } });
+      }
+
+      // [L06 · #1551] A changed make, model, year, colour or plate is a vehicle the reviewers have not
+      // seen: its papers need a fresh review, the same rule as the profile writers. Re-declaring the SAME
+      // car as another type (a car as a wagon car, same details and plate) keeps its papers, as before.
+      const identityChanged = vehicleIdentityChanged(
+        { vehicleMake: currentProfile.vehicleMake, vehicleModel: currentProfile.vehicleModel, vehicleYear: currentProfile.vehicleYear, vehicleColor: currentProfile.vehicleColor, licensePlate: currentProfile.licensePlate },
+        { vehicleMake: details.make, vehicleModel: details.model, vehicleYear: details.year, vehicleColor: details.color, licensePlate: details.licensePlate },
+      );
+      if (identityChanged) {
+        const nextProfile = target === 'DRIVER' ? await tx.driver.findUniqueOrThrow({ where: { id: targetId } }) : await tx.rider.findUniqueOrThrow({ where: { id: targetId } });
+        const freshReview = await requireFreshVehicleReview(tx, userId, currentProfile.licensePlate, { ...nextProfile, kind: target });
+        superseded.push(...freshReview.superseded);
+        withdrawn.push(...freshReview.withdrawn);
       }
 
       // The change is on the record: what the mover drove before and after, and which

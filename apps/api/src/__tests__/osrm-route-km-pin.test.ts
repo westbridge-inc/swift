@@ -14,6 +14,9 @@ import { planVendorGroup } from '../modules/order/cart-plans';
 import { DEFAULT_DELIVERY_RATES } from '../utils/markup';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
 import { osrmOutcomeCounter } from '../plugins/observability';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [money] The single-leg route as it prices TODAY, pinned before a present but
@@ -28,6 +31,14 @@ import { osrmOutcomeCounter } from '../plugins/observability';
 // 1000, perKm 300, MEDIUM +500. Delivery: base 500, 200/km after 2 km) and
 // the seeded Central → South zone fare (2000). Phone prefix +5923419 (grepped:
 // unused elsewhere).
+//
+// [PRICING-GY-OCT] The owner's October fares changed those defaults. Taxi: this
+// file puts the card its taxi bytes were derived from — which names no
+// included kilometres — on the Guyana row and restores the seeded card after,
+// so every taxi byte below stands unchanged (the October fare is pinned in
+// fares-georgetown-defaults.test.ts). Courier and delivery price from the new
+// defaults, re-derived by hand: courier base 800, perKm 120, MEDIUM +500;
+// delivery base 500, 100/km after 3 km.
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
@@ -37,7 +48,7 @@ const OSRM = 'http://osrm.test';
 // Outside every zone: the formula prices it.
 const PICKUP = { lat: 6.90, lng: -58.10 };
 const DROPOFF = { lat: 6.95, lng: -58.05 };
-// The seeded Central → South zone fare.
+// The Central → South zone fare (2000): no longer seeded, planted by this suite (helpers/zone-fare-fixture).
 const CENTRAL = { lat: 6.81, lng: -58.155 };
 const SOUTH = { lat: 6.755, lng: -58.155 };
 
@@ -53,21 +64,23 @@ async function counted(outcome: string): Promise<number> {
   return metric.values.find((v) => v.labels['op'] === 'route' && v.labels['outcome'] === outcome)?.value ?? 0;
 }
 
-const tiers = (source: string, economy: number, comfort: number, group: number) => [
+const tiers = (source: string, economy: number, comfort: number) => [
   { rideClass: 'ECONOMY', multiplier: 1, fare: economy, capacity: 4, source },
   { rideClass: 'COMFORT', multiplier: 1.35, fare: comfort, capacity: 4, source },
-  { rideClass: 'GROUP', multiplier: 2.5, fare: group, capacity: 14, source },
 ];
 
 /** The exact bytes each route answers today. */
-const TAXI_OSRM_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":11800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm"}}';
-const TAXI_FALLBACK_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":11800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":25,"billableKm":10.18,"routeSource":"haversine"}}';
-const COURIER_OSRM_BODY = '{"success":true,"data":{"baseFee":1000,"distanceFee":3045,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":4545,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
-const COURIER_FALLBACK_BODY = '{"success":true,"data":{"baseFee":1000,"distanceFee":3054,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":4554,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
+const TAXI_OSRM_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":27,"billableKm":10.15,"routeSource":"osrm"}}';
+const TAXI_FALLBACK_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":4700,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":6300,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":10.2,"durationMin":25,"billableKm":10.18,"routeSource":"haversine"}}';
+// 10.15 km: 800 + 1218 + 500 = 2518. The fallback's 10.18 km: 800 + 1221.6 + 500 = 2521.6 → 2522.
+const COURIER_OSRM_BODY = '{"success":true,"data":{"baseFee":800,"distanceFee":1218,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":2518,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
+const COURIER_FALLBACK_BODY = '{"success":true,"data":{"baseFee":800,"distanceFee":1222,"sizeSurcharge":500,"speedMultiplier":1,"totalFee":2522,"estimatedMinutes":51,"currency":"GYD","distanceKm":10.2}}';
 
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -132,11 +145,15 @@ beforeAll(async () => {
     delete process.env['MAPS_PROVIDER'];
     delete process.env['OSRM_URL'];
   }
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });
@@ -193,7 +210,7 @@ describe('the taxi fare service over OSRM, as today', () => {
       durationMin: 27, source: 'formula', fromZoneId: undefined, toZoneId: undefined,
     });
     expect(await svc().estimateTiers(PICKUP, DROPOFF, 'GY')).toStrictEqual({
-      tiers: tiers('formula', 4700, 6300, 11800), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
+      tiers: tiers('formula', 4700, 6300), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
     });
   });
 
@@ -248,7 +265,7 @@ describe('every caller of routeKm answers the same bytes, as today', () => {
     expect((await post('/api/v1/courier/estimate', parcel)).body).toBe(COURIER_FALLBACK_BODY);
   });
 
-  it('the delivery planner (the cart quote and checkout): 10.15 km → 2130, express 3195', async () => {
+  it('the delivery planner (the cart quote and checkout): 10.15 km → 1215, express 1823', async () => {
     vi.stubGlobal('fetch', answer(body('10150', '1620')));
     const osrm = new OsrmMapsProvider(OSRM);
     const plan = await planVendorGroup({
@@ -260,6 +277,6 @@ describe('every caller of routeKm answers the same bytes, as today', () => {
       express: false,
       routeKm: (from, to) => osrm.routeKm(from, to),
     });
-    expect(plan).toMatchObject({ distanceKm: 10.15, distanceSource: 'osrm', standardDeliveryFee: 2130, deliveryFee: 2130, expressSurcharge: 1065 });
+    expect(plan).toMatchObject({ distanceKm: 10.15, distanceSource: 'osrm', standardDeliveryFee: 1215, deliveryFee: 1215, expressSurcharge: 608 });
   });
 });

@@ -2,8 +2,10 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { maskedPhone } from '@/lib/review-center';
+import { REASON_MIN, reasonTooShort } from '@/lib/ask-reason';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
+import { completeAccountClosure, fetchSupportTickets, resolveSupportTicket, type SupportResolution } from '@/lib/api';
 
 const FILTERS = ['OPEN', 'IN_PROGRESS', 'RESOLVED'] as const;
 
@@ -27,6 +29,10 @@ const RESOLUTIONS: { value: SupportResolution; label: string; safety: boolean }[
   { value: 'UNABLE_TO_CONTACT', label: 'Unable to contact the reporter', safety: false },
 ];
 const SAFETY_NOTE_MIN = 20;
+// [DELETION-INTEGRITY] The subject the server gives a closure request that was
+// confirmed in the app. Only these can be completed from the queue.
+const CLOSURE_SUBJECT = 'Account closure request';
+const isClosureRequest = (t: { category?: string; subject?: string }) => t.category === 'ACCOUNT' && t.subject === CLOSURE_SUBJECT;
 
 export default function SupportPage() {
   const qc = useQueryClient();
@@ -55,6 +61,26 @@ export default function SupportPage() {
     },
   });
 
+  // [U57] "Take it" is its own act with its own answer, shown next to ITS
+  // ticket's button. It used to share the close mutation, whose error renders
+  // only inside an open close panel (possibly another ticket's), so a failed
+  // take showed nothing.
+  const take = useMutation({
+    mutationFn: ({ id, expectedStatus }: { id: string; expectedStatus: 'OPEN' | 'IN_PROGRESS' | 'RESOLVED' }) =>
+      resolveSupportTicket(id, 'IN_PROGRESS', undefined, undefined, expectedStatus),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['support'] }),
+  });
+
+  /** [DELETION-INTEGRITY] The closure request being completed, with the stated reason. */
+  const [completing, setCompleting] = useState<{ id: string; reason: string } | null>(null);
+  const closeAccount = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => completeAccountClosure(id, reason),
+    onSuccess: () => {
+      setCompleting(null);
+      qc.invalidateQueries({ queryKey: ['support'] });
+    },
+  });
+
   /** The ticket currently being closed, with the operator's answers so far. */
   const [closing, setClosing] = useState<{ id: string; resolution: SupportResolution | ''; note: string } | null>(null);
 
@@ -68,7 +94,9 @@ export default function SupportPage() {
           {FILTERS.map((f) => (
             <button
               key={f}
+              type="button"
               onClick={() => setFilter(f)}
+              aria-pressed={filter === f}
               className={`px-2.5 py-1 rounded-lg text-xs ${
                 filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
               }`}
@@ -106,6 +134,7 @@ export default function SupportPage() {
         ) : (
           tickets.map((t: any) => {
             const isSafety = t.category === 'SAFETY';
+            const completion = completing?.id === t.id ? completing : null;
             const open = closing?.id === t.id;
             const choices = RESOLUTIONS.filter((r) => !isSafety || r.safety);
             const noteTooShort = isSafety && (closing?.note ?? '').trim().length < SAFETY_NOTE_MIN;
@@ -123,7 +152,7 @@ export default function SupportPage() {
                 <div className="flex flex-wrap items-center gap-4 mt-3 text-sm text-[var(--muted)]">
                   {t.user ? (
                     <Link href={`/users/${t.user.id}`} className="hover:text-[var(--accent)] transition-colors">
-                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {t.user.phone} →
+                      {[t.user.firstName, t.user.lastName].filter(Boolean).join(' ')} · {maskedPhone(t.user.phone)} →
                     </Link>
                   ) : null}
                   {t.orderId ? (
@@ -139,17 +168,73 @@ export default function SupportPage() {
                   ) : null}
                 </div>
 
+                {t.status !== 'RESOLVED' && isClosureRequest(t) && (
+                  <div className="mt-4">
+                    {!completion ? (
+                      <button
+                        onClick={() => { closeAccount.reset(); setCompleting({ id: t.id, reason: '' }); }}
+                        className="px-4 py-2 rounded-lg text-sm border border-red-500/40 text-red-400 hover:bg-red-500/10"
+                      >
+                        Complete account closure
+                      </button>
+                    ) : (
+                      <div className="rounded-lg border border-red-500/40 p-4">
+                        <p className="text-sm font-semibold">Close this account and de-identify the person?</p>
+                        <p className="text-xs text-[var(--muted)] mt-1">
+                          This cannot be undone. Financial and legal records are kept. If orders, jobs or cash are still
+                          open, the server refuses and says what is outstanding; the request stays open.
+                        </p>
+                        <label className="mt-3 block text-xs text-[var(--muted)]" htmlFor={`closure-reason-${t.id}`}>
+                          Why you are closing this account (recorded in the audit trail)
+                        </label>
+                        <textarea
+                          id={`closure-reason-${t.id}`}
+                          value={completion.reason}
+                          onChange={(e) => setCompleting({ id: t.id, reason: e.target.value })}
+                          rows={2}
+                          aria-describedby={`closure-reason-help-${t.id}`}
+                          className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
+                        />
+                        {/* [U56] The server needs at least REASON_MIN characters; say so before sending. */}
+                        <p id={`closure-reason-help-${t.id}`} className="mt-1 text-xs text-[var(--muted)]">
+                          At least {REASON_MIN} characters ({completion.reason.trim().length} so far).
+                        </p>
+                        {closeAccount.isError && closeAccount.variables?.id === t.id ? (
+                          <p className="mt-2 text-sm text-red-400">{(closeAccount.error as Error).message}</p>
+                        ) : null}
+                        <div className="mt-3 flex gap-2">
+                          <button
+                            onClick={() => closeAccount.mutate({ id: t.id, reason: completion.reason.trim() })}
+                            disabled={closeAccount.isPending || reasonTooShort(completion.reason)}
+                            className="px-4 py-2 rounded-lg text-sm bg-red-600 hover:bg-red-600/80 disabled:opacity-50"
+                          >
+                            {closeAccount.isPending ? 'Closing…' : 'Close the account'}
+                          </button>
+                          <button
+                            onClick={() => setCompleting(null)}
+                            disabled={closeAccount.isPending}
+                            className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {t.status !== 'RESOLVED' && (
                   <div className="mt-4">
                     {!open ? (
                       <div className="flex gap-2">
                         {t.status === 'OPEN' && (
                           <button
-                            onClick={() => resolve.mutate({ id: t.id, status: 'IN_PROGRESS', expectedStatus: t.status })}
-                            disabled={resolve.isPending}
+                            type="button"
+                            onClick={() => take.mutate({ id: t.id, expectedStatus: t.status })}
+                            disabled={take.isPending}
                             className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
                           >
-                            Take it
+                            {take.isPending && take.variables?.id === t.id ? 'Taking…' : 'Take it'}
                           </button>
                         )}
                         <button
@@ -158,6 +243,9 @@ export default function SupportPage() {
                         >
                           Close this ticket
                         </button>
+                        {take.isError && take.variables?.id === t.id ? (
+                          <p role="alert" className="self-center text-sm text-red-400">{(take.error as Error).message}</p>
+                        ) : null}
                       </div>
                     ) : (
                       <div className="rounded-lg border border-[var(--border)] p-4">
@@ -191,8 +279,8 @@ export default function SupportPage() {
                           rows={3}
                           className="mt-1 w-full rounded-lg border border-[var(--border)] bg-transparent p-2 text-sm"
                         />
-                        {resolve.isError ? (
-                          <p className="mt-2 text-sm text-red-400">{(resolve.error as Error).message}</p>
+                        {resolve.isError && resolve.variables?.id === t.id ? (
+                          <p role="alert" className="mt-2 text-sm text-red-400">{(resolve.error as Error).message}</p>
                         ) : null}
                         <div className="mt-3 flex gap-2">
                           <button

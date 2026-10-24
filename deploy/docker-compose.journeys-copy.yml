@@ -1,0 +1,86 @@
+# ===========================================================================
+# [TA-S0-003 · C1] The walled-login journeys on a COPY of STAGING's database,
+# layered by deploy/wall/journeys-on-copy.sh only, on the STAGING host only,
+# over docker-compose.yml + docker-compose.wall.yml + docker-compose.rehearsal.yml
+# under the rehearsal's own project (swift-rehearsal). Never by hand, never on
+# production (journeys-on-copy.sh refuses it; the runner refuses a production
+# target by itself as well).
+#
+# - api-journeys: the API in the contract posture (the two least-privilege
+#   logins from the copy's own store, no owner credential, the owner password
+#   file masked, TENANT_RLS_BIND=1, deny) with the journey switches on, so the
+#   suite can sign its synthetic accounts in. Its secrets are the copy's
+#   (/run/swift-rehearsal-secrets), never the live stack's. In-request sends
+#   stay in the process (dev providers). No port, no route: the copy's
+#   internal network (no route out) is the only way in. It also runs the job
+#   consumers (the copy's own worker is stopped first), so one walled process,
+#   and its own /metrics, covers every request and every job of the run.
+# - journeys-copy: the journey runner, on that same internal network only.
+# Both sit in a profile the rehearsal itself never enables.
+# ===========================================================================
+services:
+  api-journeys:
+    extends:
+      file: docker-compose.yml
+      service: api
+    profiles: [journeys-copy]
+    restart: "no"
+    environment:
+      DEV_OTP_BYPASS: "1"
+      TEST_CONTROL_ENABLED: "1"
+      TEST_CONTROL_SECRET_FILE: /run/secrets/TEST_CONTROL_SECRET
+      NOTIFICATION_PROVIDER: dev
+      EMAIL_PROVIDER: dev
+      PUSH_PROVIDER: dev
+      # HTTP AND the queues (dispatch offers, the verification jobs): the only
+      # consumer while it runs (journeys-on-copy.sh stops the copy's worker
+      # first), so the measured window holds every request and every job.
+      RUN_WORKERS: "1"
+      # The copy has no route out, so the journeys' uploads (mover documents,
+      # photos) go to a throwaway store inside this container (the tmpfs
+      # below): gone with it, never the live bucket.
+      STORAGE_PROVIDER: local
+      STORAGE_ALLOW_LOCAL: "1"
+      UPLOAD_DIR: /srv/swift/uploads
+      STORAGE_LOCAL_BACKUP_ACK: "1"
+      # The contract posture, exactly as docker-compose.wall.yml gives the api.
+      POSTGRES_HOST: ""
+      POSTGRES_PORT: ""
+      POSTGRES_USER: ""
+      POSTGRES_DB: ""
+      POSTGRES_PASSWORD_FILE: ""
+      DATABASE_URL_FILE: /run/secrets/DATABASE_URL
+      SYSTEM_DATABASE_URL_FILE: /run/secrets/SYSTEM_DATABASE_URL
+      TENANT_RLS_BIND: "1"
+      TENANT_UNSCOPED_ACCESS: deny
+      TENANT_WALL_EXPAND_ATTESTED: ""
+    volumes: !override
+      - /run/swift-rehearsal-secrets:/run/secrets:ro
+      - /dev/null:/run/secrets/POSTGRES_PASSWORD:ro
+    tmpfs:
+      - /srv/swift/uploads:uid=1000,gid=1000,mode=0700
+    ports: !reset []
+    networks: !override [private]
+
+  journeys-copy:
+    image: swift-api:${SWIFT_TAG:-local}
+    profiles: [journeys-copy]
+    restart: "no"
+    user: "${JOURNEYS_UID:-1000}:${JOURNEYS_GID:-1000}"
+    working_dir: /app
+    entrypoint: ["apps/api/node_modules/.bin/tsx", "scripts/livetest/run.ts", "--suite=journeys"]
+    environment:
+      LIVETEST_BASE_URL: http://api-journeys:3000
+      LIVETEST_PUBLIC_HOST: ${API_HOST:-}
+      LIVETEST_ADMIN_PHONE: ${LIVETEST_ADMIN_PHONE:-}
+      LIVETEST_EXPECT_ENVIRONMENT: staging
+      LIVETEST_RUN_ID: ${LIVETEST_RUN_ID:-}
+      LIVETEST_OUT_DIR: /results
+    volumes:
+      - ../scripts/livetest:/app/scripts/livetest:ro
+      - ${JOURNEYS_RESULTS_DIR:-/var/tmp/swift-journeys-copy}:/results
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks: [private]

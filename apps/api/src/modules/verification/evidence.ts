@@ -12,6 +12,7 @@
  * by the service-provider projection — one rule, one implementation.
  */
 import type { CoverageClass, Prisma, PrismaClient } from '@prisma/client';
+import { HIRE_SPLIT_DOC_TYPES } from './hire-permit-grace';
 
 export type EvidenceDb = Prisma.TransactionClient | PrismaClient;
 
@@ -29,6 +30,13 @@ export interface EvidenceRow {
 
 export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   if (checklist.length === 0) return [];
+  // [Owner ruling 15 Oct 2026 · no grace] The records alone. The old hire-car permit never stands in for the
+  // Hire Car Driver's Licence or the car's hire licence (the 6 Oct 60-day allowance is removed).
+  return recordEvidenceFor(db, userId, checklist, now);
+}
+
+/** The records themselves: the evidence rule. */
+export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
   const vehicles = await db.subjectLink.findMany({
     where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
@@ -65,25 +73,26 @@ export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checkl
  * `documentsVerified` grandfather clause was ever entitled to ask — and it is
  * asked of the MISSING types alone. A type missing because its record lapsed is
  * an expiry; a type missing because nothing was ever filed is the pre-checklist
- * state the clause exists for. Same ownership
- * and purge filters as above; deliberately NO status or expiry filter, because a
+ * state the clause exists for. Historical approved vehicle links remain relevant, including closed links.
+ * Deliberately NO purge, status or expiry filter, because a
  * record that has expired is precisely the case the flag must not be allowed to
  * paper over.
  */
-export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[]): Promise<boolean> {
+export async function anyChecklistEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], currentSubjectId?: string | null): Promise<boolean> {
   if (checklist.length === 0) return false;
+  // The hire licences require current evidence, never a legacy flag (and never the old permit: no grace).
+  if (checklist.some((type) => HIRE_SPLIT_DOC_TYPES.includes(type))) return true;
+  // Historical links and retired submissions still establish that proof was
+  // filed. A missing current record is not a never-filed legacy account.
   const vehicles = await db.subjectLink.findMany({
-    where: { accountId: userId, validTo: null, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
+    where: { accountId: userId, approvedAt: { not: null }, subject: { kind: 'VEHICLE' } },
     select: { subjectId: true },
   });
-  const vehicleIds = vehicles.map((v) => v.subjectId);
-  const held = await db.documentRecord.count({
+  const vehicleIds = [...vehicles.map((v) => v.subjectId), ...(currentSubjectId ? [currentSubjectId] : [])];
+  const held = await db.verificationDocument.count({
     where: {
       docType: { in: [...checklist] },
-      AND: [
-        { OR: [{ accountId: userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])] },
-        { submission: { purgedAt: null } },
-      ],
+      OR: [{ userId }, ...(vehicleIds.length ? [{ subjectId: { in: vehicleIds } }] : [])],
     },
   });
   return held > 0;

@@ -13,9 +13,14 @@ sender pool. Startup checks these formats locally, but cannot confirm that
 Twilio assigned the number or service to this account. Setting both senders,
 or neither, refuses to boot, as does a From value that is not E.164 or a
 Messaging Service SID that is not `MG` + 32 hex. The master Auth Token is not
-used for sending. If inbound webhook signature verification is added later,
-give its Auth Token the separate name `TWILIO_WEBHOOK_AUTH_TOKEN` and keep that
-value out of the outbound adapter.
+used for sending. Inbound STOP replies to marketing texts are verified with the
+account's Auth Token under the separate name `TWILIO_WEBHOOK_AUTH_TOKEN` (a
+secret: encrypted store, wired as
+`TWILIO_WEBHOOK_AUTH_TOKEN_FILE=/run/secrets/TWILIO_WEBHOOK_AUTH_TOKEN`); the
+outbound adapter never reads it. `TWILIO_INBOUND_SMS_URL` is the exact
+incoming-message webhook URL set on the number
+(`https://<API host>/api/v1/sms/inbound`), a plain setting. Until both are set
+the webhook answers 503 and no marketing text is sent.
 
 The identifiers (`TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_FROM` and
 `TWILIO_MESSAGING_SERVICE_SID`) are settings in the host's `deploy/.env`. The
@@ -32,6 +37,31 @@ examples contain variable names only; production boot refuses an incomplete
 Twilio configuration. `deploy/preflight.sh` reads a candidate env file (and
 the store with `--secrets-dir`) and runs that same boot guard, but cannot prove
 credentials are valid or that delivery is enabled at Twilio.
+
+## Non-production: the recipient allowlist
+
+On any deployment that is not production (staging, loadtest) the real Twilio
+adapter texts **only** the numbers in `SMS_RECIPIENT_ALLOWLIST` (E.164,
+separated by commas, spaces or new lines). A text to any other number is not
+sent; the API answers as if it were, and the counter
+`swift_sms_recipient_not_allowlisted_total` goes up (the number is never
+logged). This keeps automated testers, crawlers and store reviewers from making
+a test deployment text strangers.
+
+- Store the list in the encrypted store (`sudo swift-secrets set
+  SMS_RECIPIENT_ALLOWLIST`) and wire `SMS_RECIPIENT_ALLOWLIST_FILE=/run/secrets/SMS_RECIPIENT_ALLOWLIST`
+  in the deployment's `deploy/.env`. Phone numbers are personal data: never put
+  them in an env file, the repository or a ticket.
+- **Empty or unset = SMS is OFF.** The boot log then says `SMS is OFF: no
+  allowlisted recipients`; with a list it says how many numbers (never which).
+  Check that line after every staging deploy.
+- A malformed entry stops boot (the message gives its position, not its value).
+- **Production refuses to boot** while either `SMS_RECIPIENT_ALLOWLIST` or its
+  `_FILE` form is set, so this can never silently stop real users' codes.
+- Known non-production property: an allowlisted number takes a real Twilio
+  round trip (and gets the ordinary "couldn't send" error if Twilio fails),
+  while any other number answers at once. On a test deployment the allowlist is
+  the test team, so this is accepted; production has no allowlist at all.
 
 ## Messaging Service setup
 
@@ -62,10 +92,21 @@ launch approval. Set the provider account's available spending limit or alerts
 and verify who receives those alerts. Swift's `OTP_PHONE_DAILY_CAP` (default 8),
 `OTP_IP_DAILY_CAP` (default 100, unknown numbers per client IP),
 `OTP_GLOBAL_DAILY_CAP` (default 5000, unknown numbers) and `OTP_KNOWN_DAILY_CAP`
-(default 5000, existing verified accounts and admins) bound OTP volume; they do
-not cap every alert SMS. The worst case for one Guyana day is the global cap
-plus the known cap. Set both to explicit affordable numbers for the launch
-volume, then monitor provider usage.
+(default 5000, existing verified accounts and admins) bound OTP volume. Safety
+texts (a passenger's trip link and an emergency contact's confirmation code)
+have a budget of their own that no login code can spend:
+`SMS_SAFETY_SENDER_DAILY_CAP` (default 30 per account),
+`SMS_SAFETY_RECIPIENT_DAILY_CAP` (default 10 from one account to one number)
+and `SMS_SAFETY_DAILY_CAP` (default 2000 for the whole platform). None of these
+caps every alert SMS: the SOS text to a verified emergency contact, on-call
+pages and account notices are not budgeted. Every budgeted text (login,
+step-up, trip link, emergency-contact code) is refused in the API for a number
+outside the launch market before Twilio is called; the Twilio geo-permission is
+the backstop for everything else, so an `OPS_ONCALL_PHONES` number outside the
++592 range receives nothing while it is Guyana-only. The worst case for one
+Guyana day is the global cap plus the known cap plus the safety cap. Set all
+three to explicit affordable numbers for the launch volume, then monitor
+provider usage.
 
 For rotation, create a new application API key, set its SID in `deploy/.env`
 and its secret with `swift-secrets set` (the previous encrypted version is kept

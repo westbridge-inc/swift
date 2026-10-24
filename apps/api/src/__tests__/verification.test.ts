@@ -20,6 +20,8 @@ import { registrationProofFor } from './helpers/otp';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
+import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 // [FD-D5 · 2026-09-07] The switch is OFF by default now; this suite characterises the ON behaviour.
 process.env['FEATURE_BIOMETRIC_FACE_MATCH'] = '1';
@@ -45,10 +47,15 @@ const TAXI_MOVER_PHONE = `+${runBase + 6}`;
 const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
 const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
+const CONSENT_ID_PHONE = `+${runBase + 10}`;
+const CONSENT_DOC_PHONE = `+${runBase + 11}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE];
 
-// Base (incl. police clearance — required of every courier) + motor docs.
-const MOVER_DOCS = ['national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+// [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
+// documents; the licence is their photo ID, so the national ID — and, for every mover, the police
+// clearance — are OPTIONAL: accepted for upload, never a gate.
+const MOVER_DOCS = ['drivers_licence', 'vehicle_registration', 'vehicle_insurance'];
+const MOVER_OPTIONAL_DOCS = ['national_id', 'police_clearance'];
 
 let app: FastifyInstance;
 let sweepService: VerificationService;
@@ -64,6 +71,7 @@ async function cleanup() {
   const users = await app.prisma.user.findMany({ where: { phone: { in: ALL_PHONES } }, select: { id: true } });
   const ids = users.map((u) => u.id);
   if (ids.length) {
+    await cleanupPayerBillingClocks(app.prisma, ids);
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
   }
@@ -135,7 +143,7 @@ beforeAll(async () => {
       roles: ['ADMIN'],
       activeRole: 'ADMIN',
       isPhoneVerified: true, selfieCapturedAt: new Date(),
-      admin: { create: { permissions: ['*'] } },
+      admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
     },
   });
   adminToken = app.jwt.sign({ userId: adminUser.id, role: 'ADMIN', jti: `s4-${Date.now()}` });
@@ -199,6 +207,7 @@ describe('Checklists drive from config', () => {
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
     expect(data.missing).toEqual(MOVER_DOCS);
+    expect(data.optional).toEqual(MOVER_OPTIONAL_DOCS);
     expect(data.roleVerified).toBe(false);
   });
 
@@ -214,25 +223,30 @@ describe('Checklists drive from config', () => {
     expect(res.json().error.code).toBe('INVALID_DOC_TYPE');
   });
 
-  it('commerce checklists carry the Guyana-real docs (TIN, GRA licence, storefront)', async () => {
+  // [VERIFY-DOCS · owner ruling 7, 6 Oct 2026 — a DELIBERATE change] no TIN certificate on any list:
+  // no law found requires Swift to hold it; a VAT-registered store types its VAT number instead.
+  it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate',
+      'owner_national_id', 'business_registration',
       'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
     ]);
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
     const store = await inject('GET', '/api/v1/verification/status?role=STORE', undefined, vendorToken);
     expect(store.json().data.checklist).toEqual([
-      'owner_national_id', 'business_registration', 'tin_certificate', 'storefront_photo',
+      'owner_national_id', 'business_registration', 'storefront_photo',
     ]);
 
+    // [VERIFY-DOCS · owner ruling 6 Oct ~21:25 GYT] A service business opens on its owner's ID; a
+    // police clearance is optional for the store (home-visit bookings need it: verify-docs-home-visits).
     const service = await inject('GET', '/api/v1/verification/status?role=SERVICE', undefined, vendorToken);
-    expect(service.json().data.checklist).toEqual(['owner_national_id', 'police_clearance']);
+    expect(service.json().data.checklist).toEqual(['owner_national_id']);
+    expect(service.json().data.optional).toContain('police_clearance');
   });
 });
 
@@ -258,7 +272,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
   let rejectedDocId: string;
 
   it('submitted documents land in the admin queue as PENDING', async () => {
-    for (const docType of MOVER_DOCS) {
+    // Required and optional alike: an optional document is reviewed like any other.
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) {
       const res = await inject('POST', '/api/v1/verification/documents', {
         role: 'MOVER',
         docType,
@@ -275,7 +290,7 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     const docTypes = queue.json().data
       .filter((d: { userId: string }) => d.userId === moverUserId)
       .map((d: { docType: string }) => d.docType);
-    for (const docType of MOVER_DOCS) expect(docTypes).toContain(docType);
+    for (const docType of [...MOVER_DOCS, ...MOVER_OPTIONAL_DOCS]) expect(docTypes).toContain(docType);
   });
 
   it('rejection notifies the applicant with the reason (resubmit path)', async () => {
@@ -322,9 +337,13 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
     for (const doc of pending) {
       // [A-19] A reviewer keys the printed expiry; a document type that carries
       // one can no longer be approved without it.
-      const body = docTypeExpires(doc.docType)
-        ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() }
-        : {};
+      const body = {
+        ...(docTypeExpires(doc.docType) ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() } : {}),
+        // [VERIFY-DOCS] …and types the ID/licence number or the clearance's issue date.
+        ...reviewerTyped(doc.docType, doc.id),
+        // [R13] …and, for any motor vehicle's insurance, records the hire-or-reward (commercial use) decision.
+        ...(doc.docType === 'vehicle_insurance' ? { insurance: { insurerName: 'Synthetic Mutual', policyNumber: `SYN-${doc.id.slice(-6)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } } : {}),
+      };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);
     }
@@ -366,15 +385,17 @@ describe('Provider auto-decisions (swappable interface)', () => {
     expect(res.json().data.status).toBe('APPROVED');
     expect(res.json().data.kycRef).toMatch(/^sbx_/);
 
-    // ID alone is not the SERVICE bar — police clearance is still missing
-    // (service people enter customers' homes), so listing stays gated.
+    // [VERIFY-DOCS · owner ruling 6 Oct 2026 ~21:25 GYT — a DELIBERATE change] The owner's ID IS
+    // the service business's bar now. A police clearance is needed only for HOME-VISIT bookings
+    // (verify-docs-home-visits.test.ts), never to list, so the listing is accepted at once.
     const early = await inject('POST', '/api/v1/vendor/items', {
       categoryId: serviceCategoryId,
       name: 'Hot Stone Massage',
       basePrice: 8000,
     }, vendorToken);
-    expect(early.statusCode).toBe(403);
-    expect(early.json().error.code).toBe('VERIFICATION_REQUIRED');
+    expect(early.statusCode).toBe(200);
+
+    // The clearance stays a document the business MAY add (and what home visits need).
 
     const clearance = await inject('POST', '/api/v1/verification/documents', {
       role: 'SERVICE',
@@ -435,7 +456,7 @@ describe('L2 identity — permanent customer verification', () => {
     }, customer.tokens.accessToken);
     expect(res.json().data.status).toBe('PENDING');
 
-    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, {}, adminToken);
+    const approve = await inject('PUT', `/api/v1/admin/verification/${res.json().data.id}/approve`, reviewerTyped('identity_l2', res.json().data.id), adminToken);
     expect(approve.statusCode).toBe(200);
 
     const user = await app.prisma.user.findUniqueOrThrow({ where: { phone: L2_MANUAL_PHONE } });
@@ -589,10 +610,11 @@ describe('Document storage & DPA compliance', () => {
 
 describe('Taxi checklist merge + auto-KYC audit', () => {
   it('a mover can submit a taxi-only document and the auto-approval is audited', async () => {
-    // hire_car_permit lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // hire_car_vehicle_licence lives in MOVER_TAXI_EXTRA — only submittable via the merge
+    // ([VERIFY-DOCS · ruling 8] it and the person's licence replace the single hire-car permit)
     const res = await inject('POST', '/api/v1/verification/documents', {
       role: 'MOVER',
-      docType: 'hire_car_permit',
+      docType: 'hire_car_vehicle_licence',
       fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'auto-approve-hire-permit'),
       consent: true,
       privacyNoticeVersion: 'v1',
@@ -610,9 +632,11 @@ describe('Taxi checklist merge + auto-KYC audit', () => {
 describe('Taxi movers are shown — and gated on — the taxi-extra checklist', () => {
   // The dead-end this prevents: a taxi driver was only ever shown the base
   // mover docs, uploaded them, saw "verified" — then go-online silently failed
-  // because the live gate ALSO requires hire permit / plate photo / exterior
-  // photo / fitness cert. What onboarding shows must equal what gates.
-  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert'];
+  // because the live gate ALSO requires hire permit / exterior photo / fitness
+  // cert. What onboarding shows must equal what gates. [VERIFY-DOCS] The plate
+  // photo is merged into the exterior photo (it shows the plate).
+  // [VERIFY-DOCS · ruling 8] the person's and the car's hire licences replace the single permit
+  const TAXI_DOCS = [...MOVER_DOCS, 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert'];
   let taxiToken: string;
   let bicycleToken: string;
 
@@ -638,12 +662,14 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     });
   });
 
-  it('surfaces police clearance + the taxi extras in the onboarding checklist', async () => {
+  it('surfaces the taxi extras in the onboarding checklist; police clearance is offered, not required', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, taxiToken);
     expect(res.statusCode).toBe(200);
     const data = res.json().data;
     expect(data.checklist).toEqual(TAXI_DOCS);
-    expect(data.missing).toContain('police_clearance');
+    expect(data.missing).toEqual(TAXI_DOCS);
+    expect(data.missing).not.toContain('police_clearance');
+    expect(data.optional).toContain('police_clearance');
     expect(data.roleVerified).toBe(false);
   });
 
@@ -651,16 +677,18 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, moverToken);
     const data = res.json().data;
     expect(data.checklist).toEqual(MOVER_DOCS);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_driver_licence');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
     expect(data.checklist).not.toContain('vehicle_exterior_photo');
   });
 
-  it('asks a bicycle courier for identity + character only — no vehicle docs', async () => {
+  it('asks a bicycle courier for identity only — no vehicle docs; police clearance optional', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER', undefined, bicycleToken);
     const data = res.json().data;
-    // Police clearance applies to EVERY courier (cash + home visits) — only
-    // the vehicle documents scale away for a bicycle (master plan §3.2).
-    expect(data.checklist).toEqual(['national_id', 'police_clearance']);
+    // [VERIFY-DOCS · rulings 2, 4] A bicycle rider has no licence, so the national ID is required;
+    // the police clearance is optional for every mover. The vehicle documents scale away.
+    expect(data.checklist).toEqual(['national_id']);
+    expect(data.optional).toEqual(['police_clearance']);
     expect(data.checklist).not.toContain('drivers_licence');
     expect(data.checklist).not.toContain('vehicle_insurance');
     expect(data.vehicleType).toBe('BICYCLE');
@@ -680,13 +708,13 @@ describe('Taxi movers are shown — and gated on — the taxi-extra checklist', 
     const data = res.json().data;
     // A box truck is a commercial goods vehicle, not a hire car.
     expect(data.checklist).toEqual([...MOVER_DOCS, 'road_service_licence', 'fitness_cert']);
-    expect(data.checklist).not.toContain('hire_car_permit');
+    expect(data.checklist).not.toContain('hire_car_vehicle_licence');
   });
 
   it('asks a bus for the hire extras AND commercial docs — fitness cert only once', async () => {
     const res = await inject('GET', '/api/v1/verification/status?role=MOVER&vehicleType=BUS_15', undefined, taxiToken);
     const data = res.json().data;
-    expect(data.checklist).toContain('hire_car_permit'); // it carries passengers
+    expect(data.checklist).toContain('hire_car_vehicle_licence'); // it carries passengers
     expect(data.checklist).toContain('road_service_licence'); // it is commercial
     // fitness_cert is in both the taxi and commercial profiles — deduped to one.
     expect(data.checklist.filter((d: string) => d === 'fitness_cert')).toHaveLength(1);
@@ -935,8 +963,8 @@ describe('Early renewal window — resubmission opens 30 days before expiry', ()
 describe('Taxi hire-class insurance — the manual 5-point check is enforced', () => {
   let taxiUserId: string;
   const TAXI_CHECKLIST = [
-    'national_id', 'police_clearance', 'drivers_licence', 'vehicle_registration',
-    'vehicle_insurance', 'hire_car_permit', 'vehicle_plate_photo', 'vehicle_exterior_photo', 'fitness_cert',
+    'drivers_licence', 'vehicle_registration',
+    'vehicle_insurance', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'vehicle_exterior_photo', 'fitness_cert',
   ];
 
   beforeAll(async () => {
@@ -1018,14 +1046,23 @@ describe('Lapsed documents force movers offline (daily sweep)', () => {
     expect((note!.data as any)?.audience).toBe('earner');
   });
 
-  it('an online courier is pulled offline when their police clearance lapses — others untouched', async () => {
+  it('an online courier is pulled offline when a required document lapses — never for an optional one; others untouched', async () => {
     // A bystander who stays online through someone else's expiry
     const cyclist = await app.prisma.user.findUniqueOrThrow({ where: { phone: BICYCLE_MOVER_PHONE } });
     await app.prisma.rider.updateMany({ where: { userId: cyclist.id }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
 
     await app.prisma.rider.updateMany({ where: { userId: moverUserId }, data: { isOnline: true, locationSessionId: syntheticLocationOwner('verification') } });
+    // [VERIFY-DOCS] The police clearance is optional: its lapse leaves the courier online.
     await app.prisma.verificationDocument.updateMany({
       where: { userId: moverUserId, docType: 'police_clearance', status: 'APPROVED' },
+      data: { expiresAt: new Date(Date.now() - 60 * 1000) },
+    });
+    await sweepService.expireLapsedDocuments();
+    expect((await app.prisma.rider.findFirstOrThrow({ where: { userId: moverUserId } })).isOnline).toBe(true);
+
+    // A required one (the licence) takes the courier offline at once.
+    await app.prisma.verificationDocument.updateMany({
+      where: { userId: moverUserId, docType: 'drivers_licence', status: 'APPROVED' },
       data: { expiresAt: new Date(Date.now() - 60 * 1000) },
     });
 
@@ -1065,7 +1102,7 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
   const past = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
   it('knows which types carry a printed expiry, from the one map', () => {
-    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'fitness_cert']) {
+    for (const t of ['drivers_licence', 'vehicle_insurance', 'police_clearance', 'hire_car_permit', 'hire_car_driver_licence', 'hire_car_vehicle_licence', 'fitness_cert']) {
       expect(docTypeExpires(t), t).toBe(true);
     }
     expect(docTypeExpires('business_registration')).toBe(false);
@@ -1099,10 +1136,12 @@ describe('[A-19] an expiring document cannot be approved without its expiry', ()
 
   it('the route refuses the approval, and the document stays PENDING', async () => {
     const pending = await app.prisma.verificationDocument.findFirst({
-      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance', 'police_clearance'] } },
+      // [VERIFY-DOCS] A police clearance's re-check date now comes from its typed ISSUE date
+      // (reviewer-typed-fields.test.ts), so it is no longer an example of a printed expiry.
+      where: { status: 'PENDING', docType: { in: ['drivers_licence', 'vehicle_insurance'] } },
     });
     if (!pending) return; // no such candidate in this fixture run
-    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, {}, adminToken);
+    const res = await inject('PUT', `/api/v1/admin/verification/${pending.id}/approve`, reviewerTyped(pending.docType, pending.id), adminToken);
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('EXPIRY_REQUIRED');
     const after = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: pending.id } });
@@ -1127,5 +1166,62 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [R17 · legal research D2/B1/G4, in-app ¶15] The tick before an upload is recorded in the consent ledger,
+// anchored to the tick's exact words, only when the client says it showed it (website, phone build 12). Builds
+// 9-11 send consent: true with no tick: their document is accepted as today and no ledger row is fabricated.
+// ---------------------------------------------------------------------------
+describe('[R17] upload consent ticks are recorded in the consent ledger', () => {
+  const consentRows = (userId: string, documentType: string) => app.prisma.consentRecord.findMany({
+    where: { subjectId: userId, documentType }, select: { documentVersion: true, action: true, subjectType: true, evidence: true },
+  });
+
+  it('a partner document sent with the tick writes a document_processing_consent row; one without writes none; a wrong tick is refused', async () => {
+    const mover = await signup(CONSENT_DOC_PHONE, 'MOVER');
+    const moverUserId = mover.user.id as string;
+    const moverToken = mover.tokens.accessToken as string;
+    const before = (await consentRows(moverUserId, 'document_processing_consent')).length;
+    const plain = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-plain'), consent: true, privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(plain.statusCode, plain.body).toBe(201);
+    expect(await consentRows(moverUserId, 'document_processing_consent')).toHaveLength(before);
+
+    const wrong = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-wrong'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, moverToken);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
+
+    const ticked = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-ticked'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
+    }, moverToken);
+    expect(ticked.statusCode, ticked.body).toBe(201);
+    const rows = await consentRows(moverUserId, 'document_processing_consent');
+    expect(rows).toHaveLength(before + 1);
+    expect(rows[rows.length - 1]).toMatchObject({ documentVersion: 'v1', action: 'granted', subjectType: 'driver', evidence: { control: 'upload_consent_checkbox', docType: MOVER_DOCS[0] } });
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'document_processing_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
+  });
+
+  it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
+    const customer = await signup(CONSENT_ID_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, customer.tokens.accessToken);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
+      expect.objectContaining({ documentVersion: 'v1', action: 'granted', subjectType: 'customer' }),
+    ]);
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
   });
 });

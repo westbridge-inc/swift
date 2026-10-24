@@ -3,15 +3,19 @@ import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Card, LabeledInput, PillButton, Screen, T } from '../../../kit';
+import { Card, LabeledInput, PillButton, T } from '../../../kit';
 import { GUTTER } from '../shared';
-import { API_URL } from '../../../services/api';
+import { API_URL, vendorApi } from '../../../services/api';
 import { openPayLink } from '../../../lib/payLink';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
+import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { useVendorMutation } from '../../../hooks/useVendorMutation';
+import { useQueryClient } from '@tanstack/react-query';
 import { PricingCard } from '../../../components/onboarding/PricingCard';
+import { WeeklyFeeTerms } from '../../../components/onboarding/WeeklyFeeTerms';
 import { useBecomePartner, useVerificationStatus } from '../../../hooks/verification';
 import { usePartnerPricing } from '../../../hooks/partnerPricing';
-import { vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
+import { FEE_TICK_COPY, feeTick, feeTickError, vendorQuote, quoteGate, QUOTE_GATE_COPY } from '../../../lib/partnerPricing';
 import { useLocationStore } from '../../../stores/locationStore';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import {
@@ -23,6 +27,7 @@ import {
 import { grantedLocationFix } from '../../../lib/deviceLocation';
 import { STORE_PIN_COPY, businessSetupBlocker, storeCreateErrorCopy, vendorBusinessPayload } from '../../../lib/storePin';
 import { RoleSwitcherSheet } from '../../../components/RoleSwitcherSheet';
+import { BackToSwiftScreen, useBackToSwift } from '../../../components/onboarding/backToSwift';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
 import { TYPES, TabHeader } from '../shared';
 
@@ -87,6 +92,10 @@ function BizTypeTile({ t, active, onPress }: { t: (typeof TYPES)[number]; active
 export function BusinessSetup() {
   const become = useBecomePartner();
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // [Owner, 1 Oct] Picking "Swift Business" by mistake is never a one-way door:
+  // "‹ Swift", Android's back and the iOS edge swipe go back to ordering, and
+  // what was typed waits in its draft store for the trip back.
+  const back = useBackToSwift('vendor');
   const [pinPickerOpen, setPinPickerOpen] = useState(false);
   const { latitude, longitude, status: locationStatus } = useLocationStore();
   // The form outlives this screen (stores/businessSetupDraft): a failed
@@ -126,27 +135,38 @@ export function BusinessSetup() {
   useEffect(() => {
     if (stale) void refetchPricing();
   }, [stale, refetchPricing]);
+  // [Row 628] The weekly fee, said before the store is created: the server's words and the amount
+  // for THIS business type, and the tick given to exactly that amount — a new type or a new price
+  // clears it. An API with no words asks nothing and gets nothing. The button names what is missing
+  // in screen order: the form, then the fee tick, then the agreement below it.
+  const fee = feeTick(pricing.data, gate.ok ? gate.quote.rate : null);
+  const [feeTickedFor, setFeeTickedFor] = useState<string | null>(null);
+  const feeTicked = fee.kind === 'tick' && feeTickedFor === fee.key;
+  const feeAsk = fee.kind === 'invalid' ? FEE_TICK_COPY.invalid : fee.kind === 'tick' && !feeTicked ? FEE_TICK_COPY.ask : null;
+  const ask = businessSetupBlocker({ ...form, agree: true }) ?? feeAsk ?? blocker;
 
   const submit = () => {
     if (!gate.ok) return; // guarded by the button, restated so no call site can bypass it
+    if (feeAsk) return; // the weekly-fee tick, restated for the same reason
     // Guarded by `blocker`, restated so the call site cannot fabricate a pin:
     // no confirmed pin, no payload.
     const business = vendorBusinessPayload(form);
     if (!business) return;
-    become.mutate({
-      role: 'VENDOR',
-      business,
-      acceptAgreement: agree,
+    become.mutate({ role: 'VENDOR', business, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) }, {
+      // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
+      onError: (e) => { if (feeTickError(e)) void refetchPricing(); },
     });
   };
 
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       {/* The draft lives in memory and the auth store clears it at logout, so
           the ask says so: nothing here reaches Swift until it is submitted. */}
       <TabHeader
         title="Sell on Swift"
         onSwitch={() => setSwitcherOpen(true)}
+        onBack={back.leave}
+        backBusy={back.leaving}
         logoutBody="Nothing on this form has been sent yet, so what you’ve typed is cleared from this device."
       />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
@@ -164,7 +184,7 @@ export function BusinessSetup() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <T variant="title">List your business</T>
         <T variant="body" tone="muted" style={{ marginTop: space.sm }}>
-          Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+          Reach customers across town and keep 100% of every sale — Swift charges a flat weekly fee and no commission on orders.
         </T>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md, marginTop: space.lg, marginBottom: space.md }}>
           <BizValuePill icon="check-decagram" label="Keep 100%" />
@@ -243,12 +263,13 @@ export function BusinessSetup() {
           </T>
         </Card>
 
+        <WeeklyFeeTerms fee={fee} ticked={feeTicked} onToggle={() => fee.kind === 'tick' && setFeeTickedFor(feeTicked ? null : fee.key)} />
         <Pressable
           accessibilityRole="checkbox"
           accessibilityState={{ checked: agree }}
           accessibilityLabel="I agree to the Business Agreement"
           onPress={() => edit((draft) => ({ agree: !draft.agree }))}
-          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md }}
+          style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.md, minHeight: 48 }}
         >
           <MaterialCommunityIcons
             name={agree ? 'checkbox-marked' : 'checkbox-blank-outline'}
@@ -264,7 +285,7 @@ export function BusinessSetup() {
         </Pressable>
         {become.isError ? (
           <T variant="label" tone="error" style={{ marginTop: space.md }}>
-            {storeCreateErrorCopy(become.error)}
+            {feeTickError(become.error) ?? storeCreateErrorCopy(become.error)}
           </T>
         ) : null}
         {/* [#947's grammar] Disabled names the first missing thing — the fee
@@ -273,9 +294,9 @@ export function BusinessSetup() {
             store pin after the address because its map starts from the address
             (lib/storePin businessSetupBlocker). */}
         <PillButton
-          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : blocker ?? 'Create store'}
+          label={!gate.ok ? QUOTE_GATE_COPY[gate.why] : ask ?? 'Create store'}
           loading={become.isPending}
-          disabled={!gate.ok || blocker !== null}
+          disabled={!gate.ok || ask !== null}
           style={{ marginTop: space.lg }}
           onPress={submit}
         />
@@ -283,25 +304,55 @@ export function BusinessSetup() {
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, borderRadius: radius.lg, backgroundColor: color.brand[50], paddingHorizontal: space.md, paddingVertical: space.sm, marginTop: space.md }}>
           <MaterialCommunityIcons name="check-decagram" size={15} color={color.success} />
           <T variant="caption" weight="semibold" tone="deep" style={{ flex: 1 }}>
-            You keep 100% of every sale — Swift charges a flat weekly fee, never commission.
+            You keep 100% of every sale — Swift charges a flat weekly fee and no commission on orders.
           </T>
         </View>
       </ScrollView>
-    </Screen>
+    </BackToSwiftScreen>
   );
 }
 
 export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: () => void }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  // Going back changes only which app is open: the store, its application
+  // and its documents stay on the server.
+  const back = useBackToSwift('vendor');
   // Poll while onboarding so an approval reflects within seconds.
   const { data: status, isLoading, isError, refetch } = useVerificationStatus<any>(store.vendorType, undefined, { poll: true });
+  // [owner #51] A store goes live only with a number customers can call. The
+  // server says when that is all that is missing (`goLiveMissing`), and the
+  // number is saved here, on the waiting store's own screen — the store goes
+  // live the moment the server accepts it.
+  const needsPhone = Array.isArray(store.goLiveMissing) && store.goLiveMissing.includes('PUBLISHED_PHONE');
+  const qc = useQueryClient();
+  const [phoneError, setPhoneError] = useState<string | null>(null);
+  const savePhone = useVendorMutation({
+    mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
+    onMutate: () => setPhoneError(null),
+    onSuccess: () => {
+      setPhoneError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setPhoneError(e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.'),
+  });
   return (
-    <Screen>
+    <BackToSwiftScreen onBack={back.leave}>
       {/* Waiting for approval is not a reason to be kept out of Swift. */}
-      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} />
+      <TabHeader title={store.name} onSwitch={() => setSwitcherOpen(true)} onBack={back.leave} backBusy={back.leaving} />
       <RoleSwitcherSheet visible={switcherOpen} current="vendor" onClose={() => setSwitcherOpen(false)} />
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         <PricingCard kind="vendor" vendorType={store.vendorType} />
+        {needsPhone ? (
+          <>
+            <T variant="label" weight="semibold" style={{ marginTop: space.lg }}>
+              Add the number customers can call to go live
+            </T>
+            <T variant="caption" tone="muted" style={{ marginTop: 4, marginBottom: space.sm }}>
+              After you accept an order, customers contact you on this number to change or cancel it.
+            </T>
+            <PublicCallNumberCard value={store.publicPhone} saving={savePhone.isPending} error={phoneError} onSave={(p) => savePhone.mutate(p)} />
+          </>
+        ) : null}
         <DocumentChecklist role={store.vendorType} status={status} isLoading={isLoading} isError={isError} onRetry={refetch} />
         {/* Gated-trials spec §B: waiting shouldn't mean staring at a checklist.
             The dashboard is browsable in preview; selling stays locked. */}
@@ -310,6 +361,6 @@ export function VendorOnboarding({ store, onPreview }: { store: any; onPreview: 
           Look around while you wait — selling unlocks the moment you&apos;re approved.
         </T>
       </ScrollView>
-    </Screen>
+    </BackToSwiftScreen>
   );
 }

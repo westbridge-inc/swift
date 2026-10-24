@@ -1,7 +1,8 @@
+import { identityTransaction, identityAuthority, requireIdentityAuthority, lockIdentityAuthority } from './identity-review';
+import { hasSupportedSettledPayerContract } from './mmg-payer-evidence';
 import { Prisma, type PrismaClient, type IdentitySignalType, type SignalStrength } from '@prisma/client';
 import { hashSignal } from './normalize';
 import { log } from '../../utils/logger';
-import { runWithoutTenant } from '../../plugins/tenant-context';
 
 // The identity-resolution engine (trial-integrity spec §2). Signals are
 // captured SILENTLY (zero UX change); HARD/STRONG matches union clusters
@@ -39,6 +40,7 @@ export interface CaptureInput {
   /** ALREADY-NORMALIZED value (callers use the normalize.ts helpers). */
   normalizedValue: string;
   source: string;
+  mmgEvidenceId?: string;
 }
 
 export interface CaptureResult {
@@ -59,22 +61,11 @@ export interface CaptureResult {
  *  account was never clustered. ONE walk — clusterMemberIds and the velocity
  *  engine (ALG-38) both read it, so "the same person" has one definition. */
 export async function clusterRootId(prisma: PrismaClient, accountId: string): Promise<string | null> {
-  const member = await prisma.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
-  if (!member) return null;
-  let root = member.clusterId;
-  for (let hops = 0; hops < 32; hops += 1) {
-    const c = await prisma.identityCluster.findUnique({ where: { id: root }, select: { mergedIntoId: true } });
-    if (!c?.mergedIntoId) break;
-    root = c.mergedIntoId;
-  }
-  return root;
+  return (await requireIdentityAuthority(prisma, accountId)).clusterId;
 }
 
 export async function clusterMemberIds(prisma: PrismaClient, accountId: string): Promise<string[]> {
-  const root = await clusterRootId(prisma, accountId);
-  if (!root) return [accountId];
-  const members = await prisma.identityClusterMember.findMany({ where: { clusterId: root }, select: { accountId: true } });
-  return members.length > 0 ? members.map((m) => m.accountId) : [accountId];
+  return (await requireIdentityAuthority(prisma, accountId)).memberIds;
 }
 
 export class IdentityService {
@@ -111,7 +102,8 @@ export class IdentityService {
       // leaving another tenant's TrialGrant stranded on the tombstoned loser.
       // The account row is also the authority for capture provenance; callers
       // cannot accidentally (or deliberately) stamp a foreign/default tenant.
-      return await runWithoutTenant(() => this.prisma.$transaction(async (tx) => {
+      return await identityTransaction(this.prisma, async (tx) => {
+        await lockIdentityAuthority(tx);
         // Serialize the first capture of one normalized signal across every
         // API node. Without this lock, two simultaneous accounts can each
         // insert an uncommitted key, miss the other in their peer query, and
@@ -138,6 +130,16 @@ export class IdentityService {
           return { strength, matchedAccountIds: [], merged: false, clusterId: null, dropped: true } as CaptureResult;
         }
 
+        if (input.type === 'MMG_PAYER') {
+          const proof = input.mmgEvidenceId ? await tx.mmgPayerEvidence.findUnique({ where: { id: input.mmgEvidenceId } }) : null;
+          if (!proof || proof.accountId !== input.accountId || proof.tenantId !== account.tenantId
+              || proof.actorRole !== input.actorRole || proof.payerHash !== valueHash
+              || proof.tier !== 'PROVIDER_SETTLED' || !proof.settledAt
+              || !hasSupportedSettledPayerContract(proof.providerContract)) {
+            return { strength, matchedAccountIds: [], merged: false, clusterId: null, dropped: true };
+          }
+        }
+
         // Idempotent per (account, type, hash) — recaptures are no-ops.
         const existing = await tx.identityKey.findFirst({
           where: { accountId: input.accountId, type: input.type, valueHash },
@@ -148,6 +150,7 @@ export class IdentityService {
             data: {
               type: input.type, valueHash, accountId: input.accountId,
               tenantId: account.tenantId, actorRole: input.actorRole, source: input.source,
+              mmgEvidenceId: input.type === 'MMG_PAYER' ? input.mmgEvidenceId : undefined,
             },
           });
         } else if (existing.tenantId !== account.tenantId) {
@@ -162,13 +165,35 @@ export class IdentityService {
 
         const peers = await tx.identityKey.findMany({
           where: { type: input.type, valueHash, accountId: { not: input.accountId } },
-          select: { accountId: true },
-          distinct: ['accountId'],
+          select: { accountId: true, tenantId: true, actorRole: true, mmgEvidenceId: true },
         });
-        const matchedAccountIds = peers.map((p) => p.accountId);
+        const admittedPeers: string[] = [];
+        for (const peer of peers) {
+          if (input.type === 'MMG_PAYER') {
+            const proof = peer.mmgEvidenceId ? await tx.mmgPayerEvidence.findUnique({ where: { id: peer.mmgEvidenceId } }) : null;
+            if (!proof || proof.accountId !== peer.accountId || proof.tenantId !== peer.tenantId
+                || proof.actorRole !== peer.actorRole || proof.payerHash !== valueHash
+                || proof.tier !== 'PROVIDER_SETTLED' || !proof.settledAt
+                || !hasSupportedSettledPayerContract(proof.providerContract)) continue;
+          }
+          admittedPeers.push(peer.accountId);
+        }
+        const matchedAccountIds = [...new Set(admittedPeers)];
         if (matchedAccountIds.length === 0 || strength === 'SOFT') {
           // SOFT matches never merge (§0.3) — the guardrail is structural:
           // this branch is the ONLY exit for SOFT, and it cannot union.
+          return { strength, matchedAccountIds, merged: false, clusterId: await this.clusterIdOf(tx, input.accountId) };
+        }
+
+        const resolutions = await Promise.all([input.accountId, ...matchedAccountIds].map((id) => identityAuthority(tx, id)));
+        if (resolutions.some((r) => r.status === 'REVIEW_REQUIRED')) {
+          // Preserve the new key; quarantine every connected endpoint without
+          // union, grant revocation or inferred punishment. Its shared key is
+          // durable pending-match provenance for the bounded review snapshot.
+          for (const id of [input.accountId, ...matchedAccountIds]) {
+            const root = await this.ensureCluster(tx, id, { type: input.type, at: new Date().toISOString(), pendingReview: true });
+            await tx.identityCluster.update({ where: { id: root }, data: { authorityReviewRequired: true } });
+          }
           return { strength, matchedAccountIds, merged: false, clusterId: await this.clusterIdOf(tx, input.accountId) };
         }
 
@@ -189,7 +214,7 @@ export class IdentityService {
           }
         }
         return { strength, matchedAccountIds, merged: true, clusterId: rootId };
-      }));
+      });
     } catch (err) {
       log().error({ err, accountId: input.accountId, type: input.type }, 'identity capture failed — signal dropped, flow unaffected');
       return { strength, matchedAccountIds: [], merged: false, clusterId: null };
@@ -199,9 +224,7 @@ export class IdentityService {
   /** Follow mergedIntoId to the root. Public resolver — everything trial-law
    *  reads goes through here. */
   async resolveCluster(accountId: string): Promise<string | null> {
-    const member = await this.prisma.identityClusterMember.findUnique({ where: { accountId }, select: { clusterId: true } });
-    if (!member) return null;
-    return this.rootOf(this.prisma, member.clusterId);
+    return (await requireIdentityAuthority(this.prisma, accountId)).clusterId;
   }
 
   /** §2.3 SOFT advisories — read-time only, human eyes only: ≥2 distinct SOFT
@@ -212,7 +235,7 @@ export class IdentityService {
       select: { type: true, valueHash: true },
     });
     if (mine.length === 0) return [];
-    const myCluster = await this.resolveCluster(accountId);
+    const myCluster = (await identityAuthority(this.prisma, accountId)).clusterId;
     const out: Array<{ type: IdentitySignalType; sharedWithAccountId: string }> = [];
     for (const key of mine) {
       const peers = await this.prisma.identityKey.findMany({
@@ -222,7 +245,7 @@ export class IdentityService {
         take: 20,
       });
       for (const p of peers) {
-        const peerCluster = await this.resolveCluster(p.accountId);
+        const peerCluster = (await identityAuthority(this.prisma, p.accountId)).clusterId;
         if (!myCluster || !peerCluster || peerCluster !== myCluster) {
           out.push({ type: key.type, sharedWithAccountId: p.accountId });
         }

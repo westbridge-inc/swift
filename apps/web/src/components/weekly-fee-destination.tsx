@@ -26,8 +26,8 @@ export function WeeklyFeeDestination() {
     })();
     return () => { cancelled = true; };
   }, [router]);
-  return <main className="mx-auto max-w-lg space-y-6 px-6 py-16">
-    <h1 className="text-2xl font-extrabold">Weekly fee</h1>
+  return <main id="main" tabIndex={-1} className="mx-auto max-w-lg space-y-6 px-6 py-16">
+    <h1 className="sw-title">Weekly fee</h1>
     {choice === 'loading' && <p>Opening your weekly fee…</p>}
     {choice === 'none' && <p>No business or earner profile on this account.</p>}
     {choice === 'both' && <>

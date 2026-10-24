@@ -140,3 +140,110 @@ describe('[A-18] a failed queue is not an empty queue', () => {
     expect(await screen.findByText(/no open tickets/i)).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// [DELETION-INTEGRITY] A business or advertiser asks for closure in the app and
+// the request lands here. The queue completes it: the server closes the account
+// through the same erasure checks the person's own deletion runs, so a request
+// with live work stays open and the console shows what is outstanding.
+// ---------------------------------------------------------------------------
+const closureTicket = {
+  ...safetyTicket,
+  id: 'ticket-closure',
+  category: 'ACCOUNT',
+  subject: 'Account closure request',
+  message: 'Please close my Swift account. This request was confirmed in the app.',
+};
+
+describe('[DELETION-INTEGRITY] an in-app closure request is completed from the queue', () => {
+  it('offers completion only on a closure request', async () => {
+    mockApi(listOf([closureTicket, ordinaryTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Cold food');
+    expect(screen.getAllByRole('button', { name: /complete account closure/i })).toHaveLength(1);
+  });
+
+  it('needs a stated reason, sends nothing on cancel, then completes with that reason', async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockApi(listOf([closureTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    const confirm = await screen.findByRole('button', { name: /^close the account$/i });
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText(/why you are closing this account/i), 'Listings and campaigns wound down with the owner.');
+    expect((confirm as HTMLButtonElement).disabled).toBe(false);
+    await user.click(confirm);
+
+    await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
+    const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
+    expect(String(url)).toContain('/api/v1/admin/support/ticket-closure/complete-account-closure');
+    expect((init?.headers as Record<string, string>)['x-swift-reason']).toBe('Listings and campaigns wound down with the owner.');
+  });
+
+  it('shows what is still outstanding when the server refuses', async () => {
+    const user = userEvent.setup();
+    mockApi((request) => {
+      if (request.method === 'GET') return { body: { success: true, data: { tickets: [closureTicket], total: 1 } } };
+      return { status: 409, body: { success: false, error: { code: 'ACTIVE_ORDERS', message: 'Finish or cancel your active orders and jobs before deleting your account.' } } };
+    });
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    await user.type(screen.getByLabelText(/why you are closing this account/i), 'Owner confirmed by phone call.');
+    await user.click(screen.getByRole('button', { name: /^close the account$/i }));
+    expect(await screen.findByText(/finish or cancel your active orders/i)).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [U56] Completing an account closure accepted a 1-character reason; the
+// server needs 12 and answered with a raw 400. [U57] A failed "Take it" showed
+// nothing: its error rendered only inside an open close panel (possibly
+// another ticket's). [S4] The ticket showed the full phone number.
+// ---------------------------------------------------------------------------
+describe('[U56 · U57] the support queue says what it needs and what went wrong', () => {
+  it('[U56] the closure reason must reach the server\'s floor before it can be sent, and says so', async () => {
+    const user = userEvent.setup();
+    const fetchMock = mockApi(listOf([closureTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Account closure request');
+    await user.click(screen.getByRole('button', { name: /complete account closure/i }));
+    const confirm = await screen.findByRole('button', { name: /^close the account$/i }) as HTMLButtonElement;
+    const reason = screen.getByLabelText(/why you are closing this account/i);
+    await user.type(reason, 'Done.');
+    expect(confirm.disabled).toBe(true);
+    expect(screen.getByText(/At least 12 characters/)).toBeTruthy();
+    await user.type(reason, ' Owner confirmed by phone.');
+    expect(confirm.disabled).toBe(false);
+    expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
+  });
+
+  it('[U57] a failed "Take it" is shown next to that ticket, with no close panel open', async () => {
+    const user = userEvent.setup();
+    mockApi((request) => {
+      if (request.method === 'GET') return { body: { success: true, data: { tickets: [ordinaryTicket], total: 1 } } };
+      return { status: 409, body: { success: false, error: { code: 'TICKET_STATE_CHANGED', message: 'Someone else took this ticket a moment ago.' } } };
+    });
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Cold food');
+    await user.click(screen.getByRole('button', { name: 'Take it' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Someone else took this ticket a moment ago.');
+    expect(alert.parentElement!.textContent).toContain('Take it');
+    expect(screen.queryByRole('textbox')).toBeNull();
+  });
+
+  it('[S4] the ticket shows a masked phone number, like the lists do', async () => {
+    mockApi(listOf([ordinaryTicket]));
+    renderWithQuery(<SupportPage />);
+    await screen.findByText('Cold food');
+    expect(screen.queryByText(/\+5926000000/)).toBeNull();
+    expect(screen.getByText(/••• ••• 0000/)).toBeTruthy();
+  });
+});

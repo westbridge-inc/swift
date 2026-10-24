@@ -1,4 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { STORE_MAP_START, mapPixel, pixelPoint } from '@/lib/store-pin';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { adoptSession } from '@/lib/auth';
@@ -26,6 +28,30 @@ let tickets: Ticket[];
 let marketing: boolean;
 let calls: ApiRequest[];
 let failWrite: boolean;
+/** What Swift's reverse lookup calls any pin in these tests (a made-up street). */
+const PIN_NAME = 'Lot 7 Example Street, Georgetown';
+/** While set, Swift's reverse lookup waits for it (a slow lookup). */
+let reverseHeld: Promise<void> | null;
+/** happy-dom never loads images: tell the address map each visible tile has arrived. */
+const loadMap = () => screen.getByRole('application', { name: 'Address pin map' }).querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+/** Where the map is after one ArrowRight nudge (12 px) from `from` at `zoom`. */
+function nudgedRight(from: { latitude: number; longitude: number }, zoom: number) {
+  const start = mapPixel(from, zoom);
+  return pixelPoint(start.x + 12, start.y, zoom);
+}
+async function openMap() {
+  const map = await screen.findByRole('application', { name: 'Address pin map' });
+  loadMap();
+  return map;
+}
+/** Search inside the map's own search box and pick a result. */
+async function searchMap(user: ReturnType<typeof renderWithQuery>['user'], query: string, result: string) {
+  const box = screen.getByLabelText('Search for a street or place');
+  await user.clear(box); await user.type(box, query);
+  await user.click(screen.getByRole('button', { name: 'Find' }));
+  await user.click(await screen.findByRole('button', { name: result }));
+}
+const saveButton = () => screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement;
 const profile = { id: 'test-customer', firstName: 'Test', lastName: 'Customer', phone: '+5920000000', email: 'test@example.test' };
 const ok = (data: unknown) => ({ body: { success: true, data } });
 const genericError = 'Something went wrong. Please try again.';
@@ -60,13 +86,14 @@ function api() {
     if (path === '/support' && method === 'GET') return ok(tickets);
     if (path === '/support' && method === 'POST') { const ticket = { id: 'ticket', subject: body.subject, status: 'OPEN' }; tickets.push(ticket); return ok(ticket); }
     if (url.pathname === '/api/v1/places/autocomplete') return ok([{ placeId: 'place-1', primary: 'Mapped Test Street', lat: 6.81, lng: -58.12 }]);
+    if (url.pathname === '/api/v1/places/reverse') return reverseHeld ? reverseHeld.then(() => ok({ address: PIN_NAME })) : ok({ address: PIN_NAME });
     throw new Error(`Unexpected ${method} ${url.pathname}`);
   });
 }
 
 beforeEach(() => {
   adoptSession('test-customer');
-  addresses = [{ ...home }, { ...work }]; favourites = []; tickets = []; marketing = false; calls = []; failWrite = false;
+  addresses = [{ ...home }, { ...work }]; favourites = []; tickets = []; marketing = false; calls = []; failWrite = false; reverseHeld = null;
 });
 
 describe('account parity through cookie-authenticated API contracts', () => {
@@ -274,14 +301,19 @@ describe('account parity through cookie-authenticated API contracts', () => {
     const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Edit Work' }));
     await user.clear(screen.getByLabelText('Label')); await user.type(screen.getByLabelText('Label'), 'Updated Work');
-    await user.clear(screen.getByPlaceholderText('Search address…')); await user.type(screen.getByPlaceholderText('Search address…'), 'Mapped');
-    await user.click(await screen.findByRole('button', { name: 'Mapped Test Street' }));
+    await user.clear(screen.getByLabelText('Street address')); await user.type(screen.getByLabelText('Street address'), 'Mapped Test Street');
+    // [PINS] The pin moves on the map: a search inside the map starts it there.
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    await openMap();
+    await searchMap(user, 'Mapped', 'Mapped Test Street');
+    loadMap();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
     await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'First saved instructions');
     await user.click(screen.getByRole('button', { name: 'Save address' }));
     await waitFor(() => expect(refreshes).toHaveLength(1));
     await user.click(screen.getByRole('button', { name: /Edit .*Work/ }));
     expect((screen.getByLabelText('Label') as HTMLInputElement).value).toBe('Updated Work');
-    expect((screen.getByPlaceholderText('Search address…') as HTMLInputElement).value).toBe('Mapped Test Street');
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).value).toBe('Mapped Test Street');
     expect((screen.getByLabelText('Delivery instructions (optional)') as HTMLInputElement).value).toBe('First saved instructions');
     await user.clear(screen.getByLabelText('Delivery instructions (optional)')); await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'Second saved instructions');
     await user.click(screen.getByRole('button', { name: 'Save address' }));
@@ -301,8 +333,12 @@ describe('account parity through cookie-authenticated API contracts', () => {
     api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Add an address' }));
     expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(true);
-    await user.type(screen.getByPlaceholderText('Search address…'), 'Mapped');
-    await user.click(await screen.findByRole('button', { name: 'Mapped Test Street' }));
+    await openMap();
+    await searchMap(user, 'Mapped', 'Mapped Test Street');
+    loadMap();
+    // The street follows the picked place's name; nothing is sent before Save.
+    await screen.findByDisplayValue('Mapped Test Street');
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
     expect((screen.getByRole('checkbox', { name: 'Make this my default address' }) as HTMLInputElement).checked).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Save address' }));
@@ -312,13 +348,23 @@ describe('account parity through cookie-authenticated API contracts', () => {
     expect(addresses.filter((a) => a.isDefault).map((a) => a.id)).toEqual(['new-address']);
   });
 
-  it('invalidates the saved pin when the city changes', async () => {
+  // [PINS · row 107] Was "invalidates the saved pin when the city changes":
+  // the old form took its pin from a STREET SEARCH, so new words meant a stale
+  // pin. The pin is now the point the person placed on the map (the phone's
+  // rule), and the words only help a rider find the door: a city edit keeps
+  // the pin, and nothing is written before Save.
+  it('the words never move or drop the saved pin', async () => {
     api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
-    expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(saveButton().disabled).toBe(false);
     await user.type(screen.getByLabelText('City / town'), ' changed');
-    expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText('Street address'), ' 2');
+    await user.clear(screen.getByLabelText('Region')); await user.type(screen.getByLabelText('Region'), 'Essequibo Islands-West Demerara');
     expect(calls.some((c) => c.method !== 'GET')).toBe(false);
+    expect(saveButton().disabled).toBe(false);
+    await user.click(saveButton());
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ city: 'Georgetown changed', addressLine1: 'Test Street 2', latitude: 6.8, longitude: -58.1 });
   });
 
   it('ignores an old place-details result after a city edit', async () => {
@@ -331,12 +377,22 @@ describe('account parity through cookie-authenticated API contracts', () => {
     });
     const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Add an address' }));
-    await user.type(screen.getByPlaceholderText('Search address…'), 'Old mapped');
-    await user.click(await screen.findByRole('button', { name: 'Old mapped street' }));
-    await user.type(screen.getByLabelText('City / town'), ' changed');
+    const map = await openMap();
+    await searchMap(user, 'Old mapped', 'Old mapped street');
+    // [PINS] The person moves the map before the slow lookup answers: their
+    // pin stands, and the late answer neither moves it nor names the street.
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
     await act(async () => { resolveDetails(ok({ lat: 6.8, lng: -58.1 })); });
-    expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(true);
+    const moved = nudgedRight(STORE_MAP_START, 14);
+    await screen.findByDisplayValue(PIN_NAME);
     expect(screen.queryByDisplayValue('Old mapped street')).toBeNull();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    await user.click(saveButton());
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    const body = JSON.parse(String(calls.find((c) => c.method === 'POST')!.init?.body));
+    expect(body.latitude).toBeCloseTo(moved.latitude, 9);
+    expect(body.longitude).toBeCloseTo(moved.longitude, 9);
   });
 
   it.each([false, true])('checkout submits the new default while preserving an explicit cart address (%s)', async (explicit) => {
@@ -362,7 +418,7 @@ describe('account parity through cookie-authenticated API contracts', () => {
     await view.user.click(await screen.findByRole('button', { name: 'Make Work default' }));
     await screen.findByRole('heading', { name: 'Work Default' });
     view.rerender(sessionView(<CartPage />));
-    const place = await screen.findByRole('button', { name: 'Place cash order · GY$150' });
+    const place = await screen.findByRole('button', { name: 'Place cash order · $150' });
     await waitFor(() => expect((place as HTMLButtonElement).disabled).toBe(false));
     expect((screen.getByLabelText('Saved delivery address') as HTMLSelectElement).value).toBe(explicit ? 'home' : 'work');
     await view.user.click(place);
@@ -381,13 +437,16 @@ describe('account parity through cookie-authenticated API contracts', () => {
     });
     const { user } = renderWithQuery(sessionView(<AddressesPage />));
     await user.click(await screen.findByRole('button', { name: 'Add an address' }));
-    const street = screen.getByPlaceholderText('Search address…');
-    await user.type(street, 'Old'); await user.click(await screen.findByRole('button', { name: 'Old street' }));
-    await user.clear(street); await user.type(street, 'New'); await user.click(await screen.findByRole('button', { name: 'New street' }));
+    await openMap();
+    await searchMap(user, 'Old', 'Old street');
+    await searchMap(user, 'New', 'New street');
+    loadMap();
     await act(async () => { rejectOld(new Error('Old lookup failed')); });
-    expect((screen.getByPlaceholderText('Search address…') as HTMLInputElement).value).toBe('New street');
+    await screen.findByDisplayValue('New street');
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).value).toBe('New street');
     expect(screen.queryByRole('alert')).toBeNull();
-    expect((screen.getByRole('button', { name: 'Save address' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText('Swift couldn’t put that place on the map. Move the map to your spot instead.')).toBeNull();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
   });
 
   it('submits an order support ticket and shows its status using the phone contract', async () => {
@@ -439,4 +498,190 @@ describe('account parity through cookie-authenticated API contracts', () => {
     expect(screen.getByText('Second Customer')).toBeTruthy();
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// [PINS · row 107] A saved address is the pin its owner placed on the map —
+// the same picker as the checkout and Send a parcel — and the words are theirs.
+// The phone's rule (AddAddressScreen + LocationPickerScreen), on the website.
+// ---------------------------------------------------------------------------
+describe('[PINS] saved addresses are placed and adjusted on the map', () => {
+  it('a new address is pinned on the map: the saved point is the pin, and the street follows the pin’s name', async () => {
+    addresses = [];
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Add an address' }));
+    const map = await openMap();
+    // The city centre is only where the map opens, never a pin by itself.
+    expect(screen.getByText('This is a city-centre starting point — move the map to your spot first.')).toBeTruthy();
+    expect(screen.getByText('Place the pin on the map.')).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+    // The old ways to set a pin without seeing it are gone.
+    expect(screen.queryByRole('button', { name: /I am at this address/ })).toBeNull();
+
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByDisplayValue(PIN_NAME);
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    await user.click(saveButton());
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    const body = JSON.parse(String(calls.find((c) => c.method === 'POST')!.init?.body));
+    const pin = nudgedRight(STORE_MAP_START, 14);
+    expect(body).toMatchObject({ label: 'Home', addressLine1: PIN_NAME, city: 'Georgetown', isDefault: true });
+    expect(body.latitude).toBeCloseTo(pin.latitude, 9);
+    expect(body.longitude).toBeCloseTo(pin.longitude, 9);
+    expect(body.latitude).not.toBe(STORE_MAP_START.latitude);
+  });
+
+  it('a street the person typed stays theirs when the pin moves', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Add an address' }));
+    const map = await openMap();
+    await user.type(screen.getByLabelText('Street address'), 'Lot 9 Example Road');
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).value).toBe('Lot 9 Example Road');
+    await user.click(saveButton());
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.method === 'POST')!.init?.body)).addressLine1).toBe('Lot 9 Example Road');
+  });
+
+  it('editing keeps the stored pin without the map; "Move the pin" opens the map ON it, and the moved point is saved with the person’s words', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    // A gate-code edit never needs the map.
+    expect(screen.queryByRole('application')).toBeNull();
+    expect(screen.getByText('Pin on the map: Latitude 6.80000, Longitude -58.10000')).toBeTruthy();
+    expect(saveButton().disabled).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    const map = await openMap();
+    // It opens on the stored pin, which counts as a real pin (no city-centre gate).
+    expect(within(screen.getByRole('group', { name: 'Chosen pin' })).getByText('Latitude 6.80000, Longitude -58.10000')).toBeTruthy();
+    expect(screen.queryByText('This is a city-centre starting point — move the map to your spot first.')).toBeNull();
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${PIN_NAME}`);
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    // The pin's name never replaces the street the person saved.
+    expect((screen.getByLabelText('Street address') as HTMLInputElement).value).toBe('Test Street');
+    await user.click(saveButton());
+
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    const put = calls.find((c) => c.method === 'PUT')!;
+    expect(put.url.pathname).toBe('/api/v1/customer/addresses/home');
+    const body = JSON.parse(String(put.init?.body));
+    const pin = nudgedRight({ latitude: 6.8, longitude: -58.1 }, 17);
+    expect(body.addressLine1).toBe('Test Street');
+    expect(body.latitude).toBeCloseTo(pin.latitude, 9);
+    expect(body.longitude).toBeCloseTo(pin.longitude, 9);
+    expect(body).not.toHaveProperty('isDefault');
+  });
+
+  it('"Keep the saved pin" drops a move that was not wanted', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    const map = await openMap();
+    fireEvent.keyDown(map, { key: 'ArrowRight', shiftKey: true });
+    loadMap();
+    await user.click(screen.getByRole('button', { name: 'Keep the saved pin' }));
+    expect(screen.queryByRole('application')).toBeNull();
+    await user.click(saveButton());
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ latitude: 6.8, longitude: -58.1 });
+  });
+
+  it('a moved pin is saved only once Swift has named THAT point (the checkout’s rule)', async () => {
+    let answer!: () => void;
+    reverseHeld = new Promise((resolve) => { answer = resolve; });
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    const map = await openMap();
+    fireEvent.keyDown(map, { key: 'ArrowRight' });
+    loadMap();
+    await waitFor(() => expect(calls.some((c) => c.url.pathname === '/api/v1/places/reverse')).toBe(true));
+    // The words are all there, but the moved pin's lookup has not answered.
+    expect(within(screen.getByRole('group', { name: 'Chosen pin' })).getByText('Finding the address…')).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+    await act(async () => { answer(); });
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    expect(screen.queryAllByText('Finding the address…')).toHaveLength(0);
+  });
+
+  it('a site without map tiles says so: a new address waits for a pin, and an edit keeps its stored one', async () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    try {
+      api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+      await user.click(await screen.findByRole('button', { name: 'Add an address' }));
+      expect(await screen.findByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+      expect(screen.getByRole('application', { name: 'Address pin map' }).querySelectorAll('img')).toHaveLength(0);
+      await user.type(screen.getByLabelText('Street address'), 'Lot 9 Example Road');
+      // Typed words are never a pin: no map, no new address.
+      expect(screen.getByText('Place the pin on the map.')).toBeTruthy();
+      expect(saveButton().disabled).toBe(true);
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+      await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+      expect(await screen.findByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+      expect(saveButton().disabled).toBe(true);
+      await user.click(screen.getByRole('button', { name: 'Keep the saved pin' }));
+      expect(saveButton().disabled).toBe(false);
+      await user.click(saveButton());
+      await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+      expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ latitude: 6.8, longitude: -58.1 });
+      expect(calls.some((c) => c.method === 'POST')).toBe(false);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it('a pin outside Guyana cannot be saved', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Add an address' }));
+    const map = await openMap();
+    await user.type(screen.getByLabelText('Street address'), 'Somewhere');
+    // Zoomed far out, a few big steps west leave the launch market (as the courier test does).
+    for (let i = 0; i < 12; i += 1) fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }));
+    for (let i = 0; i < 4; i += 1) fireEvent.keyDown(map, { key: 'ArrowLeft', shiftKey: true });
+    loadMap();
+    expect(await screen.findByText('That pin is outside Guyana, where Swift works today. Move it to a place in Guyana.')).toBeTruthy();
+    expect(saveButton().disabled).toBe(true);
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  it('a browser that names no submit button (Safari before 15.4) still saves', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.type(screen.getByLabelText('Delivery instructions (optional)'), 'Gate code 1234');
+    // A plain submit event carries no SubmitEvent.submitter, as older iPhones send it.
+    fireEvent.submit(saveButton().closest('form')!);
+    await waitFor(() => expect(calls.some((c) => c.method === 'PUT')).toBe(true));
+    expect(JSON.parse(String(calls.find((c) => c.method === 'PUT')!.init?.body))).toMatchObject({ instructions: 'Gate code 1234', latitude: 6.8, longitude: -58.1 });
+  });
+
+  it('Enter or Find in the map’s search searches; nothing inside the map saves the address', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    await user.click(screen.getByRole('button', { name: 'Move the pin' }));
+    await openMap();
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    await user.type(screen.getByLabelText('Search for a street or place'), 'Mapped{Enter}');
+    expect(await screen.findByRole('button', { name: /Mapped Test Street/ })).toBeTruthy();
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    // Nothing inside the map can save either: Find, the results, zoom, retry are plain buttons.
+    await user.click(screen.getByRole('button', { name: 'Find' }));
+    expect(await screen.findByRole('button', { name: /Mapped Test Street/ })).toBeTruthy();
+    expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    const form = saveButton().closest('form')!;
+    const submits = [...form.querySelectorAll('button')].filter((button) => button.type !== 'button');
+    expect(submits).toEqual([saveButton()]);
+  });
+
+  it('an edit says the words never move the pin, and how to move it', async () => {
+    api(); const { user } = renderWithQuery(sessionView(<AddressesPage />));
+    await user.click(await screen.findByRole('button', { name: 'Edit Home' }));
+    expect(screen.getByText('Changing the words doesn’t move the pin. If the door moved, use Move the pin.')).toBeTruthy();
+  });
 });

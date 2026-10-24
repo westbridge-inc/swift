@@ -1,4 +1,6 @@
 import type { Metadata, Viewport } from 'next';
+import { preload } from 'react-dom';
+import { PRELOADED_FONTS } from '@/lib/fonts';
 import { appleStartupImages } from '@/lib/apple-startup-images';
 import './globals.css';
 import { appChrome, swiftDesignVariables } from '@/lib/design-tokens';
@@ -35,7 +37,7 @@ export const metadata: Metadata = {
   twitter: {
     card: 'summary_large_image',
     title: 'Swift',
-    description: `One app for ${launch.markets[0]}. Zero commission — ever.`,
+    description: `One app for ${launch.markets[0]}. No commission on orders.`,
   },
   robots: { index: true, follow: true },
   // IDENTITY LAW [SITE-1.1 Part 2]: the company is the author, never a person.
@@ -69,9 +71,12 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+  for (const href of PRELOADED_FONTS) preload(href, { as: 'font', type: 'font/woff2', crossOrigin: 'anonymous' });
   return (
     <html lang="en-GY" style={swiftDesignVariables}>
       <body>
+        {/* [Row 111 · W8] A keyboard or screen-reader user can jump past the navigation to the content. */}
+        <a href="#main" className="sw-skip-link">Skip to main content</a>
         <ServiceWorkerRegistrar />
         {children}
       </body>

@@ -11,7 +11,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { OrderService } from '../modules/order/order.service';
 import { NotificationService } from '../modules/notification/notification.service';
 import { CashRulesService, type CashHandoverObserver } from '../modules/cash/cash-rules.service';
-import { syntheticLocationOwner } from './helpers/online-mover';
+import { issueSyntheticHandoverPhoto, syntheticMoverSession } from './helpers/handover-proof';
+import { retainedPhonePrefix } from './helpers/retained-evidence';
 
 // ---------------------------------------------------------------------------
 // [M-24 · S0] Cash handover terminal facts are ONE generation.
@@ -24,10 +25,18 @@ import { syntheticLocationOwner } from './helpers/online-mover';
 // rider, and the terminal retry refused. These cases inject a failure inside
 // the generation and require all-or-nothing, a coherent retry, and that a
 // notification can never stand between the money and the claim.
+//
+// [SAFE-B] The failed generation now also writes the immutable filing, and a
+// strike or an auto-approval follows only its complete evidence (the fix the
+// rider's own session persisted at the door, the photo the server issued), so
+// these fixtures file exactly that. Filings, proofs, claims and strikes are
+// retained evidence: nothing here deletes them, the users live in a phone
+// namespace unique to the run, and every door is one no retained strike holds.
 // ---------------------------------------------------------------------------
 
 const GPS = { lat: 7.2, lng: -58.6 };
-const PHONE_PREFIX = '+59200134';
+/** [SAFE-B · retained history] A phone namespace no other suite uses or purges, unique to the run. */
+const PHONE_PREFIX = retainedPhonePrefix('03');
 let app: FastifyInstance;
 let orders: OrderService;
 let cash: CashRulesService;
@@ -46,32 +55,11 @@ const observer: CashHandoverObserver = {
   },
 };
 
-async function purge() {
-  const users = await app.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
-  const ids = users.map((u) => u.id);
-  if (!ids.length) return;
-  const riders = await app.prisma.rider.findMany({ where: { userId: { in: ids } }, select: { id: true } });
-  const orderRows = await app.prisma.order.findMany({ where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riders.map((r) => r.id) } }] }, select: { id: true } });
-  const oids = orderRows.map((o) => o.id);
-  await app.prisma.reimbursementClaim.deleteMany({ where: { orderId: { in: oids } } });
-  await app.prisma.strike.deleteMany({ where: { orderId: { in: oids } } });
-  await app.prisma.earning.deleteMany({ where: { orderId: { in: oids } } });
-  await app.prisma.deliveryCashSettlement.deleteMany({ where: { orderId: { in: oids } } }).catch(() => {});
-  await app.prisma.order.deleteMany({ where: { id: { in: oids } } });
-  await app.prisma.rider.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.vendor.deleteMany({ where: { owner: { userId: { in: ids } } } });
-  await app.prisma.vendorOwner.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
-}
-
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `${PHONE_PREFIX}${String(seq).padStart(2, '0')}`, firstName: 'Atomic', lastName: `Cash${seq}`, roles, activeRole,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Atomic', lastName: `Cash${seq}`, roles, activeRole,
       isPhoneVerified: true, selfieCapturedAt: new Date(), trustLevel: 'L1', countryCode: 'GY',
       ...(roles.includes('CUSTOMER') && { customer: { create: {} } }),
     },
@@ -82,19 +70,31 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
 
 async function makeRider() {
   const u = await makeUser(['RIDER', 'CUSTOMER'], 'RIDER');
+  // [SAFE-B] The rider signs in; that session owns the location stream the filing reads.
+  const sessionId = await syntheticMoverSession(app.prisma, u.userId, 'cash-atomic');
   const rider = await app.prisma.rider.create({
-    data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, locationSessionId: syntheticLocationOwner('cash-atomic'), currentLat: GPS.lat, currentLng: GPS.lng },
+    data: { userId: u.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true, isOnline: true, locationSessionId: sessionId, currentLat: GPS.lat, currentLng: GPS.lng },
   });
-  return { ...u, riderId: rider.id };
+  return { ...u, riderId: rider.id, sessionId };
 }
 
+/** The server issues the door photo for this rider's order, exactly as the upload route does. */
+const issuedPhoto = async (orderId: string, riderUserId: string) =>
+  (await issueSyntheticHandoverPhoto(app.prisma, { orderId, actorId: riderUserId, role: 'RIDER' })).url;
+
 let doorSeq = 0;
+const RUN_DOOR_BASE = { lat: GPS.lat + Math.floor(Math.random() * 400) * 0.0005, lng: GPS.lng - Math.floor(Math.random() * 400) * 0.0005 };
 /** Every order gets its OWN door (the guardrails flag repeated claims at one
  *  address — collusion_address — and that is a real rule, not this test's
- *  subject), and the handover is stamped exactly at it. */
+ *  subject), and the handover is stamped exactly at it. [SAFE-B] A door is used
+ *  only if no retained strike (an earlier run's) sits at its address key. */
 async function makeAtDoorOrder(customerId: string, riderId: string, amount = 2000, status: OrderStatus = 'ARRIVED') {
-  doorSeq += 1;
-  const door = { lat: GPS.lat + doorSeq * 0.01, lng: GPS.lng - doorSeq * 0.01 };
+  let door = { lat: 0, lng: 0 };
+  for (;;) {
+    doorSeq += 1;
+    door = { lat: Number((RUN_DOOR_BASE.lat + doorSeq * 0.0011).toFixed(4)), lng: Number((RUN_DOOR_BASE.lng - doorSeq * 0.0011).toFixed(4)) };
+    if (await app.prisma.strike.count({ where: { addressKey: `geo:${door.lat.toFixed(4)}:${door.lng.toFixed(4)}` } }) === 0) break;
+  }
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `ATM-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', customerId, vendorId, riderId, status,
@@ -139,6 +139,8 @@ const facts = async (orderId: string, customerId: string) => {
     strikes: await app.prisma.strike.count({ where: { orderId, userId: customerId } }),
     claims: await app.prisma.reimbursementClaim.count({ where: { orderId } }),
     earnings: await app.prisma.earning.count({ where: { orderId } }),
+    // [SAFE-B] The filing is a fact of the same generation.
+    filings: await app.prisma.cashHandoverEvidence.count({ where: { orderId } }),
   };
 };
 
@@ -153,7 +155,6 @@ beforeAll(async () => {
   await app.register(authPlugin);
   await app.register(socketPlugin);
   await app.ready();
-  await purge();
   const ioStub = { to: () => ({ emit: () => {} }), emit: () => {} } as unknown as Server;
   orders = new OrderService(app.prisma, ioStub);
   notifications = new NotificationService(app.prisma, ioStub);
@@ -162,7 +163,7 @@ beforeAll(async () => {
   const vendorOwner = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vendorOwner.id, name: 'Atomic Corner', slug: `atomic-corner-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}99`,
+      ownerId: vendorOwner.id, name: 'Atomic Corner', slug: `atomic-corner-${nanoid(6)}`, vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}999`,
       addressLine1: '1 Atomic Corner', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: GPS.lat, longitude: GPS.lng,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },
@@ -172,8 +173,17 @@ beforeAll(async () => {
 
 afterAll(async () => {
   vi.restoreAllMocks();
-  await purge();
-  await app.close();
+  // [SAFE-B · retained history] Filings, issued proofs, claims and strikes are evidence, kept with every row
+  // they reference. Only scaffolding is touched, in one transaction: the retained riders go offline and the
+  // store is closed, so no other suite is offered them. Nothing is swallowed and nothing half-commits.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      await tx.rider.updateMany({ where: { userId: { in: createdUserIds } }, data: { isOnline: false, isAvailable: false } });
+      if (vendorId) await tx.vendor.updateMany({ where: { id: vendorId }, data: { status: 'CLOSED', acceptingOrders: false, isCurrentlyOpen: false } });
+    });
+  } finally {
+    await app.close();
+  }
 });
 
 describe('the failed handover is one generation', () => {
@@ -181,15 +191,16 @@ describe('the failed handover is one generation', () => {
     const rider = await makeRider();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
+    const photoUrl = await issuedPhoto(order.id, rider.userId);
     armed = 'failed';
-    await expect(cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' })).rejects.toThrow('failpoint');
-    expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0 });
+    await expect(cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId })).rejects.toThrow('failpoint');
+    expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0, filings: 0 });
 
-    const retry = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
+    const retry = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
     expect(retry.claim?.status).toBe('AUTO_APPROVED');
-    expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });
-    // The notices left after the commit: the customer's strike notice and the rider's claim notice, once each.
-    expect(await app.prisma.notification.count({ where: { userId: customer.userId, data: { path: ['kind'], equals: 'strike' } } })).toBe(1);
+    expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0, filings: 1 });
+    // The notices left after the commit: the customer's outcome notice and the rider's claim notice, once each.
+    expect(await app.prisma.notification.count({ where: { userId: customer.userId, data: { path: ['kind'], equals: 'handover_review' } } })).toBe(1);
     expect(await app.prisma.notification.count({ where: { userId: rider.userId, data: { path: ['kind'], equals: 'claim' } } })).toBe(1);
   });
 
@@ -199,9 +210,9 @@ describe('the failed handover is one generation', () => {
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
     const spy = vi.spyOn(notifications, 'send').mockRejectedValue(new Error('push provider down'));
     try {
-      const res = await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: order.door, photoUrl: 'storage://t/door.jpg' });
+      const res = await cash.handover(order.id, rider.userId, { outcome: 'refused', gps: order.door, photoUrl: await issuedPhoto(order.id, rider.userId), sessionId: rider.sessionId });
       expect(res.claim?.status, JSON.stringify(res.claim?.flags)).toBe('AUTO_APPROVED');
-      expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });
+      expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0, filings: 1 });
     } finally {
       spy.mockRestore();
     }
@@ -211,11 +222,13 @@ describe('the failed handover is one generation', () => {
     const rider = await makeRider();
     const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
-    const first = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
-    const again = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl: 'storage://t/door.jpg' });
+    const photoUrl = await issuedPhoto(order.id, rider.userId);
+    const first = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
+    expect(first.claim?.status).toBe('AUTO_APPROVED');
+    const again = await cash.handover(order.id, rider.userId, { outcome: 'no_show', gps: order.door, photoUrl, sessionId: rider.sessionId });
     expect(again.claim?.id).toBe(first.claim?.id);
     expect(again.order.status).toBe('FAILED');
-    expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0 });
+    expect(await facts(order.id, customer.userId)).toEqual({ status: 'FAILED', payment: 'FAILED', strikes: 1, claims: 1, earnings: 0, filings: 1 });
   });
 });
 
@@ -226,7 +239,7 @@ describe('the paid handover is one generation', () => {
     const order = await makeAtDoorOrder(customer.userId, rider.riderId);
     armed = 'paid';
     await expect(cash.handover(order.id, rider.userId, { outcome: 'paid', gps: order.door })).rejects.toThrow('failpoint');
-    expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0 });
+    expect(await facts(order.id, customer.userId)).toEqual({ status: 'ARRIVED', payment: 'PENDING', strikes: 0, claims: 0, earnings: 0, filings: 0 });
 
     const retry = await cash.handover(order.id, rider.userId, { outcome: 'paid', gps: order.door });
     expect(retry.order.status).toBe('DELIVERED');

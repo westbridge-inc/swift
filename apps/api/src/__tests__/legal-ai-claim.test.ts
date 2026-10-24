@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PRIVACY } from '../modules/legal/legal.routes';
 import { PROCESSOR_REGISTER } from '../modules/legal/processor-register';
+import { productionKycReach } from './helpers/kyc-production-reach';
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 // ---------------------------------------------------------------------------
 // [REPORT-102 / no-AI] THE PRIVACY POLICY MAY NOT OUTRUN THE PROCESSOR REGISTER
@@ -56,14 +59,20 @@ describe('[no-AI] the Privacy Policy is graded against the processor register', 
     }
   });
 
-  it('...and it DISCLOSES the model-backed processing it does do', () => {
-    if (modelBacked.length === 0) return;
+  it('...and it DISCLOSES the model-backed processing production can reach', () => {
+    // [2026-10-17 · human-only identity checks] A model-backed adapter the production factory refuses
+    // cannot receive a byte, so naming it as a recipient would be the false claim (graded in
+    // legal-human-only-identity.test.ts). Every model-backed processor production CAN reach must still
+    // be disclosed; a processor with no production refusal always counts as reachable.
+    const { refused } = productionKycReach();
+    const reachable = modelBacked.filter((p) => !refused.has(p.ref));
+    if (reachable.length === 0) return;
     // The disclosure has to survive rewording, so grade the substance: the
     // policy must say a model runs on the verification document, and must not
     // leave the reader with "nothing is automated".
     expect(PRIVACY).toMatch(/automated[- ](?:document|analysis|reading)/i);
     expect(PRIVACY).toMatch(/face[- ]match/i);
-    for (const p of modelBacked) {
+    for (const p of reachable) {
       expect(PRIVACY, `${p.party} is model-backed and is not named in the policy`).toContain(p.party);
     }
   });

@@ -12,10 +12,14 @@ export { errorMessage };
 // toast. A mutation opts out (it shows its own feedback) with
 // meta: { silent: true } or by declaring its own onError.
 const mutationCache = new MutationCache({
-  onError: (err, _vars, _ctx, mutation) => {
+  onError: (err, variables, _ctx, mutation) => {
     // Screens that render their own inline error UI opt out with
     // meta: { silent: true }; everything else gets a toast instead of silence.
     if (mutation.options.meta?.['silent']) return;
+    // Use this mutation's immutable variables, never the observer's latest call.
+    // Current-account failures still get feedback.
+    const errorOwnerCurrent = mutation.options.meta?.['errorOwnerCurrent'];
+    if (typeof errorOwnerCurrent === 'function' && !errorOwnerCurrent(variables)) return;
     toast.error('Couldn’t complete that', errorMessage(err));
   },
 });

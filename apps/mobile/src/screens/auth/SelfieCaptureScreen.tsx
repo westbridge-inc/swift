@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../../lib/uploadImage';
 import { useEffect, useRef, useState } from 'react';
 import { View, Linking, Image } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -17,6 +18,8 @@ import {
 } from '../../stores/authStore';
 import { PillButton, T, useLogoutConfirm } from '../../kit';
 import { PressableScale } from '../../kit/pressable-scale';
+import { BackToSwiftButton } from '../../components/onboarding/BackToSwiftButton';
+import { useBackToSwift, useBackToSwiftGestures } from '../../components/onboarding/backToSwift';
 
 const FRAME = 260;
 
@@ -50,6 +53,16 @@ export function SelfieCaptureScreen() {
   // photo returns the passenger to where they were.
   const navigation = useNavigation<any>();
   const stacked = navigation?.canGoBack?.() === true;
+  // [Owner, 1 Oct] As the first step of "Swift Business" or "Swift Driver"
+  // this photo is not a one-way door either: a signed-in account that picked
+  // a partner app by mistake goes back to ordering ("‹ Swift", Android's back,
+  // the iOS edge swipe) without signing out — customers are not asked for it
+  // merely to order [E27].
+  const intent = useAuthStore((s) => s.intent);
+  const hasUser = useAuthStore((s) => !!s.user);
+  const partnerGate = !stacked && hasUser && (intent === 'vendor' || intent === 'mover');
+  const back = useBackToSwift(intent === 'mover' ? 'mover' : 'vendor');
+  const gestures = useBackToSwiftGestures(back.leave, partnerGate);
 
   // The navigator can keep this same screen instance mounted when account A
   // signs out and account B also needs a selfie. Never carry A's captured
@@ -95,7 +108,8 @@ export function SelfieCaptureScreen() {
         throw new AuthSessionBoundaryError();
       }
       const form = new FormData();
-      form.append('file', { uri: photoUri, name: 'selfie.jpg', type: 'image/jpeg' } as never);
+      form.append('file', await prepareUploadImage({ uri: photoUri, name: 'selfie.jpg', type: 'image/jpeg' }) as never);
+      requireAuthSessionForPrincipal(owner);
       const { data } = await authApi.uploadSelfie(form, owner);
       requireAuthSessionForPrincipal(owner);
       const updated = data.data.user;
@@ -140,8 +154,9 @@ export function SelfieCaptureScreen() {
   );
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: color.surface.base }} edges={['top', 'bottom']} {...gestures}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: partnerGate ? 'space-between' : 'flex-end', paddingHorizontal: space.lg, paddingTop: space.md }}>
+        {partnerGate ? <BackToSwiftButton onPress={back.leave} busy={back.leaving} /> : null}
         {stacked ? (
           <PressableScale onPress={() => navigation.goBack()} hitSlop={12}>
             <T variant="label" tone="muted">Not now</T>
@@ -168,6 +183,7 @@ export function SelfieCaptureScreen() {
         <View style={{ marginTop: space.xl }}>
           {photoUri ? (
             <>
+              <T variant="label" tone="muted">{uploading ? 'Still uploading — keep this screen open. Your photo is kept if you need to retry.' : ''}</T>
               <PillButton label="Use this photo" loading={uploading} onPress={upload} />
               <PillButton
                 label="Retake"

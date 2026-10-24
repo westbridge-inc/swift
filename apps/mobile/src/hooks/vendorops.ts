@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { POLL } from '../lib/pollPolicy';
+import { prepareUploadImage } from '../lib/uploadImage';
+import { bindVendorOrderFeed } from '../lib/vendorOrderFeed';
+import { runBillingMutation } from '../lib/billingMutation';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Vibration } from 'react-native';
-import { useMutation, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
+import { useMutationState, useQuery, useQueryClient, type UseMutationOptions, type UseMutationResult } from '@tanstack/react-query';
 import { vendorApi, vendorDiscoveryApi } from '../services/api';
 import { connectSocket, getSocket } from '../services/socket';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
@@ -22,8 +26,12 @@ import {
 } from '../stores/authStore';
 import { accountHoldsRole } from '../lib/roleLanding';
 import { classifyVendorProfile, unwrapOptionalVendorProfile } from '../lib/vendorProfile';
+import { withStoreSwitchAnswer, type StoreSwitchAnswer } from '../lib/storeOpenSwitch';
 import { confirmVendorCashSettlement } from './cashSettlement';
 import { usePartnerPricing } from './partnerPricing';
+import { guardVendorOperation, useVendorMutation } from './useVendorMutation';
+import { pendingOrderIds } from '../modules/vendor/boardTaps';
+import { answeredSinceAsked } from '../modules/vendor/storeOrderRules';
 
 async function unwrap<T = any>(p: Promise<any>): Promise<T> {
   const r = await p;
@@ -58,7 +66,7 @@ function usePreviewSafeMutation<TData = unknown, TError = unknown, TVars = void,
   options: UseMutationOptions<TData, TError, TVars, TCtx>,
 ): UseMutationResult<TData, TError, TVars, TCtx> {
   const pv = usePreviewDataset();
-  const m = useMutation(options);
+  const m = useVendorMutation(options);
   return (pv ? previewMutation() : m) as UseMutationResult<TData, TError, TVars, TCtx>;
 }
 
@@ -81,7 +89,7 @@ export function useVendorProfile() {
     queryKey: ['vendor', 'profile'],
     queryFn: () => unwrapOptionalVendorProfile<any>(vendorApi.profile(), { outsider }),
     retry: false,
-    refetchInterval: 20000,
+    refetchInterval: POLL.vendorProfile,
     enabled: !pv,
   });
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
@@ -249,8 +257,15 @@ const passThrough: MutationGuard = (fn) => fn;
 export function useAddStaff(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: guard((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data))),
+    mutationFn: guard(guardVendorOperation((data: { phone: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.addStaff(data)))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
+  });
+}
+
+/** [Row 55] Withdraw every unanswered team invite (nothing pending is listed). */
+export function useWithdrawStaffInvites() {
+  return usePreviewSafeMutation({
+    mutationFn: () => unwrap<{ withdrawn: boolean; message?: string }>(vendorApi.withdrawStaffInvites()),
   });
 }
 
@@ -265,7 +280,7 @@ export function useRemoveStaff() {
 export function useUpdateStaffRole(guard: MutationGuard = passThrough) {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
-    mutationFn: guard(({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role))),
+    mutationFn: guard(guardVendorOperation(({ id, role }: { id: string; role: 'MANAGER' | 'STAFF' }) => unwrap(vendorApi.updateStaff(id, role)))),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'staff'] }),
   });
 }
@@ -276,7 +291,7 @@ export function useVendorOrders(enabled: boolean) {
     queryKey: ['vendor', 'orders'],
     queryFn: () => unwrap(vendorApi.orders()),
     enabled: enabled && !pv,
-    refetchInterval: enabled && !pv ? 12000 : false,
+    refetchInterval: () => enabled && !pv ? POLL.vendorOrders() : false,
   });
   return pv ? previewQuery(pv.orders) : q;
 }
@@ -286,7 +301,8 @@ export function useVendorOrders(enabled: boolean) {
  *  signal) instead of waiting out the 12s poll — the poll stays as the
  *  reconnect safety net. A new order also buzzes the phone: the board is a
  *  counter appliance, not a screen someone stares at. */
-export function useVendorOrdersLive(vendorId: string | undefined) {
+/** `ownsStore`: the server admits only the store owner to the store room. */
+export function useVendorOrdersLive(vendorId: string | undefined, ownsStore = false) {
   const qc = useQueryClient();
   const previewType = useVendorPreview((s) => s.previewType);
   // NEW-ORDER takeover queue (alerts spec §A1): every order:new lands here;
@@ -296,10 +312,9 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
     if (!vendorId || previewType) return; // preview: no socket, no live buzz
     connectSocket();
     const s = getSocket();
-    const join = () => s.emit('vendor:subscribe', { vendorId });
-    join();
-    s.on('connect', join); // rooms are per-connection — re-join after reconnects
-    const refresh = () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    // Only the selected store's layer may (re)join its room: a store handoff
+    // reconnects the shared socket, and a retired layer's handler can run
+    // before React unmounts it.
     const onNew = (payload?: { orderId?: string; orderNumber?: string }) => {
       Vibration.vibrate(400);
       if (payload?.orderId) {
@@ -309,23 +324,41 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
             : [...q, { orderId: payload.orderId!, orderNumber: payload.orderNumber }],
         );
       }
-      refresh();
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
     };
-    s.on('order:new', onNew);
-    s.on('order:status_changed', refresh);
-    s.on('order:prep_update', refresh);
     // Scheduling liveness nudge (spec 2.6): calendar + picker refetch the
     // moment a booking is made, moved or cancelled; the poll stays the floor.
-    const refreshBookings = () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] });
-    s.on('bookings:changed', refreshBookings);
-    return () => {
-      s.off('connect', join);
-      s.off('order:new', onNew);
-      s.off('order:status_changed', refresh);
-      s.off('order:prep_update', refresh);
-      s.off('bookings:changed', refreshBookings);
+    return bindVendorOrderFeed(s, vendorId, () => useStoreSwitcher.getState().selectedStoreId === vendorId, {
+      onNew,
+      refresh: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+      refreshBookings: () => qc.invalidateQueries({ queryKey: ['vendor', 'bookings'] }),
+      refreshOverview: () => qc.invalidateQueries({ queryKey: ['vendor', 'analytics'] }),
+    }, { serverAdmits: ownsStore });
+  }, [vendorId, ownsStore, qc, previewType]);
+
+  // [STORE-DASH · REVIEW-F S3-1 on #2048] The customer answered the store's "Out of stock" question:
+  // the server sends no push (only order:pick_state, which re-reads the board) and the store's response
+  // clock restarts from the answer. Watch the board: an order that was waiting on the customer and is
+  // the store's decision again takes the new-order screen again (as the web popup does).
+  const askedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!vendorId || previewType) return;
+    const check = () => {
+      const { answered, deciding } = answeredSinceAsked(askedRef.current, qc.getQueryData(['vendor', 'orders']));
+      askedRef.current = deciding;
+      if (answered.length === 0) return;
+      Vibration.vibrate(400);
+      // The takeover opens on the board's fresh copy (useVendorOrder's placeholder), never on a
+      // stale copy of the order that still shows the question (which would settle it at once).
+      for (const a of answered) qc.removeQueries({ queryKey: ['vendor', 'orders', 'detail', a.orderId], exact: true });
+      setTakeover((q) => [...q, ...answered.filter((a) => !q.some((x) => x.orderId === a.orderId))]);
     };
-  }, [vendorId, qc, previewType]);
+    check();
+    return qc.getQueryCache().subscribe((event) => {
+      const key = event?.query?.queryKey;
+      if (event?.type === 'updated' && Array.isArray(key) && key.length === 2 && key[0] === 'vendor' && key[1] === 'orders') check();
+    });
+  }, [vendorId, previewType, qc]);
 
   const dismissTakeover = useCallback(
     (orderId: string) => setTakeover((q) => q.filter((x) => x.orderId !== orderId)),
@@ -338,11 +371,15 @@ export function useVendorOrdersLive(vendorId: string | undefined) {
  *  Keyed under ['vendor','orders'] so order-action mutations refresh it too. */
 export function useVendorOrder(id: string | undefined) {
   const pv = usePreviewDataset();
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ['vendor', 'orders', 'detail', id],
     queryFn: () => unwrap<any>(vendorApi.order(id!)),
     enabled: !!id && !pv,
-    refetchInterval: 15000,
+    refetchInterval: POLL.vendorOrder,
+    // [STORE-DASH] The order opens at once from the board's own copy of it; the
+    // order's own read replaces it the moment it answers (isPlaceholderData).
+    placeholderData: () => boardOrder(qc.getQueryData(['vendor', 'orders']), id),
   });
   return pv ? previewQuery(pv.orders.find((o) => o.id === id) ?? pv.orders[0]) : q;
 }
@@ -395,13 +432,16 @@ export function useVendorSubscription(enabled = true) {
 
 /** [E12] Stop (NONE) or resume (CASH / MOBILE_MONEY) the weekly fee, then
  *  re-read the subscription so the screen's autoRenew state is server truth. */
-export function useSetVendorBillingMethod() {
+export function useSetVendorBillingMethod(guard: MutationGuard) {
   const qc = useQueryClient();
   // [DS198 D4] Preview-safe like every other vendor write: in the sample
   // preview, "Stop weekly billing" must never fire a real PUT.
   return usePreviewSafeMutation({
-    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) =>
-      unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn)),
+    mutationFn: ({ method, mmgPayerMsisdn }: { method: 'CASH' | 'MOBILE_MONEY' | 'NONE'; mmgPayerMsisdn?: string }) => {
+      return runBillingMutation(guard,
+        (session, storeId) => unwrap(vendorApi.setBillingMethod(method, mmgPayerMsisdn, session, storeId)),
+        () => useStoreSwitcher.getState().selectedStoreId);
+    },
     onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'subscription'] }),
   });
 }
@@ -413,6 +453,16 @@ export function useRetryDispatch() {
   return usePreviewSafeMutation({
     mutationFn: (id: string) => unwrap(vendorApi.retryDispatch(id)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+  });
+}
+
+/** [AF-MOB-006] The store confirms a returned order is back. The server closes
+ *  the return (and its recovery case); both order reads are refreshed. */
+export function useReturnReceived() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.returnReceived(id)),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
   });
 }
 
@@ -428,13 +478,33 @@ export function useSetOrderFulfillmentMode() {
   });
 }
 
+/** [PERF row 562] lib/storeOpenSwitch: the screen shows the tapped state while
+ *  this is out; the server's answer (both flags) goes into the store at once and
+ *  the re-read runs on its own. An answer it cannot place keeps the switch on
+ *  the tapped state until the re-read (the old wait); a failure re-reads too, so
+ *  the switch goes back to what the server holds. */
 export function useToggleOpen() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOpen()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  const reread = () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+  return usePreviewSafeMutation({
+    mutationFn: (open: boolean) => unwrap(vendorApi.toggleOpen(open)),
+    // The store this request is for: the header carries the selected store, and
+    // a store switch before the send refuses it (useVendorMutation).
+    onMutate: () => useStoreSwitcher.getState().selectedStoreId ?? null,
+    onSuccess: (answer: StoreSwitchAnswer, _open: boolean, storeId: string | null | undefined) => {
+      const before = qc.getQueryData(['vendor', 'profile']);
+      const after = withStoreSwitchAnswer(before, storeId, answer);
+      if (after === before) return reread();
+      qc.setQueryData(['vendor', 'profile'], after);
+      void reread();
+      return undefined;
+    },
+    onError: () => { void reread(); },
+  });
 }
 export function useToggleOrders() {
   const qc = useQueryClient();
-  return usePreviewSafeMutation({ mutationFn: () => unwrap(vendorApi.toggleOrders()), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
+  return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
 /** Turn self-delivery on/off. When on, the server routes this store's delivery
  *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
@@ -446,9 +516,29 @@ export function useSetSelfDelivery() {
   });
 }
 
+/** [STORE-DASH] Every store tap on an order shares this key, so the board can
+ *  tell WHICH orders are waiting for the server (usePendingOrderIds). */
+export const ORDER_ACTION_KEY = ['vendor', 'order-action'] as const;
+
+/** The board copy of one order, when the board holds it. */
+export function boardOrder(board: unknown, id: string | undefined): any {
+  if (!id || !Array.isArray(board)) return undefined;
+  return board.find((o) => o?.id === id) ?? undefined;
+}
+
+/** [STORE-DASH] The orders whose store tap is still out: only those cards wait. */
+export function usePendingOrderIds(): ReadonlySet<string> {
+  const variables = useMutationState({
+    filters: { mutationKey: ORDER_ACTION_KEY, status: 'pending' },
+    select: (m) => m.state.variables,
+  });
+  return useMemo(() => pendingOrderIds(variables), [variables]);
+}
+
 export function useOrderAction() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
+    mutationKey: ORDER_ACTION_KEY,
     mutationFn: ({
       id,
       action,
@@ -473,8 +563,28 @@ export function useOrderAction() {
       if (!reason?.trim()) throw new Error('Pick a reason before rejecting.');
       return unwrap(vendorApi.reject(id, reason));
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    // [PERF row 562] The server's confirmed answer lands at once: its status and clocks go into the
+    // order and the board right away, and the re-read runs on its own. The tap used to stay busy
+    // until that re-read came back (one more round trip). Nothing shows before the answer: dispatch
+    // and money never show success early.
+    onSuccess: (answer, vars) => {
+      applyConfirmedOrder(qc, vars.id, answer);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'orders'] });
+    },
   });
+}
+
+/** [PERF row 562] What a store tap's answer confirms about its order (status and its clocks). */
+const CONFIRMED_ORDER_FIELDS = ['status', 'acceptedAt', 'preparingAt', 'readyAt', 'estimatedPrepTime', 'deliveredAt', 'completedAt', 'cancelledAt'] as const;
+
+/** Writes the confirmed fields of a tap's answer into the order's caches, when the answer is that order. */
+export function applyConfirmedOrder(qc: Pick<ReturnType<typeof useQueryClient>, 'setQueryData'>, id: string, answer: unknown): boolean {
+  const row = answer as Record<string, unknown> | null | undefined;
+  if (!row || typeof row !== 'object' || row['id'] !== id || typeof row['status'] !== 'string') return false;
+  const confirmed = Object.fromEntries(CONFIRMED_ORDER_FIELDS.filter((key) => key in row).map((key) => [key, row[key]]));
+  qc.setQueryData(['vendor', 'orders', 'detail', id], (order: any) => (order ? { ...order, ...confirmed } : order));
+  qc.setQueryData(['vendor', 'orders'], (orders: any) => (Array.isArray(orders) ? orders.map((o) => (o?.id === id ? { ...o, ...confirmed } : o)) : orders));
+  return true;
 }
 
 /** MMG cash ledger — delivery fees this store owes riders in cash (the
@@ -660,6 +770,30 @@ export function useUploadItemImage() {
   });
 }
 
+/** [IMAGES-E2E PR4] A menu section's own photo, sized on the phone first (a smaller upload on
+ *  a mobile network); the server checks, scans and redraws it without the camera's data. */
+export function useUploadCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: async ({ id, file }: { id: string; file: { uri: string; name: string; type: string } }) => {
+      const prepared = await prepareUploadImage(file);
+      const form = new FormData();
+      form.append('file', { uri: prepared.uri, name: prepared.name, type: prepared.type } as unknown as Blob);
+      return unwrap(vendorApi.uploadCategoryPhoto(id, form));
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
+/** [IMAGES-E2E PR4] Takes a menu section's photo down. */
+export function useRemoveCategoryPhoto() {
+  const qc = useQueryClient();
+  return usePreviewSafeMutation({
+    mutationFn: (id: string) => unwrap(vendorApi.removeCategoryPhoto(id)),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'menu'] }),
+  });
+}
+
 // ─── Insights / settings ──────────────────────────────────────────────────────
 
 // `enabled` lets a STAFF board suppress this MANAGER-only query (it would 403,
@@ -669,7 +803,7 @@ export function useVendorAnalytics(enabled = true) {
   const q = useQuery({
     queryKey: ['vendor', 'analytics'],
     queryFn: () => unwrap<any>(vendorApi.analytics()),
-    refetchInterval: 30000,
+    refetchInterval: () => POLL.vendorAnalytics(),
     enabled: !pv && enabled,
   });
   return pv ? previewQuery(pv.analytics) : q;

@@ -1,6 +1,5 @@
 /** @jsxImportSource react */
 import { useState, useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { color } from '@swift/ui';
@@ -11,9 +10,9 @@ import { VendorOrderHistoryScreen } from './screens/VendorOrderHistoryScreen';
 import { VendorMyQrScreen } from './screens/VendorMyQrScreen';
 import { VendorCategoryReviewScreen } from './screens/VendorCategoryReviewScreen';
 import { VendorTierScreen } from './screens/VendorTierScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
-import { disconnectSocket } from '../../services/socket';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
 import { useVendorProfile, useVendorOrdersLive } from '../../hooks/vendorops';
 import { track } from '../../lib/analytics';
@@ -22,11 +21,12 @@ import { useVendorPreview } from '../../stores/vendorPreview';
 import { VendorBulkImportScreen } from './screens/VendorBulkImportScreen';
 import { NewOrderTakeover } from './NewOrderTakeover';
 import { catalogueMeta, safeVendorRole, TabHeader } from './shared';
-import { billingBlocked } from '../../lib/vendorProfile';
+import { storeHoldOf } from '../../lib/vendorProfile';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
 import { WeeklyFeeRouteScreen } from '../billing/screens/WeeklyFeeRouteScreen';
 import { VendorOps } from './screens/VendorOps';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
+import { VendorStoreBlocked } from './screens/VendorStoreBlocked';
 import { VendorMenuScreen } from './screens/VendorMenuScreen';
 import { VendorItemEditorScreen } from './screens/VendorItemEditorScreen';
 import { VendorInsightsScreen } from './screens/VendorInsightsScreen';
@@ -35,8 +35,8 @@ import { VendorScheduleScreen } from './screens/VendorScheduleScreen';
 
 const Stack = createNativeStackNavigator();
 
-function VendorLiveOrderLayer({ vendorId }: { vendorId: string }) {
-  const { takeover, dismissTakeover } = useVendorOrdersLive(vendorId);
+function VendorLiveOrderLayer({ vendorId, ownsStore }: { vendorId: string; ownsStore: boolean }) {
+  const { takeover, dismissTakeover } = useVendorOrdersLive(vendorId, ownsStore);
   return takeover.length > 0 ? <NewOrderTakeover queue={takeover} onDismiss={dismissTakeover} /> : null;
 }
 
@@ -48,11 +48,10 @@ function VendorWentLiveLayer({ status }: { status: string }) {
 
 function VendorRoot() {
   const { owner, store, stores, isLoading, state: profileState, failure, refetch } = useVendorProfile();
-  const qc = useQueryClient();
   const myRole = safeVendorRole(owner?.myRole);
   const selectedStoreId = useStoreSwitcher((s) => s.selectedStoreId);
   const setSelectedStore = useStoreSwitcher((s) => s.setSelectedStore);
-  const [repairingSelection, setRepairingSelection] = useState(false);
+  const initializeSelectedStore = useStoreSwitcher((s) => s.initializeSelectedStore);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const { preview, previewType, enterPreview, exitPreview } = useVendorPreview();
   // Preview is a per-store choice: switching stores lands on that store's
@@ -70,27 +69,25 @@ function VendorRoot() {
   useEffect(() => {
     if (stores.length === 0 || validSelection) return;
     const nextStoreId = stores[0].id;
-    if (!selectedStoreId) {
-      setSelectedStore(nextStoreId);
-      return;
-    }
-    // A selected membership disappeared (or belongs to an earlier account).
-    // Treat this like an explicit store handoff: leave the socket room and
-    // discard every store-bound cache before mounting the fallback business.
-    setRepairingSelection(true);
-    disconnectSocket();
-    setSelectedStore(nextStoreId);
-    void Promise.all([
-      qc.resetQueries({ queryKey: ['vendor'] }),
-      qc.resetQueries({ queryKey: ['verification'] }),
-    ]).finally(() => setRepairingSelection(false));
-  }, [stores, validSelection, selectedStoreId, setSelectedStore, qc]);
+    if (selectedStoreId === null) initializeSelectedStore(nextStoreId);
+    else setSelectedStore(nextStoreId);
+  }, [stores, validSelection, selectedStoreId, setSelectedStore, initializeSelectedStore]);
 
   useEffect(() => {
     if (store) track('vendor_suite_opened', { vendorType: String(store.vendorType ?? '') });
   }, [store?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (isLoading || repairingSelection || (stores.length > 0 && !validSelection)) {
+  // [STORE-ALERT] A live store's phone must ring: ask while the OS still can
+  // (once per app session). Never in a preview: nothing real rings there.
+  const storeLive = store?.status === 'ACTIVE' && !previewType;
+  useEffect(() => {
+    if (!storeLive) return;
+    void Promise.all([import('../../services/notification-priming'), import('../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('store_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [storeLive]);
+
+  if (isLoading || (stores.length > 0 && !validSelection)) {
     return (
       <Screen>
         <LoadingBlock />
@@ -127,16 +124,19 @@ function VendorRoot() {
     );
   }
   if (!store) return <BusinessSetup />;
-  const suspensionSource = store.suspensionSource == null ? null : String(store.suspensionSource).toUpperCase();
   // [MOB-038] A blocked subscription blocks, whether or not it was mirrored
-  // onto the store row. Requiring store.status === 'SUSPENDED' left a store
-  // whose subscription was SUSPENDED or CHURNED taking orders it could not be
-  // paid for. The suspension SOURCE still decides which reason is shown.
-  const billingSuspended = billingBlocked(store) && suspensionSource !== 'MODERATION';
+  // onto the store row. [NO-DEAD-ENDS] The suspension SOURCE decides which
+  // reason is shown: a fee hold (pay, and finish what was accepted), or a hold
+  // only Swift lifts (suspended by Swift, owner account closed, closed). The
+  // old check named a 'MODERATION' source the server never writes, so those
+  // stores fell through to the onboarding checklist with no reason at all.
+  const hold = storeHoldOf(store);
   return (
     <>
-      {billingSuspended ? (
+      {hold === 'FEE_UNPAID' ? (
         <VendorBillingSuspended store={store} stores={stores} myRole={myRole} />
+      ) : hold ? (
+        <VendorStoreBlocked store={store} stores={stores} myRole={myRole} hold={hold} />
       ) : store.status !== 'ACTIVE' && !preview ? (
         <VendorOnboarding store={store} onPreview={() => enterPreview()} />
       ) : (
@@ -151,7 +151,7 @@ function VendorRoot() {
       <VendorWentLiveLayer key={`went-live-${store.id}`} status={String(store.status ?? '')} />
       {/* Keying this layer by store also clears queued alerts during a store
           handoff; the old socket is disconnected before the cache reset. */}
-      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={`live-orders-${store.id}`} vendorId={store.id} /> : null}
+      {store.status === 'ACTIVE' ? <VendorLiveOrderLayer key={`live-orders-${store.id}`} vendorId={store.id} ownsStore={myRole === 'OWNER'} /> : null}
     </>
   );
 }
@@ -198,6 +198,15 @@ function VendorTabs() {
   return (
     <VTab.Navigator
       screenOptions={{
+        // [SPEED 22 Oct] As the customer tabs (navigation/CustomerStack.tsx): a tab mounts on
+        // its first visit, keeps its state, and stops DRAWING while hidden. The Orders board
+        // no longer re-draws on every poll while the owner is on Products, nor Products on
+        // every menu re-read while on Orders; reads keep running, so a tab shows the latest
+        // the moment it is opened. New-order alerts are not inside a tab (VendorRoot's
+        // VendorLiveOrderLayer), so a hidden tab never silences a new order.
+        lazy: true,
+        freezeOnBlur: true,
+        animation: 'none',
         headerShown: false,
         tabBarActiveTintColor: color.brand[500],
         tabBarInactiveTintColor: color.text.muted,
@@ -242,21 +251,32 @@ function VendorTabs() {
 }
 
 export function VendorStack() {
+  const storeId = useStoreSwitcher((s) => s.selectedStoreId);
+  const storeGeneration = useStoreSwitcher((s) => s.storeGeneration);
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
-      <Stack.Screen name="VendorRoot" component={VendorRoot} />
-      <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
-      <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
-      <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
-      {/* [MKT G3] Where the backfill's "review your categories" push lands.
-          Accepting a suggestion is what writes the tag the Market feed reads. */}
-      <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
+      {/* A batched A → B → A must also retire editors and reconnect live orders. */}
+      <Stack.Group navigationKey={`${storeId ?? 'unselected'}:${storeGeneration}`}>
+        <Stack.Screen name="VendorRoot" component={VendorRoot} />
+        <Stack.Screen name="VendorOrderDetail" component={VendorOrderDetailScreen} />
+        <Stack.Screen name="VendorOrderHistory" component={VendorOrderHistoryScreen} />
+        <Stack.Screen name="VendorMyQr" component={VendorMyQrScreen} />
+        {/* [MKT G3] Where the backfill's "review your categories" push lands.
+            Accepting a suggestion is what writes the tag the Market feed reads. */}
+        <Stack.Screen name="VendorCategoryReview" component={VendorCategoryReviewScreen} />
+        {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
+        <Stack.Screen name="VendorTier" component={VendorTierScreen} />
+      </Stack.Group>
+      {/* Keep the notification destination registered across the handoff. Its
+          vendor fee editor already remounts with key={storeId}. */}
       <Stack.Screen name="WeeklyFee" component={WeeklyFeeRouteScreen} />
-      {/* [DOC-1 §3.6] Seller status — the tier, its caps and what lifts them. */}
-      <Stack.Screen name="VendorTier" component={VendorTierScreen} />
       {/* [B-support] Role-agnostic ticket screen — the vendor stack had NO
           route to a human. Registration, not a rewrite. */}
       <Stack.Screen name="GetHelp" component={GetHelpScreen} />
+      {/* [DELETION-INTEGRITY] Personal data and account closure, reached from
+          the Account tab. Registered on THIS stack: a screen inside the Menu
+          tab's nested stack is not reachable from a sibling tab. */}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }

@@ -1,15 +1,23 @@
 import type { NextConfig } from 'next';
 import { PHASE_DEVELOPMENT_SERVER } from 'next/constants';
 import { SITE_DOMAIN } from './src/site.domain';
+import { MEDIA_DEVICE_SIZES, MEDIA_IMAGE_SIZES, mediaRemotePatterns } from './src/lib/media-patterns';
+
+/** The public site's own names: never noindexed, whichever build answers them. */
+const PUBLIC_SITE_HOSTS = [SITE_DOMAIN, `www.${SITE_DOMAIN}`];
 import {
   type BrowserApiMode,
   buildBrowserContentSecurityPolicy,
   resolveConfiguredBrowserApiOrigin,
   resolveConfiguredReleaseChannel,
 } from './src/lib/browser-api-origin';
+import { mapTilesBuildCheck } from './src/lib/map-tiles';
 
 // The public face of Swift — marketing + (coming) customer web + operator
 // dashboards. Same hardening posture as the admin console.
+
+/** [PERF #7] How long a browser keeps a self-hosted font file (see headers()). */
+const FONT_CACHE_CONTROL = 'public, max-age=2592000, stale-while-revalidate=604800';
 
 // [SWX-DEV-WEB-076 · integrated] The browser API origin and the CSP that
 // permits exactly it come from ONE authority (src/lib/browser-api-origin.ts).
@@ -25,7 +33,16 @@ export default function createNextConfig(phase: string): NextConfig {
   // declares the staging channel (the self-hosted staging image does).
   const releaseChannel = resolveConfiguredReleaseChannel();
   const browserApiOrigin = resolveConfiguredBrowserApiOrigin(browserApiMode, releaseChannel);
-  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel);
+  // [CARD embed] The bank's card page shown inside the weekly-fee page (an iframe of the
+  // API's own card page). OFF unless the build sets SWIFT_WEB_CARD_FRAME=1: off, the CSP and
+  // the client bundle are exactly what they were, and the card page opens in the same tab.
+  const cardFrame = process.env['SWIFT_WEB_CARD_FRAME'] === '1';
+  const csp = buildBrowserContentSecurityPolicy(browserApiMode, releaseChannel, { cardFrame });
+  // [WEB-TILES] The MapTiler browser key (lib/map-tiles.ts): a malformed value
+  // refuses the build; a production build without one says, in its log, that
+  // the site it builds draws no map tiles. Next inlines the key into the bundle.
+  const mapTiles = mapTilesBuildCheck(browserApiMode, process.env['NEXT_PUBLIC_MAPTILER_KEY']);
+  if (mapTiles.warning) console.warn(`[web build] ${mapTiles.warning}`);
 
   // [Q11] apps/web/Dockerfile sets SWIFT_WEB_IMAGE_BUILD=1, and nothing else
   // does: Vercel and CI get exactly the config they had. The image runs Next's
@@ -43,16 +60,63 @@ export default function createNextConfig(phase: string): NextConfig {
 
   return {
     poweredByHeader: false,
-    // MMG return queries are private, including in the development request log.
-    logging: { incomingRequests: { ignore: [/^\/pay\/mmg\//] } },
+    // [M013] Request targets and upstream fetch URLs carry private grants:
+    // share and tracking tokens in the path (/trip/<token>, /track/<token>),
+    // MMG replies (/pay/mmg/...) and signed upstream URLs. `false` turns off
+    // Next's whole development request and fetch logger, not a list of paths
+    // that a new private route could miss. (Next prints no request log in
+    // production; the API keeps its own redacted diagnostics.)
+    logging: false,
     ...imageBuildConfig,
     // @swift/types ships TypeScript source; Next must transpile it (the admin
     // console declares the same). The site reads the market zone from it.
     transpilePackages: ['@swift/types'],
+    // [Size budget, PERF 21 Oct] The customer app's shared code in ONE chunk. Next's default
+    // splitting only makes a shared chunk of 20 kB or more, so the small modules many customer
+    // pages share (the session context, the basket state, the chunk-retry helper, the shell's
+    // icons, skeletons and routes) were copied into each page's own chunk as well as the
+    // layout's: 2.5 to 4.5 kB loaded twice on every customer page. This group puts the app's own
+    // code (and lucide's icons) that at least 12 of the customer pages use into one chunk they all
+    // load. Customer pages only (app/(app)/...); the partner consoles, sign-in and legal pages keep
+    // Next's defaults. JavaScript only: CSS keeps Next's own chunking and order.
+    webpack: (config, { isServer }) => {
+      if (isServer) return config;
+      const splitChunks = config.optimization?.splitChunks;
+      if (!splitChunks || typeof splitChunks !== 'object') return config;
+      const appOwnCode = /[\\/](src[\\/]|lucide-react[\\/])/;
+      splitChunks.cacheGroups = {
+        ...(splitChunks.cacheGroups ?? {}),
+        customerAppShared: {
+          name: 'customer-app-shared',
+          chunks: (chunk: { name?: string | null }) => /^app\/\(app\)\//.test(chunk.name ?? ''),
+          test: (module: { type?: string; nameForCondition?: () => string | null }) =>
+            !module.type?.startsWith('css') && appOwnCode.test(module.nameForCondition?.() ?? ''),
+          minChunks: 12,
+          minSize: 0,
+          priority: 25,
+          reuseExistingChunk: true,
+        },
+      };
+      return config;
+    },
     // The exact origin is inlined into every client chunk from the authority,
     // so no consumer can fall back to localhost in a release by accident.
     env: {
       NEXT_PUBLIC_API_URL: browserApiOrigin,
+      ...(cardFrame ? { NEXT_PUBLIC_CARD_FRAME: '1' } : {}),
+    },
+    // Store photos bypass Next's stale-on-error image cache via photo() and
+    // /media. The one-year minimum below applies ONLY to avatars and vehicles.
+    // Both resize routes share the same responsive width lists and WebP format.
+    images: {
+      remotePatterns: mediaRemotePatterns(browserApiOrigin),
+      // Do not let /_next/image wrap /media and revive its stale-on-error cache.
+      localPatterns: [{ pathname: '/icons/**' }, { pathname: '/_next/static/media/**' }],
+      formats: ['image/webp'],
+      minimumCacheTTL: 60 * 60 * 24 * 365,
+      deviceSizes: MEDIA_DEVICE_SIZES,
+      imageSizes: MEDIA_IMAGE_SIZES,
+      dangerouslyAllowSVG: false,
     },
     // App Router ignores dot-prefixed folders, so the OS association files are
     // route handlers under /well-known/* surfaced at their mandated paths here.
@@ -131,6 +195,16 @@ export default function createNextConfig(phase: string): NextConfig {
           ],
         },
         {
+          // [PERF #7] The self-hosted font files (public/fonts) used to go out
+          // with Next's default for public files, `max-age=0`, so every full
+          // page load (each QR scan) asked again about every face it used
+          // before it could draw text in it. They are kept for 30 days now
+          // (then used while re-checked in the background). Their names carry
+          // no version: a changed font must take a NEW file name.
+          source: '/fonts/:file',
+          headers: [{ key: 'Cache-Control', value: FONT_CACHE_CONTROL }],
+        },
+        {
           // [PWA-1] The service worker (public/sw.js). Never cached, so a fixed
           // worker reaches phones on their next visit rather than when a cache
           // expires; the type is pinned because a browser refuses to install a
@@ -171,14 +245,31 @@ export default function createNextConfig(phase: string): NextConfig {
               key: 'Permissions-Policy',
               value: 'geolocation=(self), microphone=(), camera=(self)',
             },
-            // [Q11] The staging site is a full copy of the public one on another
-            // host, backed by test data: no search engine may index it in the
-            // public site's place. A staging-channel build only; the public
-            // build never sends this.
-            ...(releaseChannel === 'staging' ? [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }] : []),
           ],
         },
-        { source: '/pay/mmg/:outcome', headers: [
+        // [Q11] The staging site is a full copy of the public one on another
+        // host, backed by test data: no search engine may index it in the
+        // public site's place. A staging-channel build only; the public build
+        // never sends this. [DS628] And only on the staging host(s): the deploy
+        // stack can serve the public names from this same image
+        // (WEB_ALIAS_HOSTS), and swiftgy.com and www must stay indexable. Every
+        // other name keeps the noindex, so an unexpected host fails safe.
+        ...(releaseChannel === 'staging'
+          ? [{
+              source: '/(.*)',
+              missing: PUBLIC_SITE_HOSTS.map((host) => ({ type: 'host' as const, value: host.replace(/\./g, '\\.') })),
+              headers: [{ key: 'X-Robots-Tag', value: 'noindex, nofollow' }],
+            }]
+          : []),
+        // Every depth: MMG may put its reply in the path (/pay/mmg/success/token=…).
+        // These rules come after the site-wide ones, so they win for these paths
+        // (Referrer-Policy included), and Next sends a config header in place of
+        // the route handler's own.
+        // [M053] The public trip and parcel pages carry a bearer token in their
+        // path: nothing they load or link to is told the page's address.
+        { source: '/trip/:path*', headers: [{ key: 'Referrer-Policy', value: 'no-referrer' }] },
+        { source: '/track/:path*', headers: [{ key: 'Referrer-Policy', value: 'no-referrer' }] },
+        { source: '/pay/mmg/:path*', headers: [
           { key: 'X-Robots-Tag', value: 'noindex' },
           { key: 'Cache-Control', value: 'no-store' },
           { key: 'Referrer-Policy', value: 'no-referrer' },

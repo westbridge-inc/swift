@@ -1,5 +1,12 @@
-import { Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
-import { NotFoundError } from '../../utils/errors';
+import { bindTenantTransaction } from '../../plugins/prisma';
+import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
+import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
+import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
+import { AppError, NotFoundError } from '../../utils/errors';
+import { accountErasedUnderLock } from '../user/account-closure';
+import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
+import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
 import { TrialEntitlementService } from '../integrity/trial-entitlement.service';
 import { log } from '../../utils/logger';
@@ -35,11 +42,9 @@ type ActivationPricing =
 
 export class SubscriptionService {
   private countryConfig: CountryConfigService;
-  private trialLaw: TrialEntitlementService;
 
   constructor(private prisma: PrismaClient) {
     this.countryConfig = new CountryConfigService(prisma);
-    this.trialLaw = new TrialEntitlementService(prisma);
   }
 
   // The three resolvers below read the partner and price them through THE
@@ -54,11 +59,12 @@ export class SubscriptionService {
         riderType: true,
         vehicleType: true,
         subscription: true,
-        user: { select: { countryCode: true } },
+        user: { select: { id: true, tenantId: true, countryCode: true } },
       },
     });
     if (!rider) throw new NotFoundError('Rider', riderId);
-    if (rider.subscription) return { existing: rider.subscription };
+    const authority = await resolveMoverFeeAuthority(db, { userId: rider.user.id, tenantId: rider.user.tenantId });
+    if (authority) return { existing: await db.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } }) };
 
     const countryCode = rider.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
@@ -75,11 +81,19 @@ export class SubscriptionService {
       select: {
         vehicleType: true,
         subscription: true,
-        user: { select: { countryCode: true } },
+        user: { select: { id: true, tenantId: true, countryCode: true } },
       },
     });
     if (!driver) throw new NotFoundError('Driver', driverId);
-    if (driver.subscription) return { existing: driver.subscription };
+    const authority = await resolveMoverFeeAuthority(db, { userId: driver.user.id, tenantId: driver.user.tenantId });
+    if (authority) {
+      // A second role still preflights the tariff it is about to adopt.
+      if (authority.feeType !== 'TAXI_DRIVER') {
+        const tiers = await this.countryConfig.getSubscriptionTiers(driver.user.countryCode, db);
+        partnerRateFor(tiers, { kind: 'DRIVER', vehicleType: driver.vehicleType });
+      }
+      return { existing: await db.subscription.findUniqueOrThrow({ where: { id: authority.canonicalSubscriptionId } }) };
+    }
 
     const countryCode = driver.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
@@ -98,7 +112,6 @@ export class SubscriptionService {
         owner: {
           select: {
             user: { select: { countryCode: true } },
-            _count: { select: { vendors: true } },
           },
         },
       },
@@ -109,14 +122,13 @@ export class SubscriptionService {
     const countryCode = vendor.owner.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     // A brand-new store has no catalogue yet, so it is born on the small tier
-    // and the weekly re-tier moves it up once its listings are counted. The
-    // franchise basis IS known at signup, though: the owner's fifth store
-    // should not spend its first week at the single-store price.
+    // and the weekly re-tier moves it up once its listings are counted. Each
+    // store is its own account with its own tier: how many other stores its
+    // owner has never changes its price (owner, 13 Oct 2026).
     const priced = partnerRateFor(tiers, {
       kind: 'VENDOR',
       isService: vendor.vendorType === 'SERVICE',
       activeListings: 0,
-      ownedStores: vendor.owner._count.vendors,
     });
     return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
@@ -138,145 +150,179 @@ export class SubscriptionService {
    * so the check rides its locks.
    */
   async priceForActivation(entity: ActivationEntity, db: Db = this.prisma): Promise<PartnerRate | null> {
+    // [REVIEW-PARTNER] The store-review fiction is never priced: it holds no subscription (createRow refuses it).
+    if (await this.isFiction(entity, db)) return null;
     const activation = await this.activation(entity, db);
+    if (!activation.existing) {
+      const human = await this.humanFor(entity, db);
+      await requireIdentityAuthority(db, human.userId);
+    }
     return activation.existing ? null : activation.priced;
   }
 
-  async startTrialForRider(riderId: string) {
-    const activation = await this.riderActivation(riderId, this.prisma);
-    if (activation.existing) return activation.existing; // idempotent
-    return this.create({ riderId }, activation.type, activation.priced.rate, activation.currencyCode);
+  /** Activation, identity decision, subscription and caller projection commit
+   * together. Acquire the identity lock before any account/profile row lock. */
+  async withActivation<T>(entity: ActivationEntity, apply: (tx: Prisma.TransactionClient, sub: Subscription) => Promise<T>, db: Db = this.prisma): Promise<T> {
+    const run = async (tx: Prisma.TransactionClient) => {
+      await bindTenantTransaction(tx);
+      await lockIdentityAuthority(tx);
+      // [#1393] One weekly fee per mover payer: the payer and every one of its
+      // sources are locked (and ownership re-read) before the activation is read.
+      const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      // [#1879 S3-3 · REVIEW-G R1] No activation write for an erased account. The person's users row is locked
+      // here (a mover's already is, by lockMoverPayer), so an erasure either commits its cut-off first and this
+      // refuses, or waits behind this transaction and its wind-down then cancels what was written.
+      if (await accountErasedUnderLock(tx, payer?.userId ?? (await this.humanFor(entity, tx)).userId)) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Nothing can be activated for it.');
+      }
+      const activation = await this.activation(entity, tx);
+      const sub = payer && !('vendorId' in entity)
+        ? await this.moverRow(entity, payer, activation, tx)
+        : activation.existing ?? await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, 'swift-default');
+      return apply(tx, sub);
+    };
+    return '$transaction' in db ? db.$transaction(run) : run(db);
   }
 
-  async startTrialForDriver(driverId: string) {
-    const activation = await this.driverActivation(driverId, this.prisma);
-    if (activation.existing) return activation.existing;
-    return this.create({ driverId }, activation.type, activation.priced.rate, activation.currencyCode);
+  async startTrialForRider(riderId: string, db?: Db) { return this.start({ riderId }, db); }
+  async startTrialForDriver(driverId: string, db?: Db) { return this.start({ driverId }, db); }
+  async startTrialForVendor(vendorId: string, db?: Db) { return this.start({ vendorId }, db); }
+
+  private async start(entity: ActivationEntity, db: Db = this.prisma) {
+    const sub = await this.withActivation(entity, async (_tx, row) => row, db);
+    // A transaction caller defers SAN to its established read backstop.
+    if (!('$transaction' in db)) return sub;
+    try {
+      const { ensureSan } = await import('../billing/san.service');
+      return { ...sub, san: await ensureSan(this.prisma, sub.id) };
+    } catch (err) {
+      log().error({ err, subscriptionId: sub.id }, 'SAN assignment at activation failed — backstop will heal');
+      return sub;
+    }
   }
 
-  async startTrialForVendor(vendorId: string) {
-    const activation = await this.vendorActivation(vendorId, this.prisma);
-    if (activation.existing) return activation.existing;
-    return this.create({ vendorId }, activation.type, activation.priced.rate, activation.currencyCode);
+  /** [REVIEW-PARTNER] Is the partner behind this entity an account of the store-review fiction? (Read in `db`.) */
+  async isFiction(entity: ActivationEntity, db: Db = this.prisma): Promise<boolean> {
+    const human = await this.humanFor(entity, db);
+    const rows = await db.$queryRaw<Array<{ kind: string }>>`
+      SELECT t."kind"::text AS "kind" FROM "users" u JOIN "tenants" t ON t."id" = u."tenantId" WHERE u."id" = ${human.userId}`;
+    return rows[0]?.kind === 'REVIEW';
+  }
+
+  /** [#1393 · mover fee authority] The payer and all of its mover sources,
+   * locked in the common order, with the profile's owner re-read under the lock. */
+  private async lockMoverPayer(entity: { riderId: string } | { driverId: string }, tx: Prisma.TransactionClient) {
+    const profile = 'riderId' in entity
+      ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { user: { select: { id: true, tenantId: true } } } })
+      : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { user: { select: { id: true, tenantId: true } } } });
+    const payer = { userId: profile.user.id, tenantId: profile.user.tenantId };
+    await lockMoverSources(tx, payer);
+    const fresh = 'riderId' in entity
+      ? await tx.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } })
+      : await tx.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
+    if (fresh.userId !== payer.userId) throw new AppError(409, 'MOVER_FEE_OWNERSHIP_INVALID', 'Mover ownership changed during activation.');
+    return payer;
+  }
+
+  /** [#1393 · mover fee authority] A second role adopts the payer's canonical
+   * subscription (a taxi activation re-tiers its future rate, with a record);
+   * a new subscription is born on the trial law and joins the payer's fee authority. */
+  private async moverRow(
+    entity: { riderId: string } | { driverId: string }, payer: { userId: string; tenantId: string },
+    activation: ActivationPricing, tx: Prisma.TransactionClient,
+  ): Promise<Subscription> {
+    if (activation.existing) {
+      const authority = await activateMoverFeeType(tx, payer, 'driverId' in entity ? 'TAXI_DRIVER' : activation.existing.type);
+      let sub = activation.existing;
+      if (authority?.feeType === 'TAXI_DRIVER' && sub.customRate === null && !sub.feeWaived) {
+        const tariff = await moverFeeTariffSubject(tx, authority);
+        const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
+        const priced = partnerRateFor(tiers, tariff.subject);
+        // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A fee the
+        // mover has already paid a week at is never raised at once: a higher taxi card rate is HELD
+        // for the 14-day fee-change notice (F2, billing/fee-rise-notice.ts), told and applied only
+        // from the weekly fee it was told for. Before any paid week (a trial) the role they activate
+        // prices the first fee, in either activation order.
+        const from = Number(sub.weeklyRate);
+        const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
+          where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
+        // [REVIEW-M #1844 S4-1] A paid weekly rate of 0 or less is legacy or hand-made data: never kept
+        // as the floor, nor raised at once to the taxi rate. The activation is refused (loudly: the approval
+        // outbox retries it with backoff, then dead-letters it to the admin page) until finance corrects it.
+        if (paidAtRate && !(from > 0)) {
+          throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'This mover\'s weekly fee on record is 0 or less; finance must correct it before the taxi role is added.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+        }
+        const nextRate = paidAtRate ? from : priced.rate;
+        if (paidAtRate) {
+          await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: priced.rate, currencyCode: sub.currencyCode, source: 'TAXI_ACTIVATION', now: new Date() });
+        }
+        if (nextRate !== from) {
+          sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: nextRate } });
+          const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
+          await tx.billingEvent.create({ data: {
+            subscriptionId: sub.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: sub.currencyCode,
+            idempotencyKey: `tier:${sub.id}:${seq}:${from}->${nextRate}`,
+            note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${nextRate}; issued charges and periods retained.`,
+          } });
+        }
+      }
+      return sub;
+    }
+    const sub = await this.createRow(entity, activation.type, activation.priced.rate, activation.currencyCode, tx, payer.tenantId);
+    await lockMoverFeeAuthority(tx, payer);
+    return sub;
   }
 
   /** The human behind the entity + their trial-law role (§3: the trial
    *  belongs to the human, not the account or the entity). */
-  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string }): Promise<{ userId: string; role: string }> {
+  private async humanFor(entity: { riderId?: string; driverId?: string; vendorId?: string }, db: Db = this.prisma): Promise<{ userId: string; role: string }> {
     if (entity.riderId) {
-      const r = await this.prisma.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } });
+      const r = await db.rider.findUniqueOrThrow({ where: { id: entity.riderId }, select: { userId: true } });
       return { userId: r.userId, role: 'RIDER' };
     }
     if (entity.driverId) {
-      const d = await this.prisma.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
+      const d = await db.driver.findUniqueOrThrow({ where: { id: entity.driverId }, select: { userId: true } });
       return { userId: d.userId, role: 'DRIVER' };
     }
-    const v = await this.prisma.vendor.findUniqueOrThrow({
+    const v = await db.vendor.findUniqueOrThrow({
       where: { id: entity.vendorId! },
       select: { owner: { select: { userId: true } } },
     });
     return { userId: v.owner.userId, role: 'VENDOR' };
   }
 
-  private async create(
-    entity: { riderId?: string; driverId?: string; vendorId?: string },
-    type: SubscriptionType,
-    weeklyRate: number,
-    currencyCode: string,
-  ) {
-    const sub = await this.createRow(entity, type, weeklyRate, currencyCode);
-    // SAN at birth [san spec 2.4]: the number goes on welcome material so
-    // it's familiar long before the first bill. Never blocks activation —
-    // the ensureSan backstop on any later read heals a miss.
-    try {
-      const { ensureSan } = await import('../billing/san.service');
-      const san = await ensureSan(this.prisma, sub.id);
-      return { ...sub, san };
-    } catch (e) {
-      log().error({ err: e, subscriptionId: sub.id }, 'SAN assignment at activation failed — backstop will heal');
-      return sub;
-    }
-  }
-
   private async createRow(
-    entity: { riderId?: string; driverId?: string; vendorId?: string },
-    type: SubscriptionType,
-    weeklyRate: number,
-    currencyCode: string,
+    entity: ActivationEntity, type: SubscriptionType, weeklyRate: number, currencyCode: string,
+    tx: Prisma.TransactionClient, tenantId: string,
   ) {
+    const human = await this.humanFor(entity, tx);
+    // [REVIEW-PARTNER · DL-5] No weekly fee is ever born for the store-review fiction: it has no
+    // money rail, so a subscription would only be a bill nobody can or should pay.
+    if (await this.isFiction(entity, tx)) throw new ReviewDemoMoneyRefusedError();
+    await requireIdentityAuthority(tx, human.userId);
+    // decide also records explainable denials. Every read and write uses the
+    // same locked transaction, so quarantine cannot race a punishment or grant.
+    const law = new TrialEntitlementService(tx as PrismaClient);
+    const decision = await law.decide(human.userId, human.role, tenantId);
+    if (!decision.grant && decision.reason === 'REVIEW_REQUIRED') throw new IdentityReviewRequiredError();
     const now = new Date();
-    const trialEnd = new Date(now.getTime() + TRIAL_DAYS * DAY_MS);
-    const base = {
-      ...entity,
-      type,
-      weeklyRate,
-      currencyCode,
-      billingMethod: 'CASH' as const,
-      currentPeriodStart: now,
-    };
-
-    // Trial law (§3.2): decide() is the only authority on trials. A denied
-    // human still activates — BILLED FROM DAY 1 (same shape the day-15
-    // conversion produces, so the hourly billing cycle charges it next run).
-    const human = await this.humanFor(entity);
-    const decision = await this.trialLaw.decide(human.userId, human.role, 'swift-default');
-
-    const billedFromDayOne = () =>
-      this.prisma.subscription.create({
-        data: { ...base, status: 'ACTIVE', isTrialActive: false, trialEndDate: now, currentPeriodEnd: now, nextBillingDate: now },
-      });
-
-    try {
-      if (!decision.grant) {
-        log().info({ userId: human.userId, role: human.role, reason: decision.reason }, 'trial denied by entitlement law — subscription born billed');
-        // Every enforcement is explainable and appealable (Part 0.4/Part 4):
-        // the billed-from-day-1 decision leaves its evidence row. Fraud/debt
-        // paths already wrote theirs inside decide(); this covers the plain
-        // consumed/active-elsewhere denials.
-        if (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE') {
-          await this.prisma.enforcementAction.create({
-            data: {
-              accountId: human.userId,
-              clusterId: decision.clusterId,
-              level: 'DENY_TRIAL',
-              reasonCode: decision.reason,
-              signalsFired: [{ note: 'trial law at activation', role: human.role }] as never,
-              decidedBy: 'SYSTEM',
-            },
-          }).catch(() => {});
-        }
-        return await billedFromDayOne();
-      }
-      // Grant + subscription in ONE transaction (§3.1) — the TrialGrant unique
-      // is the last line of defense when the same human activates twice at once.
-      return await this.prisma.$transaction(async (tx) => {
-        const sub = await tx.subscription.create({
-          data: { ...base, status: 'TRIAL', isTrialActive: true, trialEndDate: trialEnd, currentPeriodEnd: trialEnd, nextBillingDate: trialEnd },
-        });
-        await this.trialLaw.recordGrant(tx, {
-          accountId: human.userId,
-          clusterId: decision.clusterId,
-          role: human.role,
-          tenantId: 'swift-default',
-          trialDays: TRIAL_DAYS,
-          exception: decision.reason === 'EXCEPTION_GRANT',
-        });
-        return sub;
-      });
-    } catch (e) {
-      if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-        const target = String((e.meta as { target?: unknown } | undefined)?.target ?? '');
-        // Scenario I — the partial ACTIVE-grant unique lost the race: this
-        // activation gets no second trial; it is born billed. Never a dead end.
-        if (target.includes('trial_grants_one_active') || target.includes('clusterId')) {
-          log().warn({ userId: human.userId, role: human.role }, 'trial-grant race lost — activating billed from day 1');
-          return billedFromDayOne();
-        }
-        // Concurrent create for the same entity — return the existing row.
-        return this.prisma.subscription.findFirstOrThrow({ where: entity });
-      }
-      throw e;
+    const end = decision.grant ? new Date(now.getTime() + TRIAL_DAYS * DAY_MS) : now;
+    if (!decision.grant && (decision.reason === 'TRIAL_CONSUMED' || decision.reason === 'TRIAL_ACTIVE_ELSEWHERE')) {
+      await tx.enforcementAction.create({ data: {
+        accountId: human.userId, clusterId: decision.clusterId, level: 'DENY_TRIAL', reasonCode: decision.reason,
+        signalsFired: [{ note: 'trial law at activation', role: human.role }] as never, decidedBy: 'SYSTEM',
+      } });
     }
+    const sub = await tx.subscription.create({ data: {
+      ...entity, type, weeklyRate, currencyCode, billingMethod: 'CASH', currentPeriodStart: now,
+      status: decision.grant ? 'TRIAL' : 'ACTIVE', isTrialActive: decision.grant,
+      trialEndDate: end, currentPeriodEnd: end, nextBillingDate: end,
+    } });
+    if (decision.grant) await law.recordGrant(tx, {
+      accountId: human.userId, clusterId: decision.clusterId, role: human.role,
+      tenantId, trialDays: TRIAL_DAYS, exception: decision.reason === 'EXCEPTION_GRANT',
+    });
+    return sub;
   }
 
   /**
@@ -285,10 +331,24 @@ export class SubscriptionService {
    * the number converted. Idempotent (only TRIAL rows past their end match).
    */
   async convertExpiredTrials(now = new Date()): Promise<number> {
-    const res = await this.prisma.subscription.updateMany({
-      where: { status: 'TRIAL', trialEndDate: { lte: now } },
-      data: { status: 'ACTIVE', isTrialActive: false, nextBillingDate: now },
-    });
-    return res.count;
+    const rows = await this.prisma.subscription.findMany({ where: { status: 'TRIAL', trialEndDate: { lte: now } }, select: { id: true } });
+    let count = 0;
+    for (const row of rows) {
+      try {
+        count += await this.prisma.$transaction(async (tx) => {
+          if (!(await lockFeeCollectionAuthority(tx, row.id)).allowed) return 0;
+          const { sub } = await lockBillingAuthority(tx, row.id);
+          if (sub.status !== 'TRIAL' || !sub.trialEndDate || sub.trialEndDate > now) return 0;
+          // Preserve the original obligation and time already paused before conversion.
+          await tx.subscription.update({ where: { id: row.id }, data: { status: 'ACTIVE', isTrialActive: false } });
+          await currentDunningClock(tx, row.id, now);
+          return 1;
+        });
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== 'MOVER_FEE_OWNERSHIP_INVALID') throw error;
+        log().warn({ subscriptionId: row.id }, 'trial conversion held: original financial source has no valid payer');
+      }
+    }
+    return count;
   }
 }

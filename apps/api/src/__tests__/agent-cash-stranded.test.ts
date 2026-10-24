@@ -217,8 +217,8 @@ const within = async <T>(p: Promise<T>, ms = 15_000): Promise<T> => {
   }
 };
 
-/** Hold the payment row in the database until `waiters` finishers are all
- *  blocked on it, so their compare-and-sets really race. */
+/** Hold the payment row until every finisher is waiting on its lock chain.
+ * Payer → source → payment locks can queue more than two levels deep. */
 async function holdingPaymentRow<T>(paymentId: string, waiters: number, start: () => Array<Promise<T>>): Promise<Array<Promise<T>>> {
   let sent: Array<Promise<T>> = [];
   await prisma.$transaction(async (tx) => {
@@ -227,10 +227,14 @@ async function holdingPaymentRow<T>(paymentId: string, waiters: number, start: (
     sent = start();
     const deadline = Date.now() + 15_000;
     for (;;) {
-      // A later waiter queues behind the first one, not behind this lock.
-      const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`SELECT count(*)::int AS blocked FROM pg_stat_activity a
-        WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
-           OR EXISTS (SELECT 1 FROM unnest(pg_blocking_pids(a.pid)) AS b(p) WHERE ${pid}::int = ANY(pg_blocking_pids(b.p)))`)[0]!.blocked;
+      const blocked = (await prisma.$queryRaw<Array<{ blocked: number }>>`
+        WITH RECURSIVE waiting(pid, path) AS (
+          SELECT a.pid, ARRAY[a.pid] FROM pg_stat_activity a WHERE ${pid}::int = ANY(pg_blocking_pids(a.pid))
+          UNION ALL
+          SELECT a.pid, w.path || a.pid FROM waiting w JOIN pg_stat_activity a ON w.pid = ANY(pg_blocking_pids(a.pid))
+          WHERE NOT a.pid = ANY(w.path)
+        ) SELECT count(DISTINCT pid)::int AS blocked FROM waiting
+      `)[0]!.blocked;
       if (blocked >= waiters) return;
       if (Date.now() > deadline) throw new Error(`only ${blocked} of ${waiters} finishers reached the payment row`);
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -323,7 +327,8 @@ describe('[MMG-RECV] a payment saved RECEIVED whose delivery died is finished, n
 
   it('the repair pass finishes webhook and manual payments stranded RECEIVED, each once and with a system audit row, and leaves a settlement-file row and a payment still in its delivery alone', async () => {
     const { sub, san } = await makeVendorSub();
-    const webhook = await strandedWebhook(san);
+    // [owner #62] The two payments finished together are within one week's fee (GY$2,100).
+    const webhook = await strandedWebhook(san, 1000);
     const receipt = receiptNo();
     const manual = await strandedBy(manualPayment(receipt, san, 'admin-keyer', 1000), adminAudit('admin-keyer'));
     const young = await strandedWebhook(san, 700);
@@ -467,6 +472,9 @@ describe('[MMG-RECV · fenced] of every finisher, one decides; the others write 
 describe('[MMG-RECV · database clock] the stranded age is the database clock, stamped by the INSERT', () => {
   it('this server 10 minutes AHEAD still leaves a payment saved just now to its delivery; 10 minutes BEHIND, it still finishes a stranded one', async () => {
     const { sub, san } = await makeVendorSub();
+    // [owner #62] A week part-way through: with the server clock moved 10 minutes back, a week that
+    // began this very second would not have started yet and would count as one week ahead.
+    await prisma.subscription.update({ where: { id: sub.id }, data: { nextBillingDate: new Date(Date.now() + 3 * 86_400_000), currentPeriodEnd: new Date(Date.now() + 3 * 86_400_000) } });
     const young = await strandedWebhook(san);
     const old = await strandedWebhook(san, 1000);
     await savedAgo(old.id, STRANDED_AFTER_MS + 60_000);

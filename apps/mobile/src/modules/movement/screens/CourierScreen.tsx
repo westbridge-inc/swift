@@ -1,4 +1,6 @@
 /** @jsxImportSource react */
+import { MapCredits } from '../../../components/MapCredits';
+import { ROAD_ROUTING_UNAVAILABLE_COPY } from '../../../lib/roadRouting';
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,10 +14,12 @@ import { useDeviceLocation } from '../../../hooks/useDeviceLocation';
 import { pickupLocationContext } from '../../../lib/deviceLocation';
 import { LocationPrimerCard } from '../../../components/LocationPrimerCard';
 import { money } from '../../../lib/money';
-import { PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
+import { orderStatusLabel } from '../../../lib/orderStatus';
+import { BrandCheckbox, PinGlyph, Card, CircleChip, LabeledInput, Pictogram, PillButton, T, TonePill, cardShadow } from '../../../kit';
 import { JourneyRail } from '../../../kit/journey-rail';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import type { PickedPlace } from './DestinationSearchScreen';
+import { PARCEL_BANNED_GOODS, PARCEL_DECLARATION, courierWaitingCaption } from '../parcelDeclaration';
 
 type Size = 'SMALL' | 'MEDIUM' | 'LARGE' | 'EXTRA_LARGE';
 type Speed = 'STANDARD' | 'EXPRESS' | 'RUSH';
@@ -26,7 +30,8 @@ const SEND_TINT = VERTICAL_TINT.send ?? { bg: color.brand[50], ink: color.brand[
 // EXTRA_LARGE is the only tier that excludes motorcycles, so the trunk promise
 // remains mechanically true in dispatch.
 const SIZES: { key: Size; letter: string; label: string; hint: string }[] = [
-  { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or documents' },
+  // [Legal research A10 · REVIEW-F S3-1 on #1753] never suggest documents: letters, documents and mail are refused
+  { key: 'SMALL', letter: 'S', label: 'Fits one hand', hint: 'Keys or a phone' },
   { key: 'MEDIUM', letter: 'M', label: 'A shopping bag', hint: 'Bike-friendly' },
   // [Wave 3 vs reference 12] LARGE was simply never offered — the reference
   // draws four tiers, the API accepts it, and dispatch has priced and proven
@@ -42,8 +47,10 @@ const SPEEDS: { key: Speed; label: string; icon: React.ComponentProps<typeof Fea
   { key: 'RUSH', label: 'Rush', icon: 'zap', hint: 'Fastest' },
 ];
 
-function prettyStatus(s: string) {
-  return (s || '').toLowerCase().replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
+// [UI-SWEEP U72] A parcel's status in the parcel's own words ("Rider on the
+// way to collect"), never the code with spaces ("Rider en route pickup").
+function parcelStatus(s: string | null | undefined) {
+  return orderStatusLabel(s, 'COURIER');
 }
 
 type LatLng = { latitude: number; longitude: number };
@@ -154,6 +161,8 @@ export function CourierScreen({ navigation }: any) {
   const [recipientName, setRecipientName] = useState('');
   const [recipientPhone, setRecipientPhone] = useState('');
   const [description, setDescription] = useState('');
+  // [GUARDRAILS §8 · owner #67] The sender's tick: "This parcel has no prohibited items".
+  const [declared, setDeclared] = useState(false);
 
   const livePickup = locationContext.devicePickup
     ? {
@@ -166,11 +175,14 @@ export function CourierScreen({ navigation }: any) {
   const pickupPoint = pickup ? { lat: pickup.lat, lng: pickup.lng } : undefined;
   const dropoffPoint = dropoff ? { lat: dropoff.lat, lng: dropoff.lng } : undefined;
 
-  const { data: estimate, isFetching: estimating, isError: estimateFailed, refetch: refetchEstimate } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
+  const { data: quotedEstimate, isFetching: estimating, isError: estimateFailed, error: estimateError, refetch: refetchEstimate } = useCourierEstimate<any>(pickupPoint, dropoffPoint, size, speed);
+  const routingUnavailable = (estimateError as any)?.response?.data?.error?.code === 'ROUTE_UNAVAILABLE';
+  const estimate = routingUnavailable ? undefined : quotedEstimate;
 
-  const valid =
-    !!pickupPoint && !!dropoffPoint && recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5 && !!estimate;
+  const recipientReady = recipientName.trim().length >= 2 && recipientPhone.trim().length >= 5;
+  const valid = !!pickupPoint && !!dropoffPoint && recipientReady && !!estimate && declared;
   const errMsg = (send.error as any)?.response?.data?.error?.message;
+  const waitingCaption = courierWaitingCaption({ estimateFailed, hasEstimate: !!estimate, recipientReady, declared });
 
   const openSearch = (onSelect: (p: PickedPlace) => void, title: string) =>
     navigation?.navigate?.('DestinationSearch', { onSelect, title });
@@ -188,7 +200,7 @@ export function CourierScreen({ navigation }: any) {
         };
 
   const onSend = () => {
-    if (!pickupPoint || !dropoffPoint || !dropoff || !pickup) return;
+    if (!pickupPoint || !dropoffPoint || !dropoff || !pickup || !declared) return;
     send.mutate(
       {
         pickup: pickupPoint,
@@ -200,11 +212,22 @@ export function CourierScreen({ navigation }: any) {
         recipientName: recipientName.trim(),
         recipientPhone: recipientPhone.trim(),
         packageDescription: description.trim() || undefined,
+        // [owner #67] Recorded on the order's own trail.
+        declaresNoProhibitedItems: true,
         payer: 'SENDER',
+        // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
+        ...(typeof estimate?.totalFee === 'number' ? { expectedFee: estimate.totalFee } : {}),
       },
       {
         onSuccess: (res: any) => {
-          if (res?.orderId) navigation?.navigate?.('Delivery', { orderId: res.orderId });
+          // [UI-SWEEP U01] The sent parcel's tracking REPLACES the form: Back
+          // never returns to a filled, still-armed "Send parcel" button.
+          if (res?.orderId) navigation?.replace?.('Delivery', { orderId: res.orderId });
+        },
+        onError: (error: any) => {
+          // The fee moved since the quote: fetch the new one to show (the
+          // server's message says so; nothing was sent).
+          if (error?.response?.data?.error?.code === 'PRICE_CHANGED') void refetchEstimate();
         },
       },
     );
@@ -251,6 +274,7 @@ export function CourierScreen({ navigation }: any) {
         backgroundStyle={{ backgroundColor: color.surface.subtle, borderTopLeftRadius: radius.xl, borderTopRightRadius: radius.xl }}
         handleIndicatorStyle={{ backgroundColor: color.border.strong, width: 44 }}
       >
+        <MapCredits />
         <BottomSheetScrollView
           contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
           keyboardShouldPersistTaps="handled"
@@ -351,6 +375,19 @@ export function CourierScreen({ navigation }: any) {
             <LabeledInput icon="user" placeholder="Recipient name" value={recipientName} onChangeText={setRecipientName} />
             <LabeledInput icon="phone" placeholder="Recipient phone" keyboardType="phone-pad" value={recipientPhone} onChangeText={setRecipientPhone} />
             <LabeledInput icon="box" placeholder="What's inside? (optional)" value={description} onChangeText={setDescription} />
+            {/* [GUARDRAILS §8 · owner #67] The server also screens what is written above against the same
+                list, and refuses a banned parcel in plain words (shown as the error line below). */}
+            <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.md, marginTop: space.xs }}>
+              <BrandCheckbox checked={declared} onToggle={() => setDeclared((d) => !d)} label={PARCEL_DECLARATION} />
+              <Pressable style={{ flex: 1 }} onPress={() => setDeclared((d) => !d)} accessible={false}>
+                <T variant="label" weight="semibold">
+                  {PARCEL_DECLARATION}
+                </T>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {PARCEL_BANNED_GOODS}
+                </T>
+              </Pressable>
+            </View>
           </View>
 
           {/* Price */}
@@ -368,7 +405,7 @@ export function CourierScreen({ navigation }: any) {
                 // (the CTA caption) or sit as a blank card.
                 <View>
                   <T variant="body" tone="error">
-                    We couldn't price this trip.
+                    {routingUnavailable ? ROAD_ROUTING_UNAVAILABLE_COPY : "We couldn't price this trip."}
                   </T>
                   <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm, alignSelf: 'flex-start' }} onPress={() => refetchEstimate()} />
                 </View>
@@ -421,11 +458,9 @@ export function CourierScreen({ navigation }: any) {
             disabled={!valid}
             onPress={onSend}
           />
-          {!valid && dropoffPoint ? (
+          {!valid && dropoffPoint && waitingCaption ? (
             <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-              {estimateFailed && !estimate
-                ? 'Waiting on the price — retry the quote above.'
-                : "Add the recipient's name and phone to continue."}
+              {waitingCaption}
             </T>
           ) : null}
 
@@ -440,7 +475,7 @@ export function CourierScreen({ navigation }: any) {
                   key={o.id}
                   onPress={() => navigation?.navigate?.('Delivery', { orderId: o.id })}
                   accessibilityRole="button"
-                  accessibilityLabel={`Send to ${o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}. Order ${o.orderNumber}. ${money(o.totalAmount)}. ${prettyStatus(o.status)}`}
+                  accessibilityLabel={`Send to ${o.courierRecipientName ?? o.deliveryAddress ?? 'recipient'}. Order ${o.orderNumber}. ${money(o.totalAmount)}. ${parcelStatus(o.status)}`}
                   accessibilityHint="Opens delivery details"
                 >
                   {({ pressed }) => (
@@ -474,7 +509,7 @@ export function CourierScreen({ navigation }: any) {
                         </View>
                       </View>
                       <TonePill
-                        label={prettyStatus(o.status)}
+                        label={parcelStatus(o.status)}
                         tone={o.status === 'DELIVERED' || o.status === 'COMPLETED' ? 'success' : 'brand'}
                       />
                     </Card>

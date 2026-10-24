@@ -1,15 +1,21 @@
 import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
-import type { Prisma, PrismaClient, ReimbursementClaim } from '@prisma/client';
+import type { Prisma, PrismaClient, ReimbursementClaim, Order } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { assertClaimAmountAttested, isDuplicateReferenceError, normaliseClaimPaymentRef } from './claim-payout';
 import { NotificationService } from '../notification/notification.service';
 import { CountryConfigService } from '../country/country-config.service';
 import { OrderService, assertMmgFulfilmentAllowed } from '../order/order.service';
+import { handoverVersionMatches } from '../order/handover-authority';
+import { assertDoorCashOutcome, decideDoorCash, decideDoorCashReturn, recordedDoorCashReturn, shortPaymentNote, type DoorCashDecision, type DoorCashReturnRecord } from './door-cash';
+import { doorCashHoldAudience, stageDoorCashHoldPage, stageDoorCashShortPage } from './door-cash-hold';
+import { log } from '../../utils/logger';
 import { FloatService } from '../dispatch/float.service';
 import { haversineDistance } from '../../utils/distance';
-import { clusterMemberIds } from '../integrity/identity.service';
+import { identityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { noShowDecision, type ArrivalFix } from '../order/cancel-policy';
-import { handoverAttemptState } from '../handover/handover-security';
+import { assertTripMayEndUnpaidOn } from '../rides/taxi-stop-rules';
+import { assertFailureSource, captureHandoverEvidence, handoverBinding } from './handover-evidence';
+import { type HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import {
   LOSS_PROTECTION_DEFAULTS, LOSS_PROTECTION_FLAGS, adjustReserve, assembleClaimEvidence, assertEvidenceComplete, coveredAmountFor,
   drawReserveForPayout, reserveStatement, rollingClaimTotal, type LossProtectionRules,
@@ -49,6 +55,8 @@ export const DEFAULT_CASH_RULES: CashRulesConfig = {
   outlierMultiplier: 3,
   maxHandoverDistanceKm: 0.75,
 };
+
+type HandoverOrder = Omit<Order, keyof typeof HANDOVER_SECRETS_OMIT>;
 
 /**
  * The country's cash rules: the code defaults under the stored overrides.
@@ -115,7 +123,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * banned -> no ordering at all. Thresholds come from CountryConfig.
  */
 export async function orderingRestriction(
-  prisma: PrismaClient,
+  prisma: PrismaClient | Prisma.TransactionClient,
   userId: string,
 ): Promise<'restricted' | 'banned' | null> {
   const user = await prisma.user.findUnique({
@@ -132,18 +140,9 @@ export async function orderingRestriction(
   // with the cluster's live strikes (same 90-day aging; the trust ladder
   // still lets them rebuild — the graph removes the shortcut, not the path).
   // No cluster → exactly the old per-user check.
-  const member = await prisma.identityClusterMember.findUnique({ where: { accountId: userId }, select: { clusterId: true } });
-  let strikeUserIds = [userId];
-  if (member) {
-    let root = member.clusterId;
-    for (let hops = 0; hops < 32; hops += 1) {
-      const c = await prisma.identityCluster.findUnique({ where: { id: root }, select: { mergedIntoId: true } });
-      if (!c?.mergedIntoId) break;
-      root = c.mergedIntoId;
-    }
-    const members = await prisma.identityClusterMember.findMany({ where: { clusterId: root }, select: { accountId: true } });
-    if (members.length > 1) strikeUserIds = members.map((m) => m.accountId);
-  }
+  const authority = await identityAuthority(prisma, userId);
+  // Ambiguous historical links cannot import someone else's punishments.
+  const strikeUserIds = authority.status === 'REVIEW_REQUIRED' ? [userId] : authority.memberIds;
 
   const strikes = await prisma.strike.count({
     where: { userId: { in: strikeUserIds }, createdAt: { gte: new Date(Date.now() - 90 * DAY_MS) } },
@@ -198,6 +197,7 @@ export async function customerTrustSummaries(
  *  a thrown error rolls the whole generation back exactly as a crash would. */
 export interface CashHandoverObserver {
   afterTerminalFacts?: (stage: 'paid' | 'failed') => Promise<void>;
+  afterCashReturnFacts?: () => Promise<void>;
 }
 type EarningNotices = Awaited<ReturnType<OrderService['createEarnings']>>;
 type StagedClaim = {
@@ -230,14 +230,34 @@ export class CashRulesService {
     orderId: string,
     moverUserId: string,
     input: {
-      outcome: 'paid' | 'no_show' | 'refused';
+      /** [L02 · row 34] 'short_payment' = the customer cannot pay in full: no
+       *  handover, the order goes back to the store (owner ruling, 5 Oct 2026). */
+      outcome: 'paid' | 'no_show' | 'refused' | 'short_payment';
       gps: { lat: number; lng: number };
       photoUrl?: string;
       courierProofPhotoUrl?: string;
+      sessionId?: string;
       /** [MKT-F057] The customer-held door PIN for a goods delivery ('paid' only). */
       ridePin?: string;
+      /** The cash actually taken, never an offer. For short_payment the rider
+       * also confirms whether that partial cash was handed back (7 Oct ruling).
+       * Absent = the older client's unchanged, unstated behavior. */
+      collectedAmount?: number;
+      cashReturned?: boolean;
+      /** [L02 · row 34] The door authority version the screen rendered; a
+       *  stale one is refused before anything is recorded. */
+      handoverVersion?: string;
+      /** [L02 · row 34] The mover handed the goods over for less than due. */
+      handedOverShort?: boolean;
     },
-  ) {
+  ): Promise<{
+    order: HandoverOrder;
+    claim: ReimbursementClaim | null;
+    doorCash?: DoorCashDecision;
+    cashReturn?: DoorCashReturnRecord;
+    /** True only for the call that committed a short-payment return: the caller announces it, once. */
+    returnStarted?: boolean;
+  }> {
     // [M-29] The mover is a rider (a delivery at the door) or a driver (a ride
     // at the destination): one rail, one golden rule, one claim shape. A user
     // may hold both profiles, so the order decides which one is acting.
@@ -283,6 +303,7 @@ export class CashRulesService {
     if (order.paymentMethod !== 'CASH') {
       throw new AppError(409, 'CASH_HANDOVER_ONLY', 'Customer cash handover is available only for cash orders.');
     }
+    assertDoorCashOutcome(input);
 
     // [M-24] A terminal retry of the mover's own finished handover (a lost
     // response, a double tap) answers the coherent facts it already wrote
@@ -291,9 +312,27 @@ export class CashRulesService {
     if (order.status === 'DELIVERED' && input.outcome === 'paid' && order.paymentStatus === 'CAPTURED') {
       return { order, claim: null };
     }
-    if (order.status === 'FAILED' && input.outcome !== 'paid') {
+    if (order.status === 'FAILED' && (input.outcome === 'no_show' || input.outcome === 'refused')) {
       const claim = await this.prisma.reimbursementClaim.findFirst({ where: { orderId } });
       return { order, claim };
+    }
+    // [L02 · row 34] A retried "cannot pay in full" (a lost answer) answers the
+    // return it already started; it never starts a second one.
+    if (order.status === 'RETURNING' && input.outcome === 'short_payment') {
+      const cashReturn = recordedDoorCashReturn(order);
+      const reportsCash = (input.collectedAmount ?? 0) > 0 || input.cashReturned !== undefined;
+      if ((!cashReturn && reportsCash)
+          || (cashReturn && ((input.collectedAmount !== undefined && input.collectedAmount !== cashReturn.amount)
+            || (input.cashReturned !== undefined && input.cashReturned !== (cashReturn.status === 'RETURNED'))))) {
+        throw new AppError(409, 'CASH_RETURN_ALREADY_RECORDED', 'A different cash return outcome is already recorded. Contact operations to resolve it.');
+      }
+      return { order, claim: null, ...(cashReturn ? { cashReturn } : {}) };
+    }
+    // [L02 · row 34] The screen's version, checked before anything is recorded
+    // or a PIN attempt is spent, and again on the locked row below. An older
+    // client that echoes nothing is not refused for it.
+    if (!handoverVersionMatches(order, input.handoverVersion)) {
+      throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
     }
     // A delivery is handed over at the door (ARRIVED); a ride's fare is settled
     // at the destination with the passenger aboard (RIDE_IN_PROGRESS); a
@@ -308,41 +347,65 @@ export class CashRulesService {
     }
 
     const gpsNote = gpsEvidence(input.gps.lat, input.gps.lng);
+    if (input.outcome === 'short_payment') {
+      return this.shortPaymentReturn(order, mover, { ...input, changedBy: moverUserId }, gpsNote, { isRide, isCourier });
+    }
+    // [L02 · row 34] The stated cash, checked on this read first so a refusal
+    // (over, or short with the goods still in hand) spends no PIN attempt;
+    // decided again on the LOCKED row inside the commit, which is what counts.
+    const previewCash = input.outcome === 'paid' ? decideDoorCash(order, input) : undefined;
+    // [review S3-1] A short handover's operations page commits WITH the
+    // handover, so its audience is resolved before the transaction opens.
+    const shortAudience = previewCash?.kind === 'SHORT_HANDED_OVER'
+      ? await doorCashHoldAudience(this.prisma, order.tenantId) : undefined;
+    let shortPageIds: string[] = [];
+    let doorCash: DoorCashDecision | undefined;
     if (input.outcome === 'paid') {
-      // [MKT-F057] The door proof for a GOODS delivery: the customer holds a
-      // 6-digit PIN and the rider enters it before the money is captured. Rides
-      // and courier jobs keep their own custody ceremonies. Legacy rows without
-      // a PIN complete as they always did (presence-gated), so nothing in flight
-      // at deploy strands. no_show/refused never reach this branch.
-      if (!isRide && !isCourier) {
-        const secret = await this.prisma.order.findUnique({
-          where: { id: orderId },
-          select: { ridePin: true, ridePinAttempts: true },
-        });
-        if (secret?.ridePin) {
-          const { locked, remaining } = handoverAttemptState(secret.ridePinAttempts);
-          if (locked) throw new AppError(400, 'MAX_ATTEMPTS',
-            'Too many incorrect PIN attempts on this order. Please contact support.');
-          if (!input.ridePin) throw new AppError(400, 'MISSING_PIN',
-            "Enter the customer's 6-digit delivery PIN.");
-          if (input.ridePin !== secret.ridePin) {
-            // The attempt burns as its own committed update, BEFORE the throw —
-            // the terminal capture transaction never runs for a wrong guess.
-            await this.prisma.order.update({ where: { id: orderId },
-              data: { ridePinAttempts: { increment: 1 } } });
-            throw new AppError(400, 'INVALID_PIN',
-              `That PIN does not match. ${remaining} attempt(s) remaining.`);
-          }
-        }
-      }
       // [M-24] ONE terminal generation: the captured payment, the DELIVERED
       // transition and the earnings commit together on the canonical seam's
       // transaction. Before, CAPTURED was written first and DELIVERED and the
       // earnings followed as separate statements, so a failure between them
       // left "captured but not delivered" or "delivered but never paid out".
       let earningNotices: EarningNotices = [];
-      const withinTransaction = async (tx: Prisma.TransactionClient) => {
-        await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'CAPTURED' } });
+      const withinTransaction = async (tx: Prisma.TransactionClient, lockedSource: Order) => {
+        if (isCourier) {
+          const current = lockedSource;
+          assertFailureSource(current, mover);
+          const key = input.courierProofPhotoUrl ?? input.photoUrl;
+          const proof = key ? await tx.handoverPhotoProof.findUnique({ where: { objectKey: key } }) : null;
+          if (!proof || proof.invalidatedAt || proof.orderId !== orderId || proof.tenantId !== current.tenantId
+              || proof.actorId !== moverUserId || proof.riderId !== mover.riderId || proof.purpose !== 'HANDOVER'
+              || proof.bindingDigest !== handoverBinding(current) || current.courierPayer !== 'RECIPIENT'
+              || current.paymentStatus !== 'PENDING') {
+            throw new AppError(409, 'PROOF_NOT_ISSUED', 'An unpaid courier handover needs its issued proof and recipient payment authority.');
+          }
+        }
+        // [L02 · row 34] On the locked row: the screen's version, then the
+        // stated cash against the authoritative total. The real amount is what
+        // is recorded; a short handover also records the shortfall and holds
+        // the mismatch for a person (the commit carries all of it or none).
+        if (!handoverVersionMatches(lockedSource, input.handoverVersion)) {
+          throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+        }
+        doorCash = decideDoorCash(lockedSource, input);
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            paymentStatus: 'CAPTURED',
+            ...(doorCash.kind === 'UNSTATED' ? {} : { doorCashCollectedAmount: doorCash.collected }),
+            ...(doorCash.kind === 'SHORT_HANDED_OVER'
+              ? { doorCashShortfallAmount: doorCash.shortfall, doorCashMismatchAt: new Date() }
+              : {}),
+          },
+        });
+        if (doorCash.kind === 'SHORT_HANDED_OVER') {
+          // The preview was not short but the locked row is: the total moved
+          // under the screen. Nothing is recorded without its page.
+          if (!shortAudience) {
+            throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+          }
+          shortPageIds = await stageDoorCashShortPage(tx, lockedSource, doorCash, shortAudience);
+        }
         // The seam mints a delivery's earnings itself; this call is a no-op
         // when it already did and the minting call when the capture above
         // was what the earnings were waiting for (every cash ride). Either
@@ -358,6 +421,7 @@ export class CashRulesService {
             orderId,
             target: 'DELIVERED',
             allowedFrom: ['RIDE_IN_PROGRESS'],
+            expectedDriverId: mover.driverId,
             changedBy: moverUserId,
             note: `fare collected — ${gpsNote}`,
             terminalMetadata: { actualDeliveryTime: rideDurationMinutes(order) },
@@ -375,16 +439,23 @@ export class CashRulesService {
               expectedRiderId: mover.riderId ?? undefined,
               changedBy: moverUserId,
               note: `payment collected — ${gpsNote}`,
-              ...(input.courierProofPhotoUrl ? { terminalMetadata: { courierProofPhotoUrl: input.courierProofPhotoUrl } } : {}),
+              ...((input.courierProofPhotoUrl ?? input.photoUrl) ? { terminalMetadata: { courierProofPhotoUrl: input.courierProofPhotoUrl ?? input.photoUrl } } : {}),
               withinTransaction,
               invalidStatus: (current) => new AppError(409, 'NOT_IN_TRANSIT', `Cannot close a courier job from status ${current}`),
             })).order
-          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction });
+          : await this.orders.updateStatus(orderId, 'DELIVERED', moverUserId, `payment collected — ${gpsNote}`, { withinTransaction, allowedFrom: ['ARRIVED'], expectedRiderId: mover.riderId, expectedDriverId: mover.driverId, handover: { purpose: 'cash-delivery', code: input.ridePin } });
       for (const notice of earningNotices) {
         await this.notifications.earningAvailable(notice.userId, notice.amount, notice.type).catch(() => {});
       }
+      // [L02 · row 34 · review S3-1] The short handover's operations alert and
+      // inbox rows committed with it; only the push fanout happens now. A lost
+      // push loses nothing: the alert sweep escalates until a person acknowledges.
+      const settled = doorCash as DoorCashDecision | undefined;
+      for (const id of shortPageIds) {
+        await this.notifications.publishPersisted(id).catch((err) => log().warn({ err, orderId }, 'cash door short page fanout failed after commit'));
+      }
       await this.maybePromoteToL3(order.customer.id, order.customer.countryCode).catch(() => {});
-      return { order: updated, claim: null };
+      return { order: updated, claim: null, ...(settled ? { doorCash: settled } : {}) };
     }
     // [M-24] ONE terminal generation for a failed handover: FAILED, the
     // payment status, the customer's strike and the mover's guarantee claim
@@ -397,7 +468,7 @@ export class CashRulesService {
     // [AF-MOB-001] A no-show may not be instant, and weak evidence may not
     // punish. Scoped to the delivery rail's no-show: a `refused` customer was
     // demonstrably present, and a taxi fare settles with the passenger aboard.
-    let strikeCustomer = true;
+    let strikeCustomer = false;
     let noShowNote = '';
     if (input.outcome === 'no_show' && !isRide && !isCourier) {
       const arrival = await this.prisma.orderStatusLog.findFirst({
@@ -405,7 +476,7 @@ export class CashRulesService {
         orderBy: { createdAt: 'desc' },
         select: { createdAt: true },
       });
-      const mover2 = rider ?? driver;
+      const mover2 = isRide ? driver : rider;
       const now = new Date();
       const fix: ArrivalFix = mover2?.currentLat != null && mover2.currentLng != null && mover2.lastLocationUpdate
         ? {
@@ -421,10 +492,13 @@ export class CashRulesService {
           ? new AppError(409, 'NO_SHOW_NOT_ARRIVED', 'Mark that you have arrived before reporting a no-show.')
           : new AppError(409, 'NO_SHOW_TOO_EARLY', `Wait until ${decision.retryAt.toISOString()} before reporting a no-show — the customer still has time to come to the door.`);
       }
-      strikeCustomer = decision.strikeCustomer;
-      noShowNote = ` evidence:${decision.evidence}${strikeCustomer ? '' : ' strike:withheld-for-review'}`;
+      // The durable bundle below decides punishment; this check only preserves the grace
+      // period. The note records the fix's strength only: the strike (or its absence) is
+      // decided inside the transaction, after this note is written, so it must not predict it.
+      noShowNote = ` evidence:${decision.evidence}`;
     }
 
+    const failureOutcome = input.outcome;
     let staged: StagedClaim = { claim: null, riderNotice: null };
     const failed = await this.orders.updateStatus(
       orderId,
@@ -432,8 +506,38 @@ export class CashRulesService {
       moverUserId,
       `${input.outcome} — ${gpsNote}${input.photoUrl ? ' photo:yes' : ''}${noShowNote}`,
       {
-        withinTransaction: async (tx) => {
+        serializeIdentity: true,
+        expectedRiderId: mover.riderId,
+        expectedDriverId: mover.driverId,
+        withinTransaction: async (tx, source) => {
+          assertFailureSource(source, mover);
+          // [TAXI multi-stop 4/8] A trip with a stop still open ends unpaid only
+          // when the passenger did not come back to the car at that stop, after
+          // its grace; a refusal waits for the destination. The stops are read on
+          // the locked row, before anything is filed. A ride without stops reads
+          // nothing: its taxiStopCount is null from the request on (the itinerary
+          // is frozen there), so this path is exactly today's.
+          if (isRide && order.taxiStopCount != null) await assertTripMayEndUnpaidOn(tx, orderId, input.outcome as 'no_show' | 'refused');
+          const rules = await this.configFor(order.customer.countryCode);
+          const filing = await captureHandoverEvidence(tx, source, {
+            actorId: moverUserId, sessionId: input.sessionId, outcome: input.outcome as 'no_show' | 'refused',
+            gps: input.gps, photoUrl: input.photoUrl ?? input.courierProofPhotoUrl,
+          }, rules.maxHandoverDistanceKm);
           await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
+          staged = await this.stageClaim(tx, { ...source, customer: order.customer }, mover,
+            { ...input, outcome: failureOutcome }, addressKey, filing.id);
+          // No strike from a declaration alone. Taxi remains incomplete while
+          // the owner-defined destination wait requirement is unresolved. An
+          // order at or over the ID gate stages no guarantee claim, so its
+          // filing is assessed on the same durable bundle directly: complete
+          // evidence still strikes (spec §I #4), a declaration still does not.
+          strikeCustomer = staged.claim
+            ? staged.claim.evidenceComplete === true
+            : (await assembleClaimEvidence(tx, {
+              handoverEvidenceId: filing.id, customerId: order.customer.id, reason: input.outcome, orderId,
+              riderId: mover.riderId, driverId: mover.driverId, gpsLat: input.gps.lat, gpsLng: input.gps.lng,
+              photoUrl: input.photoUrl ?? input.courierProofPhotoUrl ?? null, createdAt: new Date(),
+            }, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm })).complete;
           // [AF-MOB-001] The MOVER is always made whole (stageClaim below);
           // the CUSTOMER's strike waits for evidence that supports it. A
           // punishment on a stale or distant fix is a wrong punishment, and
@@ -449,7 +553,6 @@ export class CashRulesService {
               },
             });
           }
-          staged = await this.stageClaim(tx, order, mover, input, addressKey);
           await this.observer.afterTerminalFacts?.('failed');
         },
       },
@@ -460,21 +563,80 @@ export class CashRulesService {
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: isRide ? 'Unpaid fare recorded' : isCourier ? 'Unpaid courier fee recorded' : 'Failed delivery recorded',
-      body: isRide
-        ? 'Your ride’s fare was not paid at the destination. Repeated incidents restrict your account.'
-        : isCourier
-          ? 'The courier fee was not paid at the drop-off. Repeated incidents restrict your account.'
-          : 'Your order was not paid for at the door. Repeated incidents restrict your account.',
-      data: { kind: 'strike', orderId },
+      body: 'An unpaid outcome was recorded. Support can review the evidence and any disagreement.',
+      data: { kind: 'handover_review', orderId },
     }).catch(() => {});
     if (staged.riderNotice) await this.notifications.send(staged.riderNotice).catch(() => {});
     return { order: failed, claim: staged.claim };
   }
 
+  /**
+   * [L02 · row 34] The customer cannot pay in full: NO HANDOVER (owner ruling,
+   * 5 Oct 2026). The order goes back to the store through the one return path:
+   * the canonical transition into RETURNING, which opens the order's recovery
+   * case (or moves the one already open: one case, one outcome) in the same
+   * commit. Nothing is captured, nobody is struck and no guarantee claim is
+   * staged, because the goods were never handed over. When the store confirms
+   * it has them back it gives the rider the cash they fronted (4 Oct custody
+   * rulings); the rider keeps the float until then. The caller pages operations
+   * and tells the customer and the store after the commit.
+   */
+  private async shortPaymentReturn(
+    order: Order,
+    mover: ClaimMover,
+    input: { collectedAmount?: number; cashReturned?: boolean; handoverVersion?: string; changedBy: string },
+    gpsNote: string,
+    kind: { isRide: boolean; isCourier: boolean },
+  ): Promise<{ order: HandoverOrder; claim: null; returnStarted: true; cashReturn?: DoorCashReturnRecord }> {
+    if (kind.isRide || kind.isCourier || !mover.riderId) {
+      throw new AppError(409, 'SHORT_PAYMENT_NOT_AVAILABLE',
+        'This outcome is for goods deliveries. For a ride or a parcel, record the outcome the job offers or contact support.');
+    }
+    const stated = decideDoorCashReturn(order, input);
+    const audience = stated?.status === 'HELD' ? await doorCashHoldAudience(this.prisma, order.tenantId) : undefined;
+    let pageIds: string[] = [];
+    const committed = await this.orders.transitionOrderAtomically({
+      orderId: order.id,
+      target: 'RETURNING',
+      allowedFrom: ['ARRIVED'],
+      expectedRiderId: mover.riderId,
+      changedBy: input.changedBy,
+      note: shortPaymentNote(stated, gpsNote),
+      withinTransaction: async (tx, locked) => {
+        if (!handoverVersionMatches(locked, input.handoverVersion)) {
+          throw new AppError(409, 'HANDOVER_STALE', 'This order changed since the screen was loaded — refresh before handing over.');
+        }
+        if (locked.paymentStatus !== 'PENDING') {
+          throw new AppError(409, 'CASH_ALREADY_RECORDED', 'A payment is already recorded on this order, so it cannot be sent back as unpaid. Contact support.');
+        }
+        const cashReturn = decideDoorCashReturn(locked, input);
+        if (cashReturn) {
+          await tx.order.update({
+            where: { id: order.id },
+            data: {
+              doorCashReturnAmount: cashReturn.amount,
+              doorCashReturnStatus: cashReturn.status,
+              doorCashReturnRecordedAt: new Date(),
+            },
+          });
+        }
+        pageIds = cashReturn?.status === 'HELD' && audience
+          ? await stageDoorCashHoldPage(tx, locked, cashReturn.amount, audience) : [];
+        await this.observer.afterCashReturnFacts?.();
+      },
+      invalidStatus: (current) => new AppError(409, 'NOT_AT_DOOR', `Handover is only available at the delivery point (order is ${current})`),
+    });
+    for (const id of pageIds) {
+      await this.notifications.publishPersisted(id).catch((err) => log().warn({ err, orderId: order.id }, 'held cash page fanout failed after commit'));
+    }
+    const cashReturn = recordedDoorCashReturn(committed.order);
+    return { order: committed.order, claim: null, returnStarted: true, ...(cashReturn ? { cashReturn } : {}) };
+  }
+
   /** [M-28] A courier job whose SENDER pays: the fee is collected before the
    *  parcel is carried. 'paid' captures it (the status does not move — the
    *  proof still completes the job later); 'refused' ends the job before
-   *  custody, with a strike on the sender and no guarantee claim — nothing
+   *  custody, with review of the report and no guarantee claim — nothing
    *  was carried, so nothing is owed to the rider by the guarantee. */
   async collectFromSender(
     orderId: string,
@@ -496,20 +658,23 @@ export class CashRulesService {
       const before: readonly string[] = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'PICKED_UP'];
       if (!before.includes(order.status)) throw new AppError(409, 'NOT_AT_PICKUP', `The sender's fee is collected at pickup (job is ${order.status})`);
       const updated = await this.prisma.$transaction(async (tx) => {
-        const claimed = await tx.order.updateMany({ where: { id: orderId, riderId: rider.id, paymentStatus: { not: 'CAPTURED' } }, data: { paymentStatus: 'CAPTURED' } });
+        const claimed = await tx.order.updateMany({ where: { id: orderId, riderId: rider.id, orderType: 'COURIER', courierPayer: 'SENDER', paymentMethod: 'CASH', status: { in: before as never }, paymentStatus: 'PENDING' }, data: { paymentStatus: 'CAPTURED' } });
         if (claimed.count !== 1) throw new AppError(409, 'ALREADY_COLLECTED', 'The fee was already recorded as collected.');
         await tx.orderStatusLog.create({ data: { orderId, status: order.status, note: `cash collected from sender — ${gpsNote}` } });
         return tx.order.findUniqueOrThrow({ where: { id: orderId } });
       });
       return { order: updated, collected: true as const };
     }
-    // Refused before custody: the job ends here, the sender takes a strike.
+    // Refused before custody: the job ends here; the report has no independent proof.
     if (order.status === 'CANCELLED') return { order, collected: false as const };
-    const addressKey = `geo:${order.pickupLat?.toFixed(4) ?? '0'}:${order.pickupLng?.toFixed(4) ?? '0'}`;
     const cancelled = await this.orders.updateStatus(orderId, 'CANCELLED', riderUserId, `sender refused to pay — ${gpsNote}`, {
-      withinTransaction: async (tx) => {
+      expectedRiderId: rider.id,
+      withinTransaction: async (tx, source) => {
+        if (source.paymentStatus !== 'PENDING' || source.paymentMethod !== 'CASH' || source.courierPayer !== 'SENDER') {
+          throw new AppError(409, 'HANDOVER_AUTHORITY_CHANGED', 'The pickup payment facts have changed.');
+        }
         await tx.order.update({ where: { id: orderId }, data: { paymentStatus: 'FAILED' } });
-        await tx.strike.create({ data: { userId: order.customer.id, orderId, reason: 'failed_payment_refused', phone: order.customer.phone, addressKey } });
+        // Keep the cancellation; a sender refusal declaration cannot create a strike.
         await this.observer.afterTerminalFacts?.('failed');
       },
     });
@@ -517,8 +682,8 @@ export class CashRulesService {
       userId: order.customer.id,
       type: 'SYSTEM_ANNOUNCEMENT',
       title: 'Courier job ended — fee not paid',
-      body: 'The courier fee was not paid at pickup, so the job was cancelled. Repeated incidents restrict your account.',
-      data: { kind: 'strike', orderId },
+      body: 'An unpaid pickup outcome was recorded and the job ended. Contact support if you disagree.',
+      data: { kind: 'handover_review', orderId },
     }).catch(() => {});
     return { order: cancelled, collected: false as const };
   }
@@ -544,6 +709,7 @@ export class CashRulesService {
     mover: ClaimMover,
     input: { outcome: 'paid' | 'no_show' | 'refused'; gps: { lat: number; lng: number }; photoUrl?: string; courierProofPhotoUrl?: string },
     addressKey: string,
+    handoverEvidenceId: string,
   ): Promise<StagedClaim> {
     // [DOC-1 §31.3/§31.4 · P31-1] The policy covers what the rider FRONTED — the food
     // cost on a delivery, never the delivery fee — and the cap per claim is the ID gate,
@@ -584,13 +750,14 @@ export class CashRulesService {
     const doorPhoto = input.photoUrl ?? input.courierProofPhotoUrl ?? null;
     const evidence = await assembleClaimEvidence(
       tx,
-      { orderId: order.id, riderId: mover.riderId, driverId: mover.driverId, gpsLat: input.gps.lat, gpsLng: input.gps.lng, photoUrl: doorPhoto, createdAt: now },
+      { handoverEvidenceId, customerId: order.customer.id, reason: input.outcome, orderId: order.id, riderId: mover.riderId, driverId: mover.driverId, gpsLat: input.gps.lat, gpsLng: input.gps.lng, photoUrl: doorPhoto, createdAt: now },
       { maxHandoverDistanceKm: rules.maxHandoverDistanceKm },
     );
     if (!evidence.complete) flags.push(LOSS_PROTECTION_FLAGS.evidenceIncomplete);
     const claim = await tx.reimbursementClaim.create({
       data: {
         orderId: order.id,
+        handoverEvidenceId,
         riderId: mover.riderId,
         driverId: mover.driverId,
         customerId: order.customer.id,
@@ -683,7 +850,9 @@ export class CashRulesService {
     // The customer's identity cluster (identity/identity.service, resolved by the graph's own
     // rules — never by claim behaviour) widens the two collusion reads to every account it holds.
     // An advisory, not a merge: it flags, a person decides.
-    const cluster = (await clusterMemberIds(this.prisma, customerId)).filter((id) => id !== customerId);
+    const authority = await identityAuthority(db, customerId);
+    if (authority.status === 'REVIEW_REQUIRED') flags.push('identity_review_required');
+    const cluster = authority.status === 'REVIEW_REQUIRED' ? [] : authority.memberIds.filter((id) => id !== customerId);
     if (cluster.length > 0) {
       const clusterClaims = await db.reimbursementClaim.findMany({
         where: { createdAt: { gte: window90 }, customerId: { in: cluster } },
@@ -772,7 +941,7 @@ export class CashRulesService {
       }
     }
     const rules = await this.configFor(countryCode);
-    assertEvidenceComplete(await assembleClaimEvidence(this.prisma, existing, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
+
 
     // The payout is DRAWN from the reserve line inside the same transaction as the
     // CAS and the audit row: a claim is paid from a funded line or not at all.
@@ -782,6 +951,31 @@ export class CashRulesService {
     }, onAudit, async (tx) => {
       const drawn = await drawReserveForPayout(tx, { countryCode, claimId, amount: Number(existing.amount), byId: adminId });
       return { reserveBalanceAfter: drawn.balanceAfter };
+    }, async (tx) => {
+      await lockIdentityAuthority(tx);
+      await tx.$queryRaw`SELECT id FROM orders WHERE id = ${existing.orderId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT id FROM reimbursement_claims WHERE id = ${claimId} FOR UPDATE`;
+      const fresh = await tx.reimbursementClaim.findUniqueOrThrow({ where: { id: claimId } });
+      assertClaimAmountAttested(fresh.amount, paidAmount);
+      if (fresh.orderId !== existing.orderId || Number(fresh.amount) !== Number(existing.amount)) {
+        throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'Claim provenance changed during payout.');
+      }
+      if (fresh.handoverEvidenceId) {
+        await tx.$queryRaw`SELECT id FROM cash_handover_evidence WHERE id = ${fresh.handoverEvidenceId} FOR SHARE`;
+        await tx.$queryRaw`SELECT p.id FROM handover_photo_proofs p JOIN cash_handover_evidence e ON e."photoProofId" = p.id WHERE e.id = ${fresh.handoverEvidenceId} FOR SHARE OF p`;
+      }
+      if (fresh.status === 'AUTO_APPROVED') {
+        if ((await identityAuthority(tx, fresh.customerId)).status === 'REVIEW_REQUIRED') {
+          throw new AppError(409, 'RLP_IDENTITY_REVIEW_REQUIRED', 'This claim requires human review before payout.');
+        }
+        const profile = fresh.driverId ? await tx.driver.findUnique({ where: { id: fresh.driverId }, select: { userId: true } })
+          : await tx.rider.findUnique({ where: { id: fresh.riderId! }, select: { userId: true } });
+        if (!profile) throw new AppError(409, 'RLP_EVIDENCE_INCOMPLETE', 'The assigned mover is missing.');
+        await tx.$queryRaw`SELECT id FROM users WHERE id = ${profile.userId} FOR SHARE`;
+        const account = await tx.user.findUnique({ where: { id: profile.userId }, select: { lossProtectionSuspendedAt: true } });
+        if (account?.lossProtectionSuspendedAt) throw new AppError(409, 'RLP_PROTECTION_SUSPENDED', 'A human must review suspended protection before payout.');
+      }
+      assertEvidenceComplete(await assembleClaimEvidence(tx, fresh, { maxHandoverDistanceKm: rules.maxHandoverDistanceKm }));
     }).catch((err) => {
       if (isDuplicateReferenceError(err)) {
         throw new AppError(
@@ -811,10 +1005,12 @@ export class CashRulesService {
     /** [P31-1] Money moved by the same transaction as the CAS (the reserve draw); its facts join the audit row. */
     // [C-01b] AuditFacts, so a reserved name in a spread is a build error, not a 500.
     within?: (tx: Prisma.TransactionClient) => Promise<AuditFacts>,
+    before?: (tx: Prisma.TransactionClient) => Promise<void>,
   ) {
     // [ADM-002] The compare-and-set and the caller's audit row commit together;
     // a refused row leaves the claim exactly where it was.
     return this.prisma.$transaction(async (tx) => {
+      await before?.(tx);
       const res = await tx.reimbursementClaim.updateMany({
         where: { id: claimId, status: { in: from as never } },
         data: data as never,

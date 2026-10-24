@@ -4,15 +4,19 @@ import { View } from 'react-native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Feather } from '@expo/vector-icons';
-import { color } from '@swift/ui';
-import { ErrorState, LoadingBlock } from '../../kit';
+import { color, space } from '@swift/ui';
+import { ErrorState, LoadingBlock, PillButton } from '../../kit';
+import { useAdvertiserExitDialog } from './AdvertiserExitDialog';
 import { useMyAdvertisers } from '../../hooks/advertiser';
+import { useAdsEnabled } from '../../hooks/useAdsEnabled';
+import { RolePickerScreen } from '../../screens/auth/RolePickerScreen';
 import { AdvertiserRegisterScreen } from './screens/AdvertiserRegisterScreen';
 import { AdvertiserHomeScreen } from './screens/AdvertiserHomeScreen';
 import { NewCampaignScreen } from './screens/NewCampaignScreen';
 import { CampaignDetailScreen } from './screens/CampaignDetailScreen';
 import { AdvertiserBillingScreen } from './screens/AdvertiserBillingScreen';
 import { AdvertiserTeamScreen } from './screens/AdvertiserTeamScreen';
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 
 // The advertiser surface (ads-platform spec §14) — role-routed like the vendor
@@ -47,6 +51,32 @@ function AdvertiserTabs() {
 }
 
 export function AdvertiserStack() {
+  const adsEnabled = useAdsEnabled();
+  return adsEnabled ? <EnabledAdvertiserStack /> : <RolePickerScreen />;
+}
+
+/** [UI-SWEEP U32] The advertiser's first read failed. `intent` persists, so a
+ *  cold start reopens this same screen: Try again alone was a one-way door.
+ *  The way out is the advertiser's own exit (log out and switch experience),
+ *  as on its sign-up screen; the business stack keeps the same rule (MOB-038). */
+function AdvertiserRootError({ onRetry }: { onRetry: () => void }) {
+  const exitDialog = useAdvertiserExitDialog();
+  return (
+    <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
+      <ErrorState onRetry={onRetry} style={{ paddingTop: 120 }} />
+      <PillButton
+        label="Log out and switch experience"
+        icon="log-out"
+        variant="outline"
+        onPress={exitDialog.requestLogout}
+        style={{ alignSelf: 'center', marginTop: space.xl }}
+      />
+      {exitDialog.logoutDialog}
+    </View>
+  );
+}
+
+function EnabledAdvertiserStack() {
   const me = useMyAdvertisers();
 
   if (me.isLoading) {
@@ -56,13 +86,7 @@ export function AdvertiserStack() {
       </View>
     );
   }
-  if (me.isError) {
-    return (
-      <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
-        <ErrorState onRetry={() => me.refetch()} style={{ paddingTop: 120 }} />
-      </View>
-    );
-  }
+  if (me.isError) return <AdvertiserRootError onRetry={() => me.refetch()} />;
 
   const hasAdvertiser = (me.data ?? []).length > 0;
   return (
@@ -80,6 +104,7 @@ export function AdvertiserStack() {
           <Stack.Screen name="GetHelp" component={GetHelpScreen} />
         </>
       )}
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
     </Stack.Navigator>
   );
 }

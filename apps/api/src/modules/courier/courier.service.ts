@@ -16,9 +16,12 @@ export interface CourierRates {
   speedMultiplier: Record<DeliverySpeed, number>;
 }
 
+/** The owner's Georgetown courier rates (1 Oct 2026): 800 plus 120 a
+ *  kilometre; the size surcharges and speed multipliers are unchanged. The ONE
+ *  place they live — markup.ts's calculateCourierFee reads them too. */
 export const DEFAULT_COURIER_RATES: CourierRates = {
-  baseFee: 1000, // GYD
-  perKmRate: 300, // GYD
+  baseFee: 800, // GYD
+  perKmRate: 120, // GYD
   sizeSurcharge: { SMALL: 0, MEDIUM: 500, LARGE: 1000, EXTRA_LARGE: 2000 },
   speedMultiplier: { STANDARD: 1.0, EXPRESS: 1.5, RUSH: 2.0 },
 };

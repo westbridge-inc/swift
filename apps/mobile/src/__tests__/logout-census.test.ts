@@ -59,6 +59,7 @@ const KNOWN_CONTROLS = [
   'modules/mover/screens/MoverOnboardingScreen.tsx',
   'modules/vendor/shared.tsx',
   'screens/auth/SelfieCaptureScreen.tsx',
+  'screens/auth/SessionHoldScreen.tsx',
   'modules/advertiser/screens/AdvertiserRegisterScreen.tsx',
   'modules/advertiser/screens/AdvertiserTeamScreen.tsx',
 ];

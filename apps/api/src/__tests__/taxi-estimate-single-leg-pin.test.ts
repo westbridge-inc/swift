@@ -11,6 +11,9 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { ridesRoutes } from '../modules/rides/rides.routes';
 import { FareService } from '../modules/rides/fare.service';
 import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-provider';
+import { pinLegacyGuyanaTaxiCard } from './helpers/legacy-taxi-card';
+import { plantGeorgetownPair } from './helpers/zone-fare-fixture';
+// [VERIFY-DOCS · owner ruling 9, 6 Oct 2026 — a DELIBERATE change] no GROUP tier while both buses are hidden at launch.
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 2/8] Today's single-leg estimate, pinned BEFORE multi-stop
@@ -23,13 +26,19 @@ import { HaversineMapsProvider, OsrmMapsProvider } from '../providers/maps/maps-
 // perKm 300, perMin 25, minimum 1500; Comfort ×1.35, Group ×2.5) and the seeded
 // Georgetown zones (Central → South = 2000), then confirmed against the code
 // as it stood. Phone prefix +5923417 (grepped: unused elsewhere).
+//
+// [PRICING-GY-OCT] Guyana's default is now the owner's October fare (pinned in
+// fares-georgetown-defaults.test.ts). This file puts the card these bytes were
+// derived from — which names no included kilometres — on the Guyana row and
+// restores the seeded card after: the formula with included kilometres must
+// answer every byte below unchanged for a config that names none.
 // ---------------------------------------------------------------------------
 
 const DAY = 86_400_000;
 const PHONE_PREFIX = '+5923417';
 
 // Fixtures. Both ends of A and C sit in Georgetown Central; B runs Central →
-// South (the seeded zone fare); D leaves the zones; E is outside every zone.
+// South (the 2000 zone fare, planted by this suite: helpers/zone-fare-fixture); D leaves the zones; E is outside every zone.
 const A = { pickup: { lat: 6.8013, lng: -58.1553 }, dropoff: { lat: 6.8143, lng: -58.1443 } };
 const B = { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.755, lng: -58.155 } };
 const C = { pickup: { lat: 6.81, lng: -58.155 }, dropoff: { lat: 6.8105, lng: -58.155 } };
@@ -68,16 +77,15 @@ const B_KILLED_ESTIMATE = {
   durationMin: 20, source: 'formula', fromZoneId: undefined, toZoneId: undefined,
 };
 
-const tiers = (source: string, economy: number, comfort: number, group: number) => [
+const tiers = (source: string, economy: number, comfort: number) => [
   { rideClass: 'ECONOMY', multiplier: 1, fare: economy, capacity: 4, source },
   { rideClass: 'COMFORT', multiplier: 1.35, fare: comfort, capacity: 4, source },
-  { rideClass: 'GROUP', multiplier: 2.5, fare: group, capacity: 14, source },
 ];
 
 /** The exact bytes POST /rides/estimate answers today. */
-const A_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1900,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2600,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":4800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":2.5,"durationMin":6,"billableKm":2.45,"routeSource":"haversine"}}';
-const B_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2000,"capacity":4,"source":"zone_table"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2700,"capacity":4,"source":"zone_table"},{"rideClass":"GROUP","multiplier":2.5,"fare":5000,"capacity":14,"source":"zone_table"}],"currencyCode":"GYD","distanceKm":8,"durationMin":20,"billableKm":7.95,"routeSource":"haversine"}}';
-const C_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1500,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2000,"capacity":4,"source":"formula"},{"rideClass":"GROUP","multiplier":2.5,"fare":3800,"capacity":14,"source":"formula"}],"currencyCode":"GYD","distanceKm":0.1,"durationMin":1,"billableKm":0.07,"routeSource":"haversine"}}';
+const A_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1900,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2600,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":2.5,"durationMin":6,"billableKm":2.45,"routeSource":"haversine"}}';
+const B_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":2000,"capacity":4,"source":"zone_table"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2700,"capacity":4,"source":"zone_table"}],"currencyCode":"GYD","distanceKm":8,"durationMin":20,"billableKm":7.95,"routeSource":"haversine"}}';
+const C_BODY = '{"success":true,"data":{"tiers":[{"rideClass":"ECONOMY","multiplier":1,"fare":1500,"capacity":4,"source":"formula"},{"rideClass":"COMFORT","multiplier":1.35,"fare":2000,"capacity":4,"source":"formula"}],"currencyCode":"GYD","distanceKm":0.1,"durationMin":1,"billableKm":0.07,"routeSource":"haversine"}}';
 const INVALID_PICKUP_BODY = '{"success":false,"error":{"code":"VALIDATION_ERROR","message":"Invalid request data","details":{"pickup.lat":["Number must be less than or equal to 90"]}}}';
 
 /** A fetch stub that answers one OSRM route and records the URL it was asked. */
@@ -105,6 +113,8 @@ async function buildApp(): Promise<FastifyInstance> {
 let app: FastifyInstance;
 let token: string;
 let seq = 0;
+let restoreTaxiCard: () => Promise<void> = async () => {};
+let removeGeorgetownPair: () => Promise<void> = async () => {};
 
 async function purgeFixtures(on: FastifyInstance) {
   const users = await on.prisma.user.findMany({ where: { phone: { startsWith: PHONE_PREFIX } }, select: { id: true } });
@@ -152,11 +162,15 @@ beforeAll(async () => {
   delete process.env['MAPS_PROVIDER'];
   delete process.env['OSRM_URL'];
   app = await buildApp();
+  restoreTaxiCard = await pinLegacyGuyanaTaxiCard(app.prisma);
+  removeGeorgetownPair = await plantGeorgetownPair(app.prisma);
   await purgeFixtures(app);
   token = await makeCustomer(app);
 });
 
 afterAll(async () => {
+  await restoreTaxiCard();
+  await removeGeorgetownPair();
   await purgeFixtures(app);
   await app.close();
 });
@@ -205,17 +219,17 @@ describe('single-leg estimate: the fare service, pinned', () => {
     expect(await haversine().estimate(B.pickup, B.dropoff, 'GY')).toStrictEqual(B_KILLED_ESTIMATE);
   });
 
-  it('the tiers — Economy, Comfort, Group from the one base fare', async () => {
+  it('the tiers — Economy and Comfort from the one base fare (Group is hidden with the buses)', async () => {
     expect(await haversine().estimateTiers(A.pickup, A.dropoff, 'GY')).toStrictEqual({
-      tiers: tiers('formula', 1900, 2600, 4800), currencyCode: 'GYD', distanceKm: 2.5, durationMin: 6, billableKm: 2.45, routeSource: 'haversine',
+      tiers: tiers('formula', 1900, 2600), currencyCode: 'GYD', distanceKm: 2.5, durationMin: 6, billableKm: 2.45, routeSource: 'haversine',
     });
     expect(await haversine().estimateTiers(B.pickup, B.dropoff, 'GY')).toStrictEqual({
-      tiers: tiers('zone_table', 2000, 2700, 5000), currencyCode: 'GYD', distanceKm: 8, durationMin: 20, billableKm: 7.95, routeSource: 'haversine',
+      tiers: tiers('zone_table', 2000, 2700), currencyCode: 'GYD', distanceKm: 8, durationMin: 20, billableKm: 7.95, routeSource: 'haversine',
     });
     vi.stubGlobal('fetch', osrmRoute(10_150, 1620));
     const osrm = new FareService(app.prisma, new OsrmMapsProvider('http://osrm.test'));
     expect(await osrm.estimateTiers(E.pickup, E.dropoff, 'GY')).toStrictEqual({
-      tiers: tiers('formula', 4700, 6300, 11800), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
+      tiers: tiers('formula', 4700, 6300), currencyCode: 'GYD', distanceKm: 10.2, durationMin: 27, billableKm: 10.15, routeSource: 'osrm',
     });
   });
 });

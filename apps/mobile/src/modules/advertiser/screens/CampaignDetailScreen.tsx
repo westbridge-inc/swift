@@ -6,7 +6,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { color, radius, space } from '@swift/ui';
-import { ErrorState, Card, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { ErrorState, Card, Header, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertiserActions } from '../../../hooks/advertiser';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { adsApi } from '../../../services/api';
@@ -73,8 +74,10 @@ export function CampaignDetailScreen() {
       const owner = requireAuthSessionSnapshot();
       const res = await adsApi.refundPreview(campaign.id, owner);
       requireAuthSessionForPrincipal(owner);
-      const plan = res?.data?.data as { total: number; items: Array<{ kind: string }> };
-      const refundTotal = plan?.total ?? 0;
+      const total = (res?.data?.data as { total?: unknown } | null | undefined)?.total;
+      // An answer without a readable total is a failed preview ("Could not load refund preview"), never "No refund is due".
+      const refundTotal = typeof total === 'number' && Number.isFinite(total) && total >= 0 ? total : null;
+      if (refundTotal === null) throw new Error('refund preview without a readable total');
       Alert.alert(
         'Cancel this campaign?',
         refundTotal > 0
@@ -121,12 +124,14 @@ export function CampaignDetailScreen() {
     const loadedButMissing = campaigns.isSuccess && !campaigns.isFetching;
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [BUG-GUARDS C4] Loading and a failed read keep a way back, not only "no longer available". */}
+        <Header />
         {failed ? (
-          <ErrorState style={{ paddingTop: 120 }} onRetry={() => { me.refetch(); campaigns.refetch(); }} />
+          <ErrorState style={{ paddingTop: 64 }} onRetry={() => { me.refetch(); campaigns.refetch(); }} />
         ) : loadedButMissing ? (
-          <ErrorState style={{ paddingTop: 120 }} message="This campaign is no longer available." onRetry={() => navigation.goBack()} />
+          <ErrorState style={{ paddingTop: 64 }} message="This campaign is no longer available." onRetry={() => navigation.goBack()} />
         ) : (
-          <LoadingBlock style={{ paddingTop: 120 }} />
+          <LoadingBlock style={{ paddingTop: 64 }} />
         )}
       </View>
     );
@@ -137,7 +142,8 @@ export function CampaignDetailScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.xl, paddingVertical: space.md }}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => navigation.goBack()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(22)}>
           <Feather name="arrow-left" size={22} color={color.text.primary} />
         </Pressable>
         <T variant="heading" numberOfLines={1} style={{ marginLeft: space.lg, flex: 1 }}>

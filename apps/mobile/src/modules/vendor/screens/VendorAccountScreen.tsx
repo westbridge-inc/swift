@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
+import { guardVendorOperation, useVendorMutation } from '../../../hooks/useVendorMutation';
 import { useState, useEffect } from 'react';
-import { useQueryClient, useMutation } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Pressable, ScrollView, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import { Image } from 'expo-image';
@@ -24,8 +25,14 @@ import { BrandSwitch } from '../../../kit/controls';
 import { DAY_LABELS, GUTTER, InlineInput, fmtDate, prettyVendorType } from '../shared';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import { MmgPayLinkCard } from '../../../components/MmgPayLinkCard';
+import { MmgNumberCard } from '../../../components/MmgNumberCard';
+import { JobAlertSettingsRow } from '../../../components/JobAlertSettingsRow';
 import { PublicCallNumberCard } from '../../../components/PublicCallNumberCard';
+import { RefundRuleCard } from '../../../components/RefundRuleCard';
+import { WithdrawStaffInvites } from '../../../components/WithdrawStaffInvites';
 import { StoreLocationPicker } from '../../../components/StoreLocationPicker';
+import { StorePhotosCard } from '../../../components/StorePhotosCard';
+import { storePhotoUrl } from '../../../lib/images';
 import type { StorePin } from '../../../lib/storePin';
 import { vendorApi } from '../../../services/api';
 import { useVerificationStatus } from '../../../hooks/verification';
@@ -77,7 +84,8 @@ export function VendorAccountScreen() {
   const isOwner = myRole === 'OWNER';
   const isManager = myRole === 'OWNER' || myRole === 'MANAGER';
   const sub = useVendorSubscription(isOwner);
-  const setBilling = useSetVendorBillingMethod();
+  const stepUp = useStepUp();
+  const setBilling = useSetVendorBillingMethod(stepUp.withStepUp);
   const hoursQ = useVendorHours();
   const setHours = useSetHours();
   const qc = useQueryClient();
@@ -85,20 +93,40 @@ export function VendorAccountScreen() {
   // session to confirm it holds the phone (the code sheet), then STAGES the
   // change behind a cool-off with the old link live. The card shows exactly
   // what the server holds; the owner can cancel it from any device.
-  const stepUp = useStepUp();
   const [mmgError, setMmgError] = useState<string | null>(null);
-  const saveMmgLink = useMutation({
-    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl })),
+  const updateMmgLink = guardVendorOperation((mmgPayUrl: string | null) => vendorApi.updateProfile({ mmgPayUrl }));
+  const saveMmgLink = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgPayUrl: string | null) => updateMmgLink(mmgPayUrl)),
     onMutate: () => setMmgError(null),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
     onError: (e: unknown) => {
       if (!isStepUpDismissed(e)) setMmgError(serverMessage(e, 'That link could not be saved. Check it and try again.'));
     },
   });
-  const cancelPendingMmgLink = useMutation({
+  const cancelPendingMmgLink = useVendorMutation({
     mutationFn: () => vendorApi.cancelPendingMmgLink(),
     onSuccess: () => {
       toast.success('Change cancelled', 'Your current link stays. Other devices were signed out.');
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
+  });
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG NUMBER replaces the pay link:
+  // the same step-up, the same staged cool-off with the old number live, the same one-tap cancel.
+  const [mmgNumberError, setMmgNumberError] = useState<string | null>(null);
+  const updateMmgNumber = guardVendorOperation((mmgNumber: string | null) => vendorApi.updateProfile({ mmgNumber }));
+  const saveMmgNumber = useVendorMutation({
+    mutationFn: stepUp.withStepUp((mmgNumber: string | null) => updateMmgNumber(mmgNumber)),
+    onMutate: () => setMmgNumberError(null),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    onError: (e: unknown) => {
+      if (!isStepUpDismissed(e)) setMmgNumberError(serverMessage(e, 'That number could not be saved. Check it and try again.'));
+    },
+  });
+  const cancelPendingMmgNumber = useVendorMutation({
+    mutationFn: () => vendorApi.cancelPendingMmgNumber(),
+    onSuccess: () => {
+      toast.success('Change cancelled', 'Your current number stays. Other devices were signed out.');
       void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
     },
     onError: (e: unknown) => toast.error('Could not cancel', serverMessage(e, 'Try again in a moment.')),
@@ -108,7 +136,7 @@ export function VendorAccountScreen() {
   // two opinions about a valid number is how a shopkeeper gets told their own
   // shop number is wrong for a reason that is not true.
   const [callNumberError, setCallNumberError] = useState<string | null>(null);
-  const saveCallNumber = useMutation({
+  const saveCallNumber = useVendorMutation({
     mutationFn: (publicPhone: string | null) => vendorApi.updateProfile({ publicPhone }),
     onMutate: () => setCallNumberError(null),
     onSuccess: () => {
@@ -117,6 +145,20 @@ export function VendorAccountScreen() {
     },
     onError: (e: any) => setCallNumberError(
       e?.response?.data?.error?.message ?? 'That number could not be saved. Check it and try again.',
+    ),
+  });
+
+  // [R3 · CAA s.70(3)] The store's own refund rule (owner only); the server's refusal is shown in its words.
+  const [refundRuleError, setRefundRuleError] = useState<string | null>(null);
+  const saveRefundRule = useVendorMutation({
+    mutationFn: (refundRule: string | null) => vendorApi.updateProfile({ refundRule }),
+    onMutate: () => setRefundRuleError(null),
+    onSuccess: () => {
+      setRefundRuleError(null);
+      void qc.invalidateQueries({ queryKey: ['vendor', 'profile'] });
+    },
+    onError: (e: any) => setRefundRuleError(
+      e?.response?.data?.error?.message ?? 'That refund rule could not be saved. Check it and try again.',
     ),
   });
 
@@ -150,8 +192,12 @@ export function VendorAccountScreen() {
       <ScrollView contentContainerStyle={{ paddingHorizontal: GUTTER, paddingBottom: space['3xl'] }} showsVerticalScrollIndicator={false}>
         {/* Store identity */}
         <Card style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.lg }}>
-          <View style={{ width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
-            <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+          <View style={{ width: 56, height: 56, borderRadius: 28, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: color.brand[50] }}>
+            {storePhotoUrl(store?.logoUrl, 160) ? (
+              <Image source={{ uri: storePhotoUrl(store?.logoUrl, 160)! }} style={{ width: 56, height: 56 }} contentFit="cover" accessibilityLabel="Store logo" />
+            ) : (
+              <MaterialCommunityIcons name="storefront" size={26} color={color.brand[600]} />
+            )}
           </View>
           <View style={{ flex: 1 }}>
             <T variant="heading" numberOfLines={1}>
@@ -164,8 +210,13 @@ export function VendorAccountScreen() {
           </View>
         </Card>
 
+        {/* [IMAGES-E2E] The store's own logo and cover (managers): uploaded, redrawn without camera data. */}
+        {isManager && store && !samplePreview ? <StorePhotosCard store={store} /> : null}
+
         <Card style={{ marginBottom: space.lg, paddingVertical: space.sm }}>
           <SettingsRow icon="award" label="Seller status" sub="Your tier, its limits and what lifts them" onPress={() => navigation.navigate('VendorTier')} />
+          <SettingsRow icon="user" label="Personal data & account closure" onPress={() => navigation.navigate('PersonalData' , { closureRequest: true })} />
+          <JobAlertSettingsRow />
           <SettingsRow icon="life-buoy" label="Get help" sub="A human answers — orders, billing, account" onPress={() => navigation.navigate('GetHelp')} />
           {guestSample ? (
             <SettingsRow
@@ -185,6 +236,20 @@ export function VendorAccountScreen() {
         {isOwner ? <SubscriptionCard sub={sub.data} phone={store?.phone} setBilling={setBilling} /> : null}
 
         {isManager ? (
+          <MmgNumberCard
+            value={store?.mmgNumber}
+            pending={store?.mmgNumberPending ? { number: store.mmgNumberPending, applyAt: store.mmgNumberApplyAt ?? null } : null}
+            saving={saveMmgNumber.isPending}
+            cancelling={cancelPendingMmgNumber.isPending}
+            error={mmgNumberError}
+            readOnly={!isOwner}
+            onSave={(n) => saveMmgNumber.mutate(n)}
+            onCancelPending={isOwner ? () => cancelPendingMmgNumber.mutate() : undefined}
+          />
+        ) : null}
+
+        {/* [PAYMENT-SIMPLIFY] The old pay link only while the server's STORE_MMG_PAY_LINK switch is on. */}
+        {isManager && store?.mmgPayLinkEnabled === true ? (
           <MmgPayLinkCard
             who="store"
             value={store?.mmgPayUrl}
@@ -204,6 +269,15 @@ export function VendorAccountScreen() {
             saving={saveCallNumber.isPending}
             error={callNumberError}
             onSave={(p) => saveCallNumber.mutate(p)}
+          />
+        ) : null}
+
+        {isOwner ? (
+          <RefundRuleCard
+            value={store?.refundRule}
+            saving={saveRefundRule.isPending}
+            error={refundRuleError}
+            onSave={(rule) => saveRefundRule.mutate(rule)}
           />
         ) : null}
 
@@ -310,7 +384,7 @@ function StoreLocationCard({ store }: { store: any }) {
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const movePin = useMutation({
+  const movePin = useVendorMutation({
     mutationFn: (pin: StorePin) => vendorApi.updateProfile({ latitude: pin.latitude, longitude: pin.longitude }),
     onMutate: () => setError(null),
     onSuccess: () => {
@@ -404,6 +478,10 @@ function SubscriptionCard({ sub, phone, setBilling }: { sub: any; phone?: string
       <BillingStopControl
         sub={sub}
         who="store"
+        // [OWNER 21 Oct] This screen stacks its cards with marginBottom: the
+        // control keeps the same section gap below it, never flush on the
+        // "Your MMG number" card.
+        style={{ marginTop: 0, marginBottom: space.lg }}
         pending={setBilling.isPending}
         onStop={() => setBilling.mutate({ method: 'NONE' })}
         onResume={() =>
@@ -547,7 +625,14 @@ function PromosSection() {
             </View>
           );
         })}
-        {promos.length === 0 && !promosQ.isLoading ? (
+        {promosQ.isError && promos.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your promo codes.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => promosQ.refetch()} />
+          </View>
+        ) : promos.length === 0 && !promosQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No codes yet — run your first promotion and it shows on your storefront.
           </T>
@@ -632,10 +717,10 @@ function PromosSection() {
  * Swift account by phone as MANAGER or STAFF, flip roles, remove access.
  */
 function StaffSection() {
+  const stepUp = useStepUp();
   const staffQ = useVendorStaff();
   // [ALG-34] A grant hands the store's board to a phone: the server asks this
   // session to confirm it holds the owner's phone first.
-  const stepUp = useStepUp();
   const addStaff = useAddStaff(stepUp.withStepUp);
   const removeStaff = useRemoveStaff();
   const updateRole = useUpdateStaffRole(stepUp.withStepUp);
@@ -692,7 +777,14 @@ function StaffSection() {
             </Pressable>
           </View>
         ))}
-        {members.length === 0 && !staffQ.isLoading ? (
+        {staffQ.isError && members.length === 0 ? (
+          <View style={{ marginBottom: space.md }}>
+            <T variant="label" tone="muted">
+              Couldn&apos;t load your team.
+            </T>
+            <PillButton label="Retry" size="md" variant="soft" style={{ marginTop: space.sm }} onPress={() => staffQ.refetch()} />
+          </View>
+        ) : members.length === 0 && !staffQ.isLoading ? (
           <T variant="label" tone="muted" style={{ marginBottom: space.md }}>
             No team members yet — add your manager or floor staff by phone.
           </T>
@@ -718,8 +810,9 @@ function StaffSection() {
           onPress={submit}
         />
         <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-          Tap a role pill to switch Manager ↔ Staff.
+          Tap a role to switch between Manager and Staff.
         </T>
+        <WithdrawStaffInvites />
       </Card>
 
       {stepUp.sheet}

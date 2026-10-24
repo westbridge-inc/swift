@@ -43,19 +43,23 @@ describe('the allowlist', () => {
       'POSTGRES_PASSWORD', 'DATABASE_URL',
       'JWT_SECRET', 'OTP_HASH_SECRET', 'MASTER_KEK', 'STORAGE_SIGNING_SECRET', 'MEILISEARCH_KEY',
       'TWILIO_API_KEY_SECRET', 'SMTP_PASS',
+      // [R22] The token Twilio signs inbound STOP requests with (verification only).
+      'TWILIO_WEBHOOK_AUTH_TOKEN',
       'MMG_API_KEY', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET',
       // The MMG hosted checkout: the reply-opening private key and the secret
       // key sealed inside every request token.
-      'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
+      'MMG_CHECKOUT_PUBLIC_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_SECRET_KEY',
       'PAYMENT_GATEWAY_KEY', 'PAYMENT_GATEWAY_SECRET',
+      // [PT-4] The real card provider's credentials (its guide, sec. 4).
+      'POWERTRANZ_ID', 'POWERTRANZ_PASSWORD', 'POWERTRANZ_GATEWAY_KEY',
       'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
       // [R2 C1] Every other secret the API reads; each could otherwise only
       // arrive through the plaintext env file the owner ruled out.
       'TEST_CONTROL_SECRET', 'METRICS_TOKEN', 'HEALTH_DETAIL_TOKEN',
       'SERVICE_PROVIDER_CURSOR_SECRET', 'VELOCITY_KEY_SECRET', 'ADS_EVENT_SECRET',
       'AGENT_CASH_WEBHOOK_SECRET', 'SWIFT_BOOTSTRAP_PASSWORD', 'GOOGLE_MAPS_API_KEY_BACKEND',
-      // The seed ceremony's approval key: from the store, never the env file.
-      'SEED_PLAN_SECRET',
+      // The seed ceremony's pinned approver keys: from the store, never the env file.
+      'SEED_APPROVER_KEYS',
       'ATTRIB_SALT', 'IDENTITY_SALT', 'SCAN_IP_SALT', 'SENTRY_DSN',
       // [R3 R2-A] URLs that carry a credential: the RLS-bypass login's URL
       // (the most privileged database credential), a Redis URL (may carry a
@@ -69,9 +73,9 @@ describe('the allowlist', () => {
     for (const never of [
       'NODE_ENV', 'LOG_LEVEL', 'API_HOST', 'TWILIO_ACCOUNT_SID', 'TWILIO_FROM', 'TWILIO_MESSAGING_SERVICE_SID', 'MMG_MERCHANT_ID', 'KYC_PROVIDER',
       // The checkout identifiers ride in the page URL a partner opens, and the
-      // public key opens nothing.
+      // these identifiers are plain configuration.
       'MMG_CHECKOUT_ENABLED', 'MMG_CHECKOUT_MERCHANT_ID', 'MMG_CHECKOUT_CLIENT_ID', 'MMG_CHECKOUT_MERCHANT_NAME',
-      'MMG_CHECKOUT_RETURN_ORIGIN', 'MMG_CHECKOUT_PUBLIC_KEY',
+      'MMG_CHECKOUT_RETURN_ORIGIN',
     ]) {
       expect(SECRET_FILE_NAMES).not.toContain(never);
     }
@@ -101,7 +105,6 @@ describe('the allowlist census — no secret the API reads can fall back to the 
   const NON_SECRET: Record<string, string> = {
     DEV_OTP_BYPASS: 'a development switch (0/1), refused in production by the boot guard',
     MASTER_KEK_ESCROW_FINGERPRINT: 'the sha256 of the key bytes, recorded beside the key on purpose so a stale escrow is caught',
-    MMG_CHECKOUT_PUBLIC_KEY: 'the RSA public key MMG checkout requests are encrypted TO: public by definition, it opens nothing (the private half is the secret file MMG_CHECKOUT_PRIVATE_KEY, and the boot guard refuses a private key here)',
     NOT_MY_DRIVER_AUTHORITY_KILL: 'a kill switch for a dispatch rule',
     SOCKET_AUTH_RECHECK_MS: 'a timing for the socket re-authentication sweep',
     SOCKET_AUTH_RECHECK_TIMEOUT_MS: 'a timing for the socket re-authentication sweep',
@@ -163,6 +166,7 @@ describe('the allowlist census — no secret the API reads can fall back to the 
     APP_STORE_URL: 'a public store listing',
     PLAY_STORE_URL: 'a public store listing',
     AWS_S3_ENDPOINT: 'object-storage endpoint; the keys travel as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY',
+    TWILIO_INBOUND_SMS_URL: 'this deployment\'s own public inbound-SMS webhook address, exactly as set on the Twilio number; Twilio signs over it with TWILIO_WEBHOOK_AUTH_TOKEN, and no credential rides in it',
   };
   const urlLike = [...reads.keys()].filter((n) => URL_LIKE.test(n) && !PUBLIC_PREFIX.test(n)).sort();
 

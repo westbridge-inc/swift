@@ -18,6 +18,7 @@ const fx = vi.hoisted(() => {
     owner: { userId: 'dual-owner', generation: 1, accessToken: 'test-access', refreshToken: 'test-refresh' },
   };
 });
+vi.mock('../modules/profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
   const hooks = { useState: (initial: unknown) => [initial, vi.fn()], useEffect: (fn: () => void) => { fx.effects.push(fn); }, useMemo: (fn: () => unknown) => fn(), useRef: (current: unknown) => ({ current }), useCallback: (fn: unknown) => fn };
@@ -27,6 +28,8 @@ vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, Pressable: 'Pressable'
 vi.mock('@react-navigation/native', () => ({
   createNavigationContainerRef: () => ({ isReady: () => true, navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
   useFocusEffect: () => {},
+  // The fee screen's own navigation (its held-payment support door) goes through the same dispatch.
+  useNavigation: () => ({ navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
 }));
 vi.mock('@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({ Navigator: 'Navigator', Screen: 'Screen' }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0 }) }));
@@ -43,11 +46,13 @@ vi.mock('../stores/authStore', () => ({
 vi.mock('../stores/moverPreview', () => ({ useMoverPreview: (pick: (_s: unknown) => unknown) => pick({ preview: false }) }));
 vi.mock('../stores/storeSwitcher', async () => {
   const { createStore } = await import('zustand/vanilla');
-  const state = createStore(() => ({ selectedStoreId: 'store-B', feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));
+  const state = createStore(() => ({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null as unknown, setSelectedStore: (id: string) => state.setState({ selectedStoreId: id, storeGeneration: state.getState().storeGeneration + 1 }), setFeeContextPending: (pending: boolean) => state.setState({ feeContextPending: pending }) }));
   return { useStoreSwitcher: Object.assign((pick: (_s: unknown) => unknown) => pick(state.getState()), state) };
 });
 vi.mock('../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
 vi.mock('../hooks', () => ({ useMoverKind: fx.moverKind, useMoverSubscription: () => ({ data: { id: 'mover-sub', status: 'ACTIVE' }, refetch: vi.fn() }) }));
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../hooks/vendorops', () => ({ useVendorSubscription: () => ({ data: { id: 'subscription-A', status: 'ACTIVE' }, refetch: vi.fn() }) }));
 vi.mock('../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false }) }));
 vi.mock('../components/onboarding/WentLive', () => ({ useWentLive: vi.fn(), WentLivePopup: 'WentLivePopup' }));
@@ -76,7 +81,7 @@ function elements(node: unknown): Element[] {
   return [el, ...elements(el.props.children)];
 }
 const original = api.defaults.adapter;
-beforeEach(() => { fx.effects = []; fx.moverKind.mockClear(); useStoreSwitcher.setState({ selectedStoreId: 'store-B', feeContextPending: false, feeContextError: null }); });
+beforeEach(() => { fx.effects = []; fx.moverKind.mockClear(); useStoreSwitcher.setState({ selectedStoreId: 'store-B', storeGeneration: 0, feeContextPending: false, feeContextError: null }); });
 afterEach(() => { api.defaults.adapter = original; });
 describe('notification family with the active mover stack [AX316 R3]', () => {
   it('opens the store family inside Earner mode and never reads the vendor ref through mover endpoints', async () => {

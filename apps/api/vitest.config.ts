@@ -75,6 +75,15 @@ export default defineConfig({
       CARD_RAIL_PROVIDER: '',
       // [TAXI multi-stop] Off unless a test switches it on per case.
       TAXI_MAX_STOPS: '',
+      ADS_ENABLED: '',
+      // [PAYMENT-SIMPLIFY] The store's MMG pay link is off unless a test switches it on.
+      STORE_MMG_PAY_LINK: '',
+      // [TAXI waiting charge] Off unless a test switches it on per case.
+      TAXI_WAITING_CHARGE: '',
+      // [PAYMENT-SIMPLIFY] The driver's MMG pay link is off unless a test switches it on.
+      DRIVER_MMG_PAY_LINK: '',
+      // [Row 117] Web taxi booking is off unless a test switches it on.
+      WEB_TAXI_BOOKING: '',
     },
     // All test files share ONE Postgres DB, so run files sequentially: parallel
     // files race on create/delete of shared fixtures (phones, carts→vendors→users)
@@ -83,6 +92,9 @@ export default defineConfig({
     // [R048-001] The target lock: no worker is spawned until Postgres and Redis
     // are proven loopback and disposable, read-only probes agree, and the run
     // id is minted. Rollback means stopping the suite, never relaxing this.
-    globalSetup: ['./src/__tests__/setup/target-lock.ts'],
+    // The target lock runs first; the billing cutover step runs only on the
+    // database that lock has proven disposable (and re-checks it itself).
+    // test-phones starts the run-wide testPhone() count (helpers/fixture-ids.ts).
+    globalSetup: ['./src/__tests__/setup/target-lock.ts', './src/__tests__/setup/billing-cutover.ts', './src/__tests__/setup/test-phones.ts'],
   },
 });

@@ -15,6 +15,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { importSettlementCsv } from '../modules/billing/settlement-import';
 import { ensureSan } from '../modules/billing/san.service';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 
 // Channels A/A'/B [san spec 4.1-4.3] — built dark, proven now: HMAC + raw-body
 // auth law (401 ONLY for signatures; unknown SANs are 200 received_unmatched),
@@ -31,19 +32,22 @@ const vendorIds: string[] = [];
 const subIds: string[] = [];
 const externalIds: string[] = [];
 let seq = 0;
-const phoneBase = 592_007_000_000 + Math.floor(Math.random() * 8_000_000);
+// [SAFE-B · retained history] A credited payment records an advisory MMG payer observation: immutable evidence
+// naming its subscription and account, kept after the suite. Owners and stores therefore live in a phone
+// namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('20');
 
 async function makeVendorSub() {
   seq += 1;
   const user = await prisma.user.create({
-    data: { phone: `+${phoneBase + seq}`, firstName: 'Chan', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`, firstName: 'Chan', lastName: `U${seq}`, roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(user.id);
   const owner = await prisma.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await prisma.vendor.create({
     data: {
       ownerId: owner.id, name: `Shanta Kitchen ${seq}`, slug: `chan-${nanoid(8).toLowerCase()}`,
-      vendorType: 'RESTAURANT', phone: `+${phoneBase + 700_000 + seq}`,
+      vendorType: 'RESTAURANT', phone: `${PHONE_PREFIX}${String(500 + seq).padStart(3, '0')}`,
       addressLine1: '9 Inquiry St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true,
     },
@@ -99,20 +103,31 @@ beforeAll(async () => {
 
 afterAll(async () => {
   delete process.env['AGENT_CASH_WEBHOOK_SECRET'];
-  await prisma.mmgAgentPayment.deleteMany({ where: { externalId: { in: externalIds } } });
-  await prisma.settlementImport.deleteMany({ where: { source: { startsWith: 'test-' } } });
-  await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.prepaidBalance.deleteMany({ where: { subscriptionId: { in: subIds } } });
-  await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
-  await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-  await prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
-  await prisma.identityKey.deleteMany({ where: { accountId: { in: userIds } } });
-  await prisma.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } });
-  await prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await app.close();
-  await prisma.$disconnect();
+  // [SAFE-B · retained history] A subscription an MMG payer observation names is kept with its money records,
+  // store and owner; the rest goes as before, in one transaction. What stays is cancelled without renewal and
+  // its store closed. Identity rows go for everyone, as before.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { subscriptionIds: subIds });
+      const goneSubs = without(subIds, kept.subscriptionIds);
+      await tx.mmgAgentPayment.deleteMany({ where: { externalId: { in: externalIds }, OR: [{ subscriptionId: null }, { subscriptionId: { in: goneSubs } }] } });
+      await tx.settlementImport.deleteMany({ where: { source: { startsWith: 'test-' } } });
+      await tx.billingEvent.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscriptionPayment.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.prepaidBalance.deleteMany({ where: { subscriptionId: { in: goneSubs } } });
+      await tx.subscription.deleteMany({ where: { id: { in: goneSubs } } });
+      await tx.vendor.deleteMany({ where: { id: { in: without(vendorIds, kept.vendorIds) } } });
+      await tx.vendorOwner.deleteMany({ where: { userId: { in: without(userIds, kept.userIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: userIds } } });
+      await tx.identityKey.deleteMany({ where: { accountId: { in: userIds } } });
+      await tx.identityClusterMember.deleteMany({ where: { accountId: { in: userIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(userIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+    await prisma.$disconnect();
+  }
 });
 
 describe('Channel A — webhook auth law', () => {
@@ -181,12 +196,13 @@ describe("Channel A' — inquiry, the typo-killer", () => {
 describe('Channel B — settlement import + scenario G', () => {
   it('imports a file, re-import is a zero-credit no-op, trailer mismatch is flagged', async () => {
     const { sub, san } = await makeVendorSub();
+    // [owner #62] The two rows together are one week's fee (GY$2,100): one week at a time.
     const t1 = `SF-${nanoid(8)}`;
     const t2 = `SF-${nanoid(8)}`;
     externalIds.push(t1, t2);
     const csv = [
       'transaction_id,account_number,amount,paid_at',
-      `${t1},${san},2100,2026-08-01T10:00:00Z`,
+      `${t1},${san},1100,2026-08-01T10:00:00Z`,
       `${t2},"${san.slice(0, 3)}-${san.slice(3, 6)}-${san.slice(6)}",1000,2026-08-01T11:00:00Z`,
       'TOTAL,9999',
     ].join('\n');
@@ -196,16 +212,16 @@ describe('Channel B — settlement import + scenario G', () => {
     // mismatch was only a flag on the report.)
     const bad = await importSettlementCsv(prisma, svc, csv, { source: 'test-file-1' });
     expect(bad.status).toBe('REJECTED');
-    expect(bad.trailerMismatch).toBe(true); // 3100 ≠ 9999
+    expect(bad.trailerMismatch).toBe(true); // 2100 ≠ 9999
     expect(bad.credited).toBe(0);
     expect(await prisma.billingEvent.count({ where: { subscriptionId: sub.id, type: 'PREPAID_TOPUP' } })).toBe(0);
 
-    const good = csv.replace('TOTAL,9999', 'TOTAL,3100');
+    const good = csv.replace('TOTAL,9999', 'TOTAL,2100');
     const report = await importSettlementCsv(prisma, svc, good, { source: 'test-file-1' });
     expect(report.status).toBe('PUBLISHED');
     expect(report.fileRows).toBe(2);
     expect(report.credited).toBe(2);
-    expect(report.trailerTotalGyd).toBe(3100);
+    expect(report.trailerTotalGyd).toBe(2100);
     expect(report.trailerMismatch).toBe(false);
 
     // The same file again is the same import: it answers, it does not re-ingest.

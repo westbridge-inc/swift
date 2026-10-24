@@ -28,6 +28,7 @@ export function MmgPayLinkCard({
   onCancelPending,
   who,
   dark,
+  style,
 }: {
   value?: string | null;
   /** A staged change the server is holding: the new link and when it goes live. */
@@ -43,14 +44,20 @@ export function MmgPayLinkCard({
   who: 'store' | 'rides';
   /** Render on the earner app's dark surfaces (dashboard plan Phase E). */
   dark?: boolean;
+  /** The outer spacing the screen's card stack gives this card. It defaults to
+   *  the store account's marginBottom stack; the driver account stacks with
+   *  marginTop and passes its own (owner 17 Oct: the card touched the vehicle card). */
+  style?: ViewStyle;
 }) {
   const [url, setUrl] = useState(value ?? '');
   useEffect(() => setUrl(value ?? ''), [value]);
 
   const trimmed = url.trim();
   const dirty = trimmed !== (value ?? '');
-  const payer = who === 'store' ? 'Customers' : 'Riders';
-  const payerLower = who === 'store' ? 'customers' : 'riders';
+  // `rides` is the taxi driver's card: a driver's customers are passengers
+  // (in Swift, "riders" are the delivery partners).
+  const payer = who === 'store' ? 'Customers' : 'Passengers';
+  const payerLower = who === 'store' ? 'customers' : 'passengers';
   const darkCard: ViewStyle = dark
     ? { backgroundColor: color.text.primary, borderWidth: 1, borderColor: withAlpha(color.white, 0.08) }
     : {};
@@ -58,7 +65,7 @@ export function MmgPayLinkCard({
   const when = fmtWhen(pending?.applyAt);
 
   return (
-    <Card style={{ marginBottom: space.lg, ...darkCard }}>
+    <Card style={{ marginBottom: space.lg, ...style, ...darkCard }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
         <MaterialCommunityIcons name="cellphone-check" size={18} color={dark ? color.brand[500] : color.brand[600]} />
         <T variant="label" weight="semibold" style={dark ? { color: color.white } : undefined}>

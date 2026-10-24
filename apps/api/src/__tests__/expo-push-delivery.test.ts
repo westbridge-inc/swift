@@ -1,13 +1,16 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ExpoPushProvider,
   devChannelLog,
+  expoReceiptCheckDelayMs,
   getPushProvider,
   resetDevChannelLog,
   withPushRetry,
   type PushProvider,
 } from '../providers/notifications/channels';
 import { ALERT_CLASS_KINDS, pushOptionsFor } from '../providers/notifications/alert-class';
+import { pushFailuresCounter } from '../plugins/observability';
+import { setAppLogger } from '../utils/logger';
 
 // ---------------------------------------------------------------------------
 // [Q10 loud alerts 1/4] What actually leaves for Expo, per alert class.
@@ -220,5 +223,114 @@ describe('the dev adapter logs what would have been sent', () => {
     const data = { kind: 'dispatch_offer', orderId: 'o1', expiresAt: iso(-1) };
     expect(await getPushProvider().sendPush(['a'], 'T', 'B', data, pushOptionsFor(data))).toEqual({ sent: 0 });
     expect(devChannelLog).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [STORE-ALERT 18 Oct 2026] A push that does not reach a phone leaves a
+// structured log line and a count, by error CLASS only — never the token.
+// Before this, every refused ticket except DeviceNotRegistered vanished, a
+// receipt was never read (InvalidCredentials, the app's push key, only shows
+// there) and a failed request was counted by nobody.
+// ---------------------------------------------------------------------------
+describe('[STORE-ALERT] push failures are logged and counted by class, never by token', () => {
+  type Line = { level: string; obj: Record<string, unknown>; msg: string };
+  let lines: Line[] = [];
+  const capture = {
+    info: (obj: Record<string, unknown>, msg: string) => { lines.push({ level: 'info', obj, msg }); },
+    warn: (obj: Record<string, unknown>, msg: string) => { lines.push({ level: 'warn', obj, msg }); },
+    error: (obj: Record<string, unknown>, msg: string) => { lines.push({ level: 'error', obj, msg }); },
+    debug: () => {},
+  };
+  const failures = async () => Object.fromEntries((await pushFailuresCounter.get()).values
+    .map((v) => [`${v.labels['stage']}:${v.labels['reason']}`, v.value]));
+  const tokens = ['ExponentPushToken[sa-a]', 'ExponentPushToken[sa-b]', 'ExponentPushToken[sa-c]', 'ExponentPushToken[sa-d]'];
+
+  beforeEach(() => {
+    lines = [];
+    pushFailuresCounter.reset();
+    setAppLogger(capture as never);
+  });
+  afterEach(() => { setAppLogger(console); });
+
+  it('refused tickets: one count per class (unknown -> other), only DeviceNotRegistered retires a token', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true, status: 200, text: async () => '',
+      json: async () => ({ data: [
+        { status: 'error', details: { error: 'InvalidCredentials' } },
+        { status: 'error', details: { error: 'DeviceNotRegistered' } },
+        { status: 'error', details: { error: 'SomethingNew' } },
+        { status: 'ok', id: 'r-1' },
+      ] }),
+    })));
+    const result = await new ExpoPushProvider().sendPush(tokens, 'New Order!', 'B', { kind: 'vendor_order_alert' });
+    expect(result).toEqual({ sent: 1, invalidTokens: [tokens[1]] });
+    expect(await failures()).toEqual({ 'ticket:InvalidCredentials': 1, 'ticket:DeviceNotRegistered': 1, 'ticket:other': 1 });
+    expect(lines.filter((l) => l.obj['event'] === 'push_failure').map((l) => l.obj)).toEqual([
+      { event: 'push_failure', stage: 'ticket', reason: 'InvalidCredentials', count: 1, kind: 'vendor_order_alert' },
+      { event: 'push_failure', stage: 'ticket', reason: 'DeviceNotRegistered', count: 1, kind: 'vendor_order_alert' },
+      { event: 'push_failure', stage: 'ticket', reason: 'other', count: 1, kind: 'vendor_order_alert' },
+    ]);
+    expect(JSON.stringify(lines)).not.toContain('ExponentPushToken');
+  });
+
+  it('a failed request is counted by what went wrong (HTTP class, network, timeout, a short ticket list)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down', json: async () => ({}) })));
+    await expect(new ExpoPushProvider().sendPush(tokens.slice(0, 2), 'T', 'B', { kind: 'dispatch_offer' })).rejects.toThrow('503');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 429, text: async () => '', json: async () => ({}) })));
+    await expect(new ExpoPushProvider().sendPush(tokens.slice(0, 1), 'T', 'B', {})).rejects.toThrow('429');
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('ECONNRESET'); }));
+    await expect(new ExpoPushProvider().sendPush(tokens.slice(0, 1), 'T', 'B', {})).rejects.toThrow('ECONNRESET');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ status: 'ok' }] }) })));
+    await new ExpoPushProvider().sendPush(tokens.slice(0, 3), 'T', 'B', {});
+    process.env['PUSH_PROVIDER_TIMEOUT_MS'] = '20';
+    try {
+      vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+      await expect(new ExpoPushProvider().sendPush(tokens.slice(0, 1), 'T', 'B', {})).rejects.toThrow('timed out');
+    } finally {
+      delete process.env['PUSH_PROVIDER_TIMEOUT_MS'];
+    }
+    expect(await failures()).toEqual({
+      'request:http_5xx': 2, 'request:http_429': 1, 'request:network': 1, 'request:bad_response': 2, 'request:timeout': 1,
+    });
+    expect(JSON.stringify(lines)).not.toContain('ExponentPushToken');
+  });
+
+  it('receipts: every error class is counted; ids Expo does not know yet are skipped', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true, status: 200, text: async () => '',
+      json: async () => ({ data: {
+        'r-1': { status: 'ok' },
+        'r-2': { status: 'error', details: { error: 'InvalidCredentials' } },
+        'r-3': { status: 'error', details: { error: 'InvalidCredentials' } },
+        'r-4': { status: 'error', details: { error: 'MessageRateExceeded' } },
+      } }),
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const outcome = await new ExpoPushProvider().checkReceipts(['r-1', 'r-2', 'r-3', 'r-4', 'r-not-ready'], { kind: 'vendor_order_alert' });
+    expect(outcome).toEqual({ ok: 1, failed: ['InvalidCredentials', 'InvalidCredentials', 'MessageRateExceeded'] });
+    expect(JSON.parse((fetchMock.mock.calls[0] as unknown as [string, { body: string }])[1].body)).toEqual({ ids: ['r-1', 'r-2', 'r-3', 'r-4', 'r-not-ready'] });
+    expect(await failures()).toEqual({ 'receipt:InvalidCredentials': 2, 'receipt:MessageRateExceeded': 1 });
+  });
+
+  it('the production adapter reads the receipts of accepted tickets after the configured delay', async () => {
+    const fetchMock = vi.fn(async (url: string) => (url.endsWith('/getReceipts')
+      ? { ok: true, status: 200, text: async () => '', json: async () => ({ data: { 'r-9': { status: 'error', details: { error: 'DeviceNotRegistered' } } } }) }
+      : { ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ status: 'ok', id: 'r-9' }] }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    await new ExpoPushProvider({ receiptCheckDelayMs: 5 }).sendPush(tokens.slice(0, 1), 'T', 'B', { kind: 'vendor_order_alert' });
+    await vi.waitFor(async () => expect(await failures()).toEqual({ 'receipt:DeviceNotRegistered': 1 }));
+    expect(fetchMock.mock.calls.map((c) => (c as unknown as [string])[0].split('/').at(-1))).toEqual(['send', 'getReceipts']);
+  });
+
+  it('receipts are on by default for PUSH_PROVIDER=expo and can be turned off', () => {
+    delete process.env['EXPO_PUSH_RECEIPT_DELAY_MS'];
+    expect(expoReceiptCheckDelayMs()).toBe(60_000);
+    process.env['EXPO_PUSH_RECEIPT_DELAY_MS'] = '0';
+    try {
+      expect(expoReceiptCheckDelayMs()).toBeNull();
+    } finally {
+      delete process.env['EXPO_PUSH_RECEIPT_DELAY_MS'];
+    }
   });
 });

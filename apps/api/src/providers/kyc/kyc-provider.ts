@@ -1,7 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { nanoid } from 'nanoid';
-import { IdAnalyzerKycProvider } from './id-analyzer-provider';
-import { DiditKycProvider } from './didit-provider';
 import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
@@ -101,22 +99,16 @@ export class ManualReviewKycProvider implements KycProvider {
   async getStatus(): Promise<KycStatus> { return 'pending_manual'; }
 }
 
-/** Provider selection is config, not code. */
+/** Launch verification is human review only. The explicit non-production
+ * sandbox remains a synthetic regression-test adapter, never a launch option. */
 export function getKycProvider(): KycProvider {
-  const provider = process.env['KYC_PROVIDER'] ?? 'sandbox';
-  if (isProduction() && provider === 'sandbox') {
-    throw new Error('KYC_PROVIDER=sandbox is forbidden in production');
+  const production = isProduction();
+  const provider = process.env['KYC_PROVIDER'] ?? (production ? undefined : 'manual');
+  if (provider === 'manual') {
+    return new ManualReviewKycProvider();
   }
-  switch (provider) {
-    case 'sandbox':
-      return new SandboxKycProvider();
-    case 'manual':
-      return new ManualReviewKycProvider();
-    case 'idanalyzer':
-      return new IdAnalyzerKycProvider();
-    case 'didit':
-      return new DiditKycProvider();
-    default:
-      throw new Error(`Unknown KYC_PROVIDER: ${provider}`);
+  if (provider === 'sandbox' && !production) {
+    return new SandboxKycProvider();
   }
+  throw new Error('KYC_PROVIDER must be manual for human review; external KYC is disabled and sandbox is forbidden in production');
 }

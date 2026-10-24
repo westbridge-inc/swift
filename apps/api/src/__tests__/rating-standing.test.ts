@@ -13,6 +13,9 @@ import { RatingService } from '../modules/rating/rating.service';
 import { RatingStatsService } from '../modules/rating/rating-stats.service';
 import { seedRatingTags } from '../modules/rating/tag-taxonomy.seed';
 import { actorStandingView, runActorFold } from '../modules/rating/rating-standing';
+import { clearShownRatingCache } from '../modules/rating/rating-groups';
+import { displayRating } from '../modules/rating/rating-math';
+import { withSuiteCapability } from '../lib/test-target-lock';
 
 // ---------------------------------------------------------------------------
 // Movement R — R9: the Standing view. THE law here is RAT-G: everything the
@@ -153,7 +156,10 @@ describe('RAT-G — the daily fold', () => {
     expect(bd.trend.reduce((s: number, w: { count: number }) => s + w.count, 0)).toBe(2);
 
     // The fold stamps everyone; now the actor view advances.
-    const stamped = await runActorFold(app.prisma);
+    // This scheduled operation is deliberately global. The test guard still
+    // refuses it until this one invocation receives the explicit capability.
+    await expect(runActorFold(app.prisma)).rejects.toMatchObject({ code: 'UNSCOPED_MUTATION_REFUSED' });
+    const stamped = await withSuiteCapability('unscoped-mutation', () => runActorFold(app.prisma));
     expect(stamped).toBeGreaterThan(0);
     const after = await app.inject({
       method: 'GET', url: '/api/v1/vendor/standing',
@@ -165,30 +171,29 @@ describe('RAT-G — the daily fold', () => {
   });
 });
 
+/** Final ratings (past the 7-day edit window) a person received, given in order from `daysAgo`. */
+async function rated(rateeId: string, type: 'CUSTOMER_TO_RIDER' | 'RIDER_TO_CUSTOMER', scores: Array<number | [number, string[]]>, daysAgo: number) {
+  const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+  const { vendor } = await makeVendorWithOwner();
+  for (const [i, entry] of scores.entries()) {
+    const [score, tags] = Array.isArray(entry) ? entry : [entry, []];
+    const o = await makeOrder(customer.userId, vendor.id);
+    const createdAt = new Date(Date.now() - daysAgo * DAY + i * 60_000);
+    await app.prisma.rating.create({ data: {
+      orderId: o.id, raterId: customer.userId, rateeId, type, score, tags, createdAt, editableUntil: new Date(createdAt.getTime() + 7 * DAY),
+    } });
+  }
+}
+
 describe('coaching card (RAT-D)', () => {
+  // TRANSFORMED (COORD 18 Oct, option S): was 3 ratings + a hand-set stat band. A person's band is now computed from
+  // whole groups of 5 final ratings (the stat row no longer decides what the mover sees), so the band is reached with
+  // real ratings: 20 at a 4.25 mean = ATTENTION, then 10 more 5s = a 4.5 mean = GOOD. Same assertions on the card.
   it('appears only at ATTENTION/AT_RISK, with the exact line per negative tag', async () => {
     const rider = await makeUser(['MOVER'], 'MOVER');
-    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
-    const { vendor } = await makeVendorWithOwner();
-    // Folded (yesterday) negative history keyed on rateeId.
-    for (let i = 0; i < 3; i++) {
-      const o = await makeOrder(customer.userId, vendor.id);
-      await app.prisma.rating.create({
-        data: {
-          orderId: o.id, raterId: customer.userId, rateeId: rider.userId,
-          type: 'CUSTOMER_TO_RIDER', score: 2, tags: ['late'],
-          createdAt: new Date(Date.now() - DAY),
-        },
-      });
-    }
-    await stats.recompute({ role: 'RIDER', id: rider.userId });
-    // Force the band (band math is unit-proven in rating-math tests).
-    await app.prisma.actorRatingStat.update({
-      where: { tenantId_subjectRole_subjectId: { tenantId: 'swift-default', subjectRole: 'RIDER', subjectId: rider.userId } },
-      data: { standing: 'ATTENTION' },
-    });
-
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [...Array(15).fill(5), ...Array(5).fill([2, ['late']])], 30);
     const view = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    expect(view.standing).toBe('ATTENTION');
     expect(view.coaching).toHaveLength(1);
     expect(view.coaching[0]).toEqual({
       tag: 'late', label: 'Late',
@@ -196,12 +201,56 @@ describe('coaching card (RAT-D)', () => {
     });
 
     // Back to GOOD → the card disappears (no nagging healthy actors).
-    await app.prisma.actorRatingStat.update({
-      where: { tenantId_subjectRole_subjectId: { tenantId: 'swift-default', subjectRole: 'RIDER', subjectId: rider.userId } },
-      data: { standing: 'GOOD' },
-    });
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', Array(10).fill(5), 20);
     const healthy = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    expect(healthy.standing).toBe('GOOD');
     expect(healthy.coaching).toEqual([]);
+  });
+});
+
+describe('[COORD 18 Oct, option S] a person sees only whole groups of 5 ratings', () => {
+  it('a rider view is built from whole groups of final ratings: figures, trend bars and tags', async () => {
+    const rider = await makeUser(['MOVER'], 'MOVER');
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [5, 1, [4, ['late']], 2, 3, [5, ['late']], 5], 20);
+    const view = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    expect(view.groupSize).toBe(5);
+    expect(view.folded).toEqual({ count: 5, average: 3 });
+    expect(view.trend).toEqual([{ weekStart: new Date(Date.now() - 20 * DAY).toISOString().slice(0, 10), average: 3, count: 5 }]);
+    expect({ ratingCount: view.ratingCount, displayRating: view.displayRating, ratingBucket: view.ratingBucket })
+      .toEqual({ ratingCount: 5, displayRating: displayRating(5, 15), ratingBucket: '(5)' });
+    expect(view.topNegative).toEqual([{ tag: 'late', label: 'Late', count: 1 }]); // the 6th rating's tag is not in a whole group
+  });
+
+  it('the difference attack finds nothing: one more rating leaves the view identical; the fifth adds a whole group', async () => {
+    const rider = await makeUser(['MOVER'], 'MOVER');
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [4, 4, 4, 4, 4], 30);
+    const before = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [[1, ['rude']]], 25); // one passenger's 1 star
+    expect(await actorStandingView(app.prisma, 'RIDER', rider.userId)).toEqual(before);
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [5, 5, 5, 5], 24);
+    const after = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    expect(after.trend).toEqual([before.trend[0], { weekStart: new Date(Date.now() - 25 * DAY).toISOString().slice(0, 10), average: 4.2, count: 5 }]);
+    expect(after.folded).toEqual({ count: 10, average: 4.1 });
+  });
+
+  it('a rating still open to editing is not shown yet', async () => {
+    const rider = await makeUser(['MOVER'], 'MOVER');
+    await rated(rider.userId, 'CUSTOMER_TO_RIDER', [5, 5, 5, 5, 5], 3); // within the 7-day edit window
+    const view = await actorStandingView(app.prisma, 'RIDER', rider.userId);
+    expect(view.folded).toEqual({ count: 0, average: null });
+    expect(view.trend).toEqual([]);
+  });
+
+  it('a customer sees their own star from whole groups only', async () => {
+    clearShownRatingCache();
+    const customer = await makeUser(['CUSTOMER'], 'CUSTOMER');
+    // An excluded rating (the oldest) never counts: counted, the first group would be 1,5,5,5,5.
+    const { vendor } = await makeVendorWithOwner();
+    const o0 = await makeOrder(customer.userId, vendor.id);
+    await app.prisma.rating.create({ data: { orderId: o0.id, raterId: customer.userId, rateeId: customer.userId, type: 'RIDER_TO_CUSTOMER', score: 1, state: 'EXCLUDED', createdAt: new Date(Date.now() - 40 * DAY), editableUntil: new Date(Date.now() - 33 * DAY) } });
+    await rated(customer.userId, 'RIDER_TO_CUSTOMER', [5, 5, 5, 5, 5, 1], 20);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/customer/rating', headers: { authorization: `Bearer ${customer.token}` } });
+    expect(res.json().data).toEqual({ displayRating: displayRating(5, 25), ratingBucket: '(5)', ratingCount: 5, topRated: false });
   });
 });
 

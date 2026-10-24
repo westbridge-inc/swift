@@ -19,6 +19,8 @@ import { adminRoutes } from '../../modules/admin/admin.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { createQueues, type SwiftQueues } from '../../jobs/queue';
 import { recoveryFor } from '../../jobs/recovery-policy';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from '../helpers/retained-evidence';
+import { REAL_PNG } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-3 · PLAT-02 — a worker crashes mid-flow and the platform recovers.
@@ -87,7 +89,9 @@ if (fileSlots !== 1) {
 }
 
 const DAY = 24 * 60 * 60 * 1000;
-const PHONE_PREFIX = '+5920334';
+// [SAFE-B · retained history] A courier drop-off proof is immutable evidence: its job and everyone it names
+// are kept after the suite, so the phones live in a namespace no other suite uses or purges, unique to the run.
+const PHONE_PREFIX = retainedPhonePrefix('08');
 const FIXTURE = 'gold3-plat02-fixture';
 const API_ROOT = process.cwd();
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold3-plat02-'));
@@ -189,7 +193,7 @@ function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token?: st
 
 function postPhoto(orderId: string, token: string, route: 'proof-photo' | 'pickup-proof-photo' = 'proof-photo') {
   const boundary = `----gold3${nanoid(8)}`;
-  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 3)]);
+  const png = REAL_PNG; // [Row 108] a real photo: the storage seam reads every photo with the real decoder
   return app.inject({
     method: 'POST',
     url: `/api/v1/courier/order/${orderId}/${route}`,
@@ -270,7 +274,9 @@ async function jobsFor(queue: Queue, name: string, orderId: string, states: JobS
 /** Each job re-read from its queue (the instance `add` returns never updates). */
 async function describeJobs(jobs: Job[]) {
   return Promise.all(jobs.map(async (j) => {
-    const fresh = j.id ? (await queues.dispatchQueue.getJob(j.id)) ?? j : j;
+    // [row 266] Offer timeouts live on their own queue.
+    const own = j.queueName === queues.offerQueue.name ? queues.offerQueue : queues.dispatchQueue;
+    const fresh = j.id ? (await own.getJob(j.id)) ?? j : j;
     return { id: fresh.id, name: fresh.name, state: await fresh.getState(), attemptsMade: fresh.attemptsMade, failedReason: fresh.failedReason, processedOn: fresh.processedOn, finishedOn: fresh.finishedOn };
   }));
 }
@@ -319,7 +325,7 @@ async function offerDiagnostics(orderId: string) {
   return {
     order: { status: row.status, riderId: row.riderId },
     offer: await app.redis.get(offerKey(orderId)),
-    offerTimeouts: await describeJobs(await jobsFor(queues.dispatchQueue, 'offer-timeout', orderId, ALL_STATES)),
+    offerTimeouts: await describeJobs(await jobsFor(queues.offerQueue, 'offer-timeout', orderId, ALL_STATES)),
     dispatchJobs: await describeJobs(await jobsFor(queues.dispatchQueue, 'dispatch-order', orderId, ALL_STATES)),
     deadLetters: await deadLetters(),
   };
@@ -359,29 +365,36 @@ async function purgeFixtures() {
       where: { OR: [{ customerId: { in: ids } }, { riderId: { in: riderIds } }, { vendorId: { in: vendorIds } }] },
       select: { id: true },
     })).map((o) => o.id);
-    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: orderIds } } });
-    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: ids } } });
+    // [SAFE-B · retained history] An issued drop-off proof keeps its job and the people and store it names.
+    // Everything else goes as before; what stays is taken out of service at the end.
+    const kept = await retainedCohort(app.prisma, { orderIds });
+    const goneOrderIds = without(orderIds, kept.orderIds);
+    const goneUserIds = without(ids, kept.userIds);
+    await app.prisma.orderOutbox.deleteMany({ where: { orderId: { in: goneOrderIds } } });
+    await app.prisma.checkoutReceipt.deleteMany({ where: { userId: { in: goneUserIds } } });
     await app.prisma.alertDelivery.deleteMany({ where: { OR: [{ subjectId: { in: orderIds } }, { recipientId: { in: ids } }] } });
     await app.prisma.algoDecision.deleteMany({ where: { subjectId: { in: [...orderIds, ...riderIds] } } });
     await app.prisma.dispatchSearch.deleteMany({ where: { subjectId: { in: orderIds } } });
     await app.prisma.batchEvaluation.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
-    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: orderIds } }, { riderId: { in: riderIds } }] } });
+    await app.prisma.earning.deleteMany({ where: { OR: [{ orderId: { in: goneOrderIds } }, { riderId: { in: without(riderIds, kept.riderIds) } }] } });
     if (orderIds.length > 0) {
       await app.prisma.$executeRaw`DELETE FROM "notifications" WHERE "data"->>'orderId' IN (${Prisma.join(orderIds)})`;
     }
     await app.prisma.notification.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.order.deleteMany({ where: { id: { in: orderIds } } });
+    await app.prisma.order.deleteMany({ where: { id: { in: goneOrderIds } } });
     await app.prisma.cart.deleteMany({ where: { customerId: { in: ids } } });
-    await app.prisma.address.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.item.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.category.deleteMany({ where: { vendorId: { in: vendorIds } } });
-    await app.prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
-    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds } } });
+    await app.prisma.address.deleteMany({ where: { userId: { in: goneUserIds } } });
+    const goneVendorIds = without(vendorIds, kept.vendorIds);
+    await app.prisma.item.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.category.deleteMany({ where: { vendorId: { in: goneVendorIds } } });
+    await app.prisma.vendor.deleteMany({ where: { id: { in: goneVendorIds } } });
+    await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds }, userId: { in: goneUserIds } } });
     await app.prisma.session.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.rider.deleteMany({ where: { id: { in: riderIds } } });
+    await app.prisma.rider.deleteMany({ where: { id: { in: without(riderIds, kept.riderIds) } } });
     await app.prisma.admin.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.customer.deleteMany({ where: { userId: { in: ids } } });
-    await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
+    await app.prisma.customer.deleteMany({ where: { userId: { in: goneUserIds } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: goneUserIds } } });
+    await retireKeptScaffolding(app.prisma, kept);
   });
 }
 
@@ -415,15 +428,15 @@ beforeAll(async () => {
   queues = createQueues(app.redis, app.log);
   app.decorate('queues', queues);
   app.decorate('dispatchQueue', queues.dispatchQueue);
+  app.decorate('offerQueue', queues.offerQueue);
   app.decorate('workersActive', false);
   await app.register(courierRoutes, { prefix: '/api/v1/courier' });
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.register(customerRoutes, { prefix: '/api/v1/customer' });
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  // The courier routes' storage provider has read UPLOAD_DIR at registration;
-  // nothing else may inherit it (the worker processes spawned below included).
-  vi.unstubAllEnvs();
+  // API and worker keep the same explicit storage root for the whole journey.
+  // Changing live configuration after registration must refuse new uploads.
   await purgeFixtures();
   // Files run one at a time (the guard at the top of this file refuses to load
   // otherwise): nothing another file left in the shared queues (jobs,
@@ -443,6 +456,7 @@ afterAll(async () => {
   const added = [...now].filter((k) => !redisKeysBefore.has(k));
   if (added.length > 0) await app.redis.del(...added);
   await app.close();
+  vi.unstubAllEnvs();
   rmSync(UPLOAD_DIR, { recursive: true, force: true });
 }, 120_000);
 
@@ -498,7 +512,9 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
       });
     } finally {
       vi.unstubAllEnvs();
+      vi.stubEnv('UPLOAD_DIR', UPLOAD_DIR);
     }
+    expect(process.env['UPLOAD_DIR']).toBe(UPLOAD_DIR);
     expect(process.env['LIFECYCLE_V2']).toBe('');
     expect(process.env['ORDER_HOLD_MINUTES']).toBeUndefined();
     expect(held.statusCode, held.body).toBe(201);
@@ -580,7 +596,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     await waitFor('the offer to be published to Arjun', async () => ({
       offer: await app.redis.get(offerKey(o1)),
       rows: await sys(() => app.prisma.alertDelivery.count({ where: { kind: 'MOVER_OFFER', subjectId: o1, recipientId: a.userId } })),
-      timeouts: (await jobsFor(queues.dispatchQueue, 'offer-timeout', o1, ['delayed'])).length,
+      timeouts: (await jobsFor(queues.offerQueue, 'offer-timeout', o1, ['delayed'])).length,
       dispatched: (await jobsFor(queues.dispatchQueue, 'dispatch-order', o1, ['completed'])).length,
     }), (v) => v.offer?.startsWith(`${a.riderId}:`) === true && v.rows === 1 && v.timeouts === 1 && v.dispatched === 1, 60_000, { consumer: worker, diagnose: () => offerDiagnostics(o1) });
 
@@ -592,7 +608,7 @@ describe('GOLD-3 · PLAT-02 — worker crash and job recovery mid-flow', () => {
     expect(card!.split(':')[0]).toBe(a.riderId);
     const recovered = await call('GET', '/api/v1/rider/offers/current', a.token);
     expect(recovered.json().data.offer.orderId).toBe(o1);
-    const timeouts = await jobsFor(queues.dispatchQueue, 'offer-timeout', o1, ['delayed']);
+    const timeouts = await jobsFor(queues.offerQueue, 'offer-timeout', o1, ['delayed']);
     expect(timeouts.map((j) => ({ riderId: j.data.riderId, attemptId: j.data.attemptId }))).toEqual([{ riderId: a.riderId, attemptId: card!.split(':')[1] }]);
     const done = await jobsFor(queues.dispatchQueue, 'dispatch-order', o1, ['completed']);
     expect(done).toHaveLength(1);

@@ -1,6 +1,6 @@
 import { Linking } from 'react-native';
 import { api } from './api';
-import { safeNavigate } from '../navigation/navigationRef';
+import { navigationRef, safeNavigate } from '../navigation/navigationRef';
 
 // The QR/link DEEP-LINK ROUTER [qr spec Part 6]. Universal links hand the app
 // a full https URL for /store/{slug} or /s/{code}; this module turns it into
@@ -76,11 +76,27 @@ export async function resolveDestination(dest: LinkDestination): Promise<Resolve
   }
 }
 
-async function resolveAndGo(dest: LinkDestination, request: number): Promise<void> {
+/** [UI-SWEEP U30] A retry that lands REPLACES the "Could not connect to this
+ *  store" screen it was tapped on: Back from the store never returns to a
+ *  failure that is no longer true. Only when that outcome is on top. */
+function replaceOutcomeWithStore(params: Record<string, unknown>): boolean {
+  try {
+    if (!navigationRef.isReady() || navigationRef.getCurrentRoute()?.name !== 'QrOutcome') return false;
+    // StackActions.replace's action, inline: this module stays free of the navigation UI package.
+    navigationRef.dispatch({ type: 'REPLACE', payload: { name: 'Storefront', params } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveAndGo(dest: LinkDestination, request: number, fromOutcome = false): Promise<void> {
   const outcome = await resolveDestination(dest);
   if (request !== latestRequest) return;
   if (outcome.ok) {
-    safeNavigate('Storefront', { screen: 'Restaurant', params: { vendorId: outcome.vendorId } });
+    const store = { screen: 'Restaurant', params: { vendorId: outcome.vendorId } };
+    if (fromOutcome && replaceOutcomeWithStore(store)) return;
+    safeNavigate('Storefront', store);
     return;
   }
   safeNavigate('QrOutcome', { reason: outcome.reason, destination: dest, requestId: request });
@@ -89,8 +105,9 @@ async function resolveAndGo(dest: LinkDestination, request: number): Promise<voi
 let navReady = false;
 let latestRequest = 0;
 
+/** The two fixed fee returns: MMG's page and the card page (CARD-CHECKOUT-API section 7). */
 export function isWeeklyFeeReturn(url: string): boolean {
-  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && parsed.pathname === '/mmg/return'; } catch { return false; }
+  try { const parsed = new URL(url); return parsed.protocol === 'swift:' && parsed.hostname === 'pay' && (parsed.pathname === '/mmg/return' || parsed.pathname === '/card/return'); } catch { return false; }
 }
 
 function handleUrl(url: string | null): boolean {
@@ -117,7 +134,7 @@ function handleUrl(url: string | null): boolean {
  * uninstalled handler wins over a slow retry, just as it wins over initialURL. */
 export async function retryQrDestination(destination: LinkDestination, requestId: number): Promise<void> {
   if (!navReady || requestId !== latestRequest) return;
-  await resolveAndGo(destination, ++latestRequest);
+  await resolveAndGo(destination, ++latestRequest, true);
 }
 
 /** RootNavigator onReady: deliver the URL that launched a cold start. */

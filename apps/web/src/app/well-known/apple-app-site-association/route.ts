@@ -20,7 +20,7 @@
 
 export const dynamic = 'force-dynamic';
 
-/** Swift's Apple Developer Team ID (Westbridge Inc). Public by design. */
+/** Swift's Apple Developer Team ID (the operating company's; its name is in site.config.ts). Public by design. */
 const TEAM_ID = process.env['APPLE_TEAM_ID'] ?? 'N3JV22LC84';
 const BUNDLE_ID = process.env['APPLE_BUNDLE_ID'] ?? 'gy.swift.app';
 

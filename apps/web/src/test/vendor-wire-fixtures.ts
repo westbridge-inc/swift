@@ -84,6 +84,9 @@ export function wireVendorOrder(over: Record<string, unknown> = {}) {
     customer: { id: 'customer-1', firstName: 'Test', lastName: 'Customer', avatar: null },
     rider: null,
     vendor: { id: 'vendor-1', name: 'Test Kitchen', selfDeliveryEnabled: false },
+    // Row 52: the caller's role at THIS order's store may confirm an MMG
+    // payment (owner/manager). Staff fixtures override it to false.
+    canConfirmPayment: true,
     ...over,
   };
 }

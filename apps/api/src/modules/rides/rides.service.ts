@@ -1,13 +1,21 @@
+import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance } from 'fastify';
-import type { PrismaClient } from '@prisma/client';
+import type { Prisma, PrismaClient } from '@prisma/client';
 import { RideClass } from '@prisma/client';
-import { FareService } from './fare.service';
+import { FareService, type ItineraryEstimate, type TieredEstimate } from './fare.service';
 import { newRidePin } from './ride-pin';
+import type { TaxiStopPlan } from './taxi-itinerary';
+import { stopPreview, type TaxiStopPreview } from './taxi-stops-read';
+import { taxiWaitingEnabled, waitingDisclosure, waitingTermsCreate, type TaxiWaitingDisclosure } from './taxi-waiting';
 import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
+import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
+import { assertHirePassengers } from './hire-passengers';
+import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
+import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
 
 const ACTIVE_TAXI_STATUSES = [
   'PENDING',
@@ -36,7 +44,7 @@ const rideInProgress = () => new AppError(
 // for the gates and the creation path — the route and the 2-min queue scan
 // both call this. Error PRECEDENCE is preserved exactly as the route has
 // always thrown it (active → banned → availability(flag) → restricted →
-// selfie → fare → capacity → L2) and is pinned by
+// fare → capacity → L2; the customer photo gate is gone, owner 16 Oct) and is pinned by
 // taxi-characterization.test.ts.
 // ---------------------------------------------------------------------------
 
@@ -55,6 +63,122 @@ export interface RideRequestBody {
   dropoffAddress: string;
   passengerCount: number;
   rideClass: RideClass;
+  /** [TAXI multi-stop] The intermediate stops, validated and numbered by
+   *  planTaxiStops (the switch, the count, each stop, the market). Absent or
+   *  empty: a ride without stops, created exactly as before. */
+  stops?: readonly TaxiStopPlan[];
+  /** [TAXI multi-stop] The route fare the passenger was quoted for exactly
+   *  this itinerary and tier (whole units). Required with stops, compared with
+   *  the server's own fare and never used as the price. Ignored without stops. */
+  expectedFare?: number;
+}
+
+/**
+ * [TAXI multi-stop 3/8] The request's command identity, the checkout way
+ * (customer.routes /checkout, order/checkout-outbox): the customer's
+ * Idempotency-Key and the request's fingerprint. The receipt is written INSIDE
+ * the ride's own transaction, and checkout_receipts is unique on (userId,
+ * idempotencyKey), so one key can never make two rides, whatever Redis
+ * remembers. A ride request's key is stored in its own namespace
+ * (rideRequestReceiptKey), never mistaken for a checkout's.
+ */
+export interface RideRequestCommand {
+  idempotency?: { key: string; requestHash: string };
+  /** Told the moment the ride's transaction committed: from then on the ride
+   *  exists, whatever happens after it. */
+  onCommitted?: (committed: { orderId: string; receiptId: string | null }) => void;
+}
+
+/** The receipt namespace of a ride request's Idempotency-Key. */
+export function rideRequestReceiptKey(idempotencyKey: string): string {
+  return `taxi-request:${idempotencyKey}`;
+}
+
+/** The Redis key of a ride request's in-flight claim. */
+export function rideRequestClaimKey(userId: string, idempotencyKey: string): string {
+  return `ride-request:idem:${userId}:${idempotencyKey}`;
+}
+
+/** The answer to a ride request. A ride without stops has exactly the keys it
+ *  has always had; a ride with stops adds stopCount and stops. */
+export interface RideRequestAnswer {
+  ride: {
+    id: string;
+    orderNumber: string;
+    status: string;
+    fare: number;
+    rideClass: RideClass;
+    currencyCode: string;
+    fareSource: string;
+    distanceKm: number;
+    durationMin: number;
+    ridePin: string | null;
+    pickupAddress: string;
+    dropoffAddress: string;
+    stopCount?: number;
+    stops?: TaxiStopPreview[];
+    /** [TAXI waiting charge] The waiting terms frozen on this ride at booking
+     *  (CONTRACT §8.2); only for a ride booked while TAXI_WAITING_CHARGE is on. */
+    waiting?: TaxiWaitingDisclosure;
+  };
+  message: string;
+}
+
+/** What a receipt keeps of the answer: everything but the PIN, a secret the
+ *  order row already holds and a replay reads from there. */
+type RideAnswerFacts = Omit<RideRequestAnswer['ride'], 'ridePin' | 'stopCount'>;
+
+/** ONE place shapes the answer, in one key order, for the fresh request and
+ *  for every replay of it. */
+export function shapeRideRequestAnswer(facts: RideAnswerFacts, ridePin: string | null): RideRequestAnswer {
+  const stops = facts.stops ?? [];
+  return {
+    ride: {
+      id: facts.id,
+      orderNumber: facts.orderNumber,
+      status: facts.status,
+      fare: facts.fare,
+      rideClass: facts.rideClass,
+      currencyCode: facts.currencyCode,
+      fareSource: facts.fareSource,
+      distanceKm: facts.distanceKm,
+      durationMin: facts.durationMin,
+      ridePin,
+      pickupAddress: facts.pickupAddress,
+      dropoffAddress: facts.dropoffAddress,
+      ...(stops.length > 0 ? { stopCount: stops.length, stops: stopPreview(stops) } : {}),
+      ...(facts.waiting ? { waiting: facts.waiting } : {}),
+    },
+    message: 'Looking for a driver near you…',
+  };
+}
+
+/** A stored receipt's answer, shaped again with the ride's current PIN. */
+export function replayRideRequestAnswer(result: Prisma.JsonValue, ridePin: string | null): RideRequestAnswer {
+  const ride = (result as { ride?: RideAnswerFacts } | null)?.ride;
+  if (!ride || typeof ride.id !== 'string') {
+    throw new Error('ride request receipt holds no ride answer');
+  }
+  return shapeRideRequestAnswer(ride, ridePin);
+}
+
+/** [CHECKOUT-IDEM, the ride's twin] The database could not confirm whether
+ *  the ride committed (its transaction failed after its work was done, and no
+ *  receipt proves it). Not a refusal: the ride may exist. The claim on the key
+ *  is kept for a short settle window, and the passenger checks the active ride
+ *  instead of booking again. */
+export class RideRequestOutcomeUnknownError extends AppError {
+  constructor() {
+    super(503, 'RIDE_REQUEST_OUTCOME_UNKNOWN', 'We could not confirm your ride yet. Check your active ride before you book again.');
+  }
+}
+
+/** The server's fare for this itinerary and tier is not the one the passenger
+ *  was shown: nothing is booked, and the answer names the fare now. */
+export function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
+  return new AppError(409, 'FARE_CHANGED',
+    'The fare for this trip has changed. Check the new fare, then book again.',
+    { expectedFare: expectedFare ?? null, fare, rideClass, currencyCode });
 }
 
 type GatedUser = {
@@ -62,7 +186,6 @@ type GatedUser = {
   tenantId: string;
   countryCode: string;
   trustLevel: string;
-  selfieCapturedAt: Date | null;
 };
 
 /**
@@ -74,12 +197,24 @@ type GatedUser = {
 export async function assertRideGates(
   app: RideRequestApp,
   userId: string,
-  opts: { dispatch?: DispatchService; pickup?: { lat: number; lng: number } } = {},
+  opts: {
+    dispatch?: DispatchService;
+    pickup?: { lat: number; lng: number };
+    /** [REVIEW-G #2022 S4-3] What the requested ride needs of a car (class,
+     *  party, stops): the pre-check counts only cars dispatch could offer it to. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean };
+  } = {},
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
-    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true },
+    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, tenant: { select: { kind: true } } },
   });
+
+  // [REVIEW-PARTNER · DL-5] The store-review fiction books no rides: its taxi
+  // driver's board stays honestly empty, and nothing — no order, no queue
+  // entry, no dispatch, no SMS — is written. First, so no other gate (a
+  // selfie, an ID check through a provider) is ever asked of a reviewer.
+  if (user.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError(REVIEW_DEMO_NO_BOOKINGS_MESSAGE);
 
   const active = await app.prisma.order.findFirst({
     where: activeTaxiWhere(user.id, user.tenantId),
@@ -102,7 +237,7 @@ export async function assertRideGates(
   // drivers come online mid-search).
   if (opts.dispatch && opts.pickup
     && process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId);
+    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId, null, user.id, opts.ride ?? null);
     if (supply.level === 'NONE') {
       throw new AppError(
         409,
@@ -112,15 +247,13 @@ export async function assertRideGates(
     }
   }
   if (restriction === 'restricted') {
-    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
+    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides need your ID on file. Add your ID in the app — a person will look at it before rides unlock.');
   }
 
-  // Universal signup selfie (master plan §3): the driver sees who they are
-  // picking up, so a live profile photo is required before booking rides.
-  if (!user.selfieCapturedAt) {
-    throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before booking rides — your driver sees it when they accept.');
-  }
-
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a
+  // photo, taxi included: a ride needs only the ID on file (assertL2, after this). Partners keep
+  // their selfie rules (go-online). Builds 9-11 show their photo door only on SELFIE_REQUIRED,
+  // which this path no longer sends, so they simply stop asking.
   return user;
 }
 
@@ -129,11 +262,14 @@ export async function assertRideGates(
  * getting into a stranger's car is the highest-trust action on Swift.
  * This supersedes the old fare-threshold gate (every ride now needs L2).
  * (Kept separate because the route has always thrown it AFTER fare/capacity.)
+ * [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 now comes the moment a customer's ID goes on file
+ * (no admin approval unless an automatic check holds it), so the words say "on file", not
+ * "verified" — nobody may be told Swift verified an ID a person never looked at.
  */
 export function assertL2(user: GatedUser): void {
   if (user.trustLevel === 'L1') {
     throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-      'Rides need a one-time ID verification first — it takes a minute in the app and covers every future ride.',
+      'Rides need your ID on file first — add it once in the app (it takes a minute) and it covers every future ride.',
       { reason: 'first_ride_l2' });
   }
 }
@@ -156,13 +292,23 @@ export async function createRideRequest(
    *  at join time. If account tenancy changed meanwhile, fail closed instead
    *  of creating an order in a different operator from the scanned supply. */
   expectedTenantId?: string,
+  /** [TAXI multi-stop 3/8] The command's identity (Idempotency-Key) and its
+   *  commit listener; the route passes them, the queue scan does not. */
+  command: RideRequestCommand = {},
 ): Promise<{
   order: { id: string; orderNumber: string; status: string };
   estimate: { fare: number; currencyCode: string; distanceKm: number; durationMin: number; source: string };
   ridePin: string;
+  answer: RideRequestAnswer;
 }> {
+  // [TAXI multi-stop] Validated and numbered by the caller (planTaxiStops);
+  // none for a ride without stops, which takes exactly the path it always has.
+  const stops = body.stops ?? [];
+  if (stops.length === 0) assertRoadTripInMarket(body);
   const user = await assertRideGates(app, userId,
-    availabilityPreCheck ? { dispatch, pickup: body.pickup } : {});
+    availabilityPreCheck
+      ? { dispatch, pickup: body.pickup, ride: { rideClass: body.rideClass, passengerCount: body.passengerCount, taxiStops: stops.length > 0 } }
+      : {});
   if (expectedTenantId && user.tenantId !== expectedTenantId) {
     throw new AppError(
       409,
@@ -173,7 +319,16 @@ export async function createRideRequest(
   const orderTenantId = expectedTenantId ?? user.tenantId;
 
   // [M-34] Zone pricing is the order's tenant's, in the rider's country.
-  const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
+  // [TAXI multi-stop] A ride with stops is priced as ONE trip over its whole
+  // road (fare.service estimateItineraryTiers: base and minimum once, no fee
+  // per stop); it refuses a zone-priced route (409) and a route the engine
+  // cannot drive (503) rather than guess.
+  const itineraryEstimate: ItineraryEstimate | null = stops.length === 0
+    ? null
+    : await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, orderTenantId);
+  const tiered: TieredEstimate = itineraryEstimate
+    ?? await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
+  assertHirePassengers(body.passengerCount);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
   if (!tier) {
     throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
@@ -186,6 +341,18 @@ export async function createRideRequest(
       { capacity: tier.capacity, passengerCount: body.passengerCount });
   }
 
+  // [TAXI multi-stop · PRICE-LOCK] The passenger books the fare they were
+  // shown, or nothing: a fare that moved since the quote (rates, the zone
+  // table, the road, the tier) is shown to them again before anything is
+  // written. The order always stores the SERVER's fare; the passenger's number
+  // is only ever compared. A ride with stops must carry it (the route refuses
+  // a missing one first, 400 EXPECTED_FARE_REQUIRED); a ride without stops is
+  // compared whenever the app sent it, and an app from before the lock (no
+  // fare) books at the server fare as it always did.
+  if ((stops.length > 0 || body.expectedFare !== undefined) && body.expectedFare !== tier.fare) {
+    throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
+  }
+
   const estimate = {
     fare: tier.fare,
     currencyCode: tiered.currencyCode,
@@ -195,6 +362,15 @@ export async function createRideRequest(
     routeSource: tiered.routeSource,
     source: tier.source,
   };
+  // The leg that ENDS at each stop, as priced: frozen on the stop row.
+  const legs = itineraryEstimate?.legs ?? [];
+  // [TAXI waiting charge] While the switch is on, the market's waiting terms are
+  // frozen on the ride with it (the passenger pays what the estimate showed),
+  // in the fare's currency. Off: nothing is read or written, today's ride.
+  const waitingTerms = taxiWaitingEnabled() ? await fareService.waitingTerms(user.countryCode) : null;
+  const waiting = waitingTerms
+    ? { terms: { chargePerBlock: waitingTerms.chargePerBlock, blockMinutes: waitingTerms.blockMinutes, currencyCode: estimate.currencyCode }, version: waitingTerms.version }
+    : null;
 
   assertL2(user);
 
@@ -207,7 +383,10 @@ export async function createRideRequest(
   // driver and attempt-capped (driver.routes MAX_PIN_ATTEMPTS).
   const ridePin = newRidePin();
 
-  const order = await app.prisma.$transaction(async (tx) => {
+  // [TAXI multi-stop] Set once the transaction's work is done: a failure after
+  // this point came from the commit itself, and its outcome is unknown.
+  let staged = null as { order: { id: string; orderNumber: string; status: string }; facts: RideAnswerFacts; receiptId: string | null } | null;
+  const committed = await app.prisma.$transaction(async (tx) => {
     await lockActiveOrderCustomer(tx, user.id, orderTenantId);
 
     // The pre-flight check above preserves the request's historical error
@@ -223,7 +402,7 @@ export async function createRideRequest(
       throw rideInProgress();
     }
 
-    return tx.order.create({
+    const created = await tx.order.create({
       data: {
         tenantId: orderTenantId,
         orderNumber: generateOrderNumber(todayCount + 1),
@@ -255,20 +434,97 @@ export async function createRideRequest(
         totalAmount: estimate.fare,
         paymentMethod: 'CASH',
         ridePin,
+        // [TAXI multi-stop] The itinerary, frozen with the ride in the same
+        // commit: the stop count on the order, one row per intermediate stop in
+        // the passenger's order, each with the priced leg that ends at it. The
+        // pickup and the FINAL destination stay in pickup* / delivery*, and the
+        // distance, minutes and fare above are the whole route's. A stop row
+        // carries its ride's tenant (the lineage trigger proves it).
+        ...(stops.length > 0 ? {
+          taxiStopCount: stops.length,
+          taxiStops: {
+            create: stops.map((stop, i) => ({
+              tenantId: orderTenantId,
+              sequence: stop.sequence,
+              lat: stop.lat,
+              lng: stop.lng,
+              address: stop.address,
+              legMeters: legs[i]?.meters ?? null,
+              legSeconds: legs[i]?.seconds ?? null,
+            })),
+          },
+        } : {}),
+        // [TAXI waiting charge] The terms the passenger was shown, frozen with the ride.
+        ...(waiting ? { taxiRideWaiting: { create: waitingTermsCreate(orderTenantId, waiting.terms, waiting.version) } } : {}),
         statusHistory: {
-          create: { status: 'PENDING', changedBy: user.id, note: `Ride requested — fixed fare $${estimate.fare}` },
+          create: {
+            status: 'PENDING',
+            changedBy: user.id,
+            note: stops.length === 0
+              ? `Ride requested — fixed fare $${estimate.fare}`
+              : `Ride requested — fixed fare $${estimate.fare}, ${stops.length} ${stops.length === 1 ? 'stop' : 'stops'}`,
+          },
         },
       },
     });
-  }).catch((error: unknown) => {
-    // [DISPATCH 1/3] orders_one_live_taxi_per_customer_key: the database itself
-    // refuses a second live taxi for one customer. The lock and check above make
-    // this a belt (a live ride under another tenant is the one shape they miss);
-    // it answers exactly as the check does, never with a raw constraint error.
-    const e = error as { code?: unknown; meta?: { target?: unknown } } | null;
-    if (e?.code === 'P2002' && String(e.meta?.target ?? '').includes('customerId')) throw rideInProgress();
-    throw error;
+
+    const facts: RideAnswerFacts = {
+      id: created.id,
+      orderNumber: created.orderNumber,
+      status: created.status,
+      fare: estimate.fare,
+      rideClass: body.rideClass,
+      currencyCode: estimate.currencyCode,
+      fareSource: estimate.source,
+      distanceKm: estimate.distanceKm,
+      durationMin: estimate.durationMin,
+      pickupAddress: body.pickupAddress,
+      dropoffAddress: body.dropoffAddress,
+      ...(stops.length > 0 ? { stops: stopPreview(stops) } : {}),
+      ...(waiting ? { waiting: waitingDisclosure(waiting.terms) } : {}),
+    };
+    // [TAXI multi-stop · CHECKOUT-IDEM] The command's one answer commits WITH
+    // the ride: a same-key retry is answered from here even if Redis forgot,
+    // and a second insert under the same key rolls its whole ride back.
+    const receiptId = command.idempotency
+      ? await persistCheckoutReceiptInTransaction(tx, {
+        userId: user.id,
+        tenantId: orderTenantId,
+        idempotencyKey: command.idempotency.key,
+        requestHash: command.idempotency.requestHash,
+        orderIds: [created.id],
+        result: { ride: facts },
+      })
+      : null;
+    staged = { order: { id: created.id, orderNumber: created.orderNumber, status: created.status }, facts, receiptId };
+    return staged;
+  }).catch(async (error: unknown) => {
+    // The transaction's work never finished: COMMIT was never sent, so it rolled back.
+    if (!staged) {
+      // [DISPATCH 1/3] orders_one_live_taxi_per_customer_key: the database itself
+      // refuses a second live taxi for one customer. The lock and check above make
+      // this a belt (a live ride under another tenant is the one shape they miss);
+      // it answers exactly as the check does, never with a raw constraint error.
+      const e = error as { code?: unknown; meta?: { target?: unknown } } | null;
+      if (e?.code === 'P2002' && String(e.meta?.target ?? '').includes('customerId')) throw rideInProgress();
+      // The same key's receipt is already there: another request under this key committed first.
+      if (command.idempotency && e?.code === 'P2002' && String(e.meta?.target ?? '').includes('idempotencyKey')) {
+        throw new AppError(409, 'DUPLICATE_REQUEST', 'This ride is already being requested — hold on.');
+      }
+      throw error;
+    }
+    // The work was done and the commit failed or lost its answer. Without a
+    // key the error stands as it always has; with one, only the durable receipt
+    // can say whether the ride exists.
+    if (!command.idempotency) throw error;
+    return settleRideRequestCommit(app.prisma, staged, error);
   });
+  const order = committed.order;
+  try {
+    command.onCommitted?.({ orderId: order.id, receiptId: committed.receiptId });
+  } catch (err) {
+    log().error({ err, orderId: order.id }, '[TAXI multi-stop] a ride commit listener threw; ignored, the ride is committed');
+  }
 
   // The customer re-entered the funnel and got a ride — any pending "notify me
   // when drivers are back" watch is now obsolete. Clear it so the 2-min supply
@@ -294,5 +550,38 @@ export async function createRideRequest(
     await dispatch.dispatchOrder(order.id, orderTenantId);
   }
 
-  return { order: { id: order.id, orderNumber: order.orderNumber, status: order.status }, estimate, ridePin };
+  return {
+    order: { id: order.id, orderNumber: order.orderNumber, status: order.status },
+    estimate,
+    ridePin,
+    answer: shapeRideRequestAnswer(committed.facts, ridePin),
+  };
+}
+
+/**
+ * [TAXI multi-stop · CHECKOUT-IDEM, the ride's twin] Settle a ride request
+ * whose transaction rejected AFTER its work was done: the rejection came from
+ * the commit (an error, or an answer lost after the database committed), so
+ * the outcome is unknown and only the durable receipt can settle it. Present:
+ * the ride committed, carry on. Absent or unreadable: the outcome stays
+ * unknown, and the caller keeps its claim on the key for the settle window.
+ */
+async function settleRideRequestCommit<T extends { order: { id: string }; receiptId: string | null }>(
+  prisma: PrismaClient,
+  staged: T,
+  err: unknown,
+): Promise<T> {
+  let landed = false;
+  try {
+    landed = staged.receiptId !== null
+      && (await prisma.checkoutReceipt.count({ where: { id: staged.receiptId } })) === 1;
+  } catch (readErr) {
+    log().error({ err: readErr, orderId: staged.order.id }, '[TAXI multi-stop] the ride receipt could not be read to settle an unknown commit');
+  }
+  if (landed) {
+    log().warn({ err, orderId: staged.order.id }, '[TAXI multi-stop] ride commit answer lost; the durable receipt proves the ride committed');
+    return staged;
+  }
+  log().error({ err, orderId: staged.order.id }, '[TAXI multi-stop] ride commit outcome unknown and no receipt yet; the claim is kept');
+  throw new RideRequestOutcomeUnknownError();
 }

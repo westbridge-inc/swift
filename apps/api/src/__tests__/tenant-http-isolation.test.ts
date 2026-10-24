@@ -8,6 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { customerRoutes } from '../modules/user/customer.routes';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Tenant isolation END-TO-END over HTTP (launch-readiness §1.2): a customer in
@@ -27,7 +28,7 @@ async function customer(tenantId: string) {
   return runWithoutTenant(async () => {
     const u = await app.prisma.user.create({
       data: {
-        phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`,
+        phone: testPhone(),
         firstName: 'Http', lastName: 'Tenant',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true, selfieCapturedAt: new Date(), tenantId,

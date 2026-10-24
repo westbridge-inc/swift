@@ -14,6 +14,8 @@ import {
 } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
 import crypto from 'node:crypto';
+import { REAL_PNG, uniquePng } from './helpers/real-image';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Envelope encryption (onboarding spec §5): the bucket only ever holds
@@ -24,12 +26,12 @@ import crypto from 'node:crypto';
 let app: FastifyInstance;
 let token: string;
 let userId: string;
+// [VERIFY-DOCS V3] A render link is minted for a reviewer who holds the
+// document reviewer grant; the render route re-checks it on every load.
+let reviewerId: string;
 const marker = nanoid(6).toLowerCase();
-// Real PNG magic at offset 0 — the upload route magic-byte-sniffs content now.
-const PLAINTEXT = Buffer.concat([
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  Buffer.from(`swift-envelope-test-${marker}`),
-]);
+// [Row 108] A real PNG, unique to this run: the upload route reads every photo with the real decoder.
+const PLAINTEXT = uniquePng(`swift-envelope-test-${marker}`);
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -51,13 +53,22 @@ beforeAll(async () => {
   // Direct user + session (the orders.test pattern) — no OTP dance needed.
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Env', lastName: 'Crypt',
       roles: ['MOVER'] as never[], activeRole: 'MOVER' as never,
       isPhoneVerified: true,
     },
   });
   userId = user.id;
+  const reviewer = await app.prisma.user.create({
+    data: {
+      phone: testPhone(),
+      firstName: 'Env', lastName: 'Reviewer',
+      roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, status: 'ACTIVE',
+      isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } },
+    },
+  });
+  reviewerId = reviewer.id;
   token = app.jwt.sign({ userId: user.id, role: 'MOVER', jti: nanoid(8) });
   await app.prisma.session.create({
     data: {
@@ -80,6 +91,11 @@ afterAll(async () => {
     await app.prisma.session.deleteMany({ where: { userId } });
     await app.prisma.customer.deleteMany({ where: { userId } });
     await app.prisma.user.deleteMany({ where: { id: userId } });
+  }
+  if (reviewerId) {
+    await app.prisma.admin.deleteMany({ where: { userId: reviewerId } });
+    await app.prisma.customer.deleteMany({ where: { userId: reviewerId } });
+    await app.prisma.user.deleteMany({ where: { id: reviewerId } });
   }
   await app.close();
 });
@@ -119,15 +135,17 @@ describe('crypto primitives', () => {
   it('SWIFT-106: verifyRenderToken is constant-time, accepts valid, rejects tampered/wrong-length', () => {
     const docId = 'doc-abc';
     const expires = 1_900_000_000;
-    const good = signRenderToken(docId, expires);
-    expect(verifyRenderToken(docId, expires, good)).toBe(true);
+    const good = signRenderToken(docId, expires, 'reviewer-1');
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', good)).toBe(true);
     // One byte flipped, SAME length — timingSafeEqual still compares fully.
     const tampered = (good[0] === 'a' ? 'b' : 'a') + good.slice(1);
-    expect(verifyRenderToken(docId, expires, tampered)).toBe(false);
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', tampered)).toBe(false);
     // Wrong length must return false, never throw (timingSafeEqual throws on ≠ length).
-    expect(verifyRenderToken(docId, expires, good.slice(0, 10))).toBe(false);
+    expect(verifyRenderToken(docId, expires, 'reviewer-1', good.slice(0, 10))).toBe(false);
     // Bound to the exact docId + expiry.
-    expect(verifyRenderToken('other-doc', expires, good)).toBe(false);
+    expect(verifyRenderToken('other-doc', expires, 'reviewer-1', good)).toBe(false);
+    // [VERIFY-DOCS V3] ...and to the reviewer it was minted for.
+    expect(verifyRenderToken(docId, expires, 'reviewer-2', good)).toBe(false);
   });
 
   it('wrap/unwrap round-trips; a different KEK cannot unwrap', async () => {
@@ -153,7 +171,8 @@ describe('encrypted upload → render → shred', () => {
     const meta = await app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey } });
     expect(meta.wrappedDek).toBeTruthy();
     expect(meta.mimeType).toBe('image/png');
-    expect(meta.sizeBytes).toBe(PLAINTEXT.length);
+    // [Row 238] What is sealed is the photo WITHOUT the note (metadata) it was uploaded with.
+    expect(meta.sizeBytes).toBe(REAL_PNG.length);
 
     // The object in storage must NOT be the plaintext.
     const stored = await getStorageProvider().getObject(fileKey);
@@ -167,12 +186,13 @@ describe('encrypted upload → render → shred', () => {
     });
     docId = doc.id;
 
-    const minted = mintRenderPath(docId, 60);
+    const minted = mintRenderPath(docId, reviewerId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('image/png');
     expect(res.headers['cache-control']).toContain('no-store');
-    expect(Buffer.from(res.rawPayload).equals(PLAINTEXT)).toBe(true);
+    // [Row 238] The uploaded photo, byte for byte, minus its metadata.
+    expect(Buffer.from(res.rawPayload).equals(REAL_PNG)).toBe(true);
   });
 
   it('rejects a bad signature and an expired token', async () => {
@@ -186,7 +206,7 @@ describe('encrypted upload → render → shred', () => {
     const past = Math.floor(Date.now() / 1000) - 5;
     const expired = await app.inject({
       method: 'GET',
-      url: `/api/v1/verification/render/${docId}?expires=${past}&sig=${signRenderToken(docId, past)}`,
+      url: `/api/v1/verification/render/${docId}?expires=${past}&reviewer=${reviewerId}&sig=${signRenderToken(docId, past, reviewerId)}`,
     });
     expect(expired.statusCode).toBe(410);
   });
@@ -196,10 +216,25 @@ describe('encrypted upload → render → shred', () => {
       where: { fileKey },
       data: { wrappedDek: null, shreddedAt: new Date() },
     });
-    const minted = mintRenderPath(docId, 60);
+    const minted = mintRenderPath(docId, reviewerId, 60);
     const res = await app.inject({ method: 'GET', url: minted.path });
     expect(res.statusCode).toBe(400);
     expect(res.json().error.code).toBe('VERIFICATION_OBJECT_UNAVAILABLE');
+  });
+});
+
+// [Row 108] The verification store only ever sees ciphertext, so the pixel cap is
+// checked at this route, before the photo is encrypted.
+describe('[row 108] an oversized ID photo is refused before it is encrypted', () => {
+  it('a PNG declaring 8000 × 6000 pixels answers 413 IMAGE_TOO_LARGE and nothing is stored', async () => {
+    const big = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA3fxQ8AAAAABJRU5ErkJggg==', 'base64');
+    big.writeUInt32BE(8000, 16);
+    big.writeUInt32BE(6000, 20);
+    const before = await app.prisma.encryptedObject.count();
+    const res = await uploadAs(token, big);
+    expect(res.statusCode).toBe(413);
+    expect(res.json().error.code).toBe('IMAGE_TOO_LARGE');
+    expect(await app.prisma.encryptedObject.count()).toBe(before);
   });
 });
 
@@ -227,37 +262,41 @@ describe('retention purge shreds the envelope', () => {
   });
 });
 
-describe('duplicate-document detection [SWIFT-078]', () => {
-  it('flags a document already on another account and alerts admins', async () => {
+describe('duplicate-document detection [SWIFT-078 / MASTER-055]', () => {
+  it('keeps applicant responses opaque and alerts only platform reviewers', async () => {
     const admin = await app.prisma.user.create({
-      data: { phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Adm', lastName: 'In', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
+      data: { phone: testPhone(), firstName: 'Adm', lastName: 'In', roles: ['SUPER_ADMIN'] as never[], activeRole: 'SUPER_ADMIN' as never, isPhoneVerified: true },
+    });
+    const tenantAdmin = await app.prisma.user.create({
+      data: { phone: testPhone(), firstName: 'Tenant', lastName: 'Admin', roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never, isPhoneVerified: true },
     });
     const userB = await app.prisma.user.create({
-      data: { phone: `+59269${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
+      data: { phone: testPhone(), firstName: 'Env', lastName: 'B', roles: ['MOVER'] as never[], activeRole: 'MOVER' as never, isPhoneVerified: true },
     });
     const tokenB = app.jwt.sign({ userId: userB.id, role: 'MOVER', jti: nanoid(8) });
     await app.prisma.session.create({ data: { userId: userB.id, token: tokenB, refreshToken: nanoid(48), deviceId: 't', deviceType: 'test', expiresAt: new Date(Date.now() + 86400000) } });
 
     // A distinct valid PNG so this test doesn't collide with the others' hash.
-    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`dup-${marker}`)]);
+    const bytes = uniquePng(`dup-${marker}`);
 
     const a = await uploadAs(token, bytes); // applicant A
     expect(a.statusCode).toBe(200);
-    expect(a.json().data.duplicate).toBe(false);
+    expect(Object.keys(a.json().data)).toEqual(['url']);
 
     const b = await uploadAs(tokenB, bytes); // applicant B — same physical document
     expect(b.statusCode).toBe(200);
-    // RED before SWIFT-078: no detection → duplicate false and no admin alert.
-    expect(b.json().data.duplicate).toBe(true);
+    expect(Object.keys(b.json().data)).toEqual(['url']);
 
     const alert = await app.prisma.notification.findFirst({
       where: { userId: admin.id, data: { path: ['kind'], equals: 'dup_doc' } },
     });
     expect(alert).not.toBeNull();
+    expect(alert!.data).toEqual({ kind: 'dup_doc', uploader: userB.id });
+    expect(await app.prisma.notification.count({ where: { userId: tenantAdmin.id, data: { path: ['kind'], equals: 'dup_doc' } } })).toBe(0);
 
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: [userB.id] } } });
-    await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, userB.id] } } });
+    await app.prisma.notification.deleteMany({ where: { userId: { in: [admin.id, tenantAdmin.id, userB.id] } } });
     await app.prisma.session.deleteMany({ where: { userId: userB.id } });
-    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, userB.id] } } });
+    await app.prisma.user.deleteMany({ where: { id: { in: [admin.id, tenantAdmin.id, userB.id] } } });
   });
 });

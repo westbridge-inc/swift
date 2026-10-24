@@ -51,9 +51,11 @@ export default function LoginPage() {
         {step === 'phone' ? (
           <div className="space-y-4">
             <div>
-              <label className="text-xs text-[var(--muted)]">Phone</label>
+              <label htmlFor="login-phone" className="text-xs text-[var(--muted)]">Phone</label>
               <input
+                id="login-phone"
                 type="tel"
+                autoComplete="tel"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSend()}
@@ -72,9 +74,11 @@ export default function LoginPage() {
         ) : (
           <div className="space-y-4">
             <div>
-              <label className="text-xs text-[var(--muted)]">Verification code</label>
+              <label htmlFor="login-code" className="text-xs text-[var(--muted)]">Verification code</label>
               <input
+                id="login-code"
                 type="text"
+                autoComplete="one-time-code"
                 inputMode="numeric"
                 value={code}
                 onChange={(e) => setCode(e.target.value)}

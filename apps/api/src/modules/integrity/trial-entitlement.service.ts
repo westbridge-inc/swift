@@ -1,3 +1,4 @@
+import { identityAuthority, requireIdentityAuthority, lockIdentityAuthority } from './identity-review';
 import type { PrismaClient, Prisma } from '@prisma/client';
 import { IdentityService } from './identity.service';
 import { log } from '../../utils/logger';
@@ -11,7 +12,7 @@ import { log } from '../../utils/logger';
 
 export type TrialDecision =
   | { grant: true; clusterId: string; reason: 'FIRST_TRIAL' | 'EXCEPTION_GRANT' }
-  | { grant: false; clusterId: string; reason: 'TRIAL_ACTIVE_ELSEWHERE' | 'TRIAL_CONSUMED' | 'DEBT_REINSTATE_FIRST' | 'FRAUD_HELD' };
+  | { grant: false; clusterId: string; reason: 'TRIAL_ACTIVE_ELSEWHERE' | 'TRIAL_CONSUMED' | 'DEBT_REINSTATE_FIRST' | 'FRAUD_HELD' | 'REVIEW_REQUIRED' };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -24,6 +25,17 @@ export class TrialEntitlementService {
   /** §3.2/§3.3 — the grant decision. Reads cluster state; never mutates
    *  (the WRITE happens via recordGrant inside the activation transaction). */
   async decide(accountId: string, role: string, tenantId: string): Promise<TrialDecision> {
+    if ('$transaction' in this.prisma) return this.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      return new TrialEntitlementService(tx as PrismaClient).decideLocked(accountId, role, tenantId);
+    });
+    await lockIdentityAuthority(this.prisma);
+    return this.decideLocked(accountId, role, tenantId);
+  }
+
+  private async decideLocked(accountId: string, role: string, tenantId: string): Promise<TrialDecision> {
+    const authority = await identityAuthority(this.prisma, accountId);
+    if (authority.status === 'REVIEW_REQUIRED') return { grant: false, clusterId: authority.clusterId, reason: 'REVIEW_REQUIRED' };
     const clusterId = await this.clusterOrSingleton(accountId);
 
     // §3.3 fraud row: any BANNED user in the cluster → held (no trial; the
@@ -94,6 +106,9 @@ export class TrialEntitlementService {
     tx: Prisma.TransactionClient,
     input: { accountId: string; clusterId: string; role: string; tenantId: string; trialDays: number; exception?: boolean },
   ) {
+    await lockIdentityAuthority(tx);
+    const authority = await requireIdentityAuthority(tx, input.accountId);
+    if (authority.clusterId !== input.clusterId) throw new Error('IDENTITY_AUTHORITY_CHANGED');
     const now = new Date();
     if (input.exception) {
       // Exception trials don't fight the unique — they are additional BY
@@ -120,11 +135,14 @@ export class TrialEntitlementService {
   /** §3.2 note — voluntary churn consumes the grant; returning never resets
    *  the clock. Called by the subscription cancel path. */
   async consumeOnChurn(accountId: string, role: string, tenantId: string, dayN: number): Promise<void> {
-    const clusterId = await this.identity.resolveCluster(accountId);
-    if (!clusterId) return;
-    await this.prisma.trialGrant.updateMany({
-      where: { tenantId, clusterId, role, status: 'ACTIVE' },
-      data: { status: 'CONSUMED', statusReason: `CHURNED_DAY_${dayN}` },
+    await this.prisma.$transaction(async (tx) => {
+      await lockIdentityAuthority(tx);
+      const authority = await identityAuthority(tx, accountId);
+      if (!authority.clusterId) return;
+      await tx.trialGrant.updateMany({
+        where: { tenantId, clusterId: authority.clusterId, role, accountId, status: 'ACTIVE' },
+        data: { status: 'CONSUMED', statusReason: `CHURNED_DAY_${dayN}` },
+      });
     });
   }
 
@@ -145,8 +163,8 @@ export class TrialEntitlementService {
       // Raced with a capture that just created membership — resolve again.
       const resolved = await this.identity.resolveCluster(accountId);
       if (resolved) return resolved;
-      log().error({ accountId }, 'cluster singleton race unresolved — using fresh cluster');
-      return cluster.id;
+      log().error({ accountId }, 'cluster singleton race unresolved');
+      throw new Error('IDENTITY_AUTHORITY_CHANGED');
     }
   }
 

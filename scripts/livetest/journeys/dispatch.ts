@@ -4,6 +4,7 @@
 // hold so a dispatch journey does not wait on it.
 
 import type { Session } from '../client.js';
+import { completeCourierFixture } from '../courier-cleanup.js';
 import { goOnline, goOffline, ping, asAdmin } from '../provision.js';
 import { GET, POST, PUT, req, sleep, codeOf, orderIdsOf, customerOrder, idemKey, clearCart, ensureAddress, activeLegsOf, riderToDoorFrom, doorOf, startAndSettle, TERMINAL, IN_CUSTODY, type Res } from './common.js';
 import type { Ctx } from './context.js';
@@ -204,9 +205,12 @@ export async function freeRider(ctx: Ctx, id: MoverId, customerId?: string): Pro
     } else {
       // In custody: walk on from the rung the leg is on (a leg already carried
       // past pickup cannot replay 'en-route-pickup'), then close it at the door.
-      // A courier job settles from any custody state and carries no door PIN.
-      if (o.orderType !== 'COURIER') await riderToDoorFrom(m.session, oid, status);
-      last = await handoverPaid(m.session, oid, doorOf(o, m), o.orderType === 'COURIER' ? null : await doorPinFromRoster(ctx, oid));
+      if (o.orderType === 'COURIER') {
+        last = await completeCourierFixture(m.session, { ...o, id: oid }, doorOf(o, m));
+      } else {
+        await riderToDoorFrom(m.session, oid, status);
+        last = await handoverPaid(m.session, oid, doorOf(o, m), await doorPinFromRoster(ctx, oid));
+      }
     }
     if (!last.ok) left.push(`${oid} (${status}) → ${last.status} ${codeOf(last)}`);
   }

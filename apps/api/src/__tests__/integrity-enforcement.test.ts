@@ -16,6 +16,7 @@ import { IdentityService } from '../modules/integrity/identity.service';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { normalizeDocNumber } from '../modules/integrity/normalize';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // [R048-001] this suite installs its partial unique index by raw DDL on a db-push database (migrations carry it in CI) — a stated, reviewable capability.
 grantSuiteCapability('ddl');
@@ -51,7 +52,7 @@ async function makeVendorFor(userId: string) {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: owner.id,
-      name: `Enf Vendor ${seq}-${nanoid(4)}`, slug: `enf-${nanoid(8).toLowerCase()}`,
+      name: `Enf Vendor ${seq}-${wordFreeTag(8)}`, slug: `enf-${nanoid(8).toLowerCase()}`,
       vendorType: 'RESTAURANT', phone: `+${phoneBase + 800_000 + seq}`,
       addressLine1: '2 Enforcement Street', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.8, longitude: -58.15,
@@ -108,9 +109,12 @@ afterAll(async () => {
 describe('scenario H — device velocity (Part 5)', () => {
   it('the 3rd signup from one device in 24h enters REVIEW_FIRST; earlier ones are untouched', async () => {
     const device = `dev-${nanoid(10)}`;
+    // A network of this run's own: the network rung (AUD-1 row 301) counts every signup from one
+    // network for 24 h, so a fixed address would carry earlier runs' signups on a kept database.
+    const ip = `190.${80 + Math.floor(Math.random() * 16)}.${Math.floor(Math.random() * 256)}.7`;
     const [u1, u2, u3] = [await makeUser(), await makeUser(), await makeUser()];
     for (const u of [u1, u2, u3]) {
-      captureSignup(app.prisma, { userId: u.id, role: 'VENDOR', phone: u.phone, deviceId: device, ip: '190.83.99.7' });
+      captureSignup(app.prisma, { userId: u.id, role: 'VENDOR', phone: u.phone, deviceId: device, ip });
       // Sequential settle — the velocity count is per completed attempt.
       await waitFor(() => app.prisma.signupAttempt.findFirst({ where: { deviceHash: { not: null }, outcome: { in: ['CREATED', 'REVIEW_FIRST'] }, createdAt: { gte: new Date(Date.now() - 5000) } } }));
       await new Promise((r) => setTimeout(r, 120));

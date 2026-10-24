@@ -1,3 +1,6 @@
+import { emitToOrderRoom } from './order/order-room-emission.service';
+import { ownerWallSystem } from '../lib/owner-rls';
+import { taxiNotificationData } from './rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
 import type { FastifyBaseLogger } from 'fastify';
@@ -179,6 +182,7 @@ export async function persistMoverRevocationOutboxInTransaction(
       title: customer.title,
       body: customer.body,
       data: {
+        ...(order.pool === 'DRIVER' ? taxiNotificationData(order.orderId, { status: order.status }) : {}),
         audience: 'customer',
         kind: 'mover_session_revocation',
         eventId: `${outboxId}:${order.orderId}`,
@@ -307,6 +311,9 @@ async function claimNextOutboxRow(
       SELECT "id"
       FROM "mover_revocation_outbox"
       WHERE "processedAt" IS NULL
+        -- [row 267] A row whose retry budget is spent is a dead letter: never claimed again.
+        AND "deadLetteredAt" IS NULL
+        AND "attempts" < "maxAttempts"
         AND "availableAt" <= CURRENT_TIMESTAMP
         AND (
           "claimedAt" IS NULL
@@ -352,10 +359,11 @@ async function emitDurableNotifications(
     ...order.adminNotificationIds,
   ]);
   if (ids.length === 0) return;
-  const notifications = await runtime.prisma.notification.findMany({
+  // [item 20] The notices this outbox fans out belong to other people: the named capability under the owner wall.
+  const notifications = await ownerWallSystem('mover-revocation:fanout-notices', () => runtime.prisma.notification.findMany({
     where: { id: { in: ids } },
     select: { id: true, userId: true, type: true, title: true, body: true, data: true, createdAt: true },
-  });
+  }));
   for (const notification of notifications) {
     runtime.io.to(`user:${notification.userId}`).emit('notification', notification);
   }
@@ -370,10 +378,11 @@ async function emitDurableNotifications(
       where: { id: { in: userIds } },
       select: { id: true, notificationPrefs: true },
     }),
-    runtime.prisma.deviceToken.findMany({
+    // [item 20] The revoked movers' devices, read by a job: the named capability under the owner wall.
+    ownerWallSystem('mover-revocation:push-devices', () => runtime.prisma.deviceToken.findMany({
       where: { userId: { in: userIds }, isActive: true },
       select: { userId: true, token: true },
-    }),
+    })),
   ]);
   const pushEnabled = new Map(users.map((user) => {
     const prefs = user.notificationPrefs as { push?: boolean } | null;
@@ -401,10 +410,10 @@ async function emitDurableNotifications(
       pushOptionsFor(rawData),
     );
     if (result.invalidTokens?.length) {
-      await runtime.prisma.deviceToken.updateMany({
+      await ownerWallSystem('mover-revocation:dead-tokens', () => runtime.prisma.deviceToken.updateMany({
         where: { token: { in: result.invalidTokens } },
         data: { isActive: false },
-      }).catch((error) => runtime.log.warn(
+      })).catch((error) => runtime.log.warn(
         { err: error, notificationId: notification.id },
         'mover revocation invalid push-token cleanup failed',
       ));
@@ -431,7 +440,7 @@ async function applyOutboxEffects(
   for (const order of payload.orders) {
     if (order.action === 'REDISPATCH') {
       await runtime.dispatch.retryDispatch(order.orderId);
-      runtime.io.to(`order:${order.orderId}`).emit('order:status_changed', {
+      await emitToOrderRoom(runtime.prisma, runtime.io, order.orderId, 'order:status_changed', {
         eventId: `${row.id}:${order.orderId}`,
         orderId: order.orderId,
         status: order.status,
@@ -454,7 +463,7 @@ async function applyOutboxEffects(
           select: { category: true, severity: true },
         });
       }
-      runtime.io.to(`order:${order.orderId}`).emit('order:mover_connection_lost', {
+      await emitToOrderRoom(runtime.prisma, runtime.io, order.orderId, 'order:mover_connection_lost', {
         eventId: `${row.id}:${order.orderId}`,
         orderId: order.orderId,
         status: order.status,

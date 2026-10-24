@@ -12,9 +12,11 @@ import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { OrderService } from '../modules/order/order.service';
 import { DispatchService, sweepStaleMovers } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // Terminal transitions must FREE THE MOVER — found live in the 2026-07-12
@@ -38,13 +40,15 @@ let seq = 0;
 
 // Per-run random base keeps phones from colliding with other test files or
 // leftovers from a prior interrupted run (parallel vitest, shared dev DB).
-const phoneBase = 592_200_000_000 + Math.floor(Math.random() * 700_000_000);
+// [SAFE-B · retained history] A failed handover's filing keeps its order and the
+// people it names, so the phones live in a namespace no other suite uses or purges.
+const PHONE_PREFIX = retainedPhonePrefix('05');
 
 async function makeUserWithSession(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+${phoneBase + seq}`,
+      phone: `${PHONE_PREFIX}${String(seq).padStart(3, '0')}`,
       firstName: 'Freeing',
       lastName: `User${seq}`,
       roles,
@@ -78,7 +82,7 @@ async function makeVendor() {
       name: `Freeing Vendor ${seq}`,
       slug: `freeing-vendor-${nanoid(10).toLowerCase()}`,
       vendorType: 'RESTAURANT',
-      phone: `+${phoneBase + 900 + seq}`,
+      phone: `${PHONE_PREFIX}${String(900 + seq).padStart(3, '0')}`,
       addressLine1: '1 Freeing Way',
       city: 'Georgetown',
       region: 'Demerara-Mahaica',
@@ -160,6 +164,9 @@ async function makeOrder(
     /** [AF-MOB-001] How long ago the mover reported arriving. Default is past
      *  the grace window; pass 0 to sit inside it. */
     arrivedMinutesAgo?: number;
+    /** [owner #46/#52, 13–14 Oct] The checkout promise. A store order the
+     *  store accepted is the customer's to cancel only 60 minutes (owner 17 Oct; was 30) past it. */
+    promisedAt?: Date;
   } = {},
 ) {
   const at = opts.at ?? PICKUP;
@@ -186,6 +193,7 @@ async function makeOrder(
       ...(opts.taxiFareTotal != null ? { taxiFareTotal: opts.taxiFareTotal } : {}),
       ...(opts.riderId ? { riderId: opts.riderId } : {}),
       ...(opts.driverId ? { driverId: opts.driverId } : {}),
+      ...(opts.promisedAt ? { promisedAt: opts.promisedAt } : {}),
     },
   });
   createdOrderIds.push(order.id);
@@ -238,10 +246,20 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await app.prisma.order.deleteMany({ where: { id: { in: createdOrderIds } } });
-  await app.prisma.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
-  await app.prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
-  await app.close();
+  // [SAFE-B · retained history] A failed handover's filing is evidence: its order and everyone it names
+  // stay. Everything else is removed as before, in one transaction, and what stays is taken out of
+  // service. Nothing is swallowed and nothing half-commits.
+  try {
+    await app.prisma.$transaction(async (tx) => {
+      const kept = await retainedCohort(tx, { orderIds: createdOrderIds });
+      await tx.order.deleteMany({ where: { id: { in: without(createdOrderIds, kept.orderIds) } } });
+      await tx.notification.deleteMany({ where: { userId: { in: createdUserIds } } });
+      await tx.user.deleteMany({ where: { id: { in: without(createdUserIds, kept.userIds) } } });
+      await retireKeptScaffolding(tx, kept);
+    }, { timeout: 60_000 });
+  } finally {
+    await app.close();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -372,7 +390,9 @@ describe('cancelOrder frees movers and float', () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ online: true });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED');
+    // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
+    // cancel only when it is very late — this one is past its promise.
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'ACCEPTED', { promisedAt: new Date(Date.now() - 61 * 60_000) });
 
     let assignmentStaged!: () => void;
     let resumeAssignment!: () => void;
@@ -433,7 +453,8 @@ describe('cancelOrder frees movers and float', () => {
     }
 
     expect(acceptResponse!.statusCode).toBe(200);
-    expect(cancellationResult).toMatchObject({ message: 'Order cancelled' });
+    // [owner #46/#52, 13–14 Oct] Free (very late) — never a fee.
+    expect(cancellationResult).toMatchObject({ message: 'Order cancelled because it was running very late.', cancellationFee: 0 });
 
     const [cancelled, freed, statusLogs] = await Promise.all([
       app.prisma.order.findUniqueOrThrow({
@@ -461,7 +482,8 @@ describe('cancelOrder frees movers and float', () => {
     const vendor = await makeVendor();
     const customer = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
     const rider = await makeRider({ committedFloat: 1000 });
-    const order = await makeOrder(customer.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId });
+    // [owner #46/#52, 13–14 Oct] Past its promise, so the customer may cancel.
+    const order = await makeOrder(customer.userId, vendor.vendorId, 'RIDER_ASSIGNED', { riderId: rider.riderId, promisedAt: new Date(Date.now() - 61 * 60_000) });
     await app.prisma.rider.update({
       where: { id: rider.riderId },
       data: { isAvailable: false, currentOrderId: order.id },
@@ -976,7 +998,8 @@ describe('delivery watchdog under stacking: every leg, one pointer rule', () => 
     expect(moved.primaryLegId).toBe(later.id);
 
     // `offline` pins availability false whatever the room.
-    await app.prisma.order.updateMany({ where: { riderId: rider.riderId }, data: { status: 'DELIVERED' } });
+    // [row 264] Each leg walks to DELIVERED along declared edges (the database refuses a jump).
+    for (const leg of await app.prisma.order.findMany({ where: { riderId: rider.riderId }, select: { id: true } })) await walkOrderStatus(app.prisma, leg.id, 'DELIVERED');
     const empty = await app.prisma.$transaction((tx) => settleRiderLegs(tx, rider.riderId, { availability: 'offline' }));
     expect(empty.primaryLegId).toBeNull();
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.riderId } })).isAvailable).toBe(false);

@@ -28,6 +28,8 @@ vi.mock('../hooks/vendorops', () => ({
   useVendorProfile: () => ({ stores: [], owner: { myRole: 'OWNER' } }),
   useVendorSubscription: () => ({ data: fx.sub }),
   ...Object.fromEntries(['useVendorOrderHistory', 'useVendorOrders', 'useToggleOpen', 'useToggleOrders', 'useSetSelfDelivery', 'useOrderAction', 'useVendorMenu', 'useVendorQr', 'useVendorAnalytics', 'useVendorRevenue', 'useVendorOps', 'useVendorHours'].map((name) => [name, () => ({})])),
+  // [STORE-DASH] the board's per-order wait: no store tap is out in this census.
+  usePendingOrderIds: () => new Set<string>(),
 }));
 vi.mock('../modules/vendor/shared', () => ({
   safeVendorRole: (role: string) => role,
@@ -65,7 +67,9 @@ describe('rendered partner Billing tile census [AX316 R1]', () => {
     expect(billing).toBeDefined();
     const text = renderedText(billing);
     expect(text).toContain('Next bill 2026-10-06');
-    expect(text).toContain('ACTIVE');
+    // [UI-SWEEP U72] The status shows in the Billing screen's words, never the code.
+    expect(text).toContain('Active');
+    expect(text).not.toContain('ACTIVE');
     expect(text).not.toMatch(/\bcash\b|\bagent\b|Swift[\s-]+Number|account[\s-]+number|coming soon|\bMMG\b/i);
   });
 });

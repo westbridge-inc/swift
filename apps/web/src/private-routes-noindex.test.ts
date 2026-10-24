@@ -24,34 +24,43 @@ const PUBLIC_PAGES = [
   '(app)/order/page.tsx', // legacy Home redirect
   '(app)/order/browse/page.tsx',
   '(app)/order/search/page.tsx',
-  '(app)/order/vendor/[id]/page.tsx',
-  '(app)/taxi/page.tsx', // public app handoff, no web booking
+  '(app)/taxi/page.tsx', // public app handoff + fare estimate (signed in), no web booking
   '(marketing)/about/page.tsx',
   '(marketing)/account/delete/page.tsx', // public deletion instructions
   '(marketing)/contact/page.tsx',
   '(marketing)/drivers/page.tsx',
   '(marketing)/faq/page.tsx',
   '(marketing)/how-it-works/page.tsx',
+  '(marketing)/launching-soon/page.tsx', // [Item 7] the public site's front door before launch, canonical at /
   '(marketing)/pricing/page.tsx',
   '(marketing)/stores/page.tsx',
   '(marketing)/stores/[slug]/page.tsx', // legacy storefront redirect
   '(marketing)/vendors/page.tsx',
   '(marketing)/welcome/page.tsx',
   'legal/child-safety/page.tsx',
+  'legal/delivery/page.tsx', // [Q36] the card bank's delivery policy
   'legal/privacy/page.tsx',
+  'legal/refunds/page.tsx', // [Q36] the card bank's refund and cancellation policy
   'legal/terms/page.tsx',
   'signup/page.tsx', // public business acquisition door [AX295 F1]
-  'store/[slug]/page.tsx',
+  '(app)/store/[slug]/page.tsx', // [W6] a store's one page, inside the customer app's frame
 ];
 
 const PRIVATE_PAGES = [
+  'dashboard/notifications/page.tsx',
+  'portal/notifications/page.tsx',
+  'advertiser/page.tsx',
+  'advertiser/account/page.tsx',
+  'advertiser/notifications/page.tsx',
+  'advertiser/campaigns/[advertiserId]/[campaignId]/page.tsx',
   '(app)/account/page.tsx',
   '(app)/account/addresses/page.tsx',
   '(app)/account/favourites/page.tsx',
   '(app)/account/help/page.tsx',
   '(app)/account/profile/page.tsx',
   '(app)/account/safety/page.tsx',
-  '(app)/cart/page.tsx', // includes checkout/payment; no separate /checkout or /pay
+  '(app)/cart/page.tsx', // guest basket is public to browse but stays out of search
+  '(app)/checkout/page.tsx', // [W4] the one checkout: a guest's basket is shown, still out of search
   '(app)/courier/page.tsx',
   '(app)/order/location/page.tsx',
   '(app)/orders/page.tsx',
@@ -60,6 +69,8 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
+  'dashboard/insights/page.tsx',
+  'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
   'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',
@@ -83,12 +94,15 @@ const TOKEN_DISALLOWED_PAGES = [
 ];
 
 // Token-bearing HTML route handlers carry response headers instead of metadata.
-const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[outcome]/route.ts'];
+const TOKEN_DISALLOWED_HANDLERS = ['pay/mmg/[...path]/route.ts'];
 
 // Public machine resources, not HTML pages. New handlers and metadata endpoints
 // must be reviewed here too; they cannot silently evade the census.
 const PUBLIC_RESOURCES = [
+  '(app)/order/vendor/[id]/route.ts', // [W6] the old store address: a 301 to /store/<slug>, or a noindex 404
+  'api/launch-state/route.ts', // [S1] the public site's switch, as the server holds it (no personal data)
   'manifest.ts',
+  'media/[...path]/route.ts', // stores' public photos only; no identity or private upload paths
   'opengraph-image.tsx',
   'robots.ts',
   'sitemap.ts',
@@ -176,7 +190,7 @@ async function effectiveRobots(page: string): Promise<Metadata['robots']> {
     const routeModule = await load(file);
     // New dynamic metadata needs explicit fixtures, rather than guessing what
     // it will emit. This also catches re-exports and child overrides.
-    if (routeModule.generateMetadata) expect(file).toBe('store/[slug]/page.tsx');
+    if (routeModule.generateMetadata) expect(file).toBe('(app)/store/[slug]/page.tsx');
     const metadata = routeModule.generateMetadata
       ? await routeModule.generateMetadata({ params: Promise.resolve({ slug: 'census-store' }) })
       : routeModule.metadata;
@@ -242,12 +256,12 @@ describe('[DS288] every route has a reviewed search classification', () => {
 
   it.each(TOKEN_DISALLOWED_HANDLERS)('%s stays disallowed AND sends noindex for GET and POST', async (handler) => {
     expect(crawlable(urlOf(handler))).toBe(false);
-    const { GET, POST } = await import('./app/pay/mmg/[outcome]/route');
+    const { GET, POST } = await import('./app/pay/mmg/[...path]/route');
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
     try {
       for (const method of ['GET', 'POST'] as const) {
         const request = new Request('https://example.test/pay/mmg/success', { method });
-        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ outcome: 'success' }) });
+        const response = await (method === 'GET' ? GET : POST)(request, { params: Promise.resolve({ path: ['success'] }) });
         expect(response.headers.get('X-Robots-Tag')).toContain('noindex');
         expect(await response.text()).toContain('<meta name="robots" content="noindex">');
       }
@@ -267,13 +281,13 @@ describe('[DS288] every route has a reviewed search classification', () => {
 
   it('checks the storefront missing-data metadata branch without network access', async () => {
     vi.mocked(fetchStorefront).mockResolvedValueOnce(null);
-    expectRobots(await effectiveRobots('store/[slug]/page.tsx'), true, 'missing storefront metadata');
+    expectRobots(await effectiveRobots('(app)/store/[slug]/page.tsx'), true, 'missing storefront metadata');
   });
 
   it('agrees with the customer shell about which routes require sign-in', () => {
     for (const [pages, isPublic] of [[PUBLIC_PAGES, true], [PRIVATE_PAGES, false]] as const) {
       for (const page of pages.filter((file) => file.startsWith('(app)/'))) {
-        expect(customerRoute(urlOf(page)).public, page).toBe(isPublic);
+        expect(customerRoute(urlOf(page)).public, page).toBe(isPublic || page === '(app)/cart/page.tsx' || page === '(app)/checkout/page.tsx');
       }
     }
   });
@@ -281,6 +295,7 @@ describe('[DS288] every route has a reviewed search classification', () => {
   it('keeps public machine resources crawlable, including both association-file aliases', () => {
     for (const path of [
       '/robots.txt', '/sitemap.xml', '/manifest.webmanifest', '/opengraph-image',
+      '/media/items/store/AbCdEfGh_jKlMn-p.jpg',
       '/well-known/apple-app-site-association', '/well-known/assetlinks.json',
       '/.well-known/apple-app-site-association', '/.well-known/assetlinks.json',
     ]) {

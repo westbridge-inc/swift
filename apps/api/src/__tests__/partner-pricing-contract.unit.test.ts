@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PrismaClient, VehicleType } from '@prisma/client';
+import { authorityTables } from './helpers/fee-authority-fixture';
 
 // ---------------------------------------------------------------------------
 // The Guyana partner weekly fee is ONE contract: the number the public price
@@ -11,12 +12,13 @@ import type { PrismaClient, VehicleType } from '@prisma/client';
 //
 // Owner rate card (GYD per week, flat, independent of sales):
 //   delivery/courier rider on a standard vehicle   6,000   (owner, 2026-09-29; was 8,000)
-//   heavy delivery (canters, box trucks)            9,000
-//   taxi driver (any vehicle)                        9,000
+//   heavy delivery (canters, box trucks)            9,000   (OFF at launch, owner 13 Oct 2026: not offered)
+//   taxi driver (any vehicle)                        8,000   (owner, 2026-09-30)
 //   service provider                                8,000
 //   restaurant/store/grocery, < 1,000 active items  15,000
 //   1,000–9,999 active items                        20,000
 //   10,000+ active items                            60,000
+// Every store pays its own tier: no multi-store discount (owner, 13 Oct 2026).
 //
 // Service-free: every database call below is an in-memory fake, and the
 // trial-law, SAN and float collaborators are stubbed. Nothing opens Postgres,
@@ -43,7 +45,7 @@ vi.mock('../modules/dispatch/float.service', () => ({
 }));
 
 import { COMPLETE_CARD, desiredPlatformConfig, PLATFORM_CONFIG_VERSION } from '../modules/ops/platform-config';
-import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor } from '../config/vehicle-classes';
+import { VEHICLE_CLASSES, VEHICLE_TYPES_IN_ORDER, feeBandFor, isVehicleOffered } from '../config/vehicle-classes';
 import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { BillingService } from '../modules/billing/billing.service';
 import { PartnerService } from '../modules/partner/partner.service';
@@ -58,11 +60,12 @@ type Tiers = Record<string, unknown>;
 type MoverKind = 'RIDER' | 'DRIVER';
 type VendorKind = 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
 
-const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 9000, service: 8000, small: 15000, large: 20000, department: 60000 };
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const OWNER = { courier: 6000, courierHeavy: 9000, taxi: 8000, service: 8000, small: 15000, large: 20000, department: 60000 };
 /** Every key the complete card carries — a Guyana card missing any one of them is no card at all. */
 const CARD_KEYS = [
   'mover', 'moverHeavy', 'taxiDriver', 'serviceVendor', 'smallVendor', 'largeVendor', 'departmentVendor',
-  'largeCatalogueThreshold', 'departmentCatalogueThreshold', 'franchiseMinLocations', 'franchiseDiscountPct',
+  'largeCatalogueThreshold', 'departmentCatalogueThreshold',
 ] as const;
 const SOURCE = (...rel: string[]) => readFileSync(join(__dirname, '..', ...rel), 'utf8');
 const STANDARD_RIDER_VEHICLES: VehicleType[] = ['BICYCLE', 'MOTORCYCLE'];
@@ -112,28 +115,37 @@ type SignupSubject =
 /** An in-memory partner table for the REAL SubscriptionService: one partner of
  *  the given kind, optionally already holding a subscription, and a record of
  *  every subscription row the service creates. */
+
 function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY', opts: { existing?: boolean } = {}) {
   const created: Array<Record<string, unknown>> = [];
   const create = vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
     created.push(data);
     return { id: `sub-${created.length}`, ...data };
   });
-  const existing = opts.existing ? { id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' } : null;
+  const user = { id: `user-${subject.kind.toLowerCase()}`, tenantId: 'swift-default', countryCode };
+  const profile = { userId: user.id, user, ...(subject.kind !== 'VENDOR' ? { vehicleType: subject.vehicleType } : {}) };
+  const decorate = (row: Record<string, unknown>) => ({ ...row,
+    type: subject.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
+    ...(subject.kind === 'RIDER' ? { riderId: 'rider-1', rider: profile } : subject.kind === 'DRIVER' ? { driverId: 'driver-1', driver: profile } : {}),
+  });
+  const existing = opts.existing ? decorate({ id: 'sub-existing', weeklyRate: 12345, status: 'ACTIVE' }) : null;
+  const authority = authorityTables(() => [...(existing ? [existing] : []), ...created.map((row, i) => decorate({ id: `sub-${i + 1}`, ...row }))], () => [user]);
   const prisma = {
+    ...authority,
     countryConfig: countryConfigFake({ [countryCode]: tiers }),
     rider: {
       findUnique: vi.fn(async () =>
         subject.kind === 'RIDER'
-          ? { riderType: subject.riderType ?? 'BOTH', vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } }
+          ? { ...profile, riderType: subject.riderType ?? 'BOTH', subscription: existing }
           : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-rider' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     driver: {
       findUnique: vi.fn(async () =>
-        subject.kind === 'DRIVER' ? { vehicleType: subject.vehicleType, subscription: existing, user: { countryCode } } : null,
+        subject.kind === 'DRIVER' ? { ...profile, subscription: existing } : null,
       ),
-      findUniqueOrThrow: vi.fn(async () => ({ userId: 'user-driver' })),
+      findUniqueOrThrow: vi.fn(async () => profile),
     },
     vendor: {
       findUnique: vi.fn(async () =>
@@ -147,9 +159,15 @@ function partnerPrisma(subject: SignupSubject, tiers: Tiers, countryCode = 'GY',
       ),
       findUniqueOrThrow: vi.fn(async () => ({ owner: { userId: 'user-vendor' } })),
     },
-    subscription: { create, findFirstOrThrow: vi.fn() },
+    subscription: { ...authority.subscription, create, findFirstOrThrow: vi.fn() },
     enforcementAction: { create: vi.fn(() => Promise.resolve({})) },
-    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => callback({ subscription: { create } })),
+    // [SAFE-B] The trial law reads the identity authority (no cluster here);
+    // `...authority` answers the identity advisory lock with no rows.
+    identityClusterMember: { findUnique: vi.fn(async () => null) },
+    $transaction: vi.fn(async (callback: (tx: unknown) => unknown) => {
+      const tx = Object.fromEntries(Object.entries(prisma).filter(([name]) => name !== '$transaction'));
+      return callback(tx);
+    }),
   } as unknown as PrismaClient;
   return { prisma, created };
 }
@@ -213,6 +231,9 @@ interface RetierOptions {
  */
 function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOptions = {}) {
   const updates = new Map<string, number>();
+  /** [R27] Rises the re-tier HELD for the 14-day notice (fee-rise-notice.ts), by subscription: never written. */
+  const held = new Map<string, number>();
+  const heldRows = new Map<string, unknown>();
   const events: Array<Record<string, unknown>> = [];
   const keys = new Set<string>();
   const rates = new Map<string, number>();
@@ -234,10 +255,28 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
     stage(where.id, to);
     return { count: 1 };
   };
+  const authority = authorityTables(() => [...moverRows, ...vendorRows].map((r) => ({ ...r, weeklyRate: rates.get(String(r['id'])) })),
+    () => [...moverRows, ...vendorRows].map((r) => (r['rider'] as any)?.user ?? (r['driver'] as any)?.user ?? (r['vendor'] as any)?.owner.user));
   const transaction = async <T>(callback: (tx: unknown) => Promise<T>): Promise<T> => {
-    const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>> } = { updates: [], events: [] };
+    const staged: { updates: Array<[string, number]>; events: Array<Record<string, unknown>>; config: Map<string, unknown> } = { updates: [], events: [], config: new Map() };
     const tx = {
+      ...authority,
+      // [R27] Runtime records (held rises, lower-tier observations): staged like every other write.
+      platformConfig: {
+        findUnique: vi.fn(async ({ where }: { where: { key: string } }) => {
+          const value = staged.config.has(where.key) ? staged.config.get(where.key) : heldRows.get(where.key);
+          return value == null ? null : { key: where.key, value };
+        }),
+        upsert: vi.fn(async ({ where, create }: { where: { key: string }; create: { value: unknown } }) => { staged.config.set(where.key, create.value); return create; }),
+        update: vi.fn(async ({ where, data }: { where: { key: string }; data: { value: unknown } }) => { staged.config.set(where.key, data.value); return data; }),
+        delete: vi.fn(async ({ where }: { where: { key: string } }) => { staged.config.set(where.key, null); return {}; }),
+      },
+      auditLog: { create: vi.fn(async () => ({})) },
+      countryConfig: countryConfigFake(tiersByCountry),
+      rider: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['rider'] as any)?.user.id === where.userId)?.['rider']) },
+      driver: { findUniqueOrThrow: vi.fn(async ({ where }: { where: { userId: string } }) => moverRows.find((r) => (r['driver'] as any)?.user.id === where.userId)?.['driver']) },
       subscription: {
+        ...authority.subscription,
         updateMany: vi.fn(async ({ where, data }: { where: { id: string; weeklyRate?: unknown }; data: { weeklyRate: number } }) =>
           compareAndSet(where, Number(data.weeklyRate), (id, rate) => staged.updates.push([id, rate])),
         ),
@@ -261,6 +300,15 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
     for (const event of staged.events) {
       keys.add(String(event['idempotencyKey']));
       events.push(event);
+    }
+    for (const [key, value] of staged.config) {
+      if (value == null) heldRows.delete(key);
+      else heldRows.set(key, value);
+      const id = key.slice(key.indexOf(':') + 1);
+      if (key.startsWith('billing.fee_rise:')) {
+        if (value == null) held.delete(id);
+        else held.set(id, Number((value as { to: number }).to));
+      }
     }
     return result;
   };
@@ -301,17 +349,18 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
         where.isAvailable === true ? (itemCounts.get(where.vendorId) ?? 0) : 0,
       ),
     },
+    platformConfig: { count: vi.fn(async ({ where }: { where: { key: { in: string[] } } }) => where.key.in.filter((k) => heldRows.has(k)).length) },
     $transaction: vi.fn(transaction),
   } as unknown as PrismaClient;
   const billing = new BillingService(prisma, {} as NotificationService, {} as PaymentProvider);
 
-  /** One pass of the REAL weekly re-tier. A subscription seen before keeps the rate the last pass committed. */
-  async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = []) {
+  /** One pass of the REAL weekly re-tier at `at`. A subscription seen before keeps the rate the last pass committed. */
+  async function run(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = [], at = new Date()) {
     for (const s of [...movers, ...vendors]) if (!rates.has(s.id)) rates.set(s.id, s.weeklyRate);
     moverRows = movers.map((m) => {
-      const person = { vehicleType: m.vehicleType, user: { countryCode: m.countryCode ?? 'GY' } };
+      const person = { vehicleType: m.vehicleType, user: { id: `${m.id}-payer`, tenantId: 'swift-default', countryCode: m.countryCode ?? 'GY' } };
       return {
-        id: m.id,
+        id: m.id, type: m.kind === 'DRIVER' ? 'TAXI_DRIVER' : 'DELIVERY_RIDER',
         riderId: m.kind === 'RIDER' ? `${m.id}-rider` : null,
         driverId: m.kind === 'DRIVER' ? `${m.id}-driver` : null,
         weeklyRate: rates.get(m.id),
@@ -332,19 +381,26 @@ function retierHarness(tiersByCountry: Record<string, unknown>, opts: RetierOpti
       vendor: {
         id: `${v.id}-vendor`,
         vendorType: v.vendorType,
-        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner` }, _count: { vendors: v.ownedStores ?? 1 } },
+        owner: { user: { countryCode: v.countryCode ?? 'GY', id: `${v.id}-owner`, tenantId: 'swift-default' }, _count: { vendors: v.ownedStores ?? 1 } },
       },
     }));
     itemCounts = new Map(vendors.map((v) => [`${v.id}-vendor`, v.activeItems]));
-    const moversChanged = movers.length ? await billing.recalculateMoverTiers() : 0;
-    const vendorsChanged = vendors.length ? await billing.recalculateVendorTiers() : 0;
+    const moversChanged = movers.length ? await billing.recalculateMoverTiers(at) : 0;
+    const vendorsChanged = vendors.length ? await billing.recalculateVendorTiers(at) : 0;
     return { moversChanged, vendorsChanged };
   }
 
-  return { run, updates, events, rates, prisma };
+  /** [R27] Two consecutive weekly passes (a lower tier moves only when it holds on both): the summed counts. */
+  async function weeks(movers: MoverSubFixture[] = [], vendors: VendorSubFixture[] = [], start = new Date()) {
+    const first = await run(movers, vendors, start);
+    const second = await run(movers, vendors, new Date(start.getTime() + WEEK_MS));
+    return { moversChanged: first.moversChanged + second.moversChanged, vendorsChanged: first.vendorsChanged + second.vendorsChanged };
+  }
+
+  return { run, weeks, updates, held, events, rates, prisma };
 }
 
-/** Run the REAL BillingService weekly re-tier once over the given subscriptions. */
+/** Run the REAL BillingService weekly re-tier over the given subscriptions: two consecutive weekly passes. */
 async function retier(
   tiersByCountry: Record<string, unknown>,
   movers: MoverSubFixture[] = [],
@@ -352,8 +408,10 @@ async function retier(
   opts: RetierOptions = {},
 ) {
   const harness = retierHarness(tiersByCountry, opts);
-  const { moversChanged, vendorsChanged } = await harness.run(movers, vendors);
-  return { updates: harness.updates, events: harness.events, rates: harness.rates, moversChanged, vendorsChanged };
+  const { moversChanged, vendorsChanged } = await harness.weeks(movers, vendors);
+  // targets: the rate the re-tier bills each partner: moved now (a lower fee) or held for the notice (a higher one).
+  const targets = new Map([...harness.updates, ...harness.held]);
+  return { updates: harness.updates, held: harness.held, targets, events: harness.events, rates: harness.rates, moversChanged, vendorsChanged };
 }
 
 /** Serve the REAL public price list route with an in-memory CountryConfig table. */
@@ -373,13 +431,14 @@ interface MoverQuoteBody {
   band: 'STANDARD' | 'HEAVY';
   tier: string;
   rate: number;
+  offered: boolean;
 }
 interface PriceListBody {
   countryCode: string;
   trialDays: number;
   movers?: MoverQuoteBody[];
   vendors?: { service: number; catalogue: Array<{ minItems: number; tier: string; rate: number }> };
-  franchise: { minLocations: number; discountPct: number } | null;
+  franchise: null;
   weekly?: Record<string, number | null>;
 }
 
@@ -415,8 +474,20 @@ describe('Guyana partner rate card — owner rates are the seeded config', () =>
     // 2026-09-02.1 carried the previous card; 2026-09-23.1 is main's
     // Guyana-only launch config, which this card is layered on; 2026-09-23.3
     // carried the 8,000 rider rate (applied on staging) before the owner's
-    // 2026-09-29 change to 6,000.
-    for (const applied of ['2026-09-02.1', '2026-09-23.1', '2026-09-23.3']) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
+    // 2026-09-29 change to 6,000. 2026-10-04.2 and 2026-10-06.1 carried the
+    // franchise rule the owner removed on 13 Oct 2026; 2026-10-07.1,
+    // 2026-10-07.2, 2026-10-13.1 and 2026-10-13.2 are claimed by other open
+    // branches for other values. 2026-10-13.3 lacks the verified emergency
+    // numbers and the Market tab thresholds. 2026-10-14.3 is the emergency-
+    // numbers card the service-business document change builds on
+    // (2026-10-14.4), and the taxi's seven documents build on that
+    // (2026-10-14.5); those two changes carried 2026-10-14.1 and 2026-10-14.2
+    // on bases without 2026-10-14.3.
+    for (const applied of [
+      '2026-09-02.1', '2026-09-23.1', '2026-09-23.3', '2026-09-29.1', '2026-09-30.1', '2026-10-01.1', '2026-10-01.2', '2026-10-04.1',
+      '2026-10-04.2', '2026-10-06.1', '2026-10-07.1', '2026-10-07.2', '2026-10-13.1', '2026-10-13.2', '2026-10-13.3', '2026-10-14.1', '2026-10-14.2',
+      '2026-10-14.3', '2026-10-14.4',
+    ]) expect(PLATFORM_CONFIG_VERSION).not.toBe(applied);
   });
 
   it('the three mover classes together are exactly the fleet, split by the passenger-vehicle rule provisioning uses', () => {
@@ -435,36 +506,35 @@ describe('partnerRateFor — one typed resolver for every partner', () => {
   const gy = () => seededTiers('GY') as pricing.SubscriptionTiers;
 
   it('separates taxi drivers from riders even on the same vehicle', () => {
-    expect(pricing.partnerRateFor(gy(), { kind: 'DRIVER', vehicleType: 'CAR' })).toEqual({ rate: OWNER.taxi, tier: 'taxi', franchised: false });
-    expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType: 'CAR' })).toEqual({ rate: OWNER.courier, tier: 'courier', franchised: false });
+    expect(pricing.partnerRateFor(gy(), { kind: 'DRIVER', vehicleType: 'CAR' })).toEqual({ rate: OWNER.taxi, tier: 'taxi' });
+    expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType: 'CAR' })).toEqual({ rate: OWNER.courier, tier: 'courier' });
   });
 
   it('prices standard riders, heavy delivery and every taxi vehicle at the owner rates', () => {
     for (const vehicleType of STANDARD_RIDER_VEHICLES) {
-      expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType })).toEqual({ rate: OWNER.courier, tier: 'courier', franchised: false });
+      expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType })).toEqual({ rate: OWNER.courier, tier: 'courier' });
     }
     for (const vehicleType of HEAVY_RIDER_VEHICLES) {
-      expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType })).toEqual({ rate: OWNER.courierHeavy, tier: 'courierHeavy', franchised: false });
+      expect(pricing.partnerRateFor(gy(), { kind: 'RIDER', vehicleType })).toEqual({ rate: OWNER.courierHeavy, tier: 'courierHeavy' });
     }
     for (const vehicleType of TAXI_VEHICLES) {
       // A minibus driver is a taxi driver: the role decides, not the band.
-      expect(pricing.partnerRateFor(gy(), { kind: 'DRIVER', vehicleType })).toEqual({ rate: OWNER.taxi, tier: 'taxi', franchised: false });
+      expect(pricing.partnerRateFor(gy(), { kind: 'DRIVER', vehicleType })).toEqual({ rate: OWNER.taxi, tier: 'taxi' });
     }
   });
 
   it('prices services flat and catalogues by active items, the boundary itself qualifying', () => {
-    const vendor = (isService: boolean, activeListings: number, ownedStores = 1) =>
-      pricing.partnerRateFor(gy(), { kind: 'VENDOR', isService, activeListings, ownedStores });
-    expect(vendor(true, 0)).toEqual({ rate: OWNER.service, tier: 'service', franchised: false });
+    const vendor = (isService: boolean, activeListings: number) =>
+      pricing.partnerRateFor(gy(), { kind: 'VENDOR', isService, activeListings });
+    expect(vendor(true, 0)).toEqual({ rate: OWNER.service, tier: 'service' });
     expect(vendor(true, 50000).rate).toBe(OWNER.service); // services never step up
-    expect(vendor(false, 0)).toEqual({ rate: OWNER.small, tier: 'small', franchised: false });
+    expect(vendor(false, 0)).toEqual({ rate: OWNER.small, tier: 'small' });
     expect(vendor(false, 999).rate).toBe(OWNER.small);
-    expect(vendor(false, 1000)).toEqual({ rate: OWNER.large, tier: 'large', franchised: false });
+    expect(vendor(false, 1000)).toEqual({ rate: OWNER.large, tier: 'large' });
     expect(vendor(false, 9999).rate).toBe(OWNER.large);
-    expect(vendor(false, 10000)).toEqual({ rate: OWNER.department, tier: 'department', franchised: false });
+    expect(vendor(false, 10000)).toEqual({ rate: OWNER.department, tier: 'department' });
     expect(vendor(false, 250000).rate).toBe(OWNER.department);
-    // The existing franchise rule still applies to each store's own tier.
-    expect(vendor(false, 10, 5)).toEqual({ rate: OWNER.small / 2, tier: 'small', franchised: true });
+    // How many stores the owner has is not an input at all: section 13.
   });
 
   it('a market without a taxi rate keeps pricing drivers by vehicle band, exactly as before', () => {
@@ -475,7 +545,7 @@ describe('partnerRateFor — one typed resolver for every partner', () => {
     expect(pricing.partnerRateFor(tt, { kind: 'RIDER', vehicleType: 'CANTER_LONG' }).rate).toBe(tt.moverHeavy);
     const noHeavy = { mover: 10000, smallVendor: 20000, largeVendor: 30000 } as pricing.SubscriptionTiers;
     expect(pricing.partnerRateFor(noHeavy, { kind: 'RIDER', vehicleType: 'BOX_TRUCK_LONG' }).rate).toBe(10000);
-    expect(pricing.partnerRateFor(noHeavy, { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }).rate).toBe(20000);
+    expect(pricing.partnerRateFor(noHeavy, { kind: 'VENDOR', isService: true, activeListings: 0 }).rate).toBe(20000);
   });
 });
 
@@ -485,7 +555,7 @@ describe('an unpriceable partner is an error, never a free subscription', () => 
   const gy = () => seededTiers('GY');
   const rider = { kind: 'RIDER', vehicleType: 'MOTORCYCLE' } as const;
   const taxi = { kind: 'DRIVER', vehicleType: 'CAR' } as const;
-  const shop = { kind: 'VENDOR', isService: false, activeListings: 0, ownedStores: 1 } as const;
+  const shop = { kind: 'VENDOR', isService: false, activeListings: 0 } as const;
 
   it.each([
     ['an empty tier map', {}, rider],
@@ -495,9 +565,9 @@ describe('an unpriceable partner is an error, never a free subscription', () => 
     ['a rate stored as text', { ...seededTiers('GY'), smallVendor: '15000' }, shop],
     ['a missing small-catalogue rate', { ...seededTiers('GY'), smallVendor: undefined }, shop],
     ['a zero service rate', { ...seededTiers('GY'), serviceVendor: 0 }, { ...shop, isService: true }],
-    ['a 100% franchise "discount"', { ...seededTiers('GY'), franchiseDiscountPct: 100 }, { ...shop, ownedStores: 5 }],
-    ['a negative franchise "discount"', { ...seededTiers('GY'), franchiseDiscountPct: -50 }, { ...shop, ownedStores: 5 }],
-    ['a franchise threshold stored as text', { ...seededTiers('GY'), franchiseMinLocations: '5' }, shop],
+    ['a negative department rate', { ...seededTiers('GY'), departmentVendor: -60000 }, { ...shop, activeListings: 20000 }],
+    ['a large-catalogue rate stored as text', { ...seededTiers('GY'), largeVendor: '20000' }, { ...shop, activeListings: 5000 }],
+    ['a zero catalogue boundary', { ...seededTiers('GY'), largeCatalogueThreshold: 0 }, shop],
     ['a department boundary at or below the large one', { ...seededTiers('GY'), departmentCatalogueThreshold: 1000 }, { ...shop, activeListings: 5000 }],
     ['a fractional catalogue boundary', { ...seededTiers('GY'), largeCatalogueThreshold: 999.5 }, shop],
   ] as Array<[string, Tiers, pricing.PartnerSubject]>)('%s', (_name, tiers, subject) => {
@@ -513,7 +583,7 @@ describe('an unpriceable partner is an error, never a free subscription', () => 
       [{ kind: 'RIDER', vehicleType: 'MOTORCYCLE' }, { ...gy(), mover: 0 }],
       [{ kind: 'DRIVER', vehicleType: 'CAR' }, { ...gy(), taxiDriver: 0 }],
       [{ kind: 'VENDOR', vendorType: 'SERVICE' }, { ...gy(), serviceVendor: 0 }],
-      [{ kind: 'VENDOR', vendorType: 'RESTAURANT', ownedStores: 5 }, { ...gy(), franchiseDiscountPct: 100 }],
+      [{ kind: 'VENDOR', vendorType: 'RESTAURANT', ownedStores: 5 }, { ...gy(), smallVendor: 0 }],
     ] as Array<[SignupSubject, Tiers]>) {
       const { outcome, created } = await signup(subject, tiers);
       expect(outcome.ok, JSON.stringify(subject)).toBe(false);
@@ -537,7 +607,7 @@ describe('an unpriceable partner is an error, never a free subscription', () => 
   });
 
   it('the public price list refuses to quote a market it cannot price', async () => {
-    for (const broken of [{ ...gy(), mover: 0 }, { ...gy(), serviceVendor: '8000' }, { ...gy(), franchiseDiscountPct: 100 }]) {
+    for (const broken of [{ ...gy(), mover: 0 }, { ...gy(), serviceVendor: '8000' }, { ...gy(), departmentVendor: 0 }]) {
       const { status, body } = await priceList({ GY: broken });
       expect(status, JSON.stringify(broken)).toBeGreaterThanOrEqual(500);
       expect(body.data).toBeUndefined();
@@ -559,18 +629,18 @@ describe('signup — the rate a partner is born on', () => {
     }
   });
 
-  it('every taxi driver 9,000, car or bus', async () => {
+  it('every taxi driver 8,000, car or bus', async () => {
     for (const vehicleType of TAXI_VEHICLES) {
       expect((await signup({ kind: 'DRIVER', vehicleType }, seededTiers('GY'))).weeklyRate).toBe(OWNER.taxi);
     }
   });
 
-  it('services 8,000; a new restaurant, grocery or shop 15,000; the franchise rule unchanged', async () => {
+  it("services 8,000; a new restaurant, grocery or shop 15,000 — an owner's fifth store too", async () => {
     expect((await signup({ kind: 'VENDOR', vendorType: 'SERVICE' }, seededTiers('GY'))).weeklyRate).toBe(OWNER.service);
     for (const vendorType of CATALOGUE_TYPES) {
       expect((await signup({ kind: 'VENDOR', vendorType }, seededTiers('GY'))).weeklyRate).toBe(OWNER.small);
     }
-    expect((await signup({ kind: 'VENDOR', vendorType: 'RESTAURANT', ownedStores: 5 }, seededTiers('GY'))).weeklyRate).toBe(OWNER.small / 2);
+    expect((await signup({ kind: 'VENDOR', vendorType: 'RESTAURANT', ownedStores: 5 }, seededTiers('GY'))).weeklyRate).toBe(OWNER.small);
   });
 });
 
@@ -596,15 +666,18 @@ describe('weekly re-tier — automatic, no approval, custom and waived untouched
   });
 
   it('a rider who buys a canter moves to heavy delivery; a taxi driver who buys a bus stays on the taxi rate', async () => {
-    const { updates } = await retier({ GY: seededTiers('GY') }, [
+    const { updates, held, events } = await retier({ GY: seededTiers('GY') }, [
       { id: 'upgraded-rider', kind: 'RIDER', vehicleType: 'BOX_TRUCK_SHORT', weeklyRate: OWNER.courier },
       { id: 'upgraded-driver', kind: 'DRIVER', vehicleType: 'BUS_9', weeklyRate: OWNER.taxi },
     ]);
-    expect(Object.fromEntries(updates)).toEqual({ 'upgraded-rider': OWNER.courierHeavy });
+    // [R27] The higher rate is HELD for the 14-day notice, never written at once.
+    expect(Object.fromEntries(held)).toEqual({ 'upgraded-rider': OWNER.courierHeavy });
+    expect(updates.size).toBe(0);
+    expect(events).toEqual([]);
   });
 
   it('moves every store across the catalogue boundaries, up and down', async () => {
-    const { updates, vendorsChanged } = await retier({ GY: seededTiers('GY') }, [], [
+    const { updates, held, vendorsChanged } = await retier({ GY: seededTiers('GY') }, [], [
       { id: 'r999', vendorType: 'RESTAURANT', activeItems: 999, weeklyRate: 20000 },
       { id: 's1000', vendorType: 'STORE', activeItems: 1000, weeklyRate: OWNER.small },
       { id: 'g9999', vendorType: 'SUPERMARKET', activeItems: 9999, weeklyRate: 30000 },
@@ -612,7 +685,9 @@ describe('weekly re-tier — automatic, no approval, custom and waived untouched
       { id: 'svc', vendorType: 'SERVICE', activeItems: 40, weeklyRate: 12000 },
       { id: 'steady', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.small },
     ]);
-    expect(Object.fromEntries(updates)).toEqual({ r999: OWNER.small, s1000: OWNER.large, g9999: OWNER.large, g10000: OWNER.department, svc: OWNER.service });
+    // [R27] Down at once; up held for the 14-day notice.
+    expect(Object.fromEntries(updates)).toEqual({ r999: OWNER.small, g9999: OWNER.large, svc: OWNER.service });
+    expect(Object.fromEntries(held)).toEqual({ s1000: OWNER.large, g10000: OWNER.department });
     expect(vendorsChanged).toBe(5);
   });
 
@@ -657,7 +732,7 @@ describe('public price list — quote equals bill, for every partner', () => {
         { minItems: 10000, tier: 'department', rate: OWNER.department },
       ],
     });
-    expect(d.franchise).toEqual({ minLocations: 5, discountPct: 50 });
+    expect(d.franchise).toBeNull();
   });
 
   it('each vehicle quote is what signup writes and what the re-tier bills for that partner', async () => {
@@ -666,8 +741,9 @@ describe('public price list — quote equals bill, for every partner', () => {
     for (const quote of body.data!.movers!) {
       const born = await signup({ kind: quote.role, vehicleType: quote.vehicleType }, tiers);
       expect(born.weeklyRate, `${quote.vehicleType} signup`).toBe(quote.rate);
-      const { updates } = await retier({ GY: tiers }, [{ id: 'stale', kind: quote.role, vehicleType: quote.vehicleType, weeklyRate: 1 }]);
-      expect(updates.get('stale'), `${quote.vehicleType} re-tier`).toBe(quote.rate);
+      // [R27] What the re-tier bills: a higher rate is held for the 14-day notice, then billed.
+      const { targets } = await retier({ GY: tiers }, [{ id: 'stale', kind: quote.role, vehicleType: quote.vehicleType, weeklyRate: 1 }]);
+      expect(targets.get('stale'), `${quote.vehicleType} re-tier`).toBe(quote.rate);
     }
   });
 
@@ -687,11 +763,11 @@ describe('public price list — quote equals bill, for every partner', () => {
     });
     counts.push([catalogue[catalogue.length - 1]!.minItems * 5, catalogue[catalogue.length - 1]!.rate]);
     for (const [activeItems, rate] of counts) {
-      const { updates } = await retier({ GY: tiers }, [], [{ id: 'stale', vendorType: 'STORE', activeItems, weeklyRate: 1 }]);
-      expect(updates.get('stale'), `${activeItems} active items`).toBe(rate);
+      const { targets } = await retier({ GY: tiers }, [], [{ id: 'stale', vendorType: 'STORE', activeItems, weeklyRate: 1 }]);
+      expect(targets.get('stale'), `${activeItems} active items`).toBe(rate);
     }
-    const { updates } = await retier({ GY: tiers }, [], [{ id: 'svc', vendorType: 'SERVICE', activeItems: 20000, weeklyRate: 1 }]);
-    expect(updates.get('svc')).toBe(service);
+    const { targets } = await retier({ GY: tiers }, [], [{ id: 'svc', vendorType: 'SERVICE', activeItems: 20000, weeklyRate: 1 }]);
+    expect(targets.get('svc')).toBe(service);
   });
 
   it('every quoted role is the entity provisioning creates for that vehicle', async () => {
@@ -718,9 +794,15 @@ describe('public price list — quote equals bill, for every partner', () => {
   it('keeps nonzero legacy fields for older clients that never under-quote the partners who read them', async () => {
     const { body } = await priceList({ GY: seededTiers('GY') });
     const d = body.data!;
+    // Legacy clients show one figure to every mover: the highest rate of a
+    // vehicle a mover can register today. Heavy delivery is off at launch
+    // (owner, 13 Oct 2026), so that is the taxi rate; the heavy figure is the
+    // highest offered heavy-band vehicle (a bus, while buses are offered) or none.
+    const offered = d.movers!.filter((q) => q.offered);
+    const heavyOffered = offered.filter((q) => q.band === 'HEAVY');
     expect(d.weekly).toEqual({
       mover: OWNER.taxi,
-      moverHeavy: OWNER.courierHeavy,
+      moverHeavy: heavyOffered.length ? Math.max(...heavyOffered.map((q) => q.rate)) : null,
       serviceVendor: OWNER.service,
       smallVendor: OWNER.small,
       // The old "Large catalogues (1000+ items)" line stands for every store
@@ -729,14 +811,15 @@ describe('public price list — quote equals bill, for every partner', () => {
       departmentVendor: OWNER.department,
     });
     // An older web page shows `mover` to every standard-vehicle mover and
-    // `moverHeavy` to every heavy one: neither may ever read below a bill.
-    for (const q of d.movers!) {
+    // `moverHeavy` to every heavy one: neither may ever read below the bill of
+    // a mover who can sign up on that vehicle.
+    for (const q of offered) {
       const legacy = q.band === 'HEAVY' ? d.weekly!['moverHeavy'] : d.weekly!['mover'];
       expect(legacy!, q.vehicleType).toBeGreaterThanOrEqual(q.rate);
     }
     // An older app's onboarding card shows `mover` to every mover and
     // `smallVendor` to every business, whatever the vehicle or trade.
-    expect(d.weekly!['mover']).toBeGreaterThanOrEqual(Math.max(...d.movers!.map((q) => q.rate)));
+    expect(d.weekly!['mover']).toBeGreaterThanOrEqual(Math.max(...offered.map((q) => q.rate)));
     expect(d.weekly!['smallVendor']).toBeGreaterThanOrEqual(d.vendors!.service);
   });
 
@@ -749,11 +832,11 @@ describe('public price list — quote equals bill, for every partner', () => {
     const tiers = seededTiers('GY');
     const { body } = await priceList({ GY: tiers });
     const w = body.data!.weekly!;
-    for (const q of body.data!.movers!) expect(w['mover']!, q.vehicleType).toBeGreaterThanOrEqual(q.rate);
+    for (const q of body.data!.movers!.filter((m) => m.offered)) expect(w['mover']!, q.vehicleType).toBeGreaterThanOrEqual(q.rate);
     const oldCardFigure = (activeItems: number) => (activeItems >= 1000 ? w['largeVendor']! : w['smallVendor']!);
     for (const activeItems of [0, 999, 1000, 9999, 10000, 250000]) {
-      const { updates } = await retier({ GY: tiers }, [], [{ id: 'store', vendorType: 'STORE', activeItems, weeklyRate: 1 }]);
-      expect(oldCardFigure(activeItems), `${activeItems} active items`).toBeGreaterThanOrEqual(updates.get('store')!);
+      const { targets } = await retier({ GY: tiers }, [], [{ id: 'store', vendorType: 'STORE', activeItems, weeklyRate: 1 }]);
+      expect(oldCardFigure(activeItems), `${activeItems} active items`).toBeGreaterThanOrEqual(targets.get('store')!);
     }
     expect(w['smallVendor']!).toBeGreaterThanOrEqual(body.data!.vendors!.service);
     // The exact under-quote the review replayed: 20,000 shown, 60,000 billed.
@@ -765,9 +848,17 @@ describe('public price list — quote equals bill, for every partner', () => {
     const d = partnerPriceList(seededTiers('TT'));
     const byVehicle = new Map(d.movers.map((q) => [q.vehicleType, q.rate]));
     expect([byVehicle.get('CAR'), byVehicle.get('BUS_15'), byVehicle.get('MOTORCYCLE'), byVehicle.get('CANTER_LONG')]).toEqual([320, 390, 320, 390]);
-    // The old card shows `mover` to a bus driver billed 390 and `largeVendor`
-    // to a department store billed 1,600: each legacy figure is that maximum.
-    expect(d.weekly).toEqual({ mover: 390, moverHeavy: 390, serviceVendor: 390, smallVendor: 650, largeVendor: 1600, departmentVendor: 1600 });
+    // The old card shows `mover` to a bus driver billed 390 (while buses are
+    // offered) and `largeVendor` to a department store billed 1,600: each
+    // legacy figure is the maximum over the vehicles a mover can register today.
+    const offered = d.movers.filter((q) => q.offered);
+    const heavyOffered = offered.filter((q) => q.band === 'HEAVY');
+    expect(d.weekly).toEqual({
+      mover: Math.max(...offered.map((q) => q.rate)),
+      moverHeavy: heavyOffered.length ? Math.max(...heavyOffered.map((q) => q.rate)) : null,
+      serviceVendor: 390, smallVendor: 650, largeVendor: 1600, departmentVendor: 1600,
+    });
+    expect(d.weekly.mover).toBe(offered.some((q) => q.vehicleType.startsWith('BUS')) ? 390 : 320);
   });
 
   it('404s an unknown market', async () => {
@@ -792,7 +883,8 @@ describe('scope — the Guyana re-price leaves every pegged market exactly as it
     KN: { mover: 130, moverHeavy: 160, serviceVendor: 160, smallVendor: 260, largeVendor: 390, departmentVendor: 650 },
     DM: { mover: 130, moverHeavy: 160, serviceVendor: 160, smallVendor: 260, largeVendor: 390, departmentVendor: 650 },
   };
-  const RULES = { largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000, franchiseMinLocations: 5, franchiseDiscountPct: 50 };
+  // The catalogue boundaries only: no market has a multi-store rule (owner, 13 Oct 2026).
+  const RULES = { largeCatalogueThreshold: 1000, departmentCatalogueThreshold: 10000 };
 
   it.each(Object.keys(BEFORE))('%s keeps its tiers byte-for-byte', (code) => {
     expect(seededTiers(code)).toEqual({ ...BEFORE[code], ...RULES });
@@ -814,9 +906,9 @@ describe('the complete card — every key present and valid, or the whole market
     ['rider', { kind: 'RIDER', vehicleType: 'MOTORCYCLE' }],
     ['heavy rider', { kind: 'RIDER', vehicleType: 'CANTER_LONG' }],
     ['taxi driver', { kind: 'DRIVER', vehicleType: 'CAR' }],
-    ['service', { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }],
-    ['shop', { kind: 'VENDOR', isService: false, activeListings: 0, ownedStores: 1 }],
-    ['chain department store', { kind: 'VENDOR', isService: false, activeListings: 20000, ownedStores: 5 }],
+    ['service', { kind: 'VENDOR', isService: true, activeListings: 0 }],
+    ['shop', { kind: 'VENDOR', isService: false, activeListings: 0 }],
+    ['department store', { kind: 'VENDOR', isService: false, activeListings: 20000 }],
   ];
   const without = (key: string): Tiers => {
     const copy: Tiers = { ...gy() };
@@ -853,16 +945,15 @@ describe('the complete card — every key present and valid, or the whole market
 
   it('replays the review: the fallbacks that quietly re-priced an incomplete card are refusals now', () => {
     // Deleting one key at a time, the review got 8,000 for a taxi driver, 15,000
-    // for a service, 20,000 for a department store and no franchise discount — a
-    // different card each time, where the valid card says 9,000 / 8,000 / 60,000 / 7,500.
+    // for a service and 20,000 for a department store — a different card each
+    // time, where the valid card says 8,000 / 8,000 / 60,000.
     const t = (tiers: Tiers) => tiers as pricing.SubscriptionTiers;
     const calls = [
       () => pricing.partnerRateFor(t(without('taxiDriver')), { kind: 'DRIVER', vehicleType: 'CAR' }),
-      () => pricing.partnerRateFor(t(without('serviceVendor')), { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }),
-      () => pricing.partnerRateFor(t(without('departmentVendor')), { kind: 'VENDOR', isService: false, activeListings: 10000, ownedStores: 1 }),
-      () => pricing.partnerRateFor(t(without('franchiseDiscountPct')), { kind: 'VENDOR', isService: false, activeListings: 0, ownedStores: 5 }),
+      () => pricing.partnerRateFor(t(without('serviceVendor')), { kind: 'VENDOR', isService: true, activeListings: 0 }),
+      () => pricing.partnerRateFor(t(without('departmentVendor')), { kind: 'VENDOR', isService: false, activeListings: 10000 }),
+      () => pricing.partnerRateFor(t(without('departmentCatalogueThreshold')), { kind: 'VENDOR', isService: false, activeListings: 10000 }),
       () => partnerPriceList(without('departmentVendor')),
-      () => pricing.franchiseRuleFor(t(without('franchiseDiscountPct'))),
     ];
     for (const call of calls) expect(raised(call)?.code).toBe('PRICING_CONFIG_INVALID');
   });
@@ -881,22 +972,24 @@ describe('the complete card — every key present and valid, or the whole market
     const minimal = { mover: 10000, smallVendor: 20000, largeVendor: 30000 } as pricing.SubscriptionTiers;
     expect(pricing.partnerRateFor(minimal, { kind: 'RIDER', vehicleType: 'BOX_TRUCK_LONG' }).rate).toBe(10000);
     expect(pricing.partnerRateFor(minimal, { kind: 'DRIVER', vehicleType: 'CAR' }).rate).toBe(10000);
-    expect(pricing.partnerRateFor(minimal, { kind: 'VENDOR', isService: true, activeListings: 0, ownedStores: 1 }).rate).toBe(20000);
-    expect(pricing.partnerRateFor(minimal, { kind: 'VENDOR', isService: false, activeListings: 50000, ownedStores: 1 }).rate).toBe(30000);
-    expect(pricing.franchiseRuleFor(minimal)).toBeNull();
+    expect(pricing.partnerRateFor(minimal, { kind: 'VENDOR', isService: true, activeListings: 0 }).rate).toBe(20000);
+    expect(pricing.partnerRateFor(minimal, { kind: 'VENDOR', isService: false, activeListings: 50000 }).rate).toBe(30000);
   });
 
-  it('a franchise rule is both keys or neither, in every market — one key alone is a broken rule, never "no rule"', () => {
+  it('leftover franchise keys mean nothing in any market — no discount, no refusal, the complete card stays complete', () => {
+    // [Owner, 13 Oct 2026] There is no multi-store pricing. A card stored
+    // before the ruling keeps its keys until its settings are re-seeded.
     const legacy = { mover: 10000, smallVendor: 20000, largeVendor: 30000 };
-    expect(pricing.franchiseRuleFor({ ...legacy, franchiseMinLocations: 5, franchiseDiscountPct: 50 } as pricing.SubscriptionTiers)).toEqual({ minLocations: 5, discountPct: 50 });
-    expect(pricing.franchiseRuleFor(legacy as pricing.SubscriptionTiers)).toBeNull();
-    // An explicit zero discount is an explicit "no rule".
-    expect(pricing.franchiseRuleFor({ ...legacy, franchiseMinLocations: 5, franchiseDiscountPct: 0 } as pricing.SubscriptionTiers)).toBeNull();
-    const chain = { kind: 'VENDOR', isService: false, activeListings: 0, ownedStores: 5 } as const;
-    for (const half of [{ ...legacy, franchiseMinLocations: 5 }, { ...legacy, franchiseDiscountPct: 50 }]) {
-      expect(raised(() => pricing.franchiseRuleFor(half as pricing.SubscriptionTiers))?.code).toBe('PRICING_CONFIG_INVALID');
-      expect(raised(() => pricing.partnerRateFor(half as pricing.SubscriptionTiers, chain))?.code).toBe('PRICING_CONFIG_INVALID');
-      expect(raised(() => partnerPriceList(half))?.code).toBe('PRICING_CONFIG_INVALID');
+    const store = { kind: 'VENDOR', isService: false, activeListings: 0 } as const;
+    for (const leftover of [
+      { franchiseMinLocations: 5, franchiseDiscountPct: 50 },
+      { franchiseMinLocations: 5 },
+      { franchiseDiscountPct: 50 },
+      { franchiseMinLocations: 1, franchiseDiscountPct: 100 },
+    ]) {
+      expect(pricing.partnerRateFor({ ...legacy, ...leftover } as unknown as pricing.SubscriptionTiers, store).rate, JSON.stringify(leftover)).toBe(20000);
+      expect(pricing.partnerRateFor({ ...gy(), ...leftover } as unknown as pricing.SubscriptionTiers, store).rate, JSON.stringify(leftover)).toBe(OWNER.small);
+      expect(partnerPriceList({ ...gy(), ...leftover }).franchise, JSON.stringify(leftover)).toBeNull();
     }
   });
 });
@@ -926,7 +1019,11 @@ describe('a weekly fee is a whole number of currency units — never a fraction,
     const tiers = seededTiers('GY');
     const { body } = await priceList({ GY: tiers });
     const d = body.data!;
-    const quoted = [...d.movers!.map((q) => q.rate), d.vendors!.service, ...d.vendors!.catalogue.map((b) => b.rate), ...Object.values(d.weekly!)];
+    // A legacy figure may be null — moverHeavy is when no heavy-band vehicle is
+    // offered (buses hidden, #1545) — and a null is not a price; every number is.
+    const legacy = Object.values(d.weekly!).filter((n): n is number => n !== null);
+    expect(legacy.length).toBeGreaterThanOrEqual(5);
+    const quoted = [...d.movers!.map((q) => q.rate), d.vendors!.service, ...d.vendors!.catalogue.map((b) => b.rate), ...legacy];
     for (const n of quoted) {
       expect(Number.isInteger(n), String(n)).toBe(true);
       expect(n!).toBeGreaterThan(0);
@@ -954,11 +1051,11 @@ describe('a weekly fee is a whole number of currency units — never a fraction,
     for (const e of events) expect(Number.isInteger(Number(e['amount']))).toBe(true);
   });
 
-  it('a franchise discount that would leave a fraction is rounded to whole units before it is quoted or billed', () => {
-    const tiers = { ...gy(), franchiseDiscountPct: 33 } as pricing.SubscriptionTiers;
-    const chain = pricing.partnerRateFor(tiers, { kind: 'VENDOR', isService: false, activeListings: 0, ownedStores: 5 });
-    expect(chain).toEqual({ rate: Math.round(OWNER.small * 0.67), tier: 'small', franchised: true });
-    expect(Number.isInteger(chain.rate)).toBe(true);
+  it('a leftover rule that would have left a fraction changes nothing — the store pays its whole tier', () => {
+    const tiers = { ...gy(), franchiseMinLocations: 1, franchiseDiscountPct: 33 } as unknown as pricing.SubscriptionTiers;
+    const store = pricing.partnerRateFor(tiers, { kind: 'VENDOR', isService: false, activeListings: 0 });
+    expect(store).toEqual({ rate: OWNER.small, tier: 'small' });
+    expect(Number.isInteger(store.rate)).toBe(true);
   });
 });
 
@@ -970,7 +1067,7 @@ describe('activation — a market that cannot price a partner refuses to activat
     [{ kind: 'RIDER', vehicleType: 'MOTORCYCLE' }, OWNER.courier],
     [{ kind: 'DRIVER', vehicleType: 'BUS_15' }, OWNER.taxi],
     [{ kind: 'VENDOR', vendorType: 'SERVICE' }, OWNER.service],
-    [{ kind: 'VENDOR', vendorType: 'SUPERMARKET', ownedStores: 5 }, OWNER.small / 2],
+    [{ kind: 'VENDOR', vendorType: 'SUPERMARKET', ownedStores: 5 }, OWNER.small],
   ];
 
   it('priceForActivation resolves exactly the rate the trial is born on, and writes nothing', async () => {
@@ -988,7 +1085,7 @@ describe('activation — a market that cannot price a partner refuses to activat
       [{ kind: 'RIDER', vehicleType: 'MOTORCYCLE' }, { ...gy(), mover: 0 }],
       [{ kind: 'DRIVER', vehicleType: 'CAR' }, { ...gy(), taxiDriver: undefined }],
       [{ kind: 'VENDOR', vendorType: 'SERVICE' }, { ...gy(), serviceVendor: 0.5 }],
-      [{ kind: 'VENDOR', vendorType: 'RESTAURANT' }, { ...gy(), franchiseMinLocations: undefined }],
+      [{ kind: 'VENDOR', vendorType: 'RESTAURANT' }, { ...gy(), largeVendor: undefined }],
     ];
     for (const [subject, tiers] of broken) {
       const { prisma, created } = partnerPrisma(subject, tiers);
@@ -1021,17 +1118,25 @@ describe('activation — a market that cannot price a partner refuses to activat
       expect(block.indexOf(then), then).toBeGreaterThan(-1);
       expect(block.indexOf(first), `${first} must precede ${then}`).toBeLessThan(block.indexOf(then));
     };
-    // Admin approval: priced before the CAS that makes the store ACTIVE and searchable.
-    before(handler('/vendors/:id/approve'), 'priceForActivation({ vendorId: id })', "status: 'ACTIVE'");
-    // Document verification: priced before documentsVerified is written for a rider or a driver.
-    before(handler('/riders/:id/verify-documents'), 'priceForActivation({ riderId: id })', 'documentsVerified: isVerified');
-    before(handler('/drivers/:id/verify-documents'), 'priceForActivation({ driverId: id })', 'documentsVerified: isVerified');
+    // Atomic wrapper resolves pricing and trial authority before invoking the
+    // activation callback; the callback cannot escape its transaction.
+    before(handler('/vendors/:id/approve'), 'withActivation({ vendorId: id }', "status: 'ACTIVE'");
+    for (const role of ['rider', 'driver']) {
+      const block = handler(`/${role}s/:id/verify-documents`);
+      expect(block).toContain(`withActivation({ ${role}Id: id }, (tx) => project(tx))`);
+      expect(block).toContain(`tx.${role}.update(`);
+      expect(block).not.toContain(`app.prisma.${role}.update(`);
+    }
+    const subscription = SOURCE('modules', 'subscription', 'subscription.service.ts');
+    before(subscription.slice(subscription.indexOf('async withActivation')), 'await this.activation(entity, tx)', 'return apply(tx, sub)');
 
     const verification = SOURCE('modules', 'verification', 'verification.service.ts');
     // The one projection that owns vendor activation prices a store before it flips it verified/ACTIVE.
     const projectionAt = verification.indexOf('private async projectVendorActivation(');
     expect(projectionAt).toBeGreaterThan(-1);
-    before(verification.slice(projectionAt, projectionAt + 4000), 'priceForActivation({ vendorId: vendor.id }, db)', 'data: { isVerified: true');
+    // [owner #51, 14 Oct] The go-live phone gate added lines to the projection: the
+    // slice is a reading window, not the property — the ORDER is what is graded.
+    before(verification.slice(projectionAt, projectionAt + 6000), 'startTrialForVendor(vendor.id, db)', 'data: { isVerified: true');
     // The review decision prices inside its transaction, before the approval projects anything.
     const decisionAt = verification.indexOf('private async transitionPendingDocument(');
     expect(decisionAt).toBeGreaterThan(-1);
@@ -1054,60 +1159,63 @@ describe('weekly re-tier — the rate and its audit event move together, keys ne
     const { updates, events, rates, moversChanged } = await retier(
       { GY: gy() },
       [
-        { id: 'crashed', kind: 'RIDER', vehicleType: 'CANTER_LONG', weeklyRate: OWNER.courier },
-        { id: 'healthy', kind: 'RIDER', vehicleType: 'CANTER_LONG', weeklyRate: OWNER.courier },
+        // [R27] The written move is a lower fee (a higher one is held for the notice, never written).
+        { id: 'crashed', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: OWNER.courierHeavy },
+        { id: 'healthy', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: OWNER.courierHeavy },
       ],
       [],
       { failEventFor: ['crashed'] },
     );
-    expect(rates.get('crashed')).toBe(OWNER.courier);
+    expect(rates.get('crashed')).toBe(OWNER.courierHeavy);
     expect(updates.has('crashed')).toBe(false);
     expect(events.some((e) => e['subscriptionId'] === 'crashed')).toBe(false);
-    expect(updates.get('healthy')).toBe(OWNER.courierHeavy);
+    expect(updates.get('healthy')).toBe(OWNER.courier);
     expect(moversChanged).toBe(1);
   });
 
   it('the rate and its TIER_CHANGE event are written in one transaction, never as two bare writes', async () => {
     const harness = retierHarness({ GY: gy() });
-    await harness.run([{ id: 'bike', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: 10000 }], [{ id: 'shop', vendorType: 'STORE', activeItems: 1000, weeklyRate: OWNER.small }]);
+    await harness.weeks([{ id: 'bike', kind: 'RIDER', vehicleType: 'MOTORCYCLE', weeklyRate: 10000 }], [{ id: 'shop', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }]);
     const prisma = harness.prisma as unknown as {
       $transaction: ReturnType<typeof vi.fn>;
       subscription: { update: ReturnType<typeof vi.fn> };
       billingEvent: { create: ReturnType<typeof vi.fn> };
     };
-    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    // Two weekly passes (the lower tier is seen, then confirmed), one transaction per subscription each.
+    expect(prisma.$transaction).toHaveBeenCalledTimes(4);
     expect(prisma.subscription.update).not.toHaveBeenCalled();
     expect(prisma.billingEvent.create).not.toHaveBeenCalled();
-    expect(Object.fromEntries(harness.updates)).toEqual({ bike: OWNER.courier, shop: OWNER.large });
+    expect(Object.fromEntries(harness.updates)).toEqual({ bike: OWNER.courier, shop: OWNER.small });
     expect(harness.events.map((e) => [e['subscriptionId'], e['type']])).toEqual([['bike', 'TIER_CHANGE'], ['shop', 'TIER_CHANGE']]);
   });
 
   it('a same-day return to an earlier rate is a new transition with its own event — the key never collides', async () => {
     const harness = retierHarness({ GY: gy() });
-    const rider = (vehicleType: VehicleType): MoverSubFixture[] => [{ id: 'aba', kind: 'RIDER', vehicleType, weeklyRate: OWNER.courier }];
-    // Buys a canter, sells it, buys another — three moves in one day, two of them to the same rate.
-    expect((await harness.run(rider('CANTER_LONG'))).moversChanged).toBe(1);
-    expect((await harness.run(rider('MOTORCYCLE'))).moversChanged).toBe(1);
-    expect((await harness.run(rider('CANTER_LONG'))).moversChanged).toBe(1);
-    expect(harness.rates.get('aba')).toBe(OWNER.courierHeavy);
+    const rider = (vehicleType: VehicleType): MoverSubFixture[] => [{ id: 'aba', kind: 'RIDER', vehicleType, weeklyRate: OWNER.courierHeavy }];
+    // [R27] Sells the canter (down at once), a told rise moves the rate back up (fee-rise-notice.ts, not the
+    // re-tier), sells again: two moves in one day to the same rate, each its own transition.
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(1);
+    harness.rates.set('aba', OWNER.courierHeavy);
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(1);
+    expect(harness.rates.get('aba')).toBe(OWNER.courier);
     const keys = harness.events.map((e) => String(e['idempotencyKey']));
-    expect(keys).toHaveLength(3);
-    expect(new Set(keys).size).toBe(3);
-    expect(harness.events.map((e) => Number(e['amount']))).toEqual([OWNER.courierHeavy, OWNER.courier, OWNER.courierHeavy]);
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
+    expect(harness.events.map((e) => Number(e['amount']))).toEqual([OWNER.courier, OWNER.courier]);
     // A pass with nothing to do writes nothing: idempotency is carried by the rate, not by the key.
-    expect((await harness.run(rider('CANTER_LONG'))).moversChanged).toBe(0);
-    expect(harness.events).toHaveLength(3);
+    expect((await harness.weeks(rider('MOTORCYCLE'))).moversChanged).toBe(0);
+    expect(harness.events).toHaveLength(2);
   });
 
   it('two runs racing over one subscription move it once and write one event', async () => {
     const { updates, events, rates, vendorsChanged } = await retier(
       { GY: gy() },
       [],
-      [{ id: 'raced', vendorType: 'STORE', activeItems: 1000, weeklyRate: OWNER.small }],
-      { raceFor: { id: 'raced', to: OWNER.large } },
+      [{ id: 'raced', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }],
+      { raceFor: { id: 'raced', to: OWNER.small } },
     );
-    expect(rates.get('raced')).toBe(OWNER.large);
-    expect(updates.get('raced')).toBe(OWNER.large);
+    expect(rates.get('raced')).toBe(OWNER.small);
+    expect(updates.get('raced')).toBe(OWNER.small);
     // The other run already moved it: ours writes no second event and counts no change.
     expect(events).toEqual([]);
     expect(vendorsChanged).toBe(0);
@@ -1118,15 +1226,54 @@ describe('weekly re-tier — the rate and its audit event move together, keys ne
       { GY: gy() },
       [],
       [
-        { id: 'first', vendorType: 'STORE', activeItems: 1000, weeklyRate: OWNER.small },
-        { id: 'stuck', vendorType: 'SUPERMARKET', activeItems: 10000, weeklyRate: OWNER.large },
+        { id: 'first', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large },
+        { id: 'stuck', vendorType: 'SUPERMARKET', activeItems: 1000, weeklyRate: OWNER.department },
         { id: 'last', vendorType: 'SERVICE', activeItems: 0, weeklyRate: OWNER.small },
       ],
       { failEventFor: ['stuck'] },
     );
-    expect(Object.fromEntries(updates)).toEqual({ first: OWNER.large, last: OWNER.service });
+    expect(Object.fromEntries(updates)).toEqual({ first: OWNER.small, last: OWNER.service });
     expect(events.map((e) => e['subscriptionId'])).toEqual(['first', 'last']);
     expect(vendorsChanged).toBe(2);
+  });
+});
+
+// ── 11b. [R27 · security review] Shrink-and-restore around one pass moves nothing ──
+
+describe('weekly re-tier — a lower tier must hold on two consecutive weekly passes', () => {
+  const gy = () => seededTiers('GY');
+  const t0 = new Date('2026-11-02T09:00:00Z');
+  const at = (days: number) => new Date(t0.getTime() + days * 24 * 60 * 60 * 1000);
+
+  it('a vehicle sold just before one pass and bought back after it: no lower fee, no TIER_CHANGE', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const heavy = (vehicleType: VehicleType): MoverSubFixture[] => [{ id: 'flip', kind: 'RIDER', vehicleType, weeklyRate: OWNER.courierHeavy }];
+    await harness.run(heavy('MOTORCYCLE'), [], at(0));
+    await harness.run(heavy('CANTER_LONG'), [], at(7));
+    await harness.run(heavy('MOTORCYCLE'), [], at(14));
+    expect(harness.rates.get('flip')).toBe(OWNER.courierHeavy);
+    expect(harness.events).toEqual([]);
+  });
+
+  it('a second pass inside the same week never confirms; the next weekly pass does, at the higher of the two', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const shop = (activeItems: number): VendorSubFixture[] => [{ id: 'shop', vendorType: 'STORE', activeItems, weeklyRate: OWNER.department }];
+    await harness.run([], shop(1500), at(0));
+    await harness.run([], shop(12), at(1));
+    expect(harness.rates.get('shop')).toBe(OWNER.department);
+    await harness.run([], shop(12), at(7));
+    expect(harness.rates.get('shop')).toBe(OWNER.large);
+    expect(harness.events.map((e) => Number(e['amount']))).toEqual([OWNER.large]);
+  });
+
+  it('a missed week starts over: an observation older than 13 days confirms nothing', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const shop: VendorSubFixture[] = [{ id: 'late', vendorType: 'STORE', activeItems: 12, weeklyRate: OWNER.large }];
+    await harness.run([], shop, at(0));
+    await harness.run([], shop, at(14));
+    expect(harness.rates.get('late')).toBe(OWNER.large);
+    await harness.run([], shop, at(21));
+    expect(harness.rates.get('late')).toBe(OWNER.small);
   });
 });
 
@@ -1141,5 +1288,142 @@ describe('rollout — the scheduled re-tier is pinned to America/Guyana', () => 
     expect(rule).toMatch(/repeat:\s*\{\s*pattern:\s*'0 5 \* \* 1',\s*tz:\s*GUYANA_TZ\s*\}/);
     expect(queue).toMatch(/import \{[^}]*\bGUYANA_TZ\b[^}]*\} from '\.\.\/modules\/prep\/prep-time'/);
     expect(GUYANA_TZ).toBe('America/Guyana');
+  });
+});
+
+// ── 13. [Owner 13 Oct 2026, decisions 47–49] One store, one account, one tier ──
+// "No franchises — they pay per store and each store has to have its own
+// account and pay per size of catalogue." There is no multi-store discount
+// anywhere: not in a seeded card, not at signup or activation, not in the
+// weekly re-tier, not on the price list. A database whose stored card still
+// carries the old rule (staging until its settings are re-seeded) bills every
+// store its full tier too — the leftover keys mean nothing. A store that was
+// on the discount moves to its full tier at the next weekly re-tier, as one
+// recorded TIER_CHANGE, forward only: no charge is written or re-issued.
+
+describe('owner 13 Oct — every store pays its own tier; no multi-store discount anywhere', () => {
+  const gy = () => seededTiers('GY');
+  const OLD_RULE = { franchiseMinLocations: 5, franchiseDiscountPct: 50 };
+
+  it('no market seeds a multi-store rule — every card carries rates and catalogue boundaries only', () => {
+    for (const country of desiredPlatformConfig().countries) {
+      for (const row of [country.policy, country.create] as Array<{ subscriptionTiers: Tiers }>) {
+        expect(Object.keys(row.subscriptionTiers).filter((key) => /franchise/i.test(key)), country.code).toEqual([]);
+      }
+    }
+  });
+
+  it("a 5-store owner's 5th store is born on the full tier for its type", async () => {
+    for (const vendorType of CATALOGUE_TYPES) {
+      expect((await signup({ kind: 'VENDOR', vendorType, ownedStores: 5 }, gy())).weeklyRate, vendorType).toBe(OWNER.small);
+    }
+    expect((await signup({ kind: 'VENDOR', vendorType: 'SERVICE', ownedStores: 12 }, gy())).weeklyRate).toBe(OWNER.service);
+    const subject: SignupSubject = { kind: 'VENDOR', vendorType: 'SUPERMARKET', ownedStores: 5 };
+    const { prisma } = partnerPrisma(subject, gy());
+    expect((await new SubscriptionService(prisma).priceForActivation(activationEntity(subject)))?.rate).toBe(OWNER.small);
+  });
+
+  it('a stored card that still carries the old rule never discounts a store — signup, activation, re-tier and the price list', async () => {
+    const stale = { ...gy(), ...OLD_RULE };
+    const chainStore: SignupSubject = { kind: 'VENDOR', vendorType: 'RESTAURANT', ownedStores: 5 };
+    expect((await signup(chainStore, stale)).weeklyRate).toBe(OWNER.small);
+    const { prisma } = partnerPrisma(chainStore, stale);
+    expect((await new SubscriptionService(prisma).priceForActivation(activationEntity(chainStore)))?.rate).toBe(OWNER.small);
+    const { targets } = await retier({ GY: stale }, [], [
+      { id: 'chain-dept', vendorType: 'STORE', activeItems: 12000, weeklyRate: 1, ownedStores: 5 },
+      { id: 'chain-svc', vendorType: 'SERVICE', activeItems: 0, weeklyRate: 1, ownedStores: 9 },
+    ]);
+    expect(Object.fromEntries(targets)).toEqual({ 'chain-dept': OWNER.department, 'chain-svc': OWNER.service });
+    const { status, body } = await priceList({ GY: stale });
+    expect(status).toBe(200);
+    expect(body.data!.franchise).toBeNull();
+    // Leftovers that were a broken rule before are no rule now: they neither
+    // discount nor refuse the market.
+    for (const leftover of [{ franchiseMinLocations: 5 }, { franchiseDiscountPct: 100 }, { franchiseMinLocations: '5', franchiseDiscountPct: -50 }]) {
+      const card = { ...gy(), ...leftover };
+      expect((await signup(chainStore, card)).weeklyRate, JSON.stringify(leftover)).toBe(OWNER.small);
+      expect((await priceList({ GY: card })).status, JSON.stringify(leftover)).toBe(200);
+    }
+  });
+
+  it('the weekly re-tier moves a discounted store to its full tier once, with a recorded change, and writes no charge', async () => {
+    const harness = retierHarness({ GY: gy() });
+    const stores: VendorSubFixture[] = [
+      { id: 'fifth-small', vendorType: 'RESTAURANT', activeItems: 40, weeklyRate: OWNER.small / 2, ownedStores: 5 },
+      { id: 'fifth-large', vendorType: 'SUPERMARKET', activeItems: 1500, weeklyRate: OWNER.large / 2, ownedStores: 5 },
+      { id: 'fifth-dept', vendorType: 'STORE', activeItems: 12000, weeklyRate: OWNER.department / 2, ownedStores: 7 },
+      { id: 'fifth-svc', vendorType: 'SERVICE', activeItems: 0, weeklyRate: OWNER.service / 2, ownedStores: 5 },
+      // A rate agreed with Swift, or a waived fee, is a human decision and stays.
+      { id: 'agreed', vendorType: 'STORE', activeItems: 40, weeklyRate: OWNER.small / 2, ownedStores: 5, customRate: OWNER.small / 2 },
+      { id: 'waived', vendorType: 'STORE', activeItems: 40, weeklyRate: OWNER.small / 2, ownedStores: 5, feeWaived: true },
+    ];
+    const first = await harness.run([], stores);
+    // [R27 · GUARDRAILS §7 standing rule 2] The full tier is a RISE: held for the 14-day notice
+    // (fee-rise-notice.ts tells it and moves it in from the first weekly fee after the notice),
+    // never written at once. The harness has no payment table at all: a re-tier that tried to
+    // charge, top up or re-issue anything would throw and hold the store instead.
+    expect(Object.fromEntries(harness.held)).toEqual({
+      'fifth-small': OWNER.small, 'fifth-large': OWNER.large, 'fifth-dept': OWNER.department, 'fifth-svc': OWNER.service,
+    });
+    expect(harness.updates.size).toBe(0);
+    expect(harness.events).toEqual([]);
+    expect(first.vendorsChanged).toBe(4);
+    // The next week finds every rise already held and records nothing more.
+    const second = await harness.run([], stores);
+    expect(second.vendorsChanged).toBe(0);
+    expect(harness.events).toEqual([]);
+  });
+
+  it('the public price list quotes no multi-store discount', async () => {
+    const { status, body } = await priceList({ GY: gy() });
+    expect(status).toBe(200);
+    // Kept as an explicit null for clients that read the key: "no franchise pricing".
+    expect(body.data).toHaveProperty('franchise', null);
+    expect(JSON.stringify(body.data)).not.toMatch(/discount|minLocations/i);
+  });
+
+  it('no code in the pricing path counts how many stores an owner has or reads the old rule', () => {
+    // Comments may explain the ruling; code may not bring the rule back.
+    const code = (text: string) => text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+    for (const file of [
+      ['modules', 'country', 'country-config.service.ts'],
+      ['modules', 'country', 'partner-pricing.ts'],
+      ['modules', 'subscription', 'subscription.service.ts'],
+      ['modules', 'billing', 'billing.service.ts'],
+      ['modules', 'auth', 'auth.routes.ts'],
+      ['modules', 'ops', 'platform-config.ts'],
+    ]) {
+      expect(code(SOURCE(...file)), file.join('/')).not.toMatch(
+        /ownedStores|_count:\s*\{\s*select:\s*\{\s*vendors\b|franchiseMinLocations|franchiseDiscountPct|franchiseRuleFor|FranchiseRule|franchised|discountPct/,
+      );
+    }
+  });
+});
+
+describe('owner 13 Oct — heavy delivery is off at launch', () => {
+  it('every quote carries the launch vehicle list, and no offered quote is heavy delivery', async () => {
+    const { body } = await priceList({ GY: seededTiers('GY') });
+    const movers = body.data!.movers!;
+    for (const q of movers) expect(q.offered, q.vehicleType).toBe(isVehicleOffered(q.vehicleType));
+    for (const v of HEAVY_RIDER_VEHICLES) expect(isVehicleOffered(v), v).toBe(false);
+    expect(movers.filter((q) => q.tier === 'courierHeavy' && q.offered)).toEqual([]);
+  });
+
+  it('the figures older clients read are built from the vehicles a mover can register today — never the heavy-delivery rate', async () => {
+    const { body } = await priceList({ GY: seededTiers('GY') });
+    const offered = body.data!.movers!.filter((q) => q.offered);
+    const w = body.data!.weekly!;
+    expect(w['mover']).toBe(Math.max(...offered.map((q) => q.rate)));
+    const heavyOffered = offered.filter((q) => q.band === 'HEAVY');
+    expect(w['moverHeavy']).toBe(heavyOffered.length ? Math.max(...heavyOffered.map((q) => q.rate)) : null);
+    expect(Object.values(w)).not.toContain(OWNER.courierHeavy);
+    // Every figure still covers every bill a partner who can sign up today can be on.
+    for (const q of offered) expect(w['mover']!, q.vehicleType).toBeGreaterThanOrEqual(q.rate);
+  });
+
+  it('taxi drivers are quoted, born and re-tiered at GY$8,000, car or bus', async () => {
+    expect(seededTiers('GY')['taxiDriver']).toBe(8000);
+    const { body } = await priceList({ GY: seededTiers('GY') });
+    for (const q of body.data!.movers!.filter((m) => m.tier === 'taxi')) expect(q.rate, q.vehicleType).toBe(8000);
   });
 });
