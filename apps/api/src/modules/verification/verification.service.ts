@@ -2481,7 +2481,11 @@ export class VerificationService {
     goingLive: boolean,
   ): Promise<void> {
     const dedupeKey = `${FOOD_HANDLERS_NOTICE_KIND}:${FOOD_HANDLERS_VERSION}:${vendor.id}:${goingLive ? 'go-live' : 'live'}`;
-    if (await noticeHeld(db, userId, dedupeKey)) return;
+    // [item 20] The owner's inbox, read inside the projection transaction (often an admin's or a job's): with the wall on, the narrow action.
+    const held = ownerRlsBindEnabled()
+      ? await noticeHeld(db, userId, dedupeKey)
+      : (await db.notification.findFirst({ where: { userId, dedupeKey }, select: { id: true } })) !== null;
+    if (held) return;
     const words = foodHandlersNotice(vendor.name, goingLive);
     const notice = await insertNoticeFor(db, {
       userId,

@@ -141,11 +141,11 @@ export async function publicPhoneAsked(tx: TxRaw, userId: string, vendorId: stri
   return row?.asked === true;
 }
 
-/** [FOOD-PERMIT] Does this person already hold a notice under this dedupe key? Read inside the caller's transaction:
- *  with the wall on through the narrow action that already answers it (swift_owner_wall_notice_id), off as a plain read. */
-export async function noticeHeld(db: TxRaw & { notification: Pick<Prisma.TransactionClient['notification'], 'findFirst'> }, userId: string, dedupeKey: string): Promise<boolean> {
-  if (!ownerRlsBindEnabled()) return (await db.notification.findFirst({ where: { userId, dedupeKey }, select: { id: true } })) !== null;
-  const [held] = await db.$queryRaw<Array<{ id: string | null }>>`SELECT public.swift_owner_wall_notice_id(${userId}, ${dedupeKey}) AS id`;
+/** [FOOD-PERMIT] Does this person already hold a notice under this dedupe key? Read inside the caller's transaction
+ *  through the narrow action that already answers it (swift_owner_wall_notice_id); the caller reads plainly with the
+ *  wall off, like publicPhoneAsked. */
+export async function noticeHeld(tx: TxRaw, userId: string, dedupeKey: string): Promise<boolean> {
+  const [held] = await tx.$queryRaw<Array<{ id: string | null }>>`SELECT public.swift_owner_wall_notice_id(${userId}, ${dedupeKey}) AS id`;
   return (held?.id ?? null) !== null;
 }
 

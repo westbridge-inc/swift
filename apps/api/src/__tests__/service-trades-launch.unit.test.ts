@@ -63,8 +63,9 @@ function fakeDb(trade: string, lists: Record<string, string[]>, bio: string | nu
 }
 
 describe('[TRADES · R15] the research-confirmed trades open with their own checks; the UNSURE ones stay held', () => {
-  it('exactly the six decided trades open with their own floor', () => {
-    expect(OPENED).toHaveLength(6);
+  // [FOOD-PERMIT PR · REVIEW-G #2053 S4-4] the electrician (already open) now has its own floor too: seven
+  it('exactly the seven decided trades open with their own floor', () => {
+    expect(OPENED).toHaveLength(7);
     for (const trade of OPENED) {
       expect(isServiceCategoryOperational(trade), trade).toBe(true);
       expect(requireCanonicalServiceTrade(trade), trade).toBe(trade);

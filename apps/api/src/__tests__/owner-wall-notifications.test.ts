@@ -613,7 +613,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/customer.routes.ts': 3,
       'modules/vendor/staff-invites.ts': 8,
       'modules/vendor/vendor.routes.ts': 2,
-      'modules/verification/verification.service.ts': 1,
+      // + [FOOD-PERMIT] the wall-OFF branch of the food handlers notice's once-only check (askForFoodHandlerTick)
+      'modules/verification/verification.service.ts': 2,
     });
     // Raw SQL: the retention sweep (a system job) and the invitee's own invite lock.
     expect(rawSql).toEqual({ 'modules/compliance/retention.service.ts': 2, 'modules/vendor/staff-invites.ts': 1 });
