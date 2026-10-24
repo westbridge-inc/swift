@@ -36,6 +36,7 @@ import { gateVerdicts, vendorOwnerContext } from '../modules/verification/catego
 import { vendorActivationNext } from '../modules/admin/vendor-activation';
 import { feePausePredicate } from '../modules/billing/mmg-pause';
 import { FOOD_HANDLERS_TICK_V1 } from '../modules/vendor/food-handlers';
+import { recordConsent, type ConsentDocumentType } from '../modules/legal/consent.service';
 import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verification-object';
 import { reviewerTyped } from './helpers/reviewer-typed';
 import { wordFreeTag } from './helpers/fixture-ids';
@@ -278,5 +279,52 @@ describe('[FOOD-PERMIT] the prepared-food listing gate', () => {
   it('a home cook needs the certificate itself', async () => {
     const o = await restaurant({ tier: 'UNREGISTERED' });
     expect((await handlerGate(o))?.ok).toBe(false);
+  });
+});
+
+describe('[FOOD-PERMIT] who may tick, and which tick counts', () => {
+  const ledger = (fn: (tx: Parameters<typeof recordConsent>[0]) => Promise<void>) => system(() => app.prisma.$transaction(fn));
+
+  it('only the store’s owner: a manager of the store is refused and leaves no row', async () => {
+    const o = await restaurant();
+    seq += 1;
+    const manager = await system(() => app.prisma.user.create({ data: {
+      phone: `+5928${NUM}${String(seq).padStart(2, '0')}`, firstName: 'Mia', lastName: `Manager${seq}`, roles: ['CUSTOMER'], activeRole: 'CUSTOMER',
+      countryCode: 'GY', status: 'ACTIVE', isPhoneVerified: true,
+    } }));
+    users.push(manager.id);
+    await system(() => app.prisma.vendorStaff.create({ data: { vendorId: o.vendorId, userId: manager.id, role: 'MANAGER', invitedBy: o.userId } }));
+    const token = app.jwt.sign({ userId: manager.id, role: 'CUSTOMER', jti: nanoid(8) });
+    await runWithTenant('swift-default', () => app.prisma.session.create({ data: { userId: manager.id, token, refreshToken: nanoid(24), deviceId: `food-m-${seq}`, deviceType: 'test', expiresAt: new Date(Date.now() + DAY) } }));
+    const res = await tick({ userId: manager.id, vendorId: o.vendorId, token });
+    expect(res.statusCode, res.body).toBe(403);
+    expect(await system(() => app.prisma.consentRecord.count({ where: { documentType: TICK_TYPE, subjectId: { in: [manager.id, o.userId] } } }))).toBe(0);
+  });
+
+  it('a withdrawn tick counts for nothing: the store is asked again', async () => {
+    const o = await restaurant();
+    expect((await tick(o)).statusCode).toBe(201);
+    await ledger((tx) => recordConsent(tx, {
+      subjectType: 'vendor_user', subjectId: o.userId, documentType: TICK_TYPE as ConsentDocumentType, version: 'v1', action: 'withdrawn', surface: 'admin',
+      evidence: { vendorId: o.vendorId },
+    }));
+    const status = await statusOf(o);
+    expect(status.missing).toContain(TICK_TYPE);
+    expect(status.foodHandlerAttestation.stores).toEqual([{ vendorId: o.vendorId, name: expect.any(String), attested: false }]);
+    expect((await service.vendorGoLive(o.vendorId))!.foodHandlers).toEqual({ required: true, attested: false });
+  });
+
+  it('a tick row for a home cook’s store never stands in for the certificate', async () => {
+    const ticked = await restaurant();
+    expect((await tick(ticked)).statusCode).toBe(201); // the words are published
+    const o = await restaurant({ tier: 'UNREGISTERED' });
+    await ledger((tx) => recordConsent(tx, {
+      subjectType: 'vendor_user', subjectId: o.userId, documentType: TICK_TYPE as ConsentDocumentType, version: 'v1', action: 'granted', surface: 'vendor_web',
+      evidence: { vendorId: o.vendorId },
+    }));
+    const handlerGate = (await system(async () => gateVerdicts(app.prisma, await vendorOwnerContext(app.prisma, o.vendorId), [{ id: 'cat-cuisine', slug: 'caribbean', kind: 'CUISINE' as const }])))
+      .find((v) => v.requiredDocType === 'food_handler_cert');
+    expect(handlerGate?.ok).toBe(false);
+    expect((await statusOf(o)).checklist).toContain('food_handler_cert');
   });
 });

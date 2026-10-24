@@ -114,7 +114,9 @@ const FAQ: QA[] = [
     a: (
       <>
         Owner ID, business registration, a photo of your storefront, and any licence your kind of
-        business needs (a restaurant adds its GRA licence and food handler&apos;s permit). A person reviews them —
+        business needs (a restaurant adds its GRA licence and confirms that everyone who handles its food holds a
+        current food handler&apos;s certificate; a cook selling without a registered business uploads their own food
+        handler&apos;s certificate). A person reviews them —
         most businesses clear within a day — and your free trial starts the day you are{' '}
         <i>approved</i>, so review time never eats into it. The{' '}
         <Link className="font-medium text-[var(--swift-red)] underline underline-offset-2" href="/vendors">
