@@ -1,6 +1,6 @@
 import type { OnAudit } from '../../lib/audit-writer';
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { DEFAULT_DELIVERY_RATES, mergeDeliveryRates, type DeliveryRates } from '../../utils/markup';

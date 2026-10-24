@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../lib/zod';
 
 /**
  * SWIFT-080 — the mover EARNINGS response contracts.
