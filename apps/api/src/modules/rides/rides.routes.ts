@@ -4,7 +4,7 @@ import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
 import { isRideClassServed } from '../../config/vehicle-classes';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,

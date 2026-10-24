@@ -6,6 +6,9 @@ import { color, radius, space } from '@swift/ui';
 import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
 import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
+import { HANDOVER_WORDS, handoverNeedsNoCode, withHandoverSteps } from '../storeHandover';
+import { mmgDisputePaused } from '../order-dispute';
+import { RiderHandoverLine } from '../RiderHandoverLine';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { orderPaymentLine } from '../storeWords';
@@ -192,7 +195,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const isPickup = order.fulfillment === 'PICKUP';
   const isAppt = order.fulfillment === 'APPOINTMENT';
   const apptMobile = isAppt && !!order.deliveryAddress && order.deliveryAddress !== order.pickupAddress;
-  const actions = orderActions(order);
+  // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
+  const actions = withHandoverSteps(order, orderActions(order), mmgDisputePaused(order));
   // [MOB-050] The one state where a counter hand-over is due.
   const awaitingCollection = !terminal && ['READY', 'READY_FOR_PICKUP'].includes(String(order.status).toUpperCase());
   const busy = orderAction.isPending;
@@ -299,7 +303,19 @@ function VendorOrderDetailBody({ navigation, route }: any) {
             PRINT the code — which made the check prove nothing — while the action
             sent none, so the server refused every attempt.
             Same ceremony as the ride PIN on the mover side. */}
-        {isPickup && awaitingCollection ? (
+        {/* [STORE-DASH · O-2] The store's pickup code is off: the check is the name and the order number. */}
+        {/* [REVIEW-F S3-1 on #2054] Only beside the "Handed to customer" button (never on a paused order). */}
+        {isPickup && awaitingCollection && actions.some((a) => a.action === 'handed-to-customer') ? (
+          <Card style={{ marginBottom: space.md }}>
+            <T variant="caption" weight="bold" tone="muted" center>
+              HANDOVER CHECK
+            </T>
+            <T variant="body" weight="bold" center style={{ marginTop: 2 }}>
+              {HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber)}
+            </T>
+          </Card>
+        ) : null}
+        {isPickup && awaitingCollection && !handoverNeedsNoCode(order) ? (
           <Card style={{ marginBottom: space.md }}>
             <View style={{ alignItems: 'center', marginBottom: space.md }}>
               <T variant="caption" weight="bold" tone="muted">
@@ -543,6 +559,19 @@ function VendorOrderDetailBody({ navigation, route }: any) {
 
         {/* Rider — only once dispatch has assigned one */}
         {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} /> : null}
+        {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider". */}
+        {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside the "Handed to rider" button: never before the order is
+            ready, never on an order paused for an MMG payment review. */}
+        {actions.some((a) => a.action === 'handed-to-rider') ? (
+          <Card style={{ marginBottom: space.md }}>
+            <RiderHandoverLine rider={order.rider} />
+          </Card>
+        ) : null}
+        {order.handedToRiderAt ? (
+          <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.md }}>
+            {HANDOVER_WORDS.handedToRider}
+          </T>
+        ) : null}
 
         {/* This is status, never a local custody decision: the server rejects a
             stale switch if a rider has claimed while this screen was open. */}

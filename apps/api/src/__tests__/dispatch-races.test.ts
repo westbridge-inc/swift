@@ -924,7 +924,7 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the card — through
       where: { id: cold.id },
       select: {
         id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true,
-        paymentStatus: true, fulfillmentModeVersion: true, readyAt: true, vendor: { select: { name: true, owner: { select: { userId: true } } } },
+        paymentStatus: true, fulfillmentModeVersion: true, riderAssignmentVersion: true, readyAt: true, vendor: { select: { name: true, owner: { select: { userId: true } } } },
       },
     }));
     const retired = await sys(() => retireTooOldOrder(
