@@ -2,6 +2,7 @@ import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
 import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
 import { scanUpload } from '../../lib/malware-scan';
+import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -511,13 +512,14 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
-    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
+    const scan = await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
       mimeType: file.mimetype,
       folder: `vehicles/${rider.id}`,
     });
+    await recordUnscannedUpload(app.prisma, scan, { surface: 'vehicle-photo', fileKey: url, buffer, storage: getStorageProvider() });
 
     const updated = await app.prisma.rider.update({
       where: { id: rider.id },
