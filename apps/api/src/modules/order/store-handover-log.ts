@@ -5,6 +5,10 @@ import type { OrderStatus, Prisma } from '@prisma/client';
  *  evidence, not a transition. */
 export const HANDED_TO_RIDER_NOTE = 'Handed to the rider by the store';
 
+/** [O-2] The status-log note of a takeaway handed over with no code on a store whose code is off. It
+ *  states only what the server knows (REVIEW-F S3-1 on #2055): no code was asked for. */
+export const NO_CODE_HANDOVER_NOTE = "Handed to the customer without a pickup code (the store's code is off)";
+
 /**
  * The status-log rows that COUNT a mover's assignment episodes (the dispatch journal compares this
  * count before and after an assignment). The store's "Handed to rider" row can be written while the

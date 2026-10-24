@@ -120,6 +120,12 @@ const setCodeRequired = async (on: boolean) => {
   expect(res.statusCode, res.body).toBe(200);
 };
 const handedToRider = (orderId: string) => call('PUT', `/api/v1/vendor/orders/${orderId}/handed-to-rider`, owner.token, undefined, asStore());
+/** The customer's own order view (GET /customer/orders/:id). */
+const customerDetail = async (orderId: string) => {
+  const res = await call('GET', `/api/v1/customer/orders/${orderId}`, customer.token);
+  expect(res.statusCode, res.body).toBe(200);
+  return res.json().data as Record<string, unknown> & { timeline: Array<{ status: string; note: string | null }>; vendor: Record<string, unknown> };
+};
 const storeDetail = async (orderId: string) => {
   const res = await call('GET', `/api/v1/vendor/orders/${orderId}`, owner.token, undefined, asStore());
   expect(res.statusCode, res.body).toBe(200);
@@ -208,10 +214,16 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
     expect((await sys(() => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } }))).requirePickupCode).toBe(false);
     const order = await readyTakeaway();
     expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: false, orderNumber: expect.any(String), customer: { firstName: 'Asha' } });
+    // [REVIEW-F S3-3] The customer's view says the store does not ask for the code (the code is still there
+    // if an older store build asks); the store's own setting is not passed through as a store field.
+    const mine = await customerDetail(order.id);
+    expect(mine).toMatchObject({ pickupCodeRequired: false, pickupCode: expect.stringMatching(/^\d{6}$/) });
+    expect(mine.vendor).not.toHaveProperty('requirePickupCode');
     const handed = await completePickup(order.id);
     expect(handed.statusCode, handed.body).toBe(200);
     expect((await orderRow(order.id)).status).toBe('COMPLETED');
-    expect((await logs(order.id)).at(-1)).toMatchObject({ status: 'COMPLETED', note: 'Handed to the customer: the store checked the name and order number' });
+    // [REVIEW-F S3-1] The record states only what the server knows: no code was asked for.
+    expect((await logs(order.id)).at(-1)).toMatchObject({ status: 'COMPLETED', note: "Handed to the customer without a pickup code (the store's code is off)" });
   });
 
   it('an older store build that still sends the code: the code is verified exactly as before (a wrong one refused)', async () => {
@@ -233,6 +245,7 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
       expect((profile.json().data.vendors as Array<{ id: string; requirePickupCode: boolean }>).find((v) => v.id === vendorId)?.requirePickupCode).toBe(true);
       const order = await readyTakeaway();
       expect(await storeDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
+      expect(await customerDetail(order.id)).toMatchObject({ pickupCodeRequired: true });
       const missing = await completePickup(order.id);
       expect(missing.statusCode).toBe(400);
       expect(missing.json().error.code).toBe('MISSING_PICKUP_CODE');
@@ -333,12 +346,22 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
   it('the rider\'s "Picked up" records the GPS distance to the store as evidence; a rider with no fix is never stopped', async () => {
     const near = await makeRider('Nia', STORE);
     const nearOrder = await riderOwnedDelivery(near);
+    expect((await handedToRider(nearOrder)).statusCode).toBe(200);
     for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up']) {
       const res = await call('PUT', `/api/v1/rider/orders/${nearOrder}/${step}`, near.token, {});
       expect(res.statusCode, `${step}: ${res.body}`).toBe(200);
     }
     const picked = (await logs(nearOrder)).find((l) => l.status === 'PICKED_UP')!;
     expect(picked.note).toMatch(/^Rider confirmed collecting the order — .*\(0 m from the pickup, fix \d+s old\)$/);
+
+    // [REVIEW-F S3-2] The customer's timeline: the store's tap is not a second "Rider assigned" step, and
+    // the rider's position evidence never reaches the customer (the record keeps it, above).
+    const timeline = (await customerDetail(nearOrder)).timeline;
+    expect(timeline.filter((e) => e.status === 'RIDER_ASSIGNED')).toHaveLength(1);
+    expect(timeline.some((e) => e.note === HANDED_TO_RIDER_NOTE)).toBe(false);
+    expect(timeline.find((e) => e.status === 'PICKED_UP')?.note).toBe('Rider confirmed collecting the order');
+    expect(timeline.find((e) => e.status === 'RIDER_ARRIVED_PICKUP')?.note).toBe('Rider reported arriving at pickup');
+    expect(JSON.stringify(timeline)).not.toMatch(/gps:|GPS fix/);
 
     const blind = await makeRider('Bo', null);
     const blindOrder = await riderOwnedDelivery(blind);
@@ -347,5 +370,6 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
       expect(res.statusCode, `${step}: ${res.body}`).toBe(200);
     }
     expect((await logs(blindOrder)).find((l) => l.status === 'PICKED_UP')!.note).toBe('Rider confirmed collecting the order — no GPS fix on file');
+    expect((await customerDetail(blindOrder)).timeline.find((e) => e.status === 'PICKED_UP')?.note).toBe('Rider confirmed collecting the order');
   });
 });

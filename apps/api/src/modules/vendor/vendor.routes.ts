@@ -91,7 +91,7 @@ import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
-import { HANDED_TO_RIDER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
+import { HANDED_TO_RIDER_NOTE, NO_CODE_HANDOVER_NOTE, handedToRiderSinceAssignment, handoverEpisodeRowsWhere } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -2700,8 +2700,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // order over after checking the customer's first name + order number: no code needed. A code an
     // older store build still sends is verified exactly as before; with the setting ON, today's flow.
     const codeWaived = order.vendor?.requirePickupCode !== true;
+    // [REVIEW-F S3-1 on #2055] The note records only what the server knows: no code was asked for.
+    // (Store builds 11/12's board-card "Mark picked up" sends no code and asked for no name check.)
     const note = codeWaived && !code
-      ? 'Handed to the customer: the store checked the name and order number'
+      ? NO_CODE_HANDOVER_NOTE
       : 'Picked up by customer';
     const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, note, {
       allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
