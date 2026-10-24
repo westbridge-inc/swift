@@ -586,16 +586,23 @@ describe('[Opus S2] an admin account email is where solo warnings go — a sessi
     expect(emailsTo(owner.email).length).toBe(before);
   });
 
-  it('a customer changes their email as before (no code, no notice), and the change is still dated', async () => {
+  it('[L04 #1550] a customer email change needs the code too; with it the change is dated and the old address gets the plain notice, not the admin one', async () => {
     const tenantId = await makeTenant();
     const customer = await makeAdmin(tenantId, { role: 'CUSTOMER' });
+    const refused = await changeEmail(customer, `cust-${RUN}-c@example.test`);
+    expect(refused.statusCode, refused.body).toBe(403);
+    expect(refused.json().error.code).toBe('STEP_UP_REQUIRED');
+    expect((await account(customer.userId)).email).toBe(customer.email);
     const before = emailsTo(customer.email).length;
+    await stepUp(customer);
     const res = await changeEmail(customer, `cust-${RUN}-c@example.test`);
     expect(res.statusCode, res.body).toBe(200);
     const after = await account(customer.userId);
     expect(after.email).toBe(`cust-${RUN}-c@example.test`);
     expect(after['emailChangedAt']).toBeTruthy();
-    expect(emailsTo(customer.email).length).toBe(before);
+    const told = emailsTo(customer.email).slice(before);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).not.toMatch(/admin account/i);
   });
 
   it('if the old address cannot be told, an admin email does not change', async () => {
