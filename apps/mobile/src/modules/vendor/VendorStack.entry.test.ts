@@ -282,7 +282,7 @@ vi.mock('@swift/ui', () => ({ color: fx.token, font: fx.token, fontSize: fx.toke
 vi.mock('expo-crypto', () => ({ randomUUID: () => `scope-${Math.random().toString(36).slice(2)}` }));
 vi.mock('../../kit', async () => ({
   ...Object.fromEntries(
-    ['Card', 'Chip', 'DecorativeIcon', 'ErrorState', 'LabeledInput', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'T', 'TonePill']
+    ['BrandCheckbox', 'Card', 'Chip', 'DecorativeIcon', 'ErrorState', 'LabeledInput', 'LoadingBlock', 'Pictogram', 'PillButton', 'PopupCard', 'PopupTitle', 'Screen', 'T', 'TonePill']
       .map((name) => [name, name]),
   ),
   // The header's Log out asks through the real shared confirm; only its
