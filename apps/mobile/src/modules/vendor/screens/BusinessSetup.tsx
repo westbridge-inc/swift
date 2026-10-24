@@ -153,11 +153,10 @@ export function BusinessSetup() {
     // no confirmed pin, no payload.
     const business = vendorBusinessPayload(form);
     if (!business) return;
-    const ownName = business.nameBasis === 'OWN_NAME';
+    // [ROLE-DOCS · owner 21 Oct 2026] An own-name declaration ticked here is signed by the durable store-created
+    // result (hooks/verification useBecomePartner), never by a callback on this screen, which unmounts once the
+    // store exists.
     become.mutate({ role: 'VENDOR', business, acceptAgreement: agree, ...(fee.kind === 'tick' && { weeklyFeeAck: fee.ack }) }, {
-      // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed; it is
-      // signed now. If this fails, the store's Documents checklist offers the same signature again.
-      onSuccess: () => { if (ownName) void vendorApi.signOwnName().catch(() => undefined); },
       // A refused tick (the fee changed since it was read) reads the price again: the new amount shows, the tick clears.
       onError: (e) => { if (feeTickError(e)) void refetchPricing(); },
     });
