@@ -13,6 +13,7 @@ import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, deliverStaffInvite, staffInviteRevocationVersion } from '../modules/vendor/staff-invites';
 import { NotificationService } from '../modules/notification/notification.service';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up (switch ON). Nothing pending is listed to the owner, which
@@ -36,7 +37,7 @@ let owner: { userId: string; token: string; phone: string };
 let vendorId: string;
 let storeName: string;
 
-const phone = () => `+59249${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = () => testPhone();
 
 async function makeUser(roles: UserRole[], activeRole: UserRole, firstName = 'Invitee') {
   const user = await app.prisma.user.create({
@@ -57,7 +58,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole, firstName = 'In
 async function makeStore(ownerUserId: string) {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: ownerUserId } });
   vendorOwnerIds.push(vo.id);
-  const name = `Withdraw Bistro ${nanoid(4)}`;
+  const name = `Withdraw Bistro ${wordFreeTag(8)}`;
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id, name, slug: `withdraw-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',

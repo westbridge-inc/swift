@@ -16,6 +16,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -458,10 +459,11 @@ export async function sweepLossProtection(
 }
 
 async function noticedToday(prisma: PrismaClient, kind: string, today: string): Promise<boolean> {
-  const already = await prisma.notification.findFirst({
+  // [item 20] Any admin's notice today, looked up by the reserve job: the named capability under the owner wall.
+  const already = await ownerWallSystem('rlp:noticed-today', () => prisma.notification.findFirst({
     where: { data: { path: ['kind'], equals: kind }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } },
     select: { id: true },
-  });
+  }));
   return Boolean(already);
 }
 

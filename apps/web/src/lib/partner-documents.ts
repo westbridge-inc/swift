@@ -44,11 +44,13 @@ export function uploadDocumentFile(file: File): Promise<{ url: string }> {
 }
 
 /** Files one document of the checklist. `consent: true` is sent only after the
- *  uploader ticked the privacy-notice box (DPA §3.5). */
+ *  uploader ticked the privacy-notice box (DPA §3.5); [R17] `consentTick` tells
+ *  the API the box showed its exact words (document_v1), which it records in
+ *  the consent ledger. */
 export function submitDocument(role: ChecklistRole, docType: string, fileUrl: string) {
   return apiFetch('/api/v1/verification/documents', {
     method: 'POST',
-    body: JSON.stringify({ role, docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    body: JSON.stringify({ role, docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });
 }
 

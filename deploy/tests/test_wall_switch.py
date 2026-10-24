@@ -23,7 +23,7 @@ import unittest
 DEPLOY = Path(__file__).resolve().parents[1]
 SHA = 'd' * 40
 REAL_DOCKER = shutil.which('docker')
-BASE_FILES = ('pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile',
+BASE_FILES = ('pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'check-upload-storage.py', 'Caddyfile',
               'docker-compose.yml', 'docker-compose.routing.yml', 'docker-compose.wall.yml', 'docker-compose.rehearsal.yml',
               'gen-secrets.sh', 'doctor.sh')
 
@@ -103,14 +103,15 @@ class RehearsalComposeRendered(unittest.TestCase):
         self.assertEqual(model['networks'], {'private': {'name': 'swift-rehearsal-private', 'ipam': {}, 'internal': True}})
         for volume in model['volumes'].values():
             self.assertTrue(volume['name'].startswith('swift-rehearsal_'), volume)
-        self.assertEqual(sorted(model['services']), ['api', 'meilisearch', 'migrate', 'postgres', 'redis', 'worker'])
+        # [Row 312] The copy's own upload malware scanner (no secret: it reads none).
+        self.assertEqual(sorted(model['services']), ['api', 'clamd', 'meilisearch', 'migrate', 'postgres', 'redis', 'worker'])
         for name, service in model['services'].items():
             with self.subTest(service=name):
                 self.assertNotIn('ports', service)
                 self.assertEqual(list(service['networks']), ['private'])
                 sources = [v['source'] for v in service.get('volumes', []) if v['type'] == 'bind']
                 self.assertNotIn('/run/swift-secrets', sources)
-                if name != 'redis':
+                if name not in ('redis', 'clamd'):
                     self.assertIn('/run/swift-rehearsal-secrets', sources)
         for name in ('api', 'worker'):
             self.assertEqual(wall_env(model['services'][name])['DATABASE_URL_FILE'], '/run/secrets/DATABASE_URL')
@@ -148,6 +149,9 @@ if argv[:1] == ['compose'] and 'config' in argv and '--format' in argv:
         print(json.dumps({'services': {'osrm': {}}}))
     else:
         services = {n: {} for n in ('postgres', 'redis', 'meilisearch', 'migrate', 'api', 'worker')}
+        # [Row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ('api', 'worker'):
+            services[_svc] = {'environment': {'STORAGE_DEPLOYMENT': 'managed', 'STORAGE_PROVIDER': 's3', 'STORAGE_ALLOW_LOCAL': '0', 'AWS_S3_BUCKET': 'synthetic-bucket'}}
         services['caddy'] = {'ports': [{'published': '80', 'target': 80, 'protocol': 'tcp'}, {'published': '443', 'target': 443, 'protocol': 'tcp'}]}
         print(json.dumps({'services': services}))
     sys.exit(0)
@@ -292,6 +296,9 @@ class PilotUpWallPosture(unittest.TestCase):
             ({**base, 'SYSTEM_DATABASE_URL_FILE': '/run/secrets/SYSTEM_DATABASE_URL'}, [], 'must not set SYSTEM_DATABASE_URL_FILE'),
             ({**base, 'POSTGRES_PASSWORD_FILE': '/run/secrets/POSTGRES_PASSWORD'}, [], 'must not set POSTGRES_PASSWORD_FILE'),
             ({**base, 'TENANT_RLS_BIND': 'true'}, [], 'TENANT_RLS_BIND to be exactly 1'),
+            # [item 20] The owner wall is a separate, later switch: never with Phase C, with or without the contract.
+            ({**base, 'OWNER_RLS_BIND': '1'}, [], 'the owner wall is switched separately'),
+            ({**PRODUCTION, 'OWNER_RLS_BIND': '0'}, [], 'the owner wall is switched separately'),
             (base, ['SYSTEM_DATABASE_URL'], 'DATABASE_URL is wired as DATABASE_URL_FILE but is not in the encrypted store'),
         ]
         for settings, store, message in cases:
@@ -495,7 +502,8 @@ class Rehearsal(unittest.TestCase):
         stored = [c for c in calls if c['tool'] == 'swift-secrets' and c['argv'][:1] == ['set']]
         names = sorted(c['argv'][1] for c in stored)
         generated = re.search(r'^GENERATED="(.*)"$', (DEPLOY / 'gen-secrets.sh').read_text(), re.M).group(1).split()
-        self.assertEqual(names, sorted(generated + ['SMTP_PASS', 'TWILIO_API_KEY_SECRET']))
+        # [AUD-G7-023] The api is hardwired to the emergency-policy signing key, so the copy stands one in too.
+        self.assertEqual(names, sorted(generated + ['EMERGENCY_POLICY_SIGNING_KEY', 'SMTP_PASS', 'TWILIO_API_KEY_SECRET']))
         for c in calls:
             if c['tool'] == 'swift-secrets':
                 self.assertEqual((c['env_store'], c['env_run']), ('/etc/credstore.encrypted/swift-rehearsal', '/run/swift-rehearsal-secrets'))
@@ -581,8 +589,8 @@ class Rehearsal(unittest.TestCase):
                   'FAKE_LOGS_WORKER': 'worker | tenant wall: enforced role=swift_app_login'}
         result, calls = self.host.run('up', SHA, extra_env=walled)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        stood_in = ['CW_ALERT_WEBHOOK_URL', 'MMG_API_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PUBLIC_KEY', 'POWERTRANZ_GATEWAY_KEY',
-                    'POWERTRANZ_ID', 'SENTRY_DSN', 'SMS_RECIPIENT_ALLOWLIST', 'STRIPE_SECRET_KEY']
+        stood_in = ['CW_ALERT_WEBHOOK_URL', 'EMERGENCY_POLICY_SIGNING_KEY', 'MMG_API_KEY', 'MMG_CHECKOUT_PRIVATE_KEY', 'MMG_CHECKOUT_PUBLIC_KEY',
+                    'POWERTRANZ_GATEWAY_KEY', 'POWERTRANZ_ID', 'SENTRY_DSN', 'SMS_RECIPIENT_ALLOWLIST', 'STRIPE_SECRET_KEY']
         generated = re.search(r'^GENERATED="(.*)"$', (DEPLOY / 'gen-secrets.sh').read_text(), re.M).group(1).split()
         self.assertIn(f'secrets: {len(generated)} generated, {len(stood_in)} provider stand-ins', result.stdout)
         stored = {}
@@ -602,6 +610,8 @@ class Rehearsal(unittest.TestCase):
         self.assertRegex(stored['SENTRY_DSN'], r'^https://[0-9a-f]{32}@rehearsal\.invalid/1$')
         self.assertRegex(stored['STRIPE_SECRET_KEY'], r'^sk_test_[0-9a-f]{48}$')
         self.assertRegex(stored['MMG_API_KEY'], r'^[0-9a-f]{48}$')
+        # [AUD-G7-023] 48 characters: over the API's 32-character floor, so the copy's api boots and signs.
+        self.assertRegex(stored['EMERGENCY_POLICY_SIGNING_KEY'], r'^[0-9a-f]{48}$')
         # Fresh on every run, and never an argument or a printed line.
         first = dict(stored)
         result, _ = self.host.run('up', SHA, extra_env=walled)
@@ -752,6 +762,30 @@ class Rehearsal(unittest.TestCase):
                     dump.replace('CREATE ROLE swift_bypass_rls;\n', '')):
             self.assertEqual(run(bad).returncode, 1)
 
+    def test_the_owner_wall_group_is_copied_when_present_and_never_its_members(self):
+        """[item 20] swift_owner_wall exists once the owner wall's migrations ran and its policies name it: the copy
+        gets the role (else every owner-walled read errors), never a member (Phase C grants none), and a source
+        without it still copies."""
+        groups = ['swift_app', 'swift_bypass_rls', 'swift_audit_purge_owner', 'swift_audit_purge_executor']
+        base = ''.join(f'CREATE ROLE {g};\nALTER ROLE {g} WITH NOSUPERUSER NOLOGIN NOBYPASSRLS;\n' for g in groups)
+        wall = ('CREATE ROLE swift_owner_wall;\nALTER ROLE swift_owner_wall WITH NOSUPERUSER INHERIT NOLOGIN NOBYPASSRLS;\n'
+                'CREATE ROLE swift_app_login;\nGRANT swift_owner_wall TO swift_app_login WITH INHERIT TRUE GRANTED BY swift;\n')
+        run = lambda text, names: subprocess.run(['python3', '-I', str(DEPLOY / 'wall' / 'rehearsal-roles.py'), *names],
+                                                 input=text, text=True, capture_output=True, timeout=30)
+        result = run(base + wall, [*groups, '--optional', 'swift_owner_wall'])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('CREATE ROLE swift_owner_wall;', result.stdout)
+        self.assertNotIn('GRANT swift_owner_wall', result.stdout)
+        self.assertNotIn('swift_app_login', result.stdout)
+        absent = run(base, [*groups, '--optional', 'swift_owner_wall'])
+        self.assertEqual(absent.returncode, 0, absent.stderr)
+        self.assertNotIn('swift_owner_wall', absent.stdout)
+        # Without the option the role is dropped as any other; a bare --optional is refused.
+        self.assertNotIn('swift_owner_wall', run(base + wall, groups).stdout)
+        self.assertEqual(run(base, [*groups, '--optional']).returncode, 1)
+        self.assertIn('--optional $OPTIONAL_GROUPS', (DEPLOY / 'wall' / 'rehearsal.sh').read_text())
+        self.assertIn('OPTIONAL_GROUPS="swift_owner_wall"', (DEPLOY / 'wall' / 'rehearsal.sh').read_text())
+
 
 # ── doctor.sh ──────────────────────────────────────────────────────────────
 class RedactLog(unittest.TestCase):
@@ -803,7 +837,7 @@ class RedactLog(unittest.TestCase):
 
 
 class DoctorWallPosture(unittest.TestCase):
-    def run_doctor(self, settings, env_names, roles_hold=True):
+    def run_doctor(self, settings, env_names, roles_hold=True, owner_wall_members=''):
         tmp = Path(tempfile.mkdtemp(prefix='swift-wall-doctor-'))
         self.addCleanup(shutil.rmtree, tmp, True)
         deploy = tmp / 'deploy'
@@ -817,6 +851,7 @@ class DoctorWallPosture(unittest.TestCase):
         bin_dir.mkdir()
         env_lines = '\\n'.join(env_names)
         shim(bin_dir, 'docker', 'case "$*" in\n'
+             f'  *swift_owner_wall*) printf "{owner_wall_members}" ;;\n'
              '  *"ps -q api"*|*"ps -q worker"*|*"ps -q postgres"*|*"ps -q redis"*) echo some-id ;;\n'
              f'  *"range .Config.Env"*) printf "{env_lines}\\n" ;;\n'
              '  *RestartPolicy*) echo unless-stopped ;;\n'
@@ -843,6 +878,18 @@ class DoctorWallPosture(unittest.TestCase):
         self.assertNotIn('/run/secrets/POSTGRES_PASSWORD', out)
         out = self.run_doctor('PILOT_ENV=staging\n', owner)
         self.assertNotIn('least-privilege', out)
+
+    def test_the_owner_wall_stays_off_until_its_own_switch(self):
+        """[item 20] No OWNER_RLS_BIND line and no member of swift_owner_wall: either is a FAIL, by count, never a name."""
+        good = ['DATABASE_URL_FILE=/run/secrets/DATABASE_URL', 'SYSTEM_DATABASE_URL_FILE=/run/secrets/SYSTEM_DATABASE_URL',
+                'POSTGRES_PASSWORD_FILE=', 'TENANT_RLS_BIND=1']
+        out = self.run_doctor('TENANT_RLS_BIND=1\n', good, owner_wall_members='0')
+        self.assertIn('ok    no database role is a member of swift_owner_wall', out)
+        self.assertNotIn('OWNER_RLS_BIND', out)
+        out = self.run_doctor('TENANT_RLS_BIND=1\nOWNER_RLS_BIND=1\n', good, owner_wall_members='1')
+        self.assertIn('FAIL  deploy/.env sets OWNER_RLS_BIND', out)
+        self.assertIn('FAIL  1 database role(s) are members of swift_owner_wall', out)
+        self.assertNotIn('swift_app_login', out)
 
 
 if __name__ == '__main__':

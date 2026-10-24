@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { NextRequest, type NextResponse } from 'next/server';
 import { getRewrittenUrl, unstable_doesMiddlewareMatch } from 'next/experimental/testing/server';
@@ -53,6 +53,9 @@ const ORDERING_PATHS = [
   '/', '/order', '/order/browse', '/order/search', '/order/vendor/v1', '/explore', '/market', '/cart', '/orders',
   '/orders/o1', '/courier', '/taxi', '/account', '/account/profile', '/account/addresses', '/store/shanta-kitchen',
   '/store/shanta-kitchen?src=qr&c=AB12', '/stores', '/stores/shanta-kitchen',
+  // [WEB-LAUNCH-CHECK F1 · S2] The checkout itself (and the selfie step it sends a
+  // first-time buyer to) were real on swiftgy.com before launch.
+  '/checkout', '/checkout?fulfilment=PICKUP', '/selfie', '/selfie?next=%2Fcart',
 ];
 
 /** What the bank, the app stores and partners need, whatever the switch says. */
@@ -172,5 +175,88 @@ describe('[Item 7] the host is the one the visitor asked for', () => {
     expect(getRewrittenUrl(middleware.middleware(stagingVisit))).toBeNull();
     const noHost = new NextRequest('http://localhost:3000/cart');
     expect(new URL(getRewrittenUrl(middleware.middleware(noHost))!).pathname, 'no Host header is treated as the public site').toBe('/launching-soon');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [WEB-LAUNCH-CHECK F1 · S2] /checkout slipped past the switch because nothing
+// tied the matcher to the pages on disk. Now every page the web serves is named
+// here as ordering (behind the switch) or open (bank, stores, partners, the
+// links a recipient is sent), so a new page cannot go live unclassified; and
+// every route the sign-in page treats as the customer's is behind the switch.
+// ---------------------------------------------------------------------------
+const ROUTE_CLASS: Record<string, 'ordering' | 'open'> = {
+  '/': 'ordering', '/order': 'ordering', '/order/browse': 'ordering', '/order/location': 'ordering', '/order/search': 'ordering',
+  '/explore': 'ordering', '/market': 'ordering', '/cart': 'ordering', '/checkout': 'ordering', '/selfie': 'ordering',
+  '/orders': 'ordering', '/orders/[id]': 'ordering', '/courier': 'ordering', '/taxi': 'ordering',
+  '/account': 'ordering', '/account/addresses': 'ordering', '/account/favourites': 'ordering', '/account/help': 'ordering',
+  '/account/profile': 'ordering', '/account/safety': 'ordering',
+  '/store/[slug]': 'ordering', '/stores': 'ordering', '/stores/[slug]': 'ordering',
+  // Public by policy, for the bank and the app stores.
+  '/about': 'open', '/contact': 'open', '/faq': 'open', '/how-it-works': 'open', '/pricing': 'open', '/welcome': 'open',
+  '/vendors': 'open', '/drivers': 'open', '/legal/child-safety': 'open', '/legal/delivery': 'open', '/legal/privacy': 'open',
+  '/legal/refunds': 'open', '/legal/terms': 'open', '/account/delete': 'open', '/launching-soon': 'open', '/offline': 'open',
+  '/login': 'open', '/signup': 'open',
+  // Partner consoles (stores, riders, drivers, advertisers) work before launch.
+  '/dashboard': 'open', '/dashboard/inventory': 'open', '/dashboard/inventory/import': 'open', '/dashboard/notifications': 'open',
+  '/dashboard/orders': 'open', '/dashboard/insights': 'open', '/dashboard/schedule': 'open', '/dashboard/settings': 'open', '/dashboard/weekly-fee': 'open', '/weekly-fee': 'open',
+  '/portal': 'open', '/portal/account': 'open', '/portal/documents': 'open', '/portal/history': 'open',
+  '/portal/notifications': 'open', '/portal/weekly-fee': 'open',
+  '/advertiser': 'open', '/advertiser/account': 'open', '/advertiser/notifications': 'open',
+  '/advertiser/campaigns/[advertiserId]/[campaignId]': 'open',
+  // A link someone was sent (a parcel or trip to follow) and the QR fallback pages: no ordering on them.
+  '/track/[token]': 'open', '/trip/[token]': 'open', '/qr/not-found': 'open', '/qr/retired': 'open', '/qr/unavailable': 'open',
+};
+
+function pageRoutesOnDisk(dir = join(SRC, 'app'), prefix = ''): string[] {
+  const routes: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isFile() && /^page\.(tsx|ts|jsx|js)$/.test(entry.name)) routes.push(prefix || '/');
+    if (!entry.isDirectory() || entry.name.startsWith('_') || entry.name.startsWith('@')) continue;
+    const segment = /^\(.+\)$/.test(entry.name) ? '' : `/${entry.name}`;
+    routes.push(...pageRoutesOnDisk(join(dir, entry.name), prefix + segment));
+  }
+  return routes;
+}
+
+describe('[WEB-LAUNCH-CHECK F1] every page the web serves is classified, and every ordering page is behind the switch', () => {
+  it('no page is unclassified, and no classified page is missing', () => {
+    const onDisk = [...new Set(pageRoutesOnDisk())].sort();
+    expect(onDisk.filter((r) => !(r in ROUTE_CLASS)), 'new page: classify it as ordering or open').toEqual([]);
+    expect(Object.keys(ROUTE_CLASS).filter((r) => !onDisk.includes(r)).sort(), 'classified page no longer on disk').toEqual([]);
+  });
+
+  it.each(Object.entries(ROUTE_CLASS).filter(([, c]) => c === 'ordering').map(([r]) => r))('%s is answered by the front door on swiftgy.com', async (route) => {
+    const { middleware } = await deployedWith('');
+    const path = route.replace(/\[[^\]]+\]/g, 'x1');
+    expect(unstable_doesMiddlewareMatch({ config: middleware.config, url: `https://swiftgy.com${path}` }), `middleware must run on ${path}`).toBe(true);
+    const rewritten = getRewrittenUrl(middleware.middleware(requestAt('swiftgy.com', path)));
+    expect(rewritten && new URL(rewritten).pathname, path).toBe('/launching-soon');
+  });
+
+  it.each(Object.entries(ROUTE_CLASS).filter(([, c]) => c === 'open').map(([r]) => r))('%s stays open on swiftgy.com', async (route) => {
+    const { middleware } = await deployedWith('');
+    const path = route.replace(/\[[^\]]+\]/g, 'x1');
+    if (unstable_doesMiddlewareMatch({ config: middleware.config, url: `https://swiftgy.com${path}` })) {
+      expect(getRewrittenUrl(middleware.middleware(requestAt('swiftgy.com', path))), path).toBeNull();
+    }
+  });
+
+  it('every route the sign-in page sends a customer back to is behind the switch', async () => {
+    const login = readFileSync(join(SRC, 'app/login/page.tsx'), 'utf8');
+    const list = login.match(/const CUSTOMER_ROUTES = \[([^\]]+)\]/)?.[1];
+    expect(list, 'login CUSTOMER_ROUTES').toBeTruthy();
+    const routes = [...list!.matchAll(/'([^']+)'/g)].map((m) => m[1]!);
+    expect(routes).toContain('/checkout');
+    const { middleware } = await deployedWith('');
+    for (const route of routes) {
+      // /account/delete is the one page under a customer route that is public by policy (Google Play).
+      const pages = Object.keys(ROUTE_CLASS).filter((r) => (r === route || r.startsWith(`${route}/`)) && r !== '/account/delete');
+      expect(pages.length, `${route} has pages`).toBeGreaterThan(0);
+      for (const page of pages) expect(ROUTE_CLASS[page], `${page} is a customer route, so it is an ordering page`).toBe('ordering');
+      expect(unstable_doesMiddlewareMatch({ config: middleware.config, url: `https://swiftgy.com${route}` }), route).toBe(true);
+      const rewritten = getRewrittenUrl(middleware.middleware(requestAt('swiftgy.com', route)));
+      expect(rewritten && new URL(rewritten).pathname, route).toBe('/launching-soon');
+    }
   });
 });

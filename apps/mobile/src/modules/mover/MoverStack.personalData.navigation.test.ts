@@ -91,6 +91,8 @@ vi.mock('../../hooks', () => {
     useSetMoverBillingMethod: () => write, useUploadVehiclePhoto: () => write,
   };
 });
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../../stores/authStore', () => {
   const state = { user: { firstName: 'Synthetic', lastName: 'Mover', phone: '' }, setIntent: vi.fn() };
   return {

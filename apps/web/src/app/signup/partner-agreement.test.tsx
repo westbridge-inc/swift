@@ -18,11 +18,15 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: fx.api }));
-vi.mock('@/lib/customer', () => ({
+vi.mock('@/lib/customer-account', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
+}));
+vi.mock('@/lib/customer-places', () => ({
   placesAutocomplete: fx.search, placeDetails: fx.details,
 }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
+// [Row 628] The weekly fee block has its own tests (weekly-fee.test.tsx); here it says what an API older than the tick says.
+vi.mock('./weekly-fee-loader', () => ({ loadWeeklyFee: () => import('@/test/weekly-fee-fixture') }));
 
 const DOOR = { placeId: 'door', primary: '12 Regent Street', secondary: 'Georgetown', lat: 6.812, lng: -58.163 };
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));

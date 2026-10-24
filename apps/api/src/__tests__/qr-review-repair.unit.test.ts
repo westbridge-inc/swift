@@ -127,13 +127,17 @@ function productionConfig(): Record<string, string | undefined> {
     NODE_ENV: 'production', LIFECYCLE_V2: '0', JWT_SECRET: 'synthetic'.repeat(8),
     PLACES_PROVIDER: 'osm', PHOTON_URL: 'https://places.example.invalid',
     KYC_PROVIDER: 'manual', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1',
-    MMG_DRIVER: 'live', MMG_API_URL: 'https://example.invalid/api', MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+    // [22 Oct] Production's posture until the MMG switch-on: MMG fully off (live MMG now also needs
+    // the MMG checkout configured; boot-config.test.ts covers that rule, this baseline is about salts).
+    MMG_DRIVER: 'disabled',
     NOTIFICATION_PROVIDER: 'twilio', TWILIO_ACCOUNT_SID: `AC${'a'.repeat(32)}`,
     TWILIO_API_KEY_SID: `SK${'b'.repeat(32)}`, TWILIO_API_KEY_SECRET: 'synthetic-only', TWILIO_FROM: '+15550000000',
     PUSH_PROVIDER: 'expo', MASTER_KEK: Buffer.alloc(32, 7).toString('base64'),
     STORAGE_SIGNING_SECRET: 'synthetic'.repeat(8), STORAGE_PROVIDER: 's3', CONSENT_IP_PEPPER: 'synthetic'.repeat(8),
     AWS_S3_BUCKET: 'synthetic-boot-bucket',
     SCAN_IP_SALT: 'synthetic-scan'.repeat(4), ATTRIB_SALT: 'synthetic-attribution'.repeat(4),
+    // [row 331 · CONFIG-GUARDS] the identity-signal salt is a boot guard as well.
+    IDENTITY_SALT: 'synthetic-identity'.repeat(4),
     // Production also requires an SOS on-call list and a real email sender
     // (boot-config): a fully configured baseline carries both.
     OPS_ONCALL_PHONES: '+5926000001', EMAIL_PROVIDER: 'smtp', SMTP_HOST: 'smtp.example.test', SMTP_PORT: '465',
@@ -141,7 +145,6 @@ function productionConfig(): Record<string, string | undefined> {
     // ... and admin top-ups on hold (owner ruling, 8 Oct).
     BILLING_TOPUP_HOLD: '1',
   };
-  for (const key of ['MMG_API_KEY', 'MMG_MERCHANT_ID', 'MMG_PASSWORD', 'MMG_MKEY', 'MMG_MSECRET']) env[key] = 'synthetic-only';
   return env;
 }
 

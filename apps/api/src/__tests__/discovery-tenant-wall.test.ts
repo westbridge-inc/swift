@@ -7,11 +7,12 @@ import { authPlugin } from '../plugins/auth';
 import { beginRequestTenantContext, runAsSystem } from '../plugins/tenant-context';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { CATEGORY_DISCOVERY_FLAG, discoveryRoutes, resetDiscoveryCacheForTests } from '../modules/discovery/discovery.routes';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // AX343 finding 2: exercise the real guest binding, SQL counts, tenant-scoped
 // taxonomy and cache. Both tenants have the same slug, but REVIEW has two
 // vendors and an extra category that must never enter the public rail.
-const run = `dl7-rail-${nanoid(10)}`;
+const run = `dl7-rail-${wordFreeTag(10)}`;
 const production = `${run}-production`;
 const review = `${run}-review`;
 const sharedSlug = `${run}-shared`;

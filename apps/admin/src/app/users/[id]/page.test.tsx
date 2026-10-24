@@ -121,4 +121,22 @@ describe('user suspension mutation', () => {
     expect(alert.textContent).toContain("Couldn't load this person");
     expect(screen.queryByText('User not found.')).toBeNull();
   });
+
+  it('[BUG-GUARDS C5] names each strike in words, never its code', async () => {
+    const strikes = [
+      { id: 's1', reason: 'failed_payment_no_show', createdAt: '2026-10-01T00:00:00.000Z' },
+      { id: 's2', reason: 'something_new', createdAt: '2026-10-02T00:00:00.000Z' },
+    ];
+    mockApi((request) => {
+      if (request.method === 'GET' && request.url.pathname === '/api/v1/admin/users/user-1') {
+        return { body: { success: true, data: { ...userRecord, strikes, _count: { orders: 0, strikes: 2 } } } };
+      }
+      throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+    });
+    renderWithQuery(<UserDetailPage params={fulfilledParams({ id: 'user-1' })} />);
+    const list = (await screen.findByRole('heading', { name: 'Strikes' })).closest('section')!;
+    expect(within(list as HTMLElement).getByText('Cash order: nobody at the door')).toBeTruthy();
+    expect(within(list as HTMLElement).getByText('Strike')).toBeTruthy();
+    expect(list.textContent).not.toMatch(/failed payment|something new|_/i);
+  });
 });

@@ -21,7 +21,7 @@ import { resetKeyProviderForTests } from '../../providers/storage/envelope';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { clusterMemberIds } from '../../modules/integrity/identity.service';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
-import { uniquePng } from '../helpers/real-image';
+import { REAL_PNG, uniquePng } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-5 · ADMIN-01 — partner document review, through the REAL mounted
@@ -326,7 +326,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // At rest: ciphertext only; the envelope records the true type and size.
     const envelope = await sys(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: submitted.fileUrl } }));
-    expect({ mime: envelope.mimeType, size: envelope.sizeBytes, by: envelope.createdBy, sealed: envelope.wrappedDek !== null }).toEqual({ mime: 'image/png', size: bytes.length, by: partner.userId, sealed: true });
+    expect({ mime: envelope.mimeType, size: envelope.sizeBytes, by: envelope.createdBy, sealed: envelope.wrappedDek !== null }).toEqual({ mime: 'image/png', size: REAL_PNG.length, by: partner.userId, sealed: true }); // [Row 238] sealed without its metadata
     const stored = await getStorageProvider().getObject(submitted.fileUrl);
     expect(stored.equals(bytes)).toBe(false);
     expect(stored.includes(bytes.subarray(8, 30))).toBe(false);
@@ -352,7 +352,8 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     expect(shown.statusCode).toBe(200);
     expect(shown.headers['content-type']).toContain('image/png');
     expect(shown.headers['cache-control']).toContain('no-store');
-    expect(Buffer.from(shown.rawPayload).equals(bytes)).toBe(true);
+    // [Row 238] exactly the partner's photo, minus the metadata (the note) it was uploaded with.
+    expect(Buffer.from(shown.rawPayload).equals(REAL_PNG)).toBe(true);
     // The link is bound to its document: the same signature cannot open another.
     // (The last character always CHANGES: a cuid ending in 'x' made the
     // "forged" URL the real one about once in 36 runs.)
@@ -376,7 +377,8 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // DECISION: approved, with a stated reason, once.
     const decideAt = Date.now();
-    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: {} });
+    // [R16] the reviewer says what the registration is (a company's never expires)
+    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: { registrationKind: 'COMPANY' } });
     expect(approved.statusCode, approved.body).toBe(200);
     const decided = await docRow(docId);
     expect({ status: decided.status, state: decided.state, by: decided.reviewedBy }).toEqual({ status: 'APPROVED', state: 'COMMITTED', by: rev1.userId });

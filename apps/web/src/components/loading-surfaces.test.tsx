@@ -3,6 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import * as api from '@/lib/customer';
+import * as ordersApi from '@/lib/customer-orders';
+import * as searchApi from '@/lib/customer-search';
+import * as marketApi from '@/lib/customer-market';
 import * as auth from '@/lib/auth';
 import { CustomerHome } from './customer-home';
 import SearchPage from '@/app/(app)/order/search/page';
@@ -72,9 +75,9 @@ describe('loading surfaces become content in the reserved layout', () => {
 
   it('Market reserves its title, category strip and item image heights', async () => {
     vi.spyOn(api, 'getMarketDepth').mockResolvedValue({ visible: true, items: 400, vendors: 9 });
-    vi.spyOn(api, 'getMarketCategories').mockResolvedValue([]);
-    const response = pending<Awaited<ReturnType<typeof api.getMarketItems>>>();
-    vi.spyOn(api, 'getMarketItems').mockReturnValue(response.promise);
+    vi.spyOn(marketApi, 'getMarketCategories').mockResolvedValue([]);
+    const response = pending<Awaited<ReturnType<typeof marketApi.getMarketItems>>>();
+    vi.spyOn(marketApi, 'getMarketItems').mockReturnValue(response.promise);
     const view = mount(<MarketPage />);
     const region = screen.getByLabelText('Loading market items');
     // [WEB-REDESIGN] Square item photos, as in the design.
@@ -87,12 +90,14 @@ describe('loading surfaces become content in the reserved layout', () => {
   });
 
   it('orders use the same row size before and after the list arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof api.getOrders>>>();
-    vi.spyOn(api, 'getOrders').mockReturnValue(response.promise);
+    // [UI-SWEEP U13] Two reads: live orders, and a page of history.
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrderHistoryPage>>>();
+    vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValue({ items: [], total: 0 });
+    vi.spyOn(ordersApi, 'getOrderHistoryPage').mockReturnValue(response.promise);
     const view = mount(<OrdersPage />);
     expect(screen.getByLabelText('Loading your orders').querySelector('.swift-order-row')).toBeTruthy();
-    await response.finish([{ id: 'o1', vendorName: 'Local store', status: 'PENDING', totalAmount: 500 }]);
-    // The row (its name first); the in-progress band's Track link names it too.
+    await response.finish({ items: [{ id: 'o1', vendorName: 'Local store', status: 'DELIVERED', totalAmount: 500 }], page: 1, totalPages: 1, total: 1 });
+    // The history row, its name first.
     expect(await screen.findByRole('link', { name: /^Local store/ })).toBeTruthy();
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
@@ -113,8 +118,8 @@ describe('loading surfaces become content in the reserved layout', () => {
   });
 
   it('tracking retains its page, hero and progress CSS layout when the order arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof api.getOrder>>>();
-    vi.spyOn(api, 'getOrder').mockReturnValue(response.promise);
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrder>>>();
+    vi.spyOn(ordersApi, 'getOrder').mockReturnValue(response.promise);
     const view = mount(<OrderPage />);
     const region = screen.getByLabelText('Loading order tracking');
     const shape = [region.className, region.children[0]!.className, region.children[1]!.className];
@@ -127,27 +132,32 @@ describe('loading surfaces become content in the reserved layout', () => {
 
 it('search shows store-shaped placeholders during debounce and ignores a late answer after clearing', async () => {
   // [SEARCH 13 Oct] the page asks the search engine (stores and dishes), not the store list
-  const response = pending<api.CatalogueResults>();
-  vi.spyOn(api, 'searchCatalogue').mockReturnValue(response.promise);
+  const response = pending<searchApi.CatalogueResults>();
+  vi.spyOn(searchApi, 'searchCatalogue').mockReturnValue(response.promise);
   mount(<SearchPage />);
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Lunch' } });
   expect(screen.getByLabelText('Searching').querySelector('[data-store-part="copy"]')).toBeTruthy();
   expect(screen.getByRole('status').textContent).toBe('Searching…');
   await new Promise((resolve) => setTimeout(resolve, 320));
-  expect(api.searchCatalogue).toHaveBeenCalledWith('Lunch');
+  expect(searchApi.searchCatalogue).toHaveBeenCalledWith('Lunch');
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
-  await response.finish({ stores: [vendor as unknown as api.SearchStore], items: [] });
+  await response.finish({ stores: [vendor as unknown as searchApi.SearchStore], items: [] });
   expect(screen.queryByLabelText('Searching')).toBeNull();
   expect(screen.queryByText('Local store')).toBeNull();
 });
 
 it('orders cached for one person never appear while a different person’s list is loading', async () => {
-  vi.spyOn(api, 'getOrders').mockResolvedValueOnce([{ id: 'o1', vendorName: 'First order', status: 'PENDING' }])
+  // [UI-SWEEP U13] Both reads, live and history, are the person's own.
+  vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValueOnce({ items: [{ id: 'o1', vendorName: 'First order', status: 'PENDING' }], total: 1 })
+    .mockReturnValueOnce(new Promise(() => undefined));
+  vi.spyOn(ordersApi, 'getOrderHistoryPage').mockResolvedValueOnce({ items: [{ id: 'o2', vendorName: 'First history', status: 'DELIVERED' }], page: 1, totalPages: 1, total: 1 })
     .mockReturnValueOnce(new Promise(() => undefined));
   const view = mount(<OrdersPage />);
-  await screen.findByText('First order');
+  await screen.findByText('First history');
+  expect(screen.getAllByText(/First order/).length).toBeGreaterThan(0);
   person.scope = 'another-person'; person.epoch += 1;
   view.rerender(<OrdersPage />);
-  expect(screen.queryByText('First order')).toBeNull();
+  expect(screen.queryByText(/First order/)).toBeNull();
+  expect(screen.queryByText('First history')).toBeNull();
   expect(screen.getByLabelText('Loading your orders')).toBeTruthy();
 });

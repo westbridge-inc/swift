@@ -176,7 +176,7 @@ describe('free window = nothing committed [cancel-policy]', () => {
     expect(row.lateCancelFeeDue).toBe(0);
   });
 
-  // [owner #46/#50, 13–14 Oct] The owner's five-minute timer: inside the
+  // [owner #46/#50, 13–14 Oct · 22 Oct: one minute] The owner's timer: inside the
   // window a parcel cancels free even once a rider claimed it (no fee exists
   // to protect any more) — and the cancel still frees the mover in the same
   // commit. Past the window the claim makes it a refusal (block above).
@@ -187,10 +187,12 @@ describe('free window = nothing committed [cancel-policy]', () => {
     // with the assignment guard deleted — grading nothing. Held at the
     // otherwise-free status, the guard is the only thing standing between an
     // en-route mover and a free cancel, which is exactly what must be gated.
-    const id = await makeCancellableOrder(3, {
+    // [owner 22 Oct 2026] Placed 30 s ago (no assignment record, so the window counts from placing): inside the
+    // one-minute window. Its short hold has already lapsed.
+    const id = await makeCancellableOrder(0.5, {
       status: 'READY_FOR_PICKUP',
       riderId,
-      holdExpiresAt: new Date(Date.now() - 60_000),
+      holdExpiresAt: new Date(Date.now() - 10_000),
     });
     await app.prisma.rider.update({ where: { id: riderId }, data: { currentOrderId: id, isAvailable: false } });
     const res = await orders.cancelOrder(id, customerId, 'changed my mind');
@@ -297,12 +299,13 @@ describe('isFreeCancellation — the ONE predicate both the charge path and the 
     expect(isFreeCancellation({ ...courier, orderType: 'FOOD_DELIVERY' })).toBe(false);
   });
 
-  it('window boundary: exactly 5 minutes is free, past it is not', () => {
+  it('window boundary: exactly 1 minute is free, past it is not (owner 22 Oct 2026; was 5)', () => {
     // [owner #50, 14 Oct] Graded on an ACCEPTED ride — an unaccepted one is free at any age.
     const placed = new Date('2026-08-25T12:00:00Z');
     const accepted = { ...base, status: 'DRIVER_ASSIGNED', driverId: 'd1', placedAt: placed };
-    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:05:00Z'))).toBe(true);
-    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:05:01Z'))).toBe(false);
+    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:01:00Z'))).toBe(true);
+    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:01:01Z'))).toBe(false);
+    expect(isFreeCancellation(accepted, new Date('2026-08-25T12:04:00Z')), 'four minutes in: the old five-minute window is gone').toBe(false);
   });
 });
 
@@ -331,11 +334,11 @@ describe('scheduled orders: the clock must not expire before the work can start'
     expect(isFreeCancellation({ ...base, scheduledFor: inMinutes(60 * 34) })).toBe(true);
   });
 
-  // [owner #50, 14 Oct] An ACCEPTED booking keeps the ordinary five-minute
-  // window; one nobody accepted is free whatever the clock says.
-  it('an UNSCHEDULED order is untouched — the ordinary window still closes at 5 minutes', () => {
-    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(6) })).toBe(false);
-    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(4) })).toBe(true);
+  // [owner #50, 14 Oct · 22 Oct] An ACCEPTED booking keeps the ordinary
+  // (one-minute) window; one nobody accepted is free whatever the clock says.
+  it('an UNSCHEDULED order is untouched — the ordinary window still closes at 1 minute', () => {
+    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(2) })).toBe(false);
+    expect(isFreeCancellation({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(0.5) })).toBe(true);
     expect(isFreeCancellation({ ...base, placedAt: minutesAgo(6) })).toBe(true);
   });
 
@@ -390,10 +393,11 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
     // [owner ruling 14 Oct] The five minutes count from acceptance: before anyone accepts, the cancel is free with
     // no clock (below); once accepted, the window counts from that moment.
     const windowed = [
-      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1) },
-      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(1), scheduledFor: inMinutes(2) },
+      // [owner 22 Oct 2026] inside the one-minute window: accepted (or, with no acceptance moment, placed) 30 s ago
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(0.5) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt: minutesAgo(0.5), scheduledFor: inMinutes(2) },
       { ...base, placedAt: minutesAgo(90), holdExpiresAt: inMinutes(3) },
-      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(2) },
+      { ...base, status: 'ACCEPTED', placedAt: minutesAgo(0.5) },
     ];
     for (const order of windowed) {
       expect(isFreeCancellation(order, now), 'fixture should be free').toBe(true);
@@ -413,9 +417,9 @@ describe('freeCancellationExpiresAt — the countdown never expires before the w
 
   // [owner ruling 14 Oct] "counts down from placing" became "counts down from acceptance".
   it('an accepted booking counts down from its acceptance, not from placing', () => {
-    const acceptedAt = minutesAgo(1);
+    const acceptedAt = minutesAgo(0.5);
     const until = freeCancellationExpiresAt({ ...base, status: 'ACCEPTED', placedAt: minutesAgo(30), acceptedAt })!;
-    expect(until.getTime()).toBe(acceptedAt.getTime() + 5 * 60_000);
+    expect(until.getTime()).toBe(acceptedAt.getTime() + 60_000);
   });
 
   it('a held order counts down to the hold', () => {

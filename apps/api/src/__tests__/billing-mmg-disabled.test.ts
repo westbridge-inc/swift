@@ -24,7 +24,7 @@ import { subscriptionOperability, inoperableSubscriptionWhere, type OperabilityS
 /** A gate input that also carries the billing method, to prove the gate gives
  *  the same answer whatever it is (the gate itself never reads it). */
 type GateRow = OperabilitySubscription & { billingMethod: PaymentMethod };
-const gate = (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(env)), now);
+const gate = async (row: GateRow, now: Date, env: Record<string, string>) => subscriptionOperability(row, { missingRow: 'BLOCK' }, feePausePredicate(await noLivePayPath(app.prisma, env)), now);
 import { FEE_PAUSE_REPAIR_PREFIX, MMG_PAUSE_CLOCKS_KEY, feePauseHoldsBilling, feePauseStatus, syncMmgPauseClock } from '../modules/billing/mmg-pause';
 import { activeOverdueMs, currentDunningClock, FULL_FEE_GRACE_MS } from '../modules/billing/dunning-clock';
 import { mmgTerminalProof } from '../modules/billing/mmg-terminal-evidence';
@@ -111,7 +111,8 @@ async function subWithRelations(subId: string) {
 const sub = (id: string) => app.prisma.subscription.findUniqueOrThrow({ where: { id } });
 const clockOf = (id: string) => app.prisma.billingDunningClock.findUnique({ where: { subscriptionId: id } });
 const OFF = { MMG_DRIVER: 'disabled' };
-const ON = { MMG_DRIVER: 'sandbox' };
+// A real environment always names its mode (runtime-mode.ts refuses an unset NODE_ENV); the push rail reads it.
+const ON = { NODE_ENV: 'test', MMG_DRIVER: 'sandbox' };
 
 beforeAll(async () => {
   process.env['NODE_ENV'] = 'development';
@@ -381,19 +382,19 @@ describe('[PROD-PATH] the operate gate holds every partner inside grace while th
     billingConfirmationPausedAt: null, autoSuspendEnabled: true, autoRenew: true, currentPeriodEnd: new Date('2026-10-10T00:00:00.000Z'), billingMethod: 'MOBILE_MONEY',
   };
 
-  it('MMG off and no live card: a partner whose grace ran out still operates, whatever their billing method', () => {
+  it('MMG off and no live card: a partner whose grace ran out still operates, whatever their billing method', async () => {
     for (const billingMethod of ['MOBILE_MONEY', 'CASH', 'CARD'] as const) {
-      expect(gate({ ...lapsed, billingMethod }, now, OFF), billingMethod).toEqual({ operable: true });
+      expect(await gate({ ...lapsed, billingMethod }, now, OFF), billingMethod).toEqual({ operable: true });
     }
   });
 
-  it('MMG on: the lapse refuses as before', () => {
-    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(ON)), now)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+  it('MMG on: the lapse refuses as before', async () => {
+    expect(subscriptionOperability(lapsed, { missingRow: 'BLOCK' }, feePausePredicate(await noLivePayPath(app.prisma, ON)), now)).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
   });
 
-  it('the hold is only about grace: suspended and billing-stopped partners stay refused', () => {
-    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED' }, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(OFF)), now)).toMatchObject({ operable: false, why: 'STATUS' });
-    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z') }, { missingRow: 'BLOCK' }, feePausePredicate(noLivePayPath(OFF)), now)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
+  it('the hold is only about grace: suspended and billing-stopped partners stay refused', async () => {
+    expect(subscriptionOperability({ ...lapsed, status: 'SUSPENDED' }, { missingRow: 'BLOCK' }, feePausePredicate(await noLivePayPath(app.prisma, OFF)), now)).toMatchObject({ operable: false, why: 'STATUS' });
+    expect(subscriptionOperability({ ...lapsed, status: 'ACTIVE', autoRenew: false, currentPeriodEnd: new Date('2026-10-01T00:00:00.000Z') }, { missingRow: 'BLOCK' }, feePausePredicate(await noLivePayPath(app.prisma, OFF)), now)).toMatchObject({ operable: false, why: 'BILLING_STOPPED' });
   });
 
   it('the database form, run for real, matches the predicate for every billing method', async () => {
@@ -617,7 +618,7 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
     const env = { ...CARD_LIVE, CARD_RAIL_PROVIDER: provider };
     expect(() => cardFactory.getCardRailProvider({ redis: app.redis }, env)).toThrow('Unknown CARD_RAIL_PROVIDER');
-    expect(noLivePayPath(env)).toBe(true);
+    expect(await noLivePayPath(app.prisma, env)).toBe(true);
   });
   // #1520 (PT-4) made powertranz a real provider this build's factory builds.
   // The liveness list follows the factory, unmocked: with card rail v2 on and
@@ -626,28 +627,32 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
   it('the real provider the factory builds (powertranz) is a live way to pay while v2 is on and not killed', async () => {
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
     expect(cardFactory.cardRailProviderNames()).toEqual(expect.arrayContaining(['powertranz']));
-    expect(noLivePayPath(CARD_LIVE)).toBe(false);
-    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
-    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, CARD_LIVE)).toBe(false);
+    expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
   });
-  it('the predicate reads only the server\'s MMG driver and card-rail switches', async () => {
+  it('the predicate reads only the server\'s MMG and card-rail switches', async () => {
     const { noLivePayPath } = await import('../modules/billing/fee-pause');
-    expect(noLivePayPath({ MMG_DRIVER: 'disabled' })).toBe(true);
-    expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '1' })).toBe(true);
-    expect(noLivePayPath({ MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { MMG_DRIVER: 'disabled' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', CARD_RAIL_KILL: '1' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { MMG_DRIVER: 'disabled', CARD_RAIL_V2: '1', PAYMENT_PROVIDER: 'disabled', CARD_RAIL_KILL: '1' })).toBe(true);
     await whileCardLive(async () => {
-      expect(noLivePayPath(CARD_LIVE)).toBe(false);
-      expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
-      expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
-      expect(noLivePayPath({ ...CARD_LIVE, PAYMENT_PROVIDER: 'disabled' })).toBe(true);
+      expect(await noLivePayPath(app.prisma, CARD_LIVE)).toBe(false);
+      expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_KILL: '1' })).toBe(true);
+      expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_V2: '0' })).toBe(true);
+      expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, PAYMENT_PROVIDER: 'disabled' })).toBe(true);
     });
     // The card simulator (test pages for listed test subscriptions, no money) or no provider at all is no way to pay.
-    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: 'simulator' })).toBe(true);
-    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: '' })).toBe(true);
-    expect(noLivePayPath({ ...CARD_LIVE, CARD_RAIL_PROVIDER: undefined })).toBe(true);
-    expect(noLivePayPath({ MMG_DRIVER: 'live' })).toBe(false);
-    expect(noLivePayPath({ MMG_DRIVER: 'live', CARD_RAIL_KILL: '1', PAYMENT_PROVIDER: 'disabled' })).toBe(false);
-    expect(noLivePayPath({})).toBe(false);
+    expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_PROVIDER: 'simulator' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_PROVIDER: '' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { ...CARD_LIVE, CARD_RAIL_PROVIDER: undefined })).toBe(true);
+    // [22 Oct, COORD ruling on REVIEW-M's note] "MMG driver live" alone is no longer a way to pay: with
+    // the push rail off and the MMG checkout off, no partner can pay with MMG, so the fee is paused
+    // (these two lines read false before: that was the gap). fee-pause-pay-path.test.ts has the full table.
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test', MMG_DRIVER: 'live' })).toBe(true);
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test', MMG_DRIVER: 'live', CARD_RAIL_KILL: '1', PAYMENT_PROVIDER: 'disabled' })).toBe(true);
+    // The sandbox off production pushes (mmgPushRailOn), so it is a way to pay.
+    expect(await noLivePayPath(app.prisma, { NODE_ENV: 'test' })).toBe(false);
   });
 
   it('MMG on: a cash store with no card and no balance is billed as ever (and fails for want of money) — never paused', async () => {
@@ -703,7 +708,7 @@ describe('[PROD-PATH] the pause is decided by server facts only: nothing a partn
     };
     await whileCardLive(async () => {
       for (const billingMethod of ['MOBILE_MONEY', 'CASH', 'CARD'] as const) {
-        expect(gate({ ...lapsed, billingMethod }, now, CARD_LIVE), billingMethod).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
+        expect(await gate({ ...lapsed, billingMethod }, now, CARD_LIVE), billingMethod).toMatchObject({ operable: false, why: 'GRACE_LAPSED' });
       }
     });
   });

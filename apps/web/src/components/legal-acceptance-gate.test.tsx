@@ -96,8 +96,8 @@ describe('the fresh acceptance tick on the website', () => {
       expect(layout).toMatch(/<LegalAcceptanceGate \/>/);
     }
     // [perf-budget] the customer app's pages sit at their first-load ceilings: the gate loads as its own chunk after
-    // the page, so it costs those pages (cart, checkout, browse) nothing up front.
-    expect(app('(app)', 'layout.tsx')).toMatch(/const LegalAcceptanceGate = lazy\(\(\) => import\('@\/components\/legal-acceptance-gate'\)\.then\(module => \(\{ default: module\.LegalAcceptanceGate \}\)\)\);/);
+    // the page, so it costs those pages (cart, checkout, browse) nothing up front. [PERF #7] Tried twice (lib/chunk-retry).
+    expect(app('(app)', 'layout.tsx')).toMatch(/const LegalAcceptanceGate = lazyRetry\(\(\) => import\('@\/components\/legal-acceptance-gate'\)\.then\(module => \(\{ default: module\.LegalAcceptanceGate \}\)\)\);/);
     expect(app('(app)', 'layout.tsx')).toMatch(/<Suspense fallback=\{null\}><LegalAcceptanceGate \/><\/Suspense>/);
   });
 });

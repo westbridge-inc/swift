@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { grantStepUp } from './helpers/step-up';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Staff & roles (master plan §4.1). Failure paths first: STAFF is refused on
@@ -92,7 +93,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vendorOwner.id,
-      name: `Team Bistro ${nanoid(4)}`,
+      name: `Team Bistro ${wordFreeTag(8)}`,
       slug: `team-bistro-${nanoid(6)}`,
       vendorType: 'SUPERMARKET',
       phone: '+5920029900',
@@ -123,7 +124,7 @@ beforeAll(async () => {
   const other = await app.prisma.vendor.create({
     data: {
       ownerId: otherVo.id,
-      name: `Other Store ${nanoid(4)}`,
+      name: `Other Store ${wordFreeTag(8)}`,
       slug: `other-store-${nanoid(6)}`,
       vendorType: 'STORE',
       phone: '+5920029901',
@@ -274,6 +275,7 @@ describe('past orders keep no customer contact for floor staff', () => {
         paymentMethod: 'CASH',
       },
     });
+    let liveOrderId: string | undefined;
     try {
       // The role suite above removes the staff member at the end; make the
       // membership explicit so this test stands on its own.
@@ -302,13 +304,22 @@ describe('past orders keep no customer contact for floor staff', () => {
       expect(row.deliveryAddress).toBeNull();
 
       // Live control: the same order, still open, keeps what the handover needs.
-      await app.prisma.order.update({ where: { id: order.id }, data: { status: 'PENDING' } });
-      const live = await inject('GET', `/api/v1/vendor/orders/${order.id}`, undefined, staffUser.token, vendorId);
+      // [row 264] A DELIVERED order never goes back to PENDING (the database refuses
+      // it), so the open control is its twin, born PENDING.
+      liveOrderId = (await app.prisma.order.create({
+        data: {
+          orderNumber: `${order.orderNumber}-LIVE`, orderType: 'FOOD_DELIVERY', vendorId, customerId: customerUser.userId, riderId: rider.id,
+          status: 'PENDING', deliveryAddress: '77 Private Street, Georgetown', deliveryLat: 6.7913, deliveryLng: -58.1617,
+          subtotalBase: 1000, subtotalMarkup: 0, subtotalCustomer: 1000, deliveryFee: 500, totalAmount: 1500, paymentMethod: 'CASH',
+        },
+      })).id;
+      const live = await inject('GET', `/api/v1/vendor/orders/${liveOrderId}`, undefined, staffUser.token, vendorId);
       expect(live.statusCode).toBe(200);
       expect(live.json().data.customer.phone).toBe(customerUser.phone);
       expect(live.json().data.deliveryAddress).toBe('77 Private Street, Georgetown');
       expect(live.json().data.rider.user.phone).toBe(riderUser.phone);
     } finally {
+      if (liveOrderId) await app.prisma.order.delete({ where: { id: liveOrderId } }).catch(() => {});
       await app.prisma.order.delete({ where: { id: order.id } }).catch(() => {});
       await app.prisma.rider.delete({ where: { id: rider.id } }).catch(() => {});
     }

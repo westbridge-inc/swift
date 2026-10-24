@@ -24,7 +24,7 @@ const PUBLIC_PAGES = [
   '(app)/order/page.tsx', // legacy Home redirect
   '(app)/order/browse/page.tsx',
   '(app)/order/search/page.tsx',
-  '(app)/taxi/page.tsx', // public app handoff, no web booking
+  '(app)/taxi/page.tsx', // public app handoff + fare estimate (signed in), no web booking
   '(marketing)/about/page.tsx',
   '(marketing)/account/delete/page.tsx', // public deletion instructions
   '(marketing)/contact/page.tsx',
@@ -70,6 +70,8 @@ const PRIVATE_PAGES = [
   'dashboard/inventory/page.tsx',
   'dashboard/inventory/import/page.tsx',
   'dashboard/orders/page.tsx',
+  'dashboard/insights/page.tsx',
+  'dashboard/schedule/page.tsx', // a Services store's bookings (customer first names)
   'dashboard/settings/page.tsx',
   'dashboard/weekly-fee/page.tsx',
   'portal/page.tsx',

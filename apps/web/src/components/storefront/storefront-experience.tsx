@@ -10,7 +10,7 @@ import {
   Plus,
   X,
 } from 'lucide-react';
-import { useCallback, useContext, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ApiRequestError, sessionProbe } from '@/lib/auth';
 import { clearStorefrontContinuation, takeStorefrontContinuation } from '@/lib/storefront-continuation';
 import {
@@ -27,6 +27,7 @@ import {
   type VendorDetail,
 } from '@/lib/customer';
 import type { StorefrontDetail } from '@/lib/api';
+import { LIVE_MENU_MAX_AGE_MS, type ServerStoreMenu } from '@/lib/browse-keys';
 import {
   OptionSelectionError,
   basePrice,
@@ -45,9 +46,13 @@ import { FulfilmentChoice } from '@/components/checkout/fulfilment-choice';
 import { guestCart } from '@/lib/basket-projection';
 import { useGuestBasket } from '@/lib/basket-state';
 import { Photo } from '@/components/order-ui';
+import Image from 'next/image';
+import { photo } from '@/lib/media';
 import { StoreActions } from './store-actions';
 import styles from './storefront.module.css';
 import { SellerInfo } from './seller-info';
+import { AddPlusGlyph } from '@/components/add-plus';
+import { STORE_PICK } from '@/lib/store-pick';
 
 export type DisplayItem = MenuItem & {
   description?: string;
@@ -63,7 +68,17 @@ type DisplayVendor = VendorDetail & {
   acceptingOrders: boolean;
 };
 
-const CATALOG_REFRESH_MS = 30_000;
+/**
+ * How often an open store page re-reads the live store and menu in the
+ * background. [PERF #2] Only while the page is on screen: a hidden page reads
+ * nothing, and coming back after longer than this reads at once. Every Add
+ * and every checkout is re-checked by the API whatever this copy says.
+ */
+export const CATALOG_REFRESH_MS = LIVE_MENU_MAX_AGE_MS;
+
+/** [PERF #2] Server renders whose live menu this browser has already shown. */
+const shownServerMenus = new Set<string>();
+const noSubscription = () => () => {};
 
 /**
  * [W6] An item's sheet (choices, quantity, Add) is only needed after a tap or
@@ -119,6 +134,7 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
     categories: store.categories.map((category) => ({
       id: category.id,
       name: category.name,
+      imageUrl: category.imageUrl ?? null,
       items: category.items.map((item) => ({
         ...item,
         description: item.description ?? undefined,
@@ -126,6 +142,18 @@ function publicCatalog(store: StorefrontDetail): DisplayVendor {
         isAvailable: true,
       })),
     })),
+  };
+}
+
+/** The store copy merged with the live menu: the menu (choices, availability,
+ *  open and accepting) wins; the store copy keeps its address and minimum. */
+function liveCatalog(store: StorefrontDetail, vendor: VendorDetail): DisplayVendor {
+  const fromStore = publicCatalog(store);
+  return {
+    ...fromStore,
+    ...(vendor as DisplayVendor),
+    addressLine1: fromStore.addressLine1,
+    minOrderAmount: fromStore.minOrderAmount,
   };
 }
 
@@ -189,6 +217,24 @@ function useActiveSection(ids: string[]): [string | null, (_id: string) => void]
  * tile as an item without one; keyed by its address, it tries again when the
  * live menu sends a new one.
  */
+/**
+ * [IMAGES-E2E PR5 · COORD GO 21 Oct, owner rule "business pictures must reach customers"]
+ * A menu section's own photo above its heading, as on the phone. Only a photo Swift keeps is
+ * drawn (photo() picks the bounded /media route and its ladder loader for those alone); no
+ * photo, an outside address or a photo that fails to load draws nothing: today's heading.
+ */
+function SectionPhoto({ imageUrl, first = false }: { imageUrl?: string | null; first?: boolean }) {
+  const [failed, setFailed] = useState(false);
+  const media = failed ? null : photo(imageUrl);
+  if (!media?.loader) return null;
+  return (
+    <span className={styles.sectionPhoto}>
+      {/* [REVIEW-F S4-2 on #1973] The first section can sit above the fold: its photo loads at once; the rest lazily. */}
+      <Image {...media} alt="" fill sizes="(min-width: 760px) 640px, 100vw" loading={first ? 'eager' : 'lazy'} className="object-cover" onError={() => setFailed(true)} />
+    </span>
+  );
+}
+
 function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string | null | undefined }) {
   const [failed, setFailed] = useState(false);
   return (
@@ -210,7 +256,7 @@ function ItemPhoto({ item, vendorType }: { item: DisplayItem; vendorType: string
  * (storefront-page.tsx) so the design-token tables stay out of the page's
  * first-load JavaScript.
  */
-export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties }) {
+export function StorefrontExperience({ store, returnPath, fromQr = false, initialItemId, verticalStyle, liveMenu }: { store: StorefrontDetail; returnPath: string; fromQr?: boolean; initialItemId?: string; verticalStyle?: CSSProperties; liveMenu?: ServerStoreMenu | null }) {
   const router = useRouter();
   // [W6] The store page lives inside the customer app's frame (rail, dock,
   // session). Its session can renew an expired access cookie before sending a
@@ -234,8 +280,21 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
     }
   }, [fromQr, store.id, diningNoticeStorageKey]);
   const menu = useRef<HTMLDivElement | null>(null);
-  const [catalog, setCatalog] = useState<DisplayVendor>(() => publicCatalog(store));
-  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+  // [PERF #2] A page that arrives with the server's recent live menu starts
+  // ready to order from it. While React adopts the HTML the server just drew
+  // for this visit, the menu is taken as the server judged it (at most
+  // LIVE_MENU_MAX_AGE_MS old). A page drawn in the browser instead may be a
+  // kept copy (Back/Forward, a load made earlier): its menu counts once per
+  // server render, and only while it is at most LIVE_MENU_MAX_AGE_MS old by
+  // this phone's clock. Otherwise the page reads the live menu before Add
+  // works, as before.
+  const adoptingServerHtml = useSyncExternalStore(noSubscription, () => false, () => true);
+  const [serverMenu] = useState<ServerStoreMenu | null>(() => {
+    if (!liveMenu || liveMenu.vendor.id !== store.id || shownServerMenus.has(liveMenu.renderId)) return null;
+    return adoptingServerHtml || Date.now() - liveMenu.at <= LIVE_MENU_MAX_AGE_MS ? liveMenu : null;
+  });
+  const [catalog, setCatalog] = useState<DisplayVendor>(() => (serverMenu ? liveCatalog(store, serverMenu.vendor) : publicCatalog(store)));
+  const [catalogState, setCatalogState] = useState<'loading' | 'ready' | 'unavailable'>(serverMenu ? 'ready' : 'loading');
   const [catalogCheckedAt, setCatalogCheckedAt] = useState<Date | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   // [Row 109] Until the server has answered (the shell says "checking", or this page's
@@ -305,24 +364,20 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
   useEffect(() => {
     let alive = true;
     let catalogRefreshInFlight = false;
-    setCatalogState('loading');
+    // [PERF #2] When the menu this page holds was read (or last tried), by this phone's clock.
+    let lastRead = 0;
 
     const refreshCatalog = async () => {
       if (catalogRefreshInFlight) return;
       catalogRefreshInFlight = true;
+      lastRead = Date.now();
       try {
         const [liveStore, vendor] = await Promise.all([
           getPublicStorefront(store.slug),
           getPublicVendor(store.id),
         ]);
         if (!alive) return;
-        const liveCatalog = publicCatalog(liveStore);
-        setCatalog({
-          ...liveCatalog,
-          ...(vendor as DisplayVendor),
-          addressLine1: liveCatalog.addressLine1,
-          minOrderAmount: liveCatalog.minOrderAmount,
-        });
+        setCatalog(liveCatalog(liveStore, vendor));
         setCatalogState('ready');
         setCatalogCheckedAt(new Date());
       } catch {
@@ -331,14 +386,36 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
         catalogRefreshInFlight = false;
       }
     };
-    void refreshCatalog();
-    const catalogTimer = window.setInterval(() => void refreshCatalog(), CATALOG_REFRESH_MS);
+    const onScreen = () => document.visibilityState !== 'hidden';
+    const tick = () => { if (onScreen()) void refreshCatalog(); };
+    let catalogTimer: number | undefined;
+    let firstTick: number | undefined;
+    if (serverMenu) {
+      // The server's read is this page's first: the next is due when it is
+      // LIVE_MENU_MAX_AGE_MS old (the older of the two clocks' estimates).
+      shownServerMenus.add(serverMenu.renderId);
+      const age = Math.min(LIVE_MENU_MAX_AGE_MS, Math.max(serverMenu.ageMs, Date.now() - serverMenu.at));
+      lastRead = Date.now() - age;
+      setCatalogCheckedAt(new Date(lastRead));
+      firstTick = window.setTimeout(() => {
+        tick();
+        catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+      }, CATALOG_REFRESH_MS - age);
+    } else {
+      setCatalogState('loading');
+      void refreshCatalog();
+      catalogTimer = window.setInterval(tick, CATALOG_REFRESH_MS);
+    }
+    const onVisibility = () => { if (onScreen() && Date.now() - lastRead >= CATALOG_REFRESH_MS) void refreshCatalog(); };
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
       alive = false;
+      window.clearTimeout(firstTick);
       window.clearInterval(catalogTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [store.id, store.slug]);
+  }, [store.id, store.slug, serverMenu]);
 
   useEffect(() => {
     let alive = true;
@@ -545,8 +622,12 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
   // [W6] `?item=` (Home's popular rail, the Market, a shared link) opens that
   // item's sheet once the live menu is verified — it never adds anything.
+  // [PERF #2] And once the page knows who is visiting: the live menu can now
+  // arrive with the page, before the session answer, and adds wait for that
+  // answer [Row 109], so the sheet opens when its Add can work (and goes to a
+  // signed-in person's saved cart, never this browser's basket).
   useEffect(() => {
-    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready') return;
+    if (!initialItemId || deepLinkOpened.current || catalogState !== 'ready' || !sessionKnown) return;
     deepLinkOpened.current = true;
     const item = catalog.categories.flatMap(category => category.items).find(item => item.id === initialItemId);
     // A closed or paused store opens nothing: its Add could only refuse.
@@ -556,7 +637,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
       setModalError(null);
       setModalItem(item);
     }
-  }, [initialItemId, catalogState, catalog]);
+  }, [initialItemId, catalogState, catalog, sessionKnown]);
 
   useEffect(() => {
     if (!signedIn || !cartHydrated || catalogState !== 'ready') return;
@@ -746,8 +827,16 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
 
         {catalog.description ? <p className={styles.description}>{catalog.description}</p> : null}
 
-        {catalogState === 'ready' && catalogCheckedAt ? (
-          <p className={styles.menuFreshness}>Live menu checked at {catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}</p>
+        {/* [PERF #2] A page that arrives with the live menu draws this line in
+            the server's HTML too (the time follows once the phone's clock
+            shows it), so it never pushes the whole menu down after the page
+            appears (a layout shift of 0.2 on a 100-item store). */}
+        {catalogState === 'ready' ? (
+          <p className={styles.menuFreshness}>
+            {catalogCheckedAt
+              ? `Live menu checked at ${catalogCheckedAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+              : 'Live menu checked'}
+          </p>
         ) : null}
 
         {catalogState !== 'ready' ? (
@@ -784,8 +873,9 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                 This store has no orderable menu items right now. Check again later.
               </p>
             ) : null}
-            {sections.map((category) => (
+            {sections.map((category, index) => (
               <section key={category.id} id={`section-${category.id}`} className={styles.section}>
+                <SectionPhoto imageUrl={category.imageUrl} first={index === 0} />
                 <h2 className={styles.sectionTitle}>{category.name}</h2>
                 <div className={styles.rows}>
                   {(category.items as DisplayItem[]).map((item) => {
@@ -815,7 +905,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                           <h3 className={styles.itemName}>{item.name}</h3>
                           {item.description ? <p className={styles.itemDescription}>{item.description}</p> : null}
                           <div className={styles.itemMeta}>
-                            {item.isPopular ? <span className={styles.popular}>Popular</span> : null}
+                            {item.isPopular ? <span className={styles.popular}>{STORE_PICK}</span> : null}
                             {item.unit ? <span className={styles.unit}>per {item.unit}</span> : null}
                             {!item.isAvailable || choiceSoldOut ? <span className={styles.soldOut}>Sold out</span> : null}
                             {item.isAvailable && !priced ? (
@@ -892,7 +982,7 @@ export function StorefrontExperience({ store, returnPath, fromQr = false, initia
                                       ? `${item.name} unavailable while the store is closed`
                                       : `${item.name} unavailable while the store has paused orders`}
                               >
-                                Add
+                                <AddPlusGlyph />
                               </button>
                             ) : null}
                           </div>

@@ -8,6 +8,7 @@ import { registrationProofFor, mintedRegistrationProofFor } from './helpers/otp'
 import { registerErrorHandler } from '../middleware/error-handler';
 import { countryFromPhone } from '../utils/phone-country';
 import { TRIAL_DAYS } from '../modules/subscription/subscription.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Guyana-only V1 public launch. Future-market currency and phone metadata stay
@@ -148,7 +149,7 @@ describe('public auth stays inside the launch market', () => {
   });
 
   it('a Guyana number stays GY even if the client claims a future market', async () => {
-    const phone = `+592655${String(Math.floor(Math.random() * 9000) + 1000)}`;
+    const phone = testPhone();
     const registrationProof = await registrationProofFor(app, phone);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,

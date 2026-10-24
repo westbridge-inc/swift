@@ -39,6 +39,7 @@ import { SosCeremony } from '../../safety/SosCeremony';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { orderStatusLabel } from '../../../lib/orderStatus';
 import { taxiDoorFor } from '../../../lib/taxiDoors';
+import { noDriverView } from '../../../lib/taxiNoDriver';
 import { TaxiSignedOut } from '../TaxiSignedOut';
 import { signInForTaxi } from '../taxiEntry';
 
@@ -418,6 +419,8 @@ function TaxiBooking({ navigation }: any) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle }}>
         <LoadingBlock />
+        {/* [BUG-GUARDS C4] A slow ride read is no trap: Back stays on screen while it loads. */}
+        <FloatingBack navigation={navigation} insets={insets} />
       </View>
     );
   }
@@ -473,10 +476,9 @@ function TaxiBooking({ navigation }: any) {
   // [TAXI waiting charge §8.2] The server's own sentence, beside the fare.
   const waitingTerms = waitingDisclosure(estimate);
   // L2-before-first-ride (§5): the gate must open a door, never dead-end.
-  // [E27] The profile photo is asked for here, not at sign-in: the same door.
+  // [Owner 16 Oct] Customers take no photos: the ID check is the only door.
   const door = taxiDoorFor(errBody?.error?.code ?? errBody?.code);
   const needsL2 = door === 'identity';
-  const needsSelfie = door === 'selfie';
   // Joining the queue passes the same account gates as a request (the route
   // and the queue share one authority boundary), so its refusal must show,
   // with the same doors — never a silent tap.
@@ -708,7 +710,7 @@ function TaxiBooking({ navigation }: any) {
                     </T>
                   ) : (
                     <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
-                      Fare estimate · cash to the driver{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
+                      Fare estimate · pay the driver cash or MMG at drop-off{routeDurationMin != null ? ` · ~${routeDurationMin} min trip` : ''}.
                     </T>
                   )}
                   {waitingTerms ? (
@@ -751,14 +753,6 @@ function TaxiBooking({ navigation }: any) {
               onPress={() => navigation?.navigate?.('IdentityVerification')}
             />
           ) : null}
-          {needsSelfie ? (
-            <PillButton
-              label="Add your photo — your driver sees it"
-              variant="outline"
-              style={{ marginTop: space.md }}
-              onPress={() => navigation?.navigate?.('Selfie')}
-            />
-          ) : null}
 
           {queue.data ? (
             // 5.5B — you're in line. A supply gap is a service, not an
@@ -788,11 +782,13 @@ function TaxiBooking({ navigation }: any) {
             // 5.5A — the flagship fix: real counts, a queue, no apology.
             <Card style={{ marginTop: space.lg }}>
               <T variant="title">
-                {(counts?.online ?? 0) === 0
-                  ? 'No drivers online right now'
-                  : (counts?.busy ?? 0) >= (counts?.online ?? 0)
-                    ? 'All drivers are busy'
-                    : 'No eligible driver available for this request'}
+                {!counts
+                  ? 'No eligible driver available for this request'
+                  : counts.online === 0
+                    ? 'No drivers online right now'
+                    : counts.busy >= counts.online
+                      ? 'All drivers are busy'
+                      : 'No eligible driver available for this request'}
               </T>
               {counts ? (
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
@@ -803,20 +799,28 @@ function TaxiBooking({ navigation }: any) {
                 label="Join the queue"
                 style={{ marginTop: space.md }}
                 loading={joinQueue.isPending}
-                disabled={!tripPayload() || stops.length > 0}
+                // [PRICE-LOCK · row 448] Like Request, Join needs the fare on screen:
+                // nobody joins the line without seeing what they pay (the join
+                // carries it as expectedFare, and the queue books only at it).
+                disabled={!tripPayload() || !selectedTier || stops.length > 0}
                 onPress={() => {
                   const payload = tripPayload();
                   // [TAXI multi-stop] The queue never holds stops (v1): a trip
                   // with stops is not silently queued without them.
-                  if (payload && stops.length === 0) {
+                  if (payload && selectedTier && stops.length === 0) {
                     if (!pickupOverride && pickup) setPickupOverride(pickup);
-                    joinQueue.mutate(payload);
+                    joinQueue.mutate({ ...payload, expectedFare: selectedTier.fare });
                   }
                 }}
               />
               {!tripPayload() ? (
                 <T variant="caption" tone="muted" center style={{ marginTop: space.sm }}>
                   Set your destination first — we hold your whole trip in line.
+                </T>
+              ) : null}
+              {tripPayload() && !selectedTier && stops.length === 0 ? (
+                <T variant="caption" tone="muted" center testID="taxi-queue-needs-fare" style={{ marginTop: space.sm }}>
+                  You join the line at the fare you see — waiting for the fare.
                 </T>
               ) : null}
               {stops.length > 0 ? (
@@ -828,14 +832,6 @@ function TaxiBooking({ navigation }: any) {
                 <T variant="label" tone="error" center accessibilityLiveRegion="assertive" style={{ marginTop: space.sm }}>
                   {queueErrMsg}
                 </T>
-              ) : null}
-              {queueDoor === 'selfie' ? (
-                <PillButton
-                  label="Add your photo — your driver sees it"
-                  variant="outline"
-                  style={{ marginTop: space.sm }}
-                  onPress={() => navigation?.navigate?.('Selfie')}
-                />
               ) : null}
               {queueDoor === 'identity' ? (
                 <PillButton
@@ -1119,9 +1115,10 @@ function AssignedRideCard({
 
       <View style={{ flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: space.md, marginTop: space.lg, paddingTop: space.md, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: color.border.subtle }}>
         <View style={{ flex: 1 }}>
-          <T variant="micro" tone="faint">Fare · cash</T>
+          <T variant="micro" tone="faint">Fare</T>
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Paid straight to the driver: cash or MMG, no in-app pay link. */}
           <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
-            Pay the driver directly.
+            Pay the driver cash or MMG at drop-off.
           </T>
         </View>
         <Money amount={fare} size="l" />
@@ -1246,6 +1243,12 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
       s.emit('order:unsubscribe', { orderId: ride.id });
     };
   }, [d?.id, navigation, ride?.id]);
+  // [#2022 review S3-1] A driver landing on the ride ends the empty search the
+  // live event spoke about: if that driver later drops it, the new search is
+  // judged on its own (the server's noDriverFound counts only searches since).
+  useEffect(() => {
+    if (d?.id) setExhausted(false);
+  }, [d?.id]);
 
   // THE CHECK-IN CARD MUST SURVIVE A CLOSED APP.
   //
@@ -1290,10 +1293,19 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
 
   // Ticking clock so the "is the fix stale?" check re-evaluates without a new
   // event — a DEAD feed sends nothing, so only a timer can notice the silence.
+  // [TAXI-FLOW 22 Oct] Only while a driver's feed exists: the staleness check
+  // is its one reader, and ticking before that re-rendered the whole ride
+  // screen — map included — every 3 s for nothing while the rider waited.
+  const feedLive = lastFixAt != null;
   useEffect(() => {
+    if (!feedLive) return;
+    setNowTs(Date.now());
     const t = setInterval(() => setNowTs(Date.now()), 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [feedLive]);
+  // The honest "nobody has taken it yet" card: the server's facts on a
+  // reopened app, the live socket event while open (taxiNoDriver.ts).
+  const noDriver = noDriverView(ride, exhausted, nowTs, { rematching });
 
   const pickup = validLatLng(ride.pickupLat, ride.pickupLng);
   const drop = validLatLng(ride.deliveryLat, ride.deliveryLng);
@@ -1618,21 +1630,21 @@ function ActiveRide({ navigation, ride, cancelRide, confirmDriverArrival, insets
               </T>
               <T variant="label" tone="muted" style={{ marginTop: space.xs }}>
                 {ride.rideClass ? `${TIER_META[ride.rideClass as RideClass]?.label ?? ride.rideClass} · ` : ''}
-                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · cash to the driver
+                Fare {money(ride.taxiFareTotal ?? ride.totalAmount)} · pay the driver cash or MMG at drop-off
                 {ride.taxiDuration ? ` · ~${Math.round(Number(ride.taxiDuration))} min trip` : ''}
               </T>
             </>
           )}
 
-          {d ? null : exhausted ? (
-            /* Terminal dead state — honest, not an endless spinner. */
+          {d ? null : noDriver ? (
+            /* Dead state — honest, not an endless spinner. */
             <View style={{ alignItems: 'center', paddingVertical: space.lg }}>
               <IconChip icon="alert-circle" size={52} tone="error" />
               <T variant="body" weight="semibold" center style={{ marginTop: space.md }}>
-                No driver available right now
+                {noDriver.title}
               </T>
               <T variant="caption" tone="muted" center style={{ marginTop: space.xs }}>
-                No driver accepted this request. You can keep waiting or cancel.
+                {noDriver.body}
               </T>
             </View>
           ) : (

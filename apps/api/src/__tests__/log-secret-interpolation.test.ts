@@ -60,7 +60,10 @@ describe('log secret-interpolation guard (D9-07)', () => {
         // Is this interpolation an argument to a log call? Look back over the
         // current statement (bounded window since the last statement break) —
         // if a log-call opener sits before it there, the secret is being logged.
-        const before = src.slice(Math.max(0, m.index - 240), m.index);
+        // [M013] An earlier interpolation in the same template (`${phone}: ${otp}`)
+        // must not end the statement window: its closing brace is not a
+        // statement break. Mask every complete `${...}` before measuring.
+        const before = src.slice(Math.max(0, m.index - 240), m.index).replace(/\$\{[^{}]*\}/g, (s) => '_'.repeat(s.length));
         const stmt = before.slice(Math.max(before.lastIndexOf(';'), before.lastIndexOf('{'), before.lastIndexOf('}')) + 1);
         if (LOGCALL.test(stmt)) {
           offenders.push(`${path.relative(SRC_ROOT, file)}: ${m[0].slice(0, 100)}`);

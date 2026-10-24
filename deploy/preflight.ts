@@ -46,7 +46,7 @@ import { spawnSync } from 'node:child_process';
 import { assertSafeBootConfig } from '../apps/api/src/utils/boot-config';
 import { SECRET_FILE_NAMES, applySecretFiles, assembleDatabaseUrl } from '../apps/api/src/utils/secret-files';
 import { bucketVersioningStatus, kekEscrowStatus, parseBucketVersioning } from '../apps/api/src/modules/ops/document-durability';
-import { darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
+import { darkFeatureMisconfigurations, darkFeatureStatus } from '../apps/api/src/modules/ops/dark-features';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let envPath = path.join(HERE, '.env');
@@ -113,9 +113,8 @@ const STUBS: Record<string, string> = {
   ORDER_HOLD_MINUTES: '5',
   OTP_HASH_SECRET: 'x'.repeat(48),
   JWT_SECRET: 'x'.repeat(48),
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'STUB-NOT-A-REAL-KEY',
-  ID_ANALYZER_API_KEY: 'STUB-NOT-A-REAL-KEY',
+  KYC_PROVIDER: 'manual',
+  FEATURE_BIOMETRIC_FACE_MATCH: '0',
   PAYMENT_PROVIDER: 'disabled',
   CARD_RAIL_KILL: '1',
   // [LAUNCH-LOCK] production refuses card rail v2 and ads until an attorney signs off.
@@ -144,6 +143,11 @@ const STUBS: Record<string, string> = {
   SMTP_PASS: 'STUB-NOT-A-REAL-SECRET', EMAIL_FROM: 'stub@stub.invalid',
   BILLING_TOPUP_HOLD: '1',
   AGENT_CASH_WEBHOOK_SECRET: '',
+  // The hash salts come from the store (*_FILE); stubbing them lets the
+  // walkthrough see past a missing one, and lists each by name below.
+  SCAN_IP_SALT: 'STUB-NOT-A-REAL-SALT',
+  ATTRIB_SALT: 'STUB-NOT-A-REAL-SALT',
+  IDENTITY_SALT: 'STUB-NOT-A-REAL-SALT',
 };
 
 const fileEnv: Record<string, string | undefined> = readEnvFile(envPath);
@@ -325,9 +329,17 @@ console.log('');
     console.log('  Every env-gated capability in the register is on.');
   } else {
     for (const f of off) {
-      console.log(`  ${f.title}  [${f.setting}]`);
+      // [row 331] A kill switch is off BECAUSE it is set: name the value.
+      console.log(`  ${f.title}  [${f.offWhen !== undefined ? `${f.setting}=${f.offWhen}` : f.setting}]`);
       console.log(`    ${f.whileOff}`);
     }
+  }
+  // [SWITCHES fact-check] Switched ON without what it needs: worse than off, and just as quiet.
+  const broken = darkFeatureMisconfigurations(production);
+  if (broken.length > 0) {
+    console.log('');
+    console.log('  Switched ON but missing what it needs:');
+    for (const line of broken) console.log(`    ${line}`);
   }
   const configRows = darkFeatureStatus(production).filter((r) => r.source === 'config');
   if (configRows.length > 0) {

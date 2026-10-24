@@ -29,11 +29,9 @@ import { OrderService } from '../modules/order/order.service';
 import { AuthService } from '../modules/auth/auth.service';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { invalidateAlgoConfig } from '../modules/algo/algo-config';
-import { grantSuiteCapability } from '../lib/test-target-lock';
+import { moverPool, type MoverPool } from './helpers/mover-pool';
 import { devChannelLog } from '../providers/notifications/channels';
 
-// [R048-001] this suite quiets the WHOLE rider pool between cases (an unscoped Rider.updateMany) so no leftover rider takes a dispatch — a stated, reviewable capability.
-grantSuiteCapability('unscoped-mutation');
 
 // ---------------------------------------------------------------------------
 // dispatch. Hardest paths: the no-acceptance path
@@ -46,6 +44,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const PICKUP = { lat: 6.8, lng: -58.15 };
 
 let app: FastifyInstance;
+/** [AUD-G7-042] Empties the dispatch pool by id and puts other people's riders back in afterAll. */
+let riderPool: MoverPool;
 let dispatch: DispatchService;
 const scheduled: Array<{ orderId: string; riderId: string; delayMs: number; attemptId?: string; scheduledAt: number }> = [];
 
@@ -192,6 +192,8 @@ beforeAll(async () => {
   recordDispatchQueue(app);
   await app.register(riderRoutes, { prefix: '/api/v1/rider' });
   await app.ready();
+  riderPool = moverPool(app.prisma, 'rider');
+  await riderPool.begin();
 
   // STACKING PIN: this file's 69 tests were authored under the one-job-per-
   // mover law and assert its exact semantics (rollback shapes, pool contents,
@@ -664,6 +666,7 @@ afterAll(async () => {
     // Now that no user points at them, the throwaway tenants can go.
     if (createdTenantIds.length) await app.prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
   });
+  if (riderPool) await riderPool.restore(); // undefined only when beforeAll failed before building it
   await app.close();
 });
 
@@ -950,7 +953,7 @@ describe('The offer cascade', () => {
   });
 
   it('SWIFT-016: accepting via /offers/accept claims at the formula fee, and never a timeout penalty', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    await riderPool.empty({ isOnline: false });
     const rider = await makeRider({ lat: PICKUP.lat + 0.002, acceptance: 100 });
     const order = await makeDeliveryOrder();
 
@@ -988,7 +991,7 @@ describe('The offer cascade', () => {
   });
 
   it('SWIFT-065: exhaustion is terminal — long-TTL marker + admins paged once, not every hour', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // guarantee an empty pool
+    await riderPool.empty({ isOnline: false }); // guarantee an empty pool
     const order = await makeDeliveryOrder();
     const admin = await app.prisma.user.create({
       data: { phone: '+5920008877', firstName: 'Ops2', lastName: 'Admin', roles: ['ADMIN'], activeRole: 'ADMIN', isPhoneVerified: true },
@@ -1021,7 +1024,7 @@ describe('The offer cascade', () => {
   });
 
   it('a fully-exhausted search emits dispatch:exhausted to the rider live screen (no infinite spinner)', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool -> terminal exhaustion
+    await riderPool.empty({ isOnline: false }); // empty pool -> terminal exhaustion
     const order = await makeDeliveryOrder();
     const emits: Array<{ room: string; ev: string }> = [];
     // [L05] Order-room events reach the order's CURRENT people only: observe the
@@ -1112,7 +1115,7 @@ describe('The offer cascade', () => {
     // (attempts 2 < cap). A deployment that lowers DISPATCH_EXHAUST_CAP below 3
     // changes that premise; say so instead of failing on a count.
     expect(EXHAUST_CAP).toBeGreaterThanOrEqual(3);
-    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // empty pool
+    await riderPool.empty({ isOnline: false }); // empty pool
     const order = await makeDeliveryOrder();
     const exhaustsKey = `dispatch:exhausts:${order.id}`;
 
@@ -1155,13 +1158,17 @@ describe('The offer cascade', () => {
       expect(await retrying()).toBe(1); // main: a second "still looking" push
 
       // A genuine next cycle is a DIFFERENT job: the counter accumulates, and
-      // it gets its own re-arm and its own notice.
+      // it gets its own re-arm. [OF-01 · COORD ruling 19 Oct 2026: one notice
+      // per state change, ever] It is the SAME order state (still ACCEPTED, no
+      // rider), so the customer, already told, is not told again: its push
+      // collapses into the first. (Before: a second "still looking" per cycle —
+      // 219 notices on one staging order.)
       await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
       await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '42');
       expect(await app.redis.get(exhaustsKey)).toBe('2');
       expect(await queue.getDelayedCount()).toBe(2);
       expect(await queue.getJob(redispatchJobId(order.id, tag2))).toBeTruthy();
-      expect(await retrying()).toBe(2);
+      expect(await retrying()).toBe(1);
 
       // Durable order state untouched: still unassigned and waiting on the vendor.
       const final = await app.prisma.order.findUniqueOrThrow({
@@ -1184,12 +1191,14 @@ describe('The offer cascade', () => {
     }
   });
 
-  it('[E36] a manual retry that restarts the counter still arms and still tells the customer', async () => {
-    // Keyed by attempt count, the second cycle's re-arm id and push key would
-    // equal the first cycle's: BullMQ keeps a completed job's id (removeOnComplete
-    // 100) and the (user, dedupeKey) unique collapses the push — a legitimate
-    // re-sweep and its notice silently dropped. Keyed by the run, they differ.
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+  it('[E36] a manual retry that restarts the counter still arms; [OF-01] the customer, told once in this state, is not told again', async () => {
+    // Keyed by attempt count, the second cycle's re-arm id would equal the
+    // first cycle's: BullMQ keeps a completed job's id (removeOnComplete 100)
+    // — a legitimate re-sweep silently dropped. Keyed by the run, they differ.
+    // [OF-01 · COORD ruling 19 Oct 2026] The PUSH is keyed by the order's
+    // state instead (status + assignment versions): a retry of the same state
+    // re-searches, but the customer was already told "still looking".
+    await riderPool.empty({ isOnline: false });
     const order = await makeDeliveryOrder();
     const exhaustsKey = `dispatch:exhausts:${order.id}`;
     const armedIds: Array<string | undefined> = [];
@@ -1209,7 +1218,7 @@ describe('The offer cascade', () => {
       expect(new Set(armedIds).size).toBe(2);
       expect(await app.prisma.notification.count({
         where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
-      })).toBe(2);
+      })).toBe(1);
     } finally {
       await app.redis.del(
         exhaustsKey,
@@ -1221,7 +1230,7 @@ describe('The offer cascade', () => {
   });
 
   it('[E36] a redelivered offer timeout consumes the pair once: one decay, one cascade', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    await riderPool.empty({ isOnline: false });
     const rider = await makeRider({ lat: PICKUP.lat + 0.004, acceptance: 100 });
     const order = await makeDeliveryOrder();
 
@@ -1323,7 +1332,7 @@ describe('The offer cascade', () => {
   });
 
   it('go-offline releases a held offer: the cascade advances at once and the miss is scored', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } }); // isolate the pool
+    await riderPool.empty({ isOnline: false }); // isolate the pool
     const a = await makeRider({ lat: PICKUP.lat + 0.0045, acceptance: 100 }); // best — gets the offer
     const b = await makeRider({ lat: PICKUP.lat + 0.018, acceptance: 100 });  // next in line
     const order = await makeDeliveryOrder();
@@ -1466,7 +1475,7 @@ describe('Atomic acceptance — the concurrency proof', () => {
   });
 
   it('never re-dispatches a committed winner when journal/rate/Redis/socket/notification publication fails', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false, isAvailable: false } });
+    await riderPool.empty({ isOnline: false, isAvailable: false });
     const rider = await makeRider({ lat: PICKUP.lat + 0.001 });
     const order = await makeDeliveryOrder('READY_FOR_PICKUP');
     expect((await dispatch.dispatchOrder(order.id)).offered).toBe(rider.riderId);
@@ -1617,7 +1626,7 @@ describe('Atomic acceptance — the concurrency proof', () => {
   });
 
   it('cannot accept an issued offer after safety or compliance forces the mover offline', async () => {
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    await riderPool.empty({ isOnline: false });
     const a = await makeRider({ lat: PICKUP.lat + 0.003 });
     const b = await makeRider({ lat: PICKUP.lat + 0.02 });
     const order = await makeDeliveryOrder();
@@ -2419,7 +2428,7 @@ describe('Account-status authority', () => {
 describe('candidate selection at scale [SWIFT-142]', () => {
   it('with >50 movers in range, the pool is the NEAREST 50 — not an arbitrary 50', async () => {
     // Isolate the pool: take every other test's residual riders offline first.
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    await riderPool.empty({ isOnline: false });
 
     const nearIds: string[] = [];
     const farIds: string[] = [];
@@ -2505,7 +2514,7 @@ describe('vehicle capability matching [SWIFT-062]', () => {
     // [Owner ruling 15 Oct 2026] TRANSFORMED: runs with CAR_DELIVERIES=1 (the re-enable path). With the switch
     // off (default) no car is a goods candidate: taxi-cars-passengers-only.test.ts.
     vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
-    await app.prisma.rider.updateMany({ data: { isOnline: false } });
+    await riderPool.empty({ isOnline: false });
     const localUserIds: string[] = [];
     const phoneBase = 592_830_000_000 + Math.floor(Math.random() * 80_000_000);
     let n = 0;

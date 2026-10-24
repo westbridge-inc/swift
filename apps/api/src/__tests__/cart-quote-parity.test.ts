@@ -222,6 +222,8 @@ beforeAll(async () => {
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   savedAllowedHosts = process.env['MMG_PAY_URL_ALLOWED_HOSTS'];
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = MMG_HOST;
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  process.env['STORE_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);

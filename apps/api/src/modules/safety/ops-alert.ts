@@ -4,6 +4,7 @@ import { runWithoutTenant } from '../../plugins/tenant-context';
 import { log } from '../../utils/logger';
 import { opsAlertCounter, opsAlertGauge } from '../../plugins/observability';
 import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /**
  * [S-19] War-room socket membership is not delivery acknowledgement.
@@ -235,7 +236,8 @@ export async function syncOpsAlertReadReceipts(prisma: PrismaClient): Promise<nu
   const rows = await prisma.opsAlertRecipient.findMany({ where: { seenAt: null, notificationId: { not: null }, opsAlert: { acknowledgedAt: null, closedAt: null } }, select: { id: true, notificationId: true }, take: 500 });
   let seen = 0;
   for (const r of rows) {
-    const n = await prisma.notification.findUnique({ where: { id: r.notificationId! }, select: { readAt: true } });
+    // [item 20] A responder's notice, read by the receipt sync: the named capability under the owner wall.
+    const n = await ownerWallSystem('ops-alert:read-receipt', () => prisma.notification.findUnique({ where: { id: r.notificationId! }, select: { readAt: true } }));
     if (n?.readAt) { await prisma.opsAlertRecipient.update({ where: { id: r.id }, data: { seenAt: n.readAt } }); seen += 1; }
   }
   return seen;
@@ -293,7 +295,7 @@ export async function escalateOverdueOpsAlerts(
       continue;
     }
     const level = a.escalationLevel + 1;
-    const title = `⏰ UNACKNOWLEDGED (${level}×): ${a.title}`;
+    const title = `UNACKNOWLEDGED (${level}×): ${a.title}`;
     const body = `Nobody has acknowledged this alert since ${a.createdAt.toISOString()}. ${a.body} Acknowledge it now.`;
     for (const r of a.recipients) {
       await notifications.send({ userId: r.userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'ops_alert_escalated', opsAlertId: a.id, sosAlertId: a.sosAlertId, level } }).catch(() => null);
@@ -344,7 +346,7 @@ export async function runOpsAlertDrillIfDue(prisma: PrismaClient, notifications:
   const last = await prisma.opsAlert.findFirst({ where: { kind: 'DRILL' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
   if (last && now.getTime() - last.createdAt.getTime() < days * 86_400_000) return { opened: null };
   const res = await openOpsAlert(prisma, notifications, {
-    kind: 'DRILL', tenantId: null, title: '🧪 Ops alert drill — acknowledge now',
+    kind: 'DRILL', tenantId: null, title: 'Ops alert drill — acknowledge now',
     body: `This is a scheduled drill of the SOS paging path. Acknowledge it within ${ackDeadlineSeconds()} seconds; an unacknowledged drill escalates exactly like a real SOS would.`,
     data: { kind: 'ops_alert_drill' }, now,
   });

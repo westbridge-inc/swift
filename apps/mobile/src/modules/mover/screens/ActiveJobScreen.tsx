@@ -1,3 +1,4 @@
+import { RetainedUploadPhotos } from '../../../lib/retainedUploadPhotos';
 import { MapCredits } from '../../../components/MapCredits';
 import { uploadHandoverPhoto } from '../../../hooks/mover';
 import type { AuthSessionSnapshot } from '../../../lib/authSession';
@@ -10,9 +11,10 @@ import BottomSheet, { BottomSheetScrollView } from '@gorhom/bottom-sheet';
 import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
-import { CodeInput, DecorativeIcon, EmptyState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { Stars } from '../../../kit/controls';
-import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof } from '../../../hooks';
+import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useDriverRouteLine } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
 import { CustodyRecoverySection } from '../CustodyRecoverySection';
 import { useMoverPreview } from '../../../stores/moverPreview';
@@ -33,7 +35,10 @@ import { emergencyDialCopy, previewEmergencyDial } from '../../../services/emerg
 import { doorFor, doorGuidanceFor, recordDoorBlocked, recordDoorMismatch, DOOR_REFUSAL_CODES } from '../../../lib/handoverAuthority';
 import { canDriverHandbackRide } from '../../../lib/driverRide';
 import { hasOpenStop, nextStopSequence, rideStops } from '../../../lib/taxiItinerary';
+import { driverMapLine } from '../../../lib/routeLine';
 import { useWaitingClock } from '../../../hooks/useWaitingClock';
+import { afterDismiss } from '../../../kit/after-dismiss';
+import { moverStatusLabel } from '../../../lib/orderStatus';
 import { DriverItinerary, DriverWaiting, TaxiStopActions, openStopNavigation, useNoShowOpen } from '../TaxiItinerary';
 
 /** [F-213] Every driver handover PIN is 6 digits (api ride-pin.ts). */
@@ -164,6 +169,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // handover (rider): refused, or nobody / left without paying.
   const [unpaidSheet, setUnpaidSheet] = useState(false);
   const [photoBusy, setPhotoBusy] = useState(false);
+  const capturedProofs = useRef(new RetainedUploadPhotos());
+  const captureGeneration = useAuthStore((state) => state.sessionGeneration);
+  useEffect(() => { capturedProofs.current.clear(); }, [captureGeneration]);
   const [handoverPhoto, setHandoverPhoto] = useState<{ orderId: string; kind: string; url: string; owner: AuthSessionSnapshot } | null>(null);
   const activePhotoBoundary = useRef('');
   // [M-28] The sender-pays courier job that ends at pickup: the fee was not
@@ -190,6 +198,9 @@ export function ActiveJobScreen({ navigation }: any) {
   // [TAXI multi-stop · part 4] With a stop open, the passenger-didn't-come-back
   // outcome opens only at the server's grace time for that stop.
   const noShowOpen = useNoShowOpen(isDriver ? liveJob : null);
+  // [TAXI route line] The road through the ride's own points when the server
+  // has one (read once per ride, never polled); else the straight heading.
+  const roadLine = useDriverRouteLine(isDriver ? liveJob : null);
 
   // [MKT-F057] The entered code belongs to THIS stop. When the displayed job
   // changes — a stacked-leg switch, a leg dropped from the run (the
@@ -232,9 +243,20 @@ export function ActiveJobScreen({ navigation }: any) {
   }, [canDriverHandback, driverHandbackFlow?.phase, driverHandbackFlow?.rideId, liveJob?.id]);
 
   if (!job && !ratePopup) {
+    // [BUG-GUARDS C3] Until the job read answers (loading, or failed with nothing cached) this is not
+    // "No active job": a driver mid-trip must never be told they have none.
+    const unanswered = active.data === undefined && (active.isLoading || active.isError);
     return (
       <Screen>
-        <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        {unanswered && active.isError ? (
+          <ErrorState message="We couldn't load your job. Check your connection and try again." onRetry={() => void active.refetch()} />
+        ) : unanswered ? (
+          <View accessibilityLabel="Loading your job" style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+            <Spinner size="large" />
+          </View>
+        ) : (
+          <EmptyState icon="map-pin" title="No active job" body="When you accept a job it'll show up here." />
+        )}
         <View style={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
           <PillButton label="Back" variant="soft" onPress={() => navigation?.goBack?.()} />
         </View>
@@ -249,6 +271,7 @@ export function ActiveJobScreen({ navigation }: any) {
   const itinerary = isDriver ? rideStops(job) : [];
   const itineraryPoints = itinerary.flatMap((s) => (s.lat != null && s.lng != null ? [{ sequence: s.sequence, latitude: s.lat, longitude: s.lng }] : []));
   const routePoints = pickup && drop ? [pickup, ...itineraryPoints.map(({ latitude, longitude }) => ({ latitude, longitude })), drop] : [];
+  const mapLine = driverMapLine(isDriver ? roadLine.data : null, routePoints);
   const region =
     itineraryPoints.length > 0 && pickup && drop
       ? regionAround(routePoints)
@@ -265,6 +288,22 @@ export function ActiveJobScreen({ navigation }: any) {
 
   activePhotoBoundary.current = `${job?.id}:${kind}`;
   const busy = photoBusy || driverAct.isPending || riderAct.isPending || courierProof.isPending || courierCollect.isPending || courierPickupProof.isPending || courierReturn.isPending || courierReturnProof.isPending;
+  const captureProof = async (purpose: string, owner: AuthSessionSnapshot | null) => {
+    const key = `${owner?.userId}:${owner?.generation}:${job.id}:${kind}:${purpose}`;
+    const uri = await capturedProofs.current.capture(key, async () => {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (owner) requireAuthSessionForPrincipal(owner);
+      if (!permission.granted) {
+        toast.error('Camera access is needed to capture this photo.');
+        return null;
+      }
+      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
+      if (owner) requireAuthSessionForPrincipal(owner);
+      return shot.canceled ? null : shot.assets?.[0]?.uri ?? null;
+    });
+    if (owner) requireAuthSessionForPrincipal(owner);
+    return uri ? { uri, key } : null;
+  };
   // Courier deliveries close with a proof-of-delivery photo (D8-02): capture →
   // upload → the handoff transition (which pays the rider). Everything else uses
   // the plain "Mark delivered" action.
@@ -278,19 +317,13 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureCourierProof = async (outcome?: 'paid' | FailedOutcome) => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture proof of delivery.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof(`delivery:${outcome ?? 'delivered'}`, owner);
+      if (!captured) return;
       courierProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, outcome, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, outcome, authSession: owner ?? undefined },
         {
           onSuccess: (res: any) => {
+            capturedProofs.current.forget(captured.key);
             if (outcome && outcome !== 'paid') {
               const claim = res?.claim?.status;
               toast.show(
@@ -305,7 +338,7 @@ export function ActiveJobScreen({ navigation }: any) {
           },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -350,22 +383,15 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureCourierPickupProof = async () => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture proof of pickup.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof('pickup', owner);
+      if (!captured) return;
       courierPickupProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, authSession: owner ?? undefined },
         {
-          onSuccess: () => active.refetch?.(),
+          onSuccess: () => { capturedProofs.current.forget(captured.key); active.refetch?.(); },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the pickup proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -476,13 +502,10 @@ export function ActiveJobScreen({ navigation }: any) {
     const boundary = `${orderId}:${kind}`;
     setPhotoBusy(true);
     try {
-      const permission = await ImagePicker.requestCameraPermissionsAsync();
-      requireAuthSessionForPrincipal(owner);
-      if (!permission.granted) { toast.show('You can still record the outcome for review without a photo.'); return; }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0] || activePhotoBoundary.current !== boundary) return;
-      const url = await uploadHandoverPhoto(kind, orderId, shot.assets[0].uri, owner);
+      const captured = await captureProof('handover', owner);
+      if (!captured || activePhotoBoundary.current !== boundary) return;
+      const url = await uploadHandoverPhoto(kind, orderId, captured.uri, owner);
+      capturedProofs.current.forget(captured.key);
       if (activePhotoBoundary.current === boundary) setHandoverPhoto({ orderId, kind, url, owner });
     } catch (error) {
       if (!(error instanceof AuthSessionBoundaryError)) toast.show('Photo could not be saved. Retry or record the outcome without it for review.');
@@ -560,26 +583,20 @@ export function ActiveJobScreen({ navigation }: any) {
   const captureReturnProof = async () => {
     try {
       const owner = preview ? null : requireAuthSessionSnapshot();
-      const perm = await ImagePicker.requestCameraPermissionsAsync();
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (!perm.granted) {
-        toast.error('Camera access is needed to capture the return proof.');
-        return;
-      }
-      const shot = await ImagePicker.launchCameraAsync({ quality: 0.6 });
-      if (owner) requireAuthSessionForPrincipal(owner);
-      if (shot.canceled || !shot.assets?.[0]) return;
+      const captured = await captureProof('return', owner);
+      if (!captured) return;
       courierReturnProof.mutate(
-        { orderId: job.id, uri: shot.assets[0].uri, authSession: owner ?? undefined },
+        { orderId: job.id, uri: captured.uri, authSession: owner ?? undefined },
         {
           onSuccess: () => {
+            capturedProofs.current.forget(captured.key);
             haptic.success();
             toast.show('Return complete', 'The parcel is back with the sender — return proof saved.');
             active.refetch?.();
           },
           onError: (proofError: any) => {
             if (!(proofError instanceof AuthSessionBoundaryError)) {
-              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Try again.');
+              toast.error(proofError?.response?.data?.error?.message ?? 'Couldn’t save the return proof. Tap again to retry the saved photo.');
             }
           },
         },
@@ -589,9 +606,12 @@ export function ActiveJobScreen({ navigation }: any) {
     }
   };
 
+  // [UI-SWEEP U04] The trip-complete popup closes in its own tick; Back waits
+  // for the modal's teardown (#910's law, kit/after-dismiss). Closing and going
+  // back in one tick can leave an invisible window over Home eating every tap.
   const closeRating = () => {
     setRatePopup(null);
-    navigation?.goBack?.();
+    afterDismiss(() => navigation?.goBack?.());
   };
 
   // The one big action at the bottom (reference "Arrived" button).
@@ -648,11 +668,12 @@ export function ActiveJobScreen({ navigation }: any) {
           ))}
           {pickup && drop ? (
             <>
-              {/* Bold route line: white halo under the accent stroke. Geodesic
-                  connector — a heading, not turn-by-turn. [TAXI multi-stop]
-                  It runs through the stops in order. */}
-              <Polyline coordinates={routePoints} geodesic strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
-              <Polyline coordinates={routePoints} geodesic strokeColor={color.brand[500]} strokeWidth={5} />
+              {/* Bold route line: white halo under the accent stroke. [TAXI route
+                  line] The road the server's routing engine gives, through the
+                  stops in order; without one, the geodesic heading through the
+                  same points, as before (a heading, not turn-by-turn). */}
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={withAlpha(color.white, 0.35)} strokeWidth={9} />
+              <Polyline coordinates={mapLine.coordinates} geodesic={!mapLine.road} strokeColor={color.brand[500]} strokeWidth={5} />
             </>
           ) : null}
         </MapView>
@@ -661,7 +682,8 @@ export function ActiveJobScreen({ navigation }: any) {
       )}
 
       <View style={{ position: 'absolute', top: insets.top, left: 0, right: 0, zIndex: 10, flexDirection: 'row', alignItems: 'center', padding: space.lg }}>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(40)}>
           {({ pressed }) => (
             <View style={[{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
               <Feather name="chevron-left" size={22} color={dk.text} />
@@ -699,6 +721,9 @@ export function ActiveJobScreen({ navigation }: any) {
         >
           <MapCredits />
           <BottomSheetScrollView contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}>
+            {photoBusy || courierProof.isPending || courierPickupProof.isPending || courierReturnProof.isPending ? (
+              <T variant="label" style={{ color: dk.muted, marginBottom: space.md }}>Still uploading — keep this screen open. If it fails, tap again to retry the saved photo.</T>
+            ) : null}
             {stacked ? (
               <View style={{ marginBottom: space.md }}>
                 <View style={{ flexDirection: 'row', gap: space.sm }}>
@@ -732,7 +757,8 @@ export function ActiveJobScreen({ navigation }: any) {
                   {job.orderNumber ? `ORDER #${job.orderNumber}` : 'CURRENT JOB'}
                 </T>
                 <T variant="caption" weight="semibold" style={{ color: dk.muted }}>
-                  {String(job.status ?? '').replace(/_/g, ' ').toLowerCase()}
+                  {/* [UI-SWEEP U73] the status in words, never the code */}
+                  {moverStatusLabel(job.status)}
                 </T>
               </View>
               <T variant="title" style={{ marginTop: space.sm, color: dk.text }}>
@@ -1359,7 +1385,7 @@ export function ActiveJobScreen({ navigation }: any) {
           Trip complete
         </PopupTitle>
         <T variant="body" tone="muted" center style={{ marginTop: space.sm }}>
-          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Cash collected — 100% yours.'} How was {ratePopup?.name}?
+          {ratePopup?.mmg ? 'Paid to your MMG — 100% yours.' : 'Fare collected — 100% yours.'} How was {ratePopup?.name}?
         </T>
         <View style={{ marginTop: space.lg }}>
           <Stars value={stars} size={34} gap={6} onRate={setStars} />

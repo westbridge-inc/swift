@@ -115,7 +115,7 @@ beforeEach(() => {
   localStorage.clear();
   setSelectedStore('store-1');
   api = ({ url }) => {
-    if (url.pathname === '/api/v1/vendor/stores') return { body: { success: true, data: { stores: [STORE], selectedId: 'store-1' } } };
+    if (url.pathname === '/api/v1/vendor/stores') return { body: { success: true, data: { stores: [STORE], selectedId: 'store-1', myRole: 'OWNER' } } };
     if (url.pathname === '/api/v1/verification/status') return { body: { success: true, data: storeStatus() } };
     if (url.pathname === '/api/v1/verification/upload') return { body: { success: true, data: { url: 'private/verification/new-copy.jpg' } } };
     if (url.pathname === '/api/v1/verification/documents') return { body: { success: true, data: { id: 'b3', status: 'PENDING' } } };
@@ -168,7 +168,7 @@ describe('[DOCS-1] a store owner’s Documents page', () => {
     expect(await within(business).findByText('Sent. It is in review now.')).toBeTruthy();
     expect(posts('/api/v1/verification/upload')).toHaveLength(1);
     const filed = posts('/api/v1/verification/documents').map((body) => JSON.parse(String(body)));
-    expect(filed).toEqual([{ role: 'RESTAURANT', docType: 'business_registration', fileUrl: 'private/verification/new-copy.jpg', consent: true, privacyNoticeVersion: 'web-v1' }]);
+    expect(filed).toEqual([{ role: 'RESTAURANT', docType: 'business_registration', fileUrl: 'private/verification/new-copy.jpg', consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }]);
     await waitFor(() => expect(statusReads()).toBeGreaterThan(before));
   });
 
@@ -187,6 +187,18 @@ describe('[DOCS-1] a store owner’s Documents page', () => {
     const href = within(business).getByRole('link', { name: /Think this is wrong/ }).getAttribute('href')!;
     expect(href).toBe(`mailto:support@swiftgy.com?subject=${encodeURIComponent('About my Business Registration review')}`);
     expect(decodeURIComponent(href)).not.toContain('blurred');
+  });
+
+  // The checklist is read and filed for the signed-in person: a manager's or
+  // staff login would see an empty list of its own and file under itself.
+  it.each(['MANAGER', 'STAFF'] as const)('a %s login is told only the owner sends the store’s documents, and reads no checklist', async (myRole) => {
+    api = ((base) => (request: ApiRequest) => (request.url.pathname === '/api/v1/vendor/stores'
+      ? { body: { success: true, data: { stores: [STORE], selectedId: 'store-1', myRole } } }
+      : base(request)))(api);
+    renderWithQuery(<StoreDocumentsPage />);
+    expect(await screen.findByText(/Only the store’s owner sends its documents/)).toBeTruthy();
+    expect(screen.queryByRole('listitem')).toBeNull();
+    expect(calls.mock.calls.some(([url]) => new URL(String(url)).pathname === '/api/v1/verification/status')).toBe(false);
   });
 
   it('a checklist that fails to load says so and offers to try again — never an empty list', async () => {

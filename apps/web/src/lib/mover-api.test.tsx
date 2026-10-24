@@ -129,9 +129,14 @@ describe('[W-10] the blanket catch is gone, and the pages say so', () => {
 
   it('every money surface on the portal home has an unavailable state', () => {
     const home = page('page.tsx');
-    for (const q of ['summary.isError', 'settlements.isError', 'riderSub.isError', 'driverSub.isError', 'driverEarn.isError']) {
+    for (const q of ['summary.isError', 'riderSub.isError', 'driverSub.isError', 'driverEarn.isError']) {
       expect(home, q).toContain(q);
     }
+    // [UI-SWEEP U66] The cash ledger is read through one reader that maps a failed
+    // (or malformed) read to 'unavailable', and the page renders that state.
+    expect(home).toContain("readSettlementLedger(settlements, 'vendor')");
+    expect(home).toContain("ledger.state === 'unavailable'");
+    expect(readFileSync(join(process.cwd(), 'src/lib/cash-settlement-view.ts'), 'utf8')).toContain("if (query.isError) return { state: 'unavailable' };");
     expect(home.match(/<DataUnavailable/g) ?? []).not.toHaveLength(0);
   });
 

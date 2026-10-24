@@ -219,6 +219,8 @@ vi.mock('zustand', async () => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
+  // [STORE-DASH] the board's per-order wait reads the mutation cache: nothing is out here.
+  useMutationState: () => [],
   useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
     const invoke = (variables: unknown) => fx.runMutations ? options.mutationFn?.(variables) : undefined;
     const result = { mutate: vi.fn(invoke), mutateAsync: vi.fn(invoke), isPending: false, isError: false, isSuccess: false };
@@ -266,6 +268,7 @@ vi.mock('../../../components/PublicCallNumberCard', () => ({ PublicCallNumberCar
 vi.mock('../../../components/RefundRuleCard', () => ({ RefundRuleCard: 'RefundRuleCard' }));
 // [Q8] The store map: react-native-maps and expo-location are native. Its props are the contract.
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
+vi.mock('../../../components/StorePhotosCard', () => ({ StorePhotosCard: 'StorePhotosCard' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
 vi.mock('../../../hooks/useStepUp', () => ({
   useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }),

@@ -1,3 +1,4 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
 import { enterTenant } from '../../plugins/tenant-context';
@@ -5,6 +6,7 @@ import { z } from 'zod';
 import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
+import { readAppVersionPolicy } from '../ops/app-version';
 import { emergencyPolicyCounter } from '../../plugins/observability';
 import { notProhibitedStore, PUBLIC_VENDOR_TENANT } from '../vendor/vendor-visibility';
 import { adsEnabled } from '../ads/ads-enabled';
@@ -119,6 +121,17 @@ export async function publicRoutes(app: FastifyInstance) {
     reply.header('Cache-Control', 'no-store');
     return { success: true, data: { adsEnabled: adsEnabled() } };
   });
+  /**
+   * [Row 3 · force update] The oldest phone build Swift still serves, per platform
+   * (ops/app-version.ts). Phones from build 12 on read it on open and on return to
+   * the screen; builds 9–11 never ask, and no route refuses a request for its app
+   * version. Unauthenticated (an outdated phone may hold no session) and uncached,
+   * so an ops change applies at the next open.
+   */
+  app.get('/app-version', async (_request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    return { success: true, data: await readAppVersionPolicy(app.prisma) };
+  });
   /** GET /storefronts — the public directory. */
   /**
    * [MOB-018] The market emergency policy — verified local emergency numbers,
@@ -127,6 +140,9 @@ export async function publicRoutes(app: FastifyInstance) {
    * with a confirm; a market with no policy answers `numbers: null` and the
    * app falls back to its bundled table. A malformed stored policy is never
    * served as a policy. Unauthenticated: an emergency has no login step.
+   * [AUD-G7-023] A served policy also carries `envelope`: the same numbers
+   * signed with Ed25519 under a key the app pins (build 12+ trusts nothing
+   * else). The v1 fields stay byte-for-byte as before for builds 9-11.
    */
   app.get('/emergency-policy', async (request, reply) => {
     const { country } = z.object({ country: z.string().trim().length(2) }).parse(request.query ?? {});
@@ -134,7 +150,10 @@ export async function publicRoutes(app: FastifyInstance) {
     emergencyPolicyCounter.labels(served.status).inc();
     if (served.status === 'unknown-market') throw new NotFoundError('CountryConfig', country.toUpperCase());
     reply.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=86400');
-    if (served.status === 'served') return { success: true, data: served.signed };
+    if (served.status === 'served') {
+      if (served.envelopeProblem) request.log.error({ country: served.signed.country, problem: served.envelopeProblem }, '[AUD-G7-023] emergency policy served WITHOUT its Ed25519 envelope — build 12+ phones keep their last verified or bundled numbers');
+      return { success: true, data: served.envelope ? { ...served.signed, envelope: served.envelope } : served.signed };
+    }
     if (served.status === 'invalid') request.log.error({ country: served.country, problem: served.problem }, '[MOB-018] stored emergency policy is malformed — not served');
     return { success: true, data: { version: 1, country: served.country, numbers: null, reason: served.status === 'invalid' ? 'INVALID_POLICY' : 'NO_POLICY' } };
   });
@@ -216,6 +235,8 @@ export async function publicRoutes(app: FastifyInstance) {
           select: {
             id: true,
             name: true,
+            // [IMAGES-E2E PR5] The section's own photo shows on the store page (only a kept one is handed out).
+            imageUrl: true,
             items: {
               // The public menu shows what a customer could order right now.
               where: { isAvailable: true },
@@ -275,7 +296,8 @@ export async function publicRoutes(app: FastifyInstance) {
         categories: vendor.categories
           .map((c) => ({
             ...c,
-            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice) })),
+            imageUrl: servedPhotoAddress(c.imageUrl),
+            items: c.items.filter((i) => !hidden.has(i.id)).map((i) => ({ ...i, basePrice: Number(i.basePrice), imageUrl: servedPhotoAddress(i.imageUrl) })),
           }))
           // An empty category is vendor housekeeping, not a public menu section.
           .filter((c) => c.items.length > 0),

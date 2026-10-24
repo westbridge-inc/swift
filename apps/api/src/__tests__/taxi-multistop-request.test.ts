@@ -69,7 +69,7 @@ const PINNED_SINGLE_LEG_ANSWER = '{"success":true,"data":{"ride":{"id":"<ID>","o
 const BOARD_ITEM_KEYS = ['id', 'orderNumber', 'pickupLat', 'pickupLng', 'dropoffLat', 'dropoffLng', 'passengerCount', 'estimatedDistance', 'estimatedDuration', 'fareTotal', 'fareSurge', 'distanceToPickup', 'etaToPickup', 'customer', 'createdAt'];
 const LIVE_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'isExpress', 'expiresInSeconds', 'etaMinutes', 'rescueIncentiveGyd', 'paymentMethod', 'customerTrust', 'itemCount', 'estLoad', 'cashMath'];
 const RECOVERED_OFFER_KEYS = ['orderId', 'offerAttemptId', 'orderNumber', 'vendorName', 'isExpress', 'paymentMethod', 'expiresInSeconds', 'itemCount', 'estLoad', 'customerTrust', 'deliveryFee', 'tipAmount', 'taxiFareTotal', 'pickupAddress', 'deliveryAddress', 'etaMinutes', 'rescueIncentiveGyd', 'cashMath'];
-const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence'];
+const STOP_KEYS = ['stops', 'stopCount', 'nextStopSequence', 'stopWait'];
 
 let app: FastifyInstance;
 let osrmApp: FastifyInstance;
@@ -124,6 +124,9 @@ async function makeDriver(at: Point, extra: Record<string, unknown> = {}): Promi
       isOnline: true, isAvailable: true, locationSessionId: u.sessionId,
       currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date(),
       averageRating: 4.9, acceptanceRate: 90,
+      // [TAXI multi-stop 4/8] This suite's drivers run an app that declared it can
+      // run stops (go-online): a ride with stops goes only to such an app.
+      taxiStopsCapable: true,
     } as never,
   }));
   // [#1405] Taking work re-checks the driver's current approved documents,
@@ -547,12 +550,16 @@ describe('switched on (TAXI_MAX_STOPS=3): a ride with stops', () => {
 
   it('the quoted-fare check comes before the account gates: it is the request\'s own fault, judged before anything is read', async () => {
     vi.stubEnv('TAXI_MAX_STOPS', '3');
-    const noSelfie = await makeCustomer({ selfieCapturedAt: null });
-    const res = await requestRide(noSelfie.token, trip([S1]));
+    // [Owner ruling 16 Oct 2026 — customers take no photos] The account gate used here is the live-ride
+    // gate (the selfie gate is gone): a customer with no photo books a plain ride, then asks for another.
+    const busy = await makeCustomer({ selfieCapturedAt: null });
+    const first = await requestRide(busy.token, trip());
+    expect(first.statusCode, first.body).toBe(201);
+    const res = await requestRide(busy.token, trip([S1]));
     expect([res.statusCode, res.json().error.code]).toEqual([400, 'EXPECTED_FARE_REQUIRED']);
-    // With the fare it reaches the gate it always reached.
-    const gated = await requestRide(noSelfie.token, trip([S1], { expectedFare: 2000 }));
-    expect([gated.statusCode, gated.json().error.code]).toEqual([403, 'SELFIE_REQUIRED']);
+    // With the fare it reaches the account gate.
+    const gated = await requestRide(busy.token, trip([S1], { expectedFare: 2000 }));
+    expect([gated.statusCode, gated.json().error.code]).toEqual([409, 'RIDE_IN_PROGRESS']);
   });
 
   it('the routing engine down: 503 ROUTE_UNAVAILABLE, never a guessed fare, nothing written', async () => {

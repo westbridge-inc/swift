@@ -1,29 +1,41 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, ShieldCheck, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Calendar, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
+import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
 import type { ShellPerson } from '@/components/customer-shell';
 import { ConsoleShell } from '@/components/console-shell';
 import Link from 'next/link';
-import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
+import { ApiRequestError, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
 import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
+import { useStoreRole } from '@/lib/store-role';
+import type { VendorMemberRole } from '@/lib/vendor-hub';
+import { StoreLiveFeed } from '@/components/store-live-feed';
 
-/** The business console's places. The items tab is named like the app, by the
- *  store's type: Menu, Inventory, Products or Services (lib/catalogue-name). */
-export const dashboardNav = (catalogue: CatalogueName) => [
-  { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true, dock: false },
-  { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: catalogue, icon: Boxes, exact: true },
-  { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false, dock: false },
-  { href: '/dashboard/documents', label: 'Documents', icon: ShieldCheck, exact: true, dock: false },
-  { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
-  { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
-];
+/**
+ * The business console's places: the app's four sections
+ * (apps/mobile/src/modules/vendor/VendorStack.tsx), owner ruling 11 Oct 2026.
+ * The items tab is named for the store's type (lib/catalogue-name); staff see
+ * it as "Availability" and have no Insights, exactly as in the app. A Services
+ * store's owners and managers also get Schedule after Orders (the app's R1 tab:
+ * a Services store runs its day from a booking agenda). Weekly fee, bulk import
+ * and hours are reached from the Orders home and Account.
+ */
+export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined, vendorType?: string) => {
+  const manager = role === 'OWNER' || role === 'MANAGER';
+  return [
+    { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
+    ...(manager && vendorType === 'SERVICE' ? [{ href: '/dashboard/schedule', label: 'Schedule', icon: Calendar, exact: false }] : []),
+    { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
+    ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
+    // Account is the store's settings page until the app's Account screen lands (PR D).
+    { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
+  ];
+};
 
 /**
  * [W-04 / W-05] The store switcher is the tenant boundary of this console.
@@ -135,9 +147,13 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
   const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
-  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType)), [selected?.vendorType]);
+  const { role } = useStoreRole();
+  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role, selected?.vendorType), [selected?.vendorType, role]);
 
-  return (
+  // [PERF row 8] The store's live feed, for a store the server listed for this account.
+  const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;
+  return (<>
+    {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
     <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
       switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
@@ -156,30 +172,18 @@ function StoreShell({ children, person }: { children: React.ReactNode; person: S
         </p>
       )}
     </ConsoleShell>
-  );
+  </>);
 }
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
-  const [ready, setReady] = useState(false);
-  const [person, setPerson] = useState<ShellPerson | null>(null);
-
-  // [W-01] The session is an HttpOnly cookie the page cannot read, so the gate
-  // asks the SERVER whether one exists instead of inspecting localStorage.
-  useEffect(() => {
-    let cancelled = false;
-    void sessionProbe().then((session) => {
-      if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else { setPerson({ name: [session.user?.['firstName'], session.user?.['lastName']].filter(v => typeof v === 'string').join(' '), phone: null }); setReady(true); }
-    });
-    return () => { cancelled = true; };
-  }, [router]);
-
-  if (!ready) return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
+  // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
+  // a check that could not reach Swift says so instead (components/console-session).
+  const gate = useConsoleSession();
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
-    <Providers>
-      <StoreShell person={person}>{children}</StoreShell>
+    <Providers offline="fail">
+      <StoreShell person={gate.person}>{children}</StoreShell>
     </Providers>
   );
 }

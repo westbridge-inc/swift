@@ -41,9 +41,12 @@ describe('a saved vehicle can be changed', () => {
     expect(ONBOARDING).toContain("changeVehicle.mutate({ vehicleType: vt, vehicle }, { onSuccess: (r) => onDone(r?.changed !== false) });");
     expect(ONBOARDING).toContain("const needsAgreement = mode === 'join';");
     expect(ONBOARDING).toMatch(/\{needsAgreement \? \(\s*<Pressable\s+accessibilityRole="checkbox"/);
-    expect(ONBOARDING).toMatch(/disabled=\{!gate\.ok \|\| !valid \|\| \(needsAgreement && !agree\) \|\| sameAsSaved\}/);
-    // Join keeps its agreement: /become still sends acceptAgreement.
-    expect(ONBOARDING).toContain("become.mutate({ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree }, { onSuccess: () => onDone(true) });");
+    // [Row 628] The button also waits for the weekly-fee tick — asked on join only: change mode re-asks neither.
+    expect(ONBOARDING).toMatch(/disabled=\{!gate\.ok \|\| !valid \|\| feeAsk !== null \|\| \(needsAgreement && !agree\) \|\| sameAsSaved\}/);
+    expect(ONBOARDING).toContain("const fee = needsAgreement ? feeTick(pricing.data, gate.ok ? gate.quote.rate : null) : ({ kind: 'none' } as const);");
+    // Join keeps its agreement: /become still sends acceptAgreement (and the fee tick when asked).
+    expect(ONBOARDING).toMatch(/become\.mutate\(\s*\{ role: 'MOVER', vehicleType: vt, vehicle, acceptAgreement: agree, \.\.\.\(fee\.kind === 'tick' && \{ weeklyFeeAck: fee\.ack \}\) \},/);
+    expect(ONBOARDING).toContain('{ onSuccess: () => onDone(true), onError: (e) => { if (feeTickError(e)) void refetchPricing(); } },');
   });
 
   it('the server’s own words explain a refused change; a dismissed step-up says nothing', () => {
@@ -57,8 +60,9 @@ describe('a saved vehicle can be changed', () => {
     expect(VEHICLE).toMatch(/<VehicleSetup\s+mode="change"/);
     expect(VEHICLE).toMatch(/guard=\{stepUp\.withStepUp\}/);
     expect(VEHICLE).toContain('{stepUp.sheet}');
-    // After a change the next stop is the new vehicle's papers.
-    expect(VEHICLE).toContain("navigation?.navigate?.('MoverDocuments');");
+    // After a change the next stop is the new vehicle's papers, IN PLACE of the
+    // finished form ([UI-SWEEP U35]; the stack itself: MoverVehicleScreen.documents.navigation.test.ts).
+    expect(VEHICLE).toContain("navigation?.replace?.('MoverDocuments');");
   });
 
   it('a working mover reaches it from Account', () => {

@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_URL } from '../../../services/api';
 import { color, radius, space } from '@swift/ui';
 import { customerKeys, useDiscoveryCategories, useHome, useToggleFavorite, type HomeFeed, type LiveOrderProjection } from '../../../hooks/customer';
+import { useRowHold } from '../../../lib/useRowHold';
 import { createHomeRefreshGate, homeFeedState, homeQueryKey, subscribeToHomeAttention } from '../../../lib/homeReliability';
 import { useAds } from '../../../hooks/ads';
 import { AdHeroVideo, AdTopCard, AdBar } from '../../../components/ads';
@@ -31,6 +32,7 @@ import { money } from '../../../lib/money';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
 import { orderRecipientNoun, orderStatusLabel, orderSubtitle, presentedVertical } from '../../../lib/orderStatus';
 import { promiseLine } from '../../../lib/promise';
+import { trackRouteFor } from '../../../lib/orderTrackRoute';
 // ONE hold authority, shared with the tracking screen — never a second
 // countdown that could disagree with it about whether the window is open.
 import { holdRingActive, holdRingWindow } from '../../../kit/hold-window';
@@ -269,7 +271,12 @@ function LiveOrderCard({ order, navigation, statusNote }: { order: LiveOrderProj
             label="Track"
             variant="dark"
             size="sm"
-            onPress={() => navigation.navigate('Delivery', { orderId: order.id })}
+            // [TAXI-FLOW 22 Oct] A ride tracks on the ride screen, never the
+            // store's: the server's orderType picks (orderTrackRoute.ts).
+            onPress={() => {
+              const target = trackRouteFor(order);
+              navigation.navigate(target.screen, target.params);
+            }}
           />
         </View>
 
@@ -348,6 +355,7 @@ export function HomeScreen() {
     [refreshForAttention],
   ));
   const toggleFav = useToggleFavorite();
+  const holdRow = useRowHold();
   // Category rail (#17): flag-gated server-side; when live it SUPERSEDES the
   // old "Find by category" section (one category system on Home, ever —
   // spec 6.2). Flag off → both absent/present exactly as before (CAT-G).
@@ -373,7 +381,9 @@ export function HomeScreen() {
       promptLogin();
       return;
     }
-    toggleFav.mutate({ vendorId, isFavorite });
+    // [BUG-GUARDS C2] A double tap on the heart sent two add/remove requests: one per store at a time
+    // (another store's heart still goes while this one sends).
+    holdRow(vendorId, () => toggleFav.mutateAsync({ vendorId, isFavorite }));
   };
 
   const feed = home.data;
@@ -465,7 +475,7 @@ export function HomeScreen() {
                 <Feather name="bell" size={22} color={color.text.primary} />
               </Pressable>
               <Pressable
-                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' })}
+                onPress={() => navigation.navigate('Tabs', { screen: 'Profile' }, { pop: true })}
                 accessibilityRole="button"
                 accessibilityLabel="Profile"
               >
@@ -654,7 +664,7 @@ export function HomeScreen() {
         <CategoryRail
           data={discovery.data}
           loading={false}
-          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name, emoji: c.emoji })}
+          onChip={(c) => navigation.navigate('CategoryFeed', { slug: c.slug, name: c.name })}
           onSeeAll={() => navigation.navigate('CategoryGrid')}
         />
 

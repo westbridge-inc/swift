@@ -1,4 +1,7 @@
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
+import { shownRatingTotals, withShownTotals } from '../rating/rating-groups';
+import { scanUpload } from '../../lib/malware-scan';
 import { assertMoverPushReady } from '../notification/mover-push-authority';
 import { safeBoardOrders } from '../dispatch/pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, expiredDocumentAuthority, lockMoverDocuments } from '../verification/mover-document-authority';
@@ -283,6 +286,9 @@ const startOfMonth = startOfMonthGY;
 // ---------------------------------------------------------------------------
 
 export async function riderRoutes(app: FastifyInstance) {
+  // [PERF item 3] Job-step taps answer without waiting for the customer's push (lib/push-after-response);
+  // shutdown waits for those pushes under the same cleanup deadline as in-flight requests.
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const floatService = new FloatService(app.prisma);
   const verification = new VerificationService(
@@ -317,7 +323,7 @@ export async function riderRoutes(app: FastifyInstance) {
   /** POST /orders/:id/handover — the golden rule at the door.
    *  'paid' completes the delivery; 'no_show'/'refused' fails it and files the
    *  evidence; a strike and an automatic guarantee follow only a complete bundle. */
-  app.post('/orders/:id/handover', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/orders/:id/handover', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const rider = await getRider(app, request.user.userId); // authz before validation
     // [MASTER-008] The order is this rider's BEFORE anything is replayed: a
@@ -466,6 +472,8 @@ export async function riderRoutes(app: FastifyInstance) {
       success: true,
       data: {
         ...rider,
+        // [COORD 18 Oct, option S] The row's live averageRating/totalRatings never reach the person: whole groups only.
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         subscription: (await readMoverFeeSubscription(app.prisma, await moverFeePayer(app.prisma, rider.userId)))?.subscription ?? null,
         // D.3 float exposure — surfaced so the app can explain "why no offers".
         float: {
@@ -478,8 +486,8 @@ export async function riderRoutes(app: FastifyInstance) {
         stats: {
           totalDeliveries: rider.totalDeliveries,
           totalCourierJobs: rider.totalCourierJobs,
-          averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-          totalRatings: rider.totalRatings,
+          // [COORD 18 Oct, option S] from whole groups of 5 only (rating-groups.ts).
+          ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
           completionRate: rider.completionRate ? Number(rider.completionRate) : null,
           todayEarnings: Number(todayEarnings._sum.amount ?? 0),
           todayDeliveries,
@@ -503,6 +511,7 @@ export async function riderRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'vehicle-photo', log: request.log });
     const { url } = await getStorageProvider().upload({
       buffer,
       filename: file.filename,
@@ -515,7 +524,7 @@ export async function riderRoutes(app: FastifyInstance) {
       data: { vehiclePhotoUrl: url },
       select: { id: true, vehiclePhotoUrl: true },
     });
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   /** PUT /profile — Update vehicle info, profile photo, rider type. */
@@ -604,7 +613,7 @@ export async function riderRoutes(app: FastifyInstance) {
       return updated;
     });
 
-    return { success: true, data: updated };
+    return { success: true, data: await withShownTotals(app.prisma, updated, 'RIDER', request.user.userId) };
   });
 
   // =========================================================================
@@ -1222,10 +1231,11 @@ export async function riderRoutes(app: FastifyInstance) {
         addressLine1: true, city: true,
       },
     },
+    // [COORD 17 Oct] The rider calls the customer (no masked calling yet): first name + phone, never the last name.
     customer: {
       select: {
         id: true,
-        firstName: true, lastName: true, phone: true,
+        firstName: true, phone: true,
       },
     },
     items: { select: { name: true, quantity: true, totalCustomer: true, specialInstructions: true } },
@@ -1307,7 +1317,7 @@ export async function riderRoutes(app: FastifyInstance) {
   // =========================================================================
 
   /** POST /orders/:id/accept — Claim an available order. */
-  app.post('/orders/:id/accept', { preHandler: [app.authenticate] }, async (request) => {
+  app.post('/orders/:id/accept', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] A mover never sets the
     // price. An older app's `fare` is read (never refused) and ignored: the
@@ -1502,7 +1512,7 @@ export async function riderRoutes(app: FastifyInstance) {
    *   PUT /orders/:id/arrived
    */
   for (const [slug, { from, to, note }] of Object.entries(STATUS_TRANSITIONS)) {
-    app.put(`/orders/:id/${slug}`, { preHandler: [app.authenticate] }, async (request) => {
+    app.put(`/orders/:id/${slug}`, { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
       const { id } = request.params as { id: string };
       const rider = await getRider(app, request.user.userId);
       const order = await getOwnedOrder(app, id, rider.id);
@@ -1583,7 +1593,7 @@ export async function riderRoutes(app: FastifyInstance) {
   }
 
   /** PUT /orders/:id/delivered — Final step: complete delivery, create earnings, free rider. */
-  app.put('/orders/:id/delivered', { preHandler: [app.authenticate] }, async (request) => {
+  app.put('/orders/:id/delivered', { preHandler: [app.authenticate], onRequest: pushAfterResponse }, async (request) => {
     const { id } = request.params as { id: string };
     const { ridePin, handoverVersion } = pickupPinSchema.parse(request.body ?? {});
     const rider = await getRider(app, request.user.userId);
@@ -2286,8 +2296,7 @@ export async function riderRoutes(app: FastifyInstance) {
         currentOrderId: rider.currentOrderId,
         totalDeliveries: rider.totalDeliveries,
         totalCourierJobs: rider.totalCourierJobs,
-        averageRating: rider.averageRating ? Number(rider.averageRating) : null,
-        totalRatings: rider.totalRatings,
+        ...(await shownRatingTotals(app.prisma, 'RIDER', request.user.userId)),
         completionRate: rider.completionRate ? Number(rider.completionRate) : null,
         onlineHoursToday,
         todayDeliveries,

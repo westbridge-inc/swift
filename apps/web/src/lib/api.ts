@@ -114,6 +114,8 @@ export interface StorefrontDetail extends StorefrontSummary {
   categories: Array<{
     id: string;
     name: string;
+    /** [IMAGES-E2E PR5] The section's own photo (a kept one; absent from an older API). */
+    imageUrl?: string | null;
     items: Array<{
       id: string;
       name: string;
@@ -148,10 +150,11 @@ export async function fetchStorefronts(params: { type?: string; city?: string; q
  * [W2] ONE read per visit: the page and its metadata share it (React `cache`
  * remembers it for the length of the request). The server keeps the answer for
  * 30 seconds — a scanned counter code is a commerce surface, but this copy
- * only draws the page: the storefront re-reads the live store and menu the
- * moment it opens and takes no order until that live read has answered
- * (storefront-experience.tsx `orderable`), and the API re-checks everything
- * at add and at checkout.
+ * only draws the page: the storefront takes no order until it holds a live
+ * menu at most 30 seconds old (storefront-experience.tsx `orderable`) — the
+ * one the server drew into the page (browse-server.ts `storeMenuForPage`) or,
+ * failing that, its own read the moment it opens — and the API re-checks
+ * everything at add and at checkout.
  */
 export const STOREFRONT_REVALIDATE_SECONDS = 30;
 

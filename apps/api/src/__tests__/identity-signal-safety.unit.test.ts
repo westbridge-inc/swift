@@ -92,6 +92,9 @@ describe('[VERIFY-DOCS] numbers a reviewer types at approval', () => {
     expect(reviewerTypedFields('national_id')).toEqual(['documentNumber']);
     expect(reviewerTypedFields('drivers_licence')).toEqual(['documentNumber']);
     expect(reviewerTypedFields('police_clearance')).toEqual(['issuedOn']);
-    expect(reviewerTypedFields('business_registration')).toEqual([]);
+    // [R15/R16] a certificate checked every January asks for its year; a business registration for its kind (and year)
+    expect(reviewerTypedFields('food_handler_cert')).toEqual(['certificateYear']);
+    expect(reviewerTypedFields('business_registration')).toEqual(['registrationKind', 'certificateYear']);
+    expect(reviewerTypedFields('storefront_photo')).toEqual([]);
   });
 });

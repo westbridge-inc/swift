@@ -3,10 +3,15 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { selectedProfileStore, storeCheckLabel, type ProfileData } from './store-check';
 import { confirmSettlement, getCashSettlements, getHours, getProfile, getSubscription, money, putHours } from '@/lib/vendor-api';
 import { MutationNotice } from '@/components/mutation-notice';
+import { DataUnavailable } from '@/components/data-unavailable';
+import { readSettlementLedger } from '@/lib/cash-settlement-view';
+import { subscriptionInGoodStanding, subscriptionLine, subscriptionStatusWord } from '@/lib/partner-fee';
 import { setDraftDirty, storeKey, useStoreId } from '@/lib/store-scope';
 import { RefundRuleCard } from './refund-rule-card';
+import { StorePhotosCard } from './store-photos-card';
 
 const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -35,7 +40,10 @@ function HoursEditor() {
   const save = useMutation({
     mutationFn: () =>
       putHours(rows!.map((r) => (r.isClosed ? { dayOfWeek: r.dayOfWeek, isClosed: true } : { ...r, isClosed: false }))),
+    onMutate: () => setError(null),
     onSuccess: () => {
+      // [U50] A save that worked clears the last one's error.
+      setError(null);
       setSaved(true);
       setDraftDirty(HOURS_DRAFT, false);
       setTimeout(() => setSaved(false), 2500);
@@ -66,6 +74,7 @@ function HoursEditor() {
   // discard the operator's decision rather than a surprise.
   const set = (d: number, patch: Partial<DayRow>) => {
     setDraftDirty(HOURS_DRAFT, true);
+    setSaved(false);
     setRows(rows.map((r) => (r.dayOfWeek === d ? { ...r, ...patch } : r)));
   };
 
@@ -81,6 +90,7 @@ function HoursEditor() {
                 type="checkbox"
                 checked={!r.isClosed}
                 onChange={(e) => set(r.dayOfWeek, { isClosed: !e.target.checked })}
+                aria-label={`Open on ${DAYS[r.dayOfWeek]}`}
                 className="h-4 w-4 accent-[var(--swift-red)]"
               />
               Open
@@ -91,6 +101,7 @@ function HoursEditor() {
                   type="time"
                   value={r.openTime}
                   onChange={(e) => set(r.dayOfWeek, { openTime: e.target.value })}
+                  aria-label={`${DAYS[r.dayOfWeek]} opens at`}
                   className="rounded-lg border border-[var(--swift-border)] px-2 py-1"
                 />
                 <span className="text-[var(--swift-muted)]">to</span>
@@ -98,6 +109,7 @@ function HoursEditor() {
                   type="time"
                   value={r.closeTime}
                   onChange={(e) => set(r.dayOfWeek, { closeTime: e.target.value })}
+                  aria-label={`${DAYS[r.dayOfWeek]} closes at`}
                   className="rounded-lg border border-[var(--swift-border)] px-2 py-1"
                 />
               </span>
@@ -114,17 +126,26 @@ function HoursEditor() {
           {save.isPending ? 'Saving…' : 'Save hours'}
         </button>
         {saved && <span className="text-sm font-medium text-green-600">Saved ✓</span>}
-        {error && <span className="text-sm text-[var(--swift-red)]">{error}</span>}
+        {error && <span role="alert" className="text-sm text-[var(--swift-red)]">{error}</span>}
       </div>
     </div>
   );
 }
 
-function SubscriptionCard() {
+/**
+ * [UI-SWEEP U20 / U18 / U46] The phone shows this card to OWNERS only, and the
+ * read is owner-only on the server: every manager used to be told "No
+ * subscription on this store yet", and so was an owner whose read failed. The
+ * fee shown is the rate actually charged, in the phone's words.
+ */
+function SubscriptionCard({ isOwner }: { isOwner: boolean }) {
   const storeId = useStoreId();
-  const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription });
-  const s = sub.data;
-  if (sub.isLoading) return null;
+  const sub = useQuery({ queryKey: storeKey(storeId, 'subscription'), queryFn: getSubscription, enabled: isOwner });
+  if (!isOwner) return null;
+  if (sub.isError) return <DataUnavailable what="your subscription" error={sub.error} onRetry={() => void sub.refetch()} />;
+  // isPending, not isLoading: a read paused offline has no data and is not "no subscription".
+  if (sub.isPending) return <div role="status" className="sw-card p-6 text-sm text-[var(--swift-muted)]">Checking your subscription…</div>;
+  const s = (sub.data ?? null) as Record<string, unknown> | null;
   return (
     <div className="sw-card p-6">
       <h2 className="font-bold">Subscription</h2>
@@ -133,16 +154,9 @@ function SubscriptionCard() {
       ) : (
         <div className="mt-3 space-y-1 text-sm">
           <p>
-            Status:{' '}
-            <b className={s.status === 'ACTIVE' || s.status === 'TRIAL' ? 'text-green-600' : 'text-[var(--swift-red)]'}>
-              {s.status}
-            </b>
-            {s.status === 'TRIAL' && s.trialEndsAt && (
-              <span className="text-[var(--swift-muted)]"> — Free trial until {new Date(s.trialEndsAt).toLocaleDateString()}</span>
-            )}
+            Status: <b className={subscriptionInGoodStanding(s) ? 'text-green-600' : 'text-[var(--swift-red)]'}>{subscriptionStatusWord(s)}</b>
           </p>
-          <p>Weekly fee: <b>{money(s.weeklyRate)}</b> — you keep 100% of every sale.</p>
-          {s.currentPeriodEnd && <p>Next bill: {new Date(s.currentPeriodEnd).toLocaleDateString()}</p>}
+          <p>{subscriptionLine(s)} — you keep 100% of every sale.</p>
           <p className="text-[var(--swift-muted)]">
             <Link href="/dashboard/weekly-fee" className="font-semibold underline">Weekly fee — view and pay</Link>
           </p>
@@ -152,14 +166,21 @@ function SubscriptionCard() {
   );
 }
 
+/**
+ * [UI-SWEEP U03 / U19 / U47 / U66] "You owe riders", in the phone's words
+ * (VendorInsightsScreen RiderFeesOwedCard, lib/riderFeesOwed markPaidPrompt).
+ * U19: a failed read used to remove the card, which to a store is the absence of
+ * a debt. U66: rows read fields the server never sends, so they said
+ * "#undefined · Rider". U03: the armed confirmation did not wrap and was cut off
+ * on a 360-390 px phone.
+ */
 function SettlementsCard() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
   const data = useQuery({ queryKey: storeKey(storeId, 'cash-settlements'), queryFn: getCashSettlements, refetchInterval: 60_000 });
-  // [W-26] Closing this row settles a REAL cash debt. It used to be one click
-  // with nothing behind it. Now the store confirms a named amount for a named
-  // rider, in a second deliberate step, and the server refuses any figure that
-  // is not the one owed.
+  // [W-26] Closing this row settles a REAL cash debt. The store confirms a
+  // named amount for a named rider, in a second deliberate step, and the server
+  // refuses any figure that is not the one owed.
   const [pending, setPending] = useState<string | null>(null);
   const confirm = useMutation({
     mutationFn: ({ id, amount }: { id: string; amount: string | number }) => confirmSettlement(id, amount),
@@ -168,63 +189,62 @@ function SettlementsCard() {
       queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'cash-settlements') });
     },
   });
-  const d = data.data;
-  if (!d) return null;
-  const rows: Array<Record<string, unknown>> = d.unsettled ?? [];
+  const ledger = readSettlementLedger(data, 'rider');
+  if (ledger.state === 'unavailable') {
+    return <DataUnavailable what="what you owe riders" error={data.error} onRetry={() => void data.refetch()} />;
+  }
   return (
     <div className="sw-card p-6">
-      <h2 className="font-bold">Rider fees owed (MMG orders)</h2>
+      <h2 className="font-bold">You owe riders</h2>
       <MutationNotice errors={[confirm.error]} className="mt-2" />
       <p className="mt-1 text-sm text-[var(--swift-muted)]">
-        When a customer pays your MMG, the delivery fee lands in your MMG account — hand the rider their fee in cash and
-        confirm here. Both sides confirm; then it{'’'}s settled.
+        MMG orders — the delivery fee came to you with the customer&apos;s payment. Hand it to the rider in cash (usually at
+        pickup), then mark it paid. Both sides confirm; then it{'’'}s settled.
       </p>
-      {rows.length === 0 ? (
+      {ledger.state === 'loading' ? (
+        <p role="status" className="mt-3 text-sm text-[var(--swift-muted)]">Checking what you owe riders…</p>
+      ) : ledger.state === 'empty' ? (
         <p className="mt-3 text-sm font-medium text-green-600">Nothing owed — all settled ✓</p>
       ) : (
         <>
           <p className="mt-3 text-sm font-bold text-[var(--swift-red)]">
-            {/* No `?? 0`: an absent server total must read as an em-dash, not as
-                "nothing is owed" — a real zero and an invented zero mean
-                opposite things to the person handing over cash. */}
-            Owed now: {money(d.summary?.owed)} across {d.summary?.count ?? rows.length} deliveries
+            {/* An absent server total reads as an em-dash, never as "nothing is owed". */}
+            Owed now: {money(ledger.owed)} across {ledger.count} deliveries
           </p>
           <div className="mt-2 space-y-2">
-            {rows.map((r) => {
-              const id = String(r['id']);
-              const riderUser = (r['rider'] as { user?: { firstName?: string; lastName?: string } } | null)?.user;
-              const rider = [riderUser?.firstName, riderUser?.lastName].filter(Boolean).join(' ') || 'Rider';
-              const orderNo = (r['order'] as { orderNumber?: string } | null)?.orderNumber;
-              const status = String(r['status']);
+            {ledger.rows.map((r) => {
+              const id = r.id;
+              const rider = r.counterparty ?? 'this rider';
               return (
-                <div key={id} className="flex items-center justify-between gap-3 rounded-lg bg-[var(--swift-subtle)] p-3 text-sm">
-                  <span>
-                    #{orderNo} · {rider} · <b>{money(r['amount'])}</b>
-                    {status === 'RIDER_CONFIRMED' && <span className="ml-2 text-xs text-green-600">rider confirmed</span>}
-                    {status === 'STORE_CONFIRMED' && <span className="ml-2 text-xs text-amber-600">waiting on rider</span>}
+                <div key={id} className="flex flex-col gap-3 rounded-lg bg-[var(--swift-subtle)] p-3 text-sm sm:flex-row sm:items-center sm:justify-between">
+                  <span className="min-w-0 break-words">
+                    {r.orderNumber ? `#${r.orderNumber} · ` : ''}{r.counterparty ?? 'Rider'} · <b>{money(r.amount)}</b>
+                    {r.status === 'RIDER_CONFIRMED' && <span className="ml-2 text-xs text-green-600">The rider confirmed receiving it — mark it paid to close it out.</span>}
                   </span>
-                  {status !== 'STORE_CONFIRMED' && (
+                  {r.status !== 'STORE_CONFIRMED' ? (
                     pending === id ? (
-                      <span className="flex shrink-0 items-center gap-2">
-                        <span className="text-xs font-semibold">Hand {rider} {money(r['amount'])}?</span>
+                      <span className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold">Paid {money(r.amount)} to {rider}?</span>
                         <button
-                          onClick={() => confirm.mutate({ id, amount: String(r['amount'] ?? '') })}
+                          onClick={() => confirm.mutate({ id, amount: r.rawAmount })}
                           disabled={confirm.isPending}
-                          className="rounded-lg bg-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-white disabled:opacity-50"
+                          className="min-h-11 rounded-lg bg-[var(--swift-red)] px-3 text-xs font-bold text-white disabled:opacity-50"
                         >
-                          {confirm.isPending ? 'Confirming…' : 'Yes, handed over'}
+                          {confirm.isPending ? 'Confirming…' : `Yes, I paid ${money(r.amount)}`}
                         </button>
-                        <button onClick={() => setPending(null)} className="text-xs font-semibold text-[var(--swift-muted)]">Cancel</button>
+                        <button onClick={() => setPending(null)} className="min-h-11 px-2 text-xs font-semibold text-[var(--swift-muted)]">Not yet</button>
                       </span>
                     ) : (
                       <button
                         onClick={() => setPending(id)}
                         disabled={confirm.isPending}
-                        className="shrink-0 rounded-lg border border-[var(--swift-red)] px-3 py-1.5 text-xs font-bold text-[var(--swift-red)] disabled:opacity-50"
+                        className="min-h-11 shrink-0 self-start rounded-lg border border-[var(--swift-red)] px-3 text-xs font-bold text-[var(--swift-red)] disabled:opacity-50 sm:self-auto"
                       >
-                        Fee handed over
+                        Mark paid
                       </button>
                     )
+                  ) : (
+                    <span className="text-xs text-[var(--swift-muted)]">You marked this paid — waiting for the rider to confirm.</span>
                   )}
                 </div>
               );
@@ -239,28 +259,37 @@ function SettlementsCard() {
 export default function SettingsPage() {
   const storeId = useStoreId();
   const profile = useQuery({ queryKey: storeKey(storeId, 'profile'), queryFn: getProfile });
-  const p = profile.data;
+  const p = selectedProfileStore(profile.data as ProfileData | undefined, storeId);
+  const isOwner = (profile.data as { myRole?: string } | undefined)?.myRole === 'OWNER';
 
   return (
     <div className="max-w-3xl space-y-6">
       <h1 className="sw-title">Settings</h1>
 
+      {profile.isError && <DataUnavailable what="your store details" error={profile.error} onRetry={() => void profile.refetch()} />}
       {p && (
         <div className="sw-card p-6">
           <h2 className="font-bold">{p.name}</h2>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
             {p.vendorType === 'SUPERMARKET' ? 'Grocery' : p.vendorType === 'STORE' ? 'Shop' : p.vendorType === 'SERVICE' ? 'Services' : 'Restaurant'}
-            {p.city ? ` · ${p.city}` : ''} {p.isVerified ? ' · Verified ✓' : ' · Verification pending'}
+            {p.city ? ` · ${p.city}` : ''} · {storeCheckLabel(p)}
           </p>
           {p.description && <p className="mt-2 text-sm">{p.description}</p>}
+          {/* [DOCS-1] A store's documents are its owner's (the checklist is read for the signed-in owner). */}
+          {isOwner && (
+            <p className="mt-3 text-sm">
+              <Link href="/dashboard/documents" className="font-semibold underline">Documents — where each stands, and a new copy of one that was turned down</Link>
+            </p>
+          )}
           <p className="mt-3 text-xs text-[var(--swift-muted)]">
-            Name, description, photos, address and MMG details are edited in the Swift app (they go through review).
+            Name, description, address and MMG details are edited in the Swift app (they go through review).
           </p>
         </div>
       )}
 
+      <StorePhotosCard storeId={storeId} />
       <RefundRuleCard storeId={storeId} />
-      <SubscriptionCard />
+      <SubscriptionCard isOwner={isOwner} />
       <SettlementsCard />
       <HoursEditor />
     </div>

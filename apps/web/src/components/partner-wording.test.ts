@@ -10,15 +10,18 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = join(__dirname, '..');
 const ROOTS = ['app/dashboard', 'app/portal', 'app/advertiser'];
-const FILES = ['components/console-shell.tsx', 'components/business-status.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
+const FILES = ['components/console-shell.tsx', 'components/advertiser-campaigns.tsx', 'components/notifications.tsx',
   // The weekly-fee page every partner pays through, and its MMG and card words (lib/card-fee.ts
   // is byte-identical to the phone copy by census; both now say "kept for your next weekly fee").
   'components/weekly-fee.tsx', 'components/card-pay.tsx', 'components/weekly-fee-destination.tsx', 'lib/weekly-fee.ts', 'lib/card-fee.ts',
+  'lib/subscription-words.ts',
   // Everything else a console draws: the new-order takeover, the Switch app
   // sheet, the error and notice blocks, and the API helpers whose messages
   // reach the screen.
   'components/NewOrderTakeover.tsx', 'components/customer-shell.tsx', 'components/data-unavailable.tsx', 'components/mutation-notice.tsx',
-  'lib/vendor-api.ts', 'lib/mover-api.ts', 'lib/partner-api.ts', 'lib/catalogue-name.ts'];
+  'lib/vendor-api.ts', 'lib/mover-api.ts', 'lib/partner-api.ts', 'lib/catalogue-name.ts',
+  // The Orders home's cards and the app helpers they read (PR A).
+  'components/orders-home.tsx', 'lib/vendor-hub.ts', 'lib/store-role.ts', 'lib/profile-store.ts', 'lib/mmg-pay-words.ts'];
 
 function sources(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {

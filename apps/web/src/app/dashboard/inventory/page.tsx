@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { memo, useCallback, useDeferredValue, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query';
 import { FileUp, Search } from 'lucide-react';
 import { adjustStock, getCategories, getItems, money, setItemAvailability, updateItem, type CatalogItem } from '@/lib/vendor-api';
 import { Pictogram } from '@/components/glyphs';
@@ -10,6 +10,7 @@ import { DataUnavailable } from '@/components/data-unavailable';
 import { MutationNotice } from '@/components/mutation-notice';
 import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useCatalogueName } from '@/lib/catalogue-name';
+import { instantSwitch } from '@/lib/instant-toggle';
 
 type AdjustReason = 'RECEIVED' | 'DAMAGED' | 'MANUAL' | 'RECONCILE' | 'RETURN';
 
@@ -90,6 +91,45 @@ function PriceEdit({ item, onDone }: { item: CatalogItem; onDone: () => void }) 
   );
 }
 
+/**
+ * [SPEED 22 Oct] One item's row. Memoised: an in-stock tap, a background re-read or a key
+ * typed in Search draws again only a row whose own facts changed (the read keeps unchanged
+ * items as the same objects), not every row of the catalogue. Off-screen rows also skip
+ * layout and paint until scrolled to (content-visibility), which long catalogues need.
+ */
+const ItemRow = memo(function ItemRow({ item: i, pending, adjusting, editingPrice, onToggle, onAdjust, onEditPrice, onSaved }: {
+  item: CatalogItem;
+  pending: boolean;
+  adjusting: boolean;
+  editingPrice: boolean;
+  onToggle: (_id: string, _isAvailable: boolean) => void;
+  onAdjust: (_id: string | null) => void;
+  onEditPrice: (_id: string | null) => void;
+  onSaved: () => void;
+}) {
+  const low = i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5);
+  return <article aria-label={i.name} className="border-b border-[var(--swift-border)] py-5" style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 120px' }}>
+    <div className="flex items-center gap-3">
+      <span className="grid h-12 w-12 flex-none place-items-center rounded-xl bg-[var(--swift-sunken)]"><Pictogram name="food" size={26} /></span>
+      <div className={`min-w-0 flex-1 ${i.isAvailable ? '' : 'opacity-60'}`}><h2 className="sw-label">{i.name}</h2><p className="sw-caption">{i.category?.name ?? 'Uncategorised'}</p>
+        {i.catalogueCheck && <CatalogueCheckNote check={i.catalogueCheck} />}
+        {editingPrice ? <PriceEdit item={i} onDone={() => { onEditPrice(null); onSaved(); }} /> : <button onClick={() => onEditPrice(i.id)} className="min-h-8 font-semibold hover:underline">{money(i.basePrice)}</button>}
+      </div>
+      <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => onToggle(i.id, !i.isAvailable)} disabled={pending}
+        className="grid h-11 w-16 flex-none place-items-center disabled:opacity-60" title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}>
+        <span className={`sw-stock-switch ${i.isAvailable ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${i.isAvailable ? 'translate-x-5' : ''}`} /></span>
+      </button>
+    </div>
+    <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px] text-[var(--swift-muted)]">
+      {!i.isAvailable && <span>Sold out</span>}
+      {low && <span className="font-semibold text-amber-700">Low stock</span>}
+      {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => onAdjust(adjusting ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
+      {i.sku && <span>SKU: {i.sku}</span>}
+    </div>
+    {adjusting && <StockAdjust item={i} onDone={() => { onAdjust(null); onSaved(); }} />}
+  </article>;
+});
+
 export default function InventoryPage() {
   const queryClient = useQueryClient();
   const storeId = useStoreId();
@@ -103,22 +143,41 @@ export default function InventoryPage() {
   const items = useQuery({ queryKey: storeKey(storeId, 'items', 'all'), queryFn: () => getItems() });
   const categories = useQuery({ queryKey: storeKey(storeId, 'categories'), queryFn: getCategories });
 
-  const refresh = () => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'items') });
+  const refresh = useCallback(() => queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'items') }), [queryClient, storeId]);
+  // [PERF row 562] An item's in-stock switch moves at the tap and goes back if the server refuses.
+  // Only that item's switch waits for its answer: the others stay usable (they used to lock together).
+  const availKey = ['item-availability', storeId];
   const availMut = useMutation({
+    mutationKey: availKey,
     mutationFn: (v: { id: string; isAvailable: boolean }) => setItemAvailability(v.id, v.isAvailable),
-    onSettled: refresh,
+    ...instantSwitch<{ id: string; isAvailable: boolean }, CatalogItem[]>(
+      queryClient, storeKey(storeId, 'items', 'all'),
+      (rows, v, undo) => rows.map((row) => (row.id === v.id ? { ...row, isAvailable: undo ? !v.isAvailable : v.isAvailable } : row)),
+      // [#1936 S4-1] Only the last answer re-reads: a re-read while another item's change is
+      // still on its way would show that item's old value for a moment. (This one still counts.)
+      () => (queryClient.isMutating({ mutationKey: availKey }) > 1 ? undefined : refresh()),
+    ),
   });
+  const availPending = new Set(useMutationState({
+    filters: { mutationKey: availKey, status: 'pending' },
+    select: (mutation) => (mutation.state.variables as { id: string } | undefined)?.id,
+  }));
 
   const soldOutCount = (items.data ?? []).filter((i) => i.isAvailable === false).length;
   const activeCount = Math.max(0, (items.data ?? []).length - soldOutCount);
 
+  // [SPEED 22 Oct] The search box answers each key at once; the list follows a moment later.
+  const shownSearch = useDeferredValue(search);
   const list = useMemo(() => {
     let rows = items.data ?? [];
-    if (search) rows = rows.filter((i) => i.name.toLowerCase().includes(search.toLowerCase()) || (i.sku ?? '').toLowerCase().includes(search.toLowerCase()));
+    const term = shownSearch.toLowerCase();
+    if (term) rows = rows.filter((i) => i.name.toLowerCase().includes(term) || (i.sku ?? '').toLowerCase().includes(term));
     if (categoryId) rows = rows.filter((i) => i.category?.id === categoryId);
     if (lowOnly) rows = rows.filter((i) => i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5));
     return rows;
-  }, [items.data, search, categoryId, lowOnly]);
+  }, [items.data, shownSearch, categoryId, lowOnly]);
+  const toggle = availMut.mutate;
+  const onToggle = useCallback((id: string, isAvailable: boolean) => toggle({ id, isAvailable }), [toggle]);
 
   return (
     <div className="space-y-5">
@@ -167,26 +226,8 @@ export default function InventoryPage() {
       {items.isLoading && <div className="sw-empty" role="status"><span className="sw-skeleton h-24 w-full" />Loading your menu…</div>}
       {!items.isLoading && !items.isError && !list.length && <p className="sw-board-empty">No items match.</p>}
       <div className="grid gap-x-8 wide:grid-cols-2">
-        {list.map(i => { const low = i.stockQuantity != null && i.stockQuantity <= (i.lowStockThreshold ?? 5); return <article key={i.id} aria-label={i.name} className="border-b border-[var(--swift-border)] py-5">
-          <div className="flex items-center gap-3">
-            <span className="grid h-12 w-12 flex-none place-items-center rounded-xl bg-[var(--swift-sunken)]"><Pictogram name="food" size={26} /></span>
-            <div className={`min-w-0 flex-1 ${i.isAvailable ? '' : 'opacity-60'}`}><h2 className="sw-label">{i.name}</h2><p className="sw-caption">{i.category?.name ?? 'Uncategorised'}</p>
-              {i.catalogueCheck && <CatalogueCheckNote check={i.catalogueCheck} />}
-              {editingPrice === i.id ? <PriceEdit item={i} onDone={() => { setEditingPrice(null); refresh(); }} /> : <button onClick={() => setEditingPrice(i.id)} className="min-h-8 font-semibold hover:underline">{money(i.basePrice)}</button>}
-            </div>
-            <button role="switch" aria-label={`In stock: ${i.name}`} aria-checked={i.isAvailable} onClick={() => availMut.mutate({ id: i.id, isAvailable: !i.isAvailable })} disabled={availMut.isPending}
-              className="grid h-11 w-16 flex-none place-items-center" title={i.isAvailable ? 'Live — customers can order it' : 'Hidden / sold out'}>
-              <span className={`sw-stock-switch ${i.isAvailable ? 'bg-[var(--swift-red)]' : 'bg-[var(--swift-border-strong)]'}`}><span className={`sw-stock-knob ${i.isAvailable ? 'translate-x-5' : ''}`} /></span>
-            </button>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-3 text-[13px] text-[var(--swift-muted)]">
-            {!i.isAvailable && <span>Sold out</span>}
-            {low && <span className="font-semibold text-amber-700">Low stock</span>}
-            {i.stockQuantity == null ? <span>Stock untracked</span> : <button onClick={() => setAdjusting(adjusting === i.id ? null : i.id)} className="sw-link-btn min-h-8">{i.stockQuantity} in stock · Adjust stock</button>}
-            {i.sku && <span>SKU: {i.sku}</span>}
-          </div>
-          {adjusting === i.id && <StockAdjust item={i} onDone={() => { setAdjusting(null); refresh(); }} />}
-        </article>; })}
+        {list.map(i => <ItemRow key={i.id} item={i} pending={availPending.has(i.id)} adjusting={adjusting === i.id} editingPrice={editingPrice === i.id}
+          onToggle={onToggle} onAdjust={setAdjusting} onEditPrice={setEditingPrice} onSaved={refresh} />)}
       </div>
       <p className="text-xs text-[var(--swift-muted)]">
         Photos, descriptions, options and new single items are managed in the Swift app — you can edit prices, stock and availability here.

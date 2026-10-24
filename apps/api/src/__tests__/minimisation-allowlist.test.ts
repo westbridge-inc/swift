@@ -21,7 +21,9 @@ describe('capture allowlists [DCR-1 NR5-01]', () => {
     // and cite the purpose in the commit message.
     // 2026-10-15 [R18]: + driver 'consent.backgroundLocation' (proof of the
     // separately-asked background-location consent, DPA s.7(1)).
-    expect(hash).toBe('868947f09acf5972');
+    // 2026-10-17 [PAYMENT-SIMPLIFY · owner]: + vendor_user 'mmgNumber' (the store's MMG
+    // number, shown only to that order's customer after acceptance, to pay the store directly).
+    expect(hash).toBe('a5a6af220821afc1');
     // Structural minimums that must never silently shrink:
     expect(CAPTURE_ALLOWLISTS.customer.length).toBeGreaterThan(10);
     expect(CAPTURE_ALLOWLISTS.third_party).toContain('courier.recipientPhone');

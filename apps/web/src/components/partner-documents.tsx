@@ -137,7 +137,7 @@ export function PartnerDocuments({
                   </p>
                 </div>
               ) : null}
-              {state === 'IN_REVIEW' ? <p className="mt-2 text-sm text-[var(--swift-muted)]">We’re checking it — usually within 24 hours.</p> : null}
+              {state === 'IN_REVIEW' ? <p className="mt-2 text-sm text-[var(--swift-muted)]">We’re checking it. We review documents Monday to Saturday, 8:00–20:00 Guyana time.</p> : null}
               {sent === docType ? <p role="status" className="mt-2 text-sm font-medium text-[var(--swift-success)]">Sent. It is in review now.</p> : null}
 
               {open ? (

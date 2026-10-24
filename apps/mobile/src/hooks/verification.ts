@@ -1,3 +1,4 @@
+import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
@@ -14,6 +15,7 @@ import { canonicalMoverAuthority } from '../lib/moverAuthorityCache';
 import type { AuthSessionSnapshot } from '../lib/authSession';
 import { verificationRefetchInterval } from './verificationPolling';
 import type { MutationGuard } from './useStepUp';
+import type { WeeklyFeeAck } from '../lib/partnerPricing';
 
 const PRIVACY_NOTICE_VERSION = 'v1';
 
@@ -52,6 +54,8 @@ export function useBecomePartner() {
       vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
       /** [DCR-1] The role-agreement checkbox, recorded in the consent ledger. */
       acceptAgreement?: boolean;
+      /** [Row 628] The "I understand the weekly fee" tick: the words' version and the fee on screen. */
+      weeklyFeeAck?: WeeklyFeeAck;
       business?: {
         name: string;
         vendorType: 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
@@ -163,7 +167,8 @@ export function useUploadFile() {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const current = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const up = await unwrap<{ url: string }>(verificationApi.upload(form, current));
       requireAuthSessionForPrincipal(owner);
       return up.url;
@@ -180,7 +185,8 @@ export function useSubmitIdentity() {
     mutationFn: async (data: { idDocumentUrl: string; selfieUrl?: string }) => {
       const owner = requireAuthSessionSnapshot();
       const result = await unwrap(verificationApi.submitIdentity(
-        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION },
+        // [R17 · in-app ¶15] the screen's tick (build 12) is recorded in the consent ledger
+        { ...data, consent: true, privacyNoticeVersion: PRIVACY_NOTICE_VERSION, consentTick: 'customer_id_v1' },
         owner,
       ));
       requireAuthSessionForPrincipal(owner);
@@ -204,7 +210,8 @@ export function useUploadDocument(role: string) {
       const owner = authSession ?? requireAuthSessionSnapshot();
       const initial = requireAuthSessionForPrincipal(owner);
       const form = new FormData();
-      form.append('file', { uri: file.uri, name: file.name, type: file.type } as any);
+      form.append('file', await prepareUploadImage(file, true) as any);
+      requireAuthSessionForPrincipal(owner);
       const uploaded = await unwrap<{ url: string }>(verificationApi.upload(form, initial));
       const current = requireAuthSessionForPrincipal(owner);
       const result = await unwrap(
@@ -214,6 +221,8 @@ export function useUploadDocument(role: string) {
           fileUrl: uploaded.url,
           consent: true,
           privacyNoticeVersion: PRIVACY_NOTICE_VERSION,
+          // [R17] the checklist's tick (build 12) is recorded in the consent ledger
+          consentTick: 'document_v1',
         }, current),
       );
       requireAuthSessionForPrincipal(owner);
