@@ -60,6 +60,7 @@ import {
   useVendorHours,
 } from '../../../hooks/vendorops';
 import { cardTapFor } from '../boardTaps';
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
@@ -279,6 +280,12 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         </View>
       ) : null}
       <MmgDisputeNotice order={order} />
+      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+      {customerDeciding(order) || nothingToAccept(order) ? (
+        <T variant="label" weight="semibold" style={{ marginTop: space.sm, color: color.warning }}>
+          {customerDeciding(order) ? OUT_OF_STOCK_WORDS.deciding : OUT_OF_STOCK_WORDS.nothing}
+        </T>
+      ) : null}
       {actions.length > 0 ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (

@@ -406,6 +406,12 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
   // [E20] A booking was declined by its PROVIDER, never "the store" — the same
   // voice the vendor decline copy uses. Food keeps its wording word for word.
   const booking = paymentPreview?.fulfillment === 'APPOINTMENT';
+  // [O-4 · owner 22 Oct 2026] A store that asked the customer about an out-of-stock item before
+  // accepting is never cancelled for the customer's time: decided on the LOCKED row (a question
+  // asks under the same order lock), and the job is armed again for the store's new deadline.
+  const { storeClockAfterQuestion, vendorResponseSlaMinutes } = await import('../modules/order/response-sla');
+  const slaMinutes = await vendorResponseSlaMinutes(ctx.prisma);
+  let waitingUntil: Date | null = null;
   let order: { vendorId: string | null; customerId: string; orderNumber: string };
   try {
     ({ order } = await new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis).transitionOrderAtomically({
@@ -417,11 +423,28 @@ export async function autoCancelUnresponsiveOrder(ctx: JobContext, orderId: stri
       cancellation: { by: null, reason },
       requireHoldExpired: true,
       releaseStaleMoverPointer: true,
+      withinTransaction: async (tx) => {
+        const lines = await tx.orderItem.findMany({ where: { orderId }, select: { substituteDecideBy: true } });
+        const due = storeClockAfterQuestion(lines, slaMinutes);
+        if (due && due.getTime() > Date.now()) {
+          waitingUntil = due;
+          throw new AppError(409, 'STORE_WAITING_ON_CUSTOMER', 'The store is waiting for the customer to answer an out-of-stock question');
+        }
+      },
       invalidStatus: () => new AppError(409, 'AUTO_CANCEL_NOT_ELIGIBLE', 'Order is held or no longer pending'),
     }));
   } catch (error) {
     if (error instanceof AppError && (error.code === 'AUTO_CANCEL_NOT_ELIGIBLE' || error.code === 'NOT_FOUND')) {
       return false; // held, already accepted, already cancelled, or gone — no-op
+    }
+    if (error instanceof AppError && error.code === 'STORE_WAITING_ON_CUSTOMER' && waitingUntil) {
+      const dueAt: Date = waitingUntil;
+      const { persistAutoCancelRearmInTransaction } = await import('../modules/order/checkout-outbox');
+      const tenant = await ctx.prisma.order.findUnique({ where: { id: orderId }, select: { tenantId: true } });
+      if (tenant) {
+        await ctx.prisma.$transaction((tx) => persistAutoCancelRearmInTransaction(tx, { orderId, tenantId: tenant.tenantId, dueAt }));
+      }
+      return false;
     }
     // [REPORT-006 F-006-01] A vendor who confirmed the MMG payment landed HAS
     // responded — auto-cancelling would mint CANCELLED+CAPTURED with no refund
@@ -2075,10 +2098,13 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         // or, on MMG, the question is withdrawn — so no order waits forever on
         // an answer. CAS per line; each line runs in its own order's tenant.
         const { sweepSubstitutionDeadlines } = await import('../modules/order/picking.service');
+        const { OrderService } = await import('../modules/order/order.service');
         const res = await sweepSubstitutionDeadlines(ctx.prisma, ctx.io, {
           narrow: (orderId, fn) => inTenantOf(ctx.prisma, { order: orderId }, fn),
+          // [O-4] the only item left with no answer cancels its waiting order (free) through the seam.
+          orderService: new OrderService(ctx.prisma, ctx.io, undefined, undefined, ctx.redis),
         });
-        if (res.removed + res.withdrawn + res.started + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
+        if (res.removed + res.withdrawn + res.started + res.cancelled + res.failed > 0) ctx.log.info(res, 'substitution: deadline sweep');
         return;
       }
 

@@ -130,7 +130,7 @@ describe('[STORE-DASH · REVIEW-F S4-1 on #2024] an unpaid MMG order\'s one step
     const view = renderWithQuery(<OrdersPage />);
     const c = await card('SW-8006');
     expect(within(c).queryByRole('button', { name: 'Start preparing' })).toBeNull();
-    await view.user.click(within(c).getByRole('button', { name: 'Confirm MMG payment' }));
+    await view.user.click(within(c).getByRole('button', { name: 'Paid by MMG' }));
     const dialog = await screen.findByRole('dialog', { name: 'Order details' });
     expect(await within(dialog).findByRole('button', { name: 'Paid by MMG' })).toBeTruthy();
     expect(within(dialog).queryByRole('button', { name: 'Start preparing' })).toBeNull();

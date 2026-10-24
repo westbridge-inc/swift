@@ -54,7 +54,7 @@ import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
-import { legacySwapItemFields, lineOptionsAsMade, substitutionView } from '../order/substitution-view';
+import { isRemovalQuestion, legacySwapItemFields, lineOptionsAsMade, onlyItemLeft, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -2684,7 +2684,12 @@ export async function customerRoutes(app: FastifyInstance) {
     const { userId } = request.user;
     // Only clients that render server decision permissions opt in. Build 9 /
     // Android vc5 omit this capability and retain the pre-feature item shape.
-    const supportsSwapDecisions = (request.query as { swapDecisions?: unknown }).swapDecisions === 'v1';
+    const swapDecisionsLevel = (request.query as { swapDecisions?: unknown }).swapDecisions;
+    // [O-4 · REVIEW-G S4-1 on #2043] v2 = a client that renders the pre-accept REMOVAL question (its
+    // own card). A v1 client (store builds 11/12) has only the swap card, which would read "suggests
+    // (nothing) instead": for it a removal question is served in the truthful legacy shape below.
+    const supportsSwapDecisions = swapDecisionsLevel === 'v1' || swapDecisionsLevel === 'v2';
+    const supportsRemovalQuestion = swapDecisionsLevel === 'v2';
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
@@ -2887,13 +2892,13 @@ export async function customerRoutes(app: FastifyInstance) {
           // them it is switched on only when every word of that card is true
           // (legacySwapItemFields); otherwise the line's name says what is
           // happening [SUBSTITUTION · owner 17 Oct: the customer is always told].
-          ...(supportsSwapDecisions ? {
+          ...(supportsSwapDecisions && (supportsRemovalQuestion || !isRemovalQuestion(i)) ? {
             options: lineOptionsAsMade(i),
             subStatus: i.subStatus,
             substituteName: i.substituteName,
             substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
-            substitution: substitutionView(i, order),
-          } : legacySwapItemFields(i, order)),
+            substitution: substitutionView(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) }),
+          } : legacySwapItemFields(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) })),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),

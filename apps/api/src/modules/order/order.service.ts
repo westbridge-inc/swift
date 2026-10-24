@@ -430,6 +430,10 @@ export function assertMmgFulfilmentAllowed(
   }
 }
 
+/** [O-3 · REVIEW-F S4-2 on #2024] How close to its time a pre-order's accept may also start its
+ *  preparation. Further ahead, the store accepts now and taps "Start preparing" when it is time. */
+export const SCHEDULED_PREP_LEAD_MINUTES = 60;
+
 /**
  * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
  * store order the store has just accepted (or, for MMG, just marked "Paid by
@@ -441,10 +445,15 @@ export function assertMmgFulfilmentAllowed(
  * gate: the seam re-decides the next hop with its own gates on the locked row.
  */
 export function preparationMayStart(
-  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'>,
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'> & { scheduledFor?: Date | null },
+  now: Date = new Date(),
 ): boolean {
   if (order.fulfillment === 'APPOINTMENT') return false;
   if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
+  // [O-3 · REVIEW-F S4-2 on #2024] A pre-order for later (SCHEDULED_ORDERS_ENABLED, off at launch) is
+  // accepted now and prepared near its time: the walk stops at ACCEPTED while the slot is more than
+  // SCHEDULED_PREP_LEAD_MINUTES away, and the store's "Start preparing" starts it.
+  if (order.scheduledFor && order.scheduledFor.getTime() - now.getTime() > SCHEDULED_PREP_LEAD_MINUTES * 60_000) return false;
   try {
     assertMmgFulfilmentAllowed(order, 'PREPARING');
     return true;
