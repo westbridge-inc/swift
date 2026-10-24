@@ -34,7 +34,7 @@ export default function AuditPage() {
   return (
     <div className="mc-page">
       <p className="mc-muted mb-4">
-        Every admin action — business approvals, document decisions, setting changes, claim payouts. Nothing here can be edited or deleted.
+        Every recorded action — admins' approvals, document decisions, setting changes and claim payouts, and the claims customers and partners make. Nothing here can be edited or deleted.
       </p>
 
       {isLoading ? (
@@ -57,7 +57,7 @@ export default function AuditPage() {
                   {humanise(e.action)} <span className="mc-muted font-normal">· {entityWords(e.entity)} <span className="mc-mono">{e.entityId}</span></span>
                 </p>
                 <p className="mc-muted text-xs">
-                  {e.userId ? <>By admin <span className="mc-mono">{e.userId}</span></> : 'By the system'}
+                  {e.userId ? <>By account <span className="mc-mono">{e.userId}</span></> : 'By the system'}
                   {e.ipAddress ? <> · from <span className="mc-mono">{e.ipAddress}</span></> : null}
                 </p>
               </div>
