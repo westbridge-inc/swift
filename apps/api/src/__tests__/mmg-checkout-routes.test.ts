@@ -1325,6 +1325,27 @@ describe('[MMG reopen · review fixes] Back only ever reopens the named OPEN che
     expect(await countsOf(p)).toMatchObject({ checkouts: 1, holds: 1 });
   });
 
+  it.each(['a late card approval held for a person', 'an MMG fee payment being returned'] as const)('[merge · main pauses] Back is refused while %s, exactly as a new payment is', async (pause) => {
+    const p = await makeStore(); const first = await started(p);
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toMatchObject({ ref: first.ref });
+    if (pause === 'a late card approval held for a person') {
+      await app.prisma.cardSession.create({ data: {
+        subscriptionId: p.subId, userId: p.userId, purpose: 'PAY_NOW', provider: 'simulator', environment: 'sandbox', providerAccount: 'reopen-test',
+        stateHash: 'cd'.repeat(32), expiresAt: new Date(Date.now() - 60_000), status: 'HELD', failureCode: 'LATE_PROVIDER_APPROVAL',
+        amount: 2100, currencyCode: 'GYD', periodStart: (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate,
+      } });
+    } else {
+      await app.prisma.mmgFeeReversal.create({ data: {
+        tenantId: first.row.tenantId, subscriptionId: p.subId, checkoutId: first.ref, providerPaymentId: `rev-${nanoid(8)}`, mmgTransactionId: `rev-${nanoid(8)}`,
+        amount: 2100, currencyCode: 'GYD', state: 'SENT', reason: 'reopen test', requestedBy: 'test', sentAt: new Date(),
+      } });
+    }
+    expect((await subscriptionOf(p)).json().data.reopenableMmgCheckout).toBeNull();
+    const res = await reopenTap(p, first.ref);
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.body).not.toContain('checkoutUrl');
+  });
+
   it('[F1] Back is refused while a card payment is pending, exactly as the grant is withheld', async () => {
     const p = await makeStore(); const first = await started(p);
     const due = (await app.prisma.subscription.findUniqueOrThrow({ where: { id: p.subId } })).nextBillingDate;
