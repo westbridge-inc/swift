@@ -5,7 +5,8 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
-import { HANDOVER_WORDS, OUT_OF_STOCK_WORDS, canMarkHandedToRider, canMarkOutOfStock, customerDeciding, handoverNeedsNoCode, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, handoverNeedsNoCode, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
+import { HANDOVER_WORDS } from '../storeHandover';
 import { RiderHandoverLine } from '../RiderHandoverLine';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
@@ -301,7 +302,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
             sent none, so the server refused every attempt.
             Same ceremony as the ride PIN on the mover side. */}
         {/* [STORE-DASH · O-2] The store's pickup code is off: the check is the name and the order number. */}
-        {isPickup && awaitingCollection && handoverNeedsNoCode(order) ? (
+        {/* [REVIEW-F S3-1 on #2054] Only beside the "Handed to customer" button (never on a paused order). */}
+        {isPickup && awaitingCollection && actions.some((a) => a.action === 'handed-to-customer') ? (
           <Card style={{ marginBottom: space.md }}>
             <T variant="caption" weight="bold" tone="muted" center>
               HANDOVER CHECK
@@ -556,7 +558,9 @@ function VendorOrderDetailBody({ navigation, route }: any) {
         {/* Rider — only once dispatch has assigned one */}
         {deliveryOwner.riderAssigned ? <ContactCard icon="bike" title="Rider" name={riderName || 'Swift rider'} phone={order.rider?.user?.phone} /> : null}
         {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider". */}
-        {canMarkHandedToRider(order) ? (
+        {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside the "Handed to rider" button: never before the order is
+            ready, never on an order paused for an MMG payment review. */}
+        {actions.some((a) => a.action === 'handed-to-rider') ? (
           <Card style={{ marginBottom: space.md }}>
             <RiderHandoverLine rider={order.rider} />
           </Card>

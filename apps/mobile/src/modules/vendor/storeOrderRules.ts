@@ -125,9 +125,11 @@ export function lineStockWords(line: LineLike): string | null {
 //   custody stays the rider's "Picked up". Shown only when the server knows the step (the order
 //   carries handedToRiderAt), so an older server never gets a request it cannot answer.
 
-type HandoverOrder = {
+export type HandoverOrder = {
   status?: unknown; fulfillment?: unknown; fulfillmentMode?: unknown; riderId?: unknown; rider?: unknown;
   pickupCodeRequired?: unknown; handedToRiderAt?: unknown;
+  customer?: { firstName?: unknown } | null; orderNumber?: unknown;
+  paymentMethod?: unknown; orderType?: unknown; mmgClaimMismatchAt?: unknown;
 } | null | undefined;
 
 /** The takeaway hand-over needs no code: the store's setting is off. Unknown (an older server) = the code is still needed. */
@@ -145,37 +147,5 @@ export function canMarkHandedToRider(order: HandoverOrder): boolean {
   return RIDER_AT_STORE.includes(String(order.status ?? '').toUpperCase());
 }
 
-type RiderLike = { user?: { firstName?: unknown } | null; vehicleType?: unknown; vehicleMake?: unknown; vehicleModel?: unknown; vehicleColor?: unknown; licensePlate?: unknown; photoUrl?: unknown } | null | undefined;
-const word = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
-/** A vehicle type as words ('MOTORCYCLE' -> 'Motorcycle'). */
-const typeWord = (v: unknown) => {
-  const w = word(v)?.replace(/_/g, ' ').toLowerCase();
-  return w ? w.charAt(0).toUpperCase() + w.slice(1) : null;
-};
-
-/** What the store checks at the hand-over: the rider's first name and vehicle (colour make model · plate). */
-export function riderHandoverLine(rider: RiderLike): string | null {
-  const name = word(rider?.user?.firstName);
-  const vehicle = [word(rider?.vehicleColor), word(rider?.vehicleMake), word(rider?.vehicleModel)].filter(Boolean).join(' ') || typeWord(rider?.vehicleType);
-  const plate = word(rider?.licensePlate);
-  const parts = [name, [vehicle, plate].filter(Boolean).join(' · ') || null].filter(Boolean);
-  return parts.length ? parts.join(' — ') : null;
-}
-
-/** The rider's photo, only as the server's resolved address (never a raw storage key). */
-export function riderPhotoUrl(rider: RiderLike): string | null {
-  const url = word(rider?.photoUrl);
-  return url && /^https?:\/\//.test(url) ? url : null;
-}
-
-export const HANDOVER_WORDS = {
-  toRider: 'Handed to rider',
-  toCustomer: 'Handed to customer',
-  checkName: (firstName: unknown, orderNumber: unknown) =>
-    `Check the name before you hand it over: ${word(firstName) ?? 'the customer'} · order #${word(orderNumber) ?? ''}`.trimEnd(),
-  checkRider: 'Check the rider before you hand it over:',
-  handedToRider: 'Handed to the rider',
-  settingTitle: 'Ask for the pickup code',
-  settingOn: 'Customers collecting an order read out their code; you type it.',
-  settingOff: 'You hand takeaway orders over after checking the customer’s first name and order number.',
-} as const;
+// The words and the rider line the store reads live in storeHandover.ts (only the orders screens
+// load them, so the dashboard's shared chunk stays small).

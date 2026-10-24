@@ -27,7 +27,8 @@ import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
-import { HANDOVER_WORDS, OUT_OF_STOCK_WORDS, canMarkHandedToRider, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS } from '../../../mobile/src/modules/vendor/storeHandover';
 import { RiderHandoverLine } from './rider-handover-line';
 import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
@@ -577,7 +578,8 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       {/* [STORE-DASH · O-2] What the store checks before a one-tap hand-over (the app card's line): the
           customer's name and order number with the pickup code off; the rider. Then that it went. */}
       {actions.some((a) => a.action === 'handed-to-customer') && <p className="sw-caption font-semibold">{HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber)}</p>}
-      {!paused && canMarkHandedToRider(order) && <RiderHandoverLine rider={order.rider} />}
+      {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
+      {actions.some((a) => a.action === 'handed-to-rider') && <RiderHandoverLine rider={order.rider} />}
       {order.handedToRiderAt && <p className="sw-caption font-semibold">{HANDOVER_WORDS.handedToRider}</p>}
       {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
       {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}

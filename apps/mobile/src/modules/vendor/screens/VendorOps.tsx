@@ -61,7 +61,8 @@ import {
   useVendorHours,
 } from '../../../hooks/vendorops';
 import { cardTapFor } from '../boardTaps';
-import { HANDOVER_WORDS, OUT_OF_STOCK_WORDS, canMarkHandedToRider, customerDeciding, handoverNeedsNoCode, nothingToAccept } from '../storeOrderRules';
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
+import { HANDOVER_WORDS, pickupCheckWords } from '../storeHandover';
 import { RiderHandoverLine } from '../RiderHandoverLine';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
@@ -206,8 +207,9 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: space.sm }}>
           <MaterialCommunityIcons name="form-textbox-password" size={13} color={color.text.muted} />
           <T variant="label" tone="muted">
-            {/* [STORE-DASH · O-2] With the store's pickup code off: check the name and the order number. */}
-            {handoverNeedsNoCode(order) ? HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber) : 'Ask the customer for their code at collection'}
+            {/* [STORE-DASH · O-2] With the store's pickup code off: check the name and the order number
+                (never a hand-over prompt on a paused order — REVIEW-F S3-1 on #2054). */}
+            {pickupCheckWords(order) ?? 'Ask the customer for their code at collection'}
           </T>
         </View>
       ) : !isPickup && order.deliveryAddress ? (
@@ -284,7 +286,9 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
       ) : null}
       <MmgDisputeNotice order={order} />
       {/* [STORE-DASH · O-2] Who the order goes to, checked before "Handed to rider"; then that it went. */}
-      {canMarkHandedToRider(order) ? <RiderHandoverLine rider={order.rider} /> : null}
+      {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside the "Handed to rider" button: never before the order is
+          ready, never on an order paused for an MMG payment review. */}
+      {actions.some((a) => a.action === 'handed-to-rider') ? <RiderHandoverLine rider={order.rider} /> : null}
       {order.handedToRiderAt ? (
         <T variant="caption" weight="semibold" tone="muted" style={{ marginTop: space.sm }}>
           {HANDOVER_WORDS.handedToRider}

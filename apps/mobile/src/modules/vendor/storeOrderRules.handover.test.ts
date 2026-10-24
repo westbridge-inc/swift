@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, riderHandoverLine, riderPhotoUrl } from './storeOrderRules';
+import { canMarkHandedToRider, handoverNeedsNoCode } from './storeOrderRules';
+import { HANDOVER_WORDS, pickupCheckWords, riderHandoverLine, riderPhotoUrl } from './storeHandover';
 import { cardTapFor } from './boardTaps';
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,29 @@ describe('[O-2] what the store checks at the hand-over', () => {
   });
   it('the name check reads the first name and the order number', () => {
     expect(HANDOVER_WORDS.checkName('Asha', 'SW-1001')).toBe('Check the name before you hand it over: Asha · order #SW-1001');
-    expect(HANDOVER_WORDS.checkName(null, 'SW-1001')).toBe('Check the name before you hand it over: the customer · order #SW-1001');
+    expect(HANDOVER_WORDS.checkName('Asha', 1001)).toBe('Check the name before you hand it over: Asha · order #1001');
+  });
+  it('[REVIEW-F S4-2 on #2054] only what the store can check: no name = the number; no number = the name', () => {
+    expect(HANDOVER_WORDS.checkName(null, 'SW-1001')).toBe('Check the order number before you hand it over: order #SW-1001');
+    expect(HANDOVER_WORDS.checkName('  ', 'SW-1001')).toBe('Check the order number before you hand it over: order #SW-1001');
+    expect(HANDOVER_WORDS.checkName('Asha', null)).toBe('Check the name before you hand it over: Asha');
+    expect(HANDOVER_WORDS.checkName(undefined, '')).toBe('Check who is collecting before you hand it over.');
+  });
+});
+
+describe('[REVIEW-F S3-1 on #2054] the takeaway line never prompts a hand-over on a paused order', () => {
+  const pickup = (extra: Record<string, unknown> = {}) => ({ status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', customer: { firstName: 'Asha' }, orderNumber: 'SW-1001', ...extra });
+  const paused = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:00:00.000Z' };
+  it('code off: the name and order-number check', () => {
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: false }))).toBe('Check the name before you hand it over: Asha · order #SW-1001');
+  });
+  it('code off on an order paused for an MMG payment review: no hand-over prompt', () => {
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: false, ...paused }))).toBe('The customer collects this order.');
+  });
+  it('code on, or an older server: null (the screen keeps its code words)', () => {
+    expect(pickupCheckWords(pickup({ pickupCodeRequired: true }))).toBeNull();
+    expect(pickupCheckWords(pickup())).toBeNull();
+    expect(pickupCheckWords(null)).toBeNull();
   });
 });
 
@@ -126,6 +149,12 @@ describe('[O-2] the phone sends the right request for each', () => {
     expect(hooks).toMatch(/vendorApi\.updateProfile\(\{ requirePickupCode \}\)/);
     const hook = hooks.slice(hooks.indexOf('export function useSetRequirePickupCode('), hooks.indexOf('export function useSetSelfDelivery('));
     expect(hook).toMatch(/queryKey: \['vendor', 'orders'\]/);
+  });
+  it('[REVIEW-F S3-1/S4-1 on #2054] the board card shows the rider check only beside its "Handed to rider" button, and the takeaway line through pickupCheckWords', () => {
+    const board = read('src/modules/vendor/screens/VendorOps.tsx');
+    expect(board).toMatch(/\{actions\.some\(\(a\) => a\.action === 'handed-to-rider'\) \? <RiderHandoverLine rider=\{order\.rider\} \/> : null\}/);
+    expect(board).toMatch(/\{pickupCheckWords\(order\) \?\? 'Ask the customer for their code at collection'\}/);
+    expect(board).not.toMatch(/canMarkHandedToRider\(order\) \? <RiderHandoverLine/);
   });
   it('the tap\'s answer writes handedToRiderAt into the order\'s caches', () => {
     expect(hooks).toMatch(/const CONFIRMED_ORDER_FIELDS = \[[^\]]*'handedToRiderAt'/);

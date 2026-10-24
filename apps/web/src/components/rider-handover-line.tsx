@@ -1,7 +1,7 @@
 'use client';
 
 // The app's own O-2 words and checks (plain file, imported as is).
-import { HANDOVER_WORDS, riderHandoverLine, riderPhotoUrl } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, riderHandoverLine, riderPhotoUrl } from '../../../mobile/src/modules/vendor/storeHandover';
 import type { VendorOrder } from '@/lib/vendor-api';
 
 /**

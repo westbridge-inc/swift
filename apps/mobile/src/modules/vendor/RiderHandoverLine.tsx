@@ -3,7 +3,7 @@ import React from 'react';
 import { View } from 'react-native';
 import { space } from '@swift/ui';
 import { Avatar, T } from '../../kit';
-import { HANDOVER_WORDS, riderHandoverLine, riderPhotoUrl } from './storeOrderRules';
+import { HANDOVER_WORDS, riderHandoverLine, riderPhotoUrl } from './storeHandover';
 
 /**
  * [STORE-DASH · O-2, owner ruling 22 Oct 19:45Z] Who the store hands a delivery to: the rider's

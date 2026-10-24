@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import OrdersPage from './page';
+import { OrderDetail } from './order-detail';
 import { mockApi, renderWithQuery, stubAudioContext, type ApiRequest } from '@/test/test-utils';
 import { wireVendorOrder } from '@/test/vendor-wire-fixtures';
 
@@ -186,3 +187,46 @@ describe('[O-2] "Ask for the pickup code" (owners and managers)', () => {
     expect(screen.queryByRole('switch', { name: 'Ask for the pickup code' })).toBeNull();
   });
 });
+
+describe('[REVIEW-F S3-1/S4-1/S4-3 on #2054] no hand-over prompt where there is no hand-over step', () => {
+  const paused = { paymentMethod: 'MOBILE_MONEY', paymentStatus: 'CLAIMED', mmgClaimMismatchAt: '2026-10-23T09:05:00.000Z' };
+
+  it('card: a rider delivery paused for an MMG payment review shows no rider check (M-F241)', async () => {
+    api([riderDelivery({ id: 'o-7', orderNumber: 'SW-6007', ...paused })]);
+    const view = renderWithQuery(<OrdersPage />);
+    const c = await card('SW-6007', view);
+    expect(within(c).queryByTestId('rider-handover-line')).toBeNull();
+    expect(within(c).queryByRole('button', { name: 'Handed to rider' })).toBeNull();
+  });
+
+  it('card: the rider is assigned but the order is not ready — "Ready for delivery", no rider check yet', async () => {
+    api([riderDelivery({ id: 'o-8', orderNumber: 'SW-6008', status: 'RIDER_ASSIGNED', readyAt: null })]);
+    const view = renderWithQuery(<OrdersPage />);
+    const c = await card('SW-6008', view);
+    expect(within(c).getByRole('button', { name: 'Ready for delivery' })).toBeTruthy();
+    expect(within(c).queryByTestId('rider-handover-line')).toBeNull();
+  });
+
+  it('window: paused rider delivery — no rider check; paused takeaway with the code off — no name check', async () => {
+    api([riderDelivery({ id: 'o-9', orderNumber: 'SW-6009', ...paused }), takeaway({ id: 'o-10', orderNumber: 'SW-6010', pickupCodeRequired: false, ...paused })]);
+    const view = renderWithQuery(<OrdersPage />);
+    const d = await openWindow('SW-6009', view);
+    expect(within(d).queryByTestId('rider-handover-line')).toBeNull();
+    await view.user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Order details' })).toBeNull());
+    const t = await openWindow('SW-6010', view);
+    expect(within(t).queryByText(/Check the name before you hand it over/)).toBeNull();
+    expect(within(t).getByText('The customer collects this order.')).toBeTruthy();
+  });
+
+  it('window: a cancelled takeaway says nothing about collecting', async () => {
+    api([takeaway({ id: 'o-11', orderNumber: 'SW-6011', status: 'CANCELLED', pickupCodeRequired: false })]);
+    // A closed order leaves the board; the window shows it when it closes while open.
+    renderWithQuery(<OrderDetail id="o-11" onClose={() => {}} />);
+    expect((await screen.findAllByText(/SW-6011/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Check the name before you hand it over/)).toBeNull();
+    expect(screen.queryByText('The customer collects this order.')).toBeNull();
+    expect(screen.queryByText('Customer collects with a pickup code.')).toBeNull();
+  });
+});
+

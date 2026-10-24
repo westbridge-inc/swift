@@ -164,3 +164,25 @@ describe('[O-2] delivery: "Handed to rider"', () => {
     expect(text).not.toContain('Check the rider before you hand it over:');
   });
 });
+
+describe('[REVIEW-F S3-1/S4-1 on #2054] no hand-over prompt where there is no hand-over step', () => {
+  const paused = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:05:00.000Z' };
+
+  it('a rider delivery paused for an MMG payment review (only Reject survives): no rider check', async () => {
+    const text = await show(riderDelivery(paused), []);
+    expect(text).not.toContain('Check the rider before you hand it over:');
+    expect(host.querySelector('img[src="https://cdn.test/signed/rider.jpg?sig=1"]')).toBeNull();
+  });
+
+  it('a takeaway with the code off, paused: no name check (and no code box)', async () => {
+    const text = await show(takeaway({ pickupCodeRequired: false, ...paused }), []);
+    expect(text).not.toContain('Check the name before you hand it over');
+    expect(text).not.toContain('HANDOVER CHECK');
+    expect(host.querySelector('input[aria-label="Pickup code"]')).toBeNull();
+  });
+
+  it('the rider is assigned but the order is not ready yet ("Ready for delivery"): no rider check', async () => {
+    const text = await show(riderDelivery({ status: 'RIDER_ASSIGNED', readyAt: null }), [{ label: 'Ready for delivery', action: 'ready' }]);
+    expect(text).not.toContain('Check the rider before you hand it over:');
+  });
+});
