@@ -26,6 +26,8 @@ import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
+// The app's own O-4 rules and words (plain file, imported as is).
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
@@ -522,7 +524,8 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const moneyMoved = mmgMoneyMoved(order.paymentStatus);
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes(status);
   const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
-  const canConfirm = attestable && order.canConfirmPayment === true;
+  // [STORE-DASH] A disputed (paused) order offers no MMG step on the card either, as in the window.
+  const canConfirm = attestable && order.canConfirmPayment === true && !mmgDisputePaused(order);
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
   const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
@@ -536,7 +539,11 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
         </p>
       )}
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}
-      {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Confirm MMG payment</button>}
+      {/* [REVIEW-F S4-3 on #2032] One name for the MMG step: the window's own button (the reference is typed there). */}
+      {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Paid by MMG</button>}
+      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+      {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}
+      {!paused && nothingToAccept(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-red-600)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}
       {/* The card's status chip already reads the notice's title (orders page statusChip). */}
       {paused && (
