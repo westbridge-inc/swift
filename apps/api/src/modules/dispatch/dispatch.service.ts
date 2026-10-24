@@ -23,6 +23,7 @@ import { journalAuthorityWhere, poolForOrder, type DispatchPool } from './dispat
 import { foodAgeLimitMinutes, foodAge, retireTooOldOrder, rescueIncentiveGyd, grantRescueIncentive, incentiveKey, isCapturedMmg } from './rescue';
 import { recordDecision } from '../algo/decisions';
 import { TERMINAL_ORDER_STATUSES, DRIVER_PRE_CUSTODY_STATUSES } from '../order/order-status';
+import { assignmentLogWhere } from '../order/store-handover-log';
 import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
@@ -457,7 +458,7 @@ export class DispatchService {
   private async currentAssignmentEpisode(tx: Prisma.TransactionClient, orderId: string, pool: DispatchPool, expected: number): Promise<boolean> {
     if (!Number.isSafeInteger(expected) || expected < 0) return false;
     const count = await tx.orderStatusLog.count({
-      where: { orderId, status: pool === 'DRIVER' ? 'DRIVER_ASSIGNED' : 'RIDER_ASSIGNED' },
+      where: assignmentLogWhere(orderId, pool === 'DRIVER' ? 'DRIVER_ASSIGNED' : 'RIDER_ASSIGNED'),
     });
     return count === expected;
   }
@@ -2827,7 +2828,7 @@ export class DispatchService {
       // [F-0011] This row is returned straight to the accepting mover by the
       // taxi accept route. The mover VERIFIES the ride PIN — they must not read it.
       const committedOrder = await this.committedAssignment(tx, orderId);
-      const sequence = await tx.orderStatusLog.count({ where: { orderId, status: assignedStatus } });
+      const sequence = await tx.orderStatusLog.count({ where: assignmentLogWhere(orderId, assignedStatus) });
       return { order: committedOrder, assignmentSequence: sequence };
     });
 

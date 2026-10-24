@@ -505,8 +505,9 @@ describe('[#15] every publication to a store room goes through the team gate', (
     expect(bypasses).toEqual([]);
     // 12 + the admin store-refund close (#1607) + the MMG acceptance expiry (owner 18 Oct: an accepted MMG
     // order not marked "Paid by MMG" within 30 minutes cancels; the store's room hears it through the gate)
-    // + [O-4] a waiting order cancelled because its only item got no answer (picking.service, through the gate).
-    expect(publishers).toBe(15);
+    // + [O-4] a waiting order cancelled because its only item got no answer (picking.service, through the gate)
+    // + [O-2] the store's "Handed to rider" tap (order:handed_to_rider to the store team, through the gate).
+    expect(publishers).toBe(16);
   });
 });
 
