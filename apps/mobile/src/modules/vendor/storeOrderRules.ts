@@ -147,11 +147,16 @@ export function canMarkHandedToRider(order: HandoverOrder): boolean {
 
 type RiderLike = { user?: { firstName?: unknown } | null; vehicleType?: unknown; vehicleMake?: unknown; vehicleModel?: unknown; vehicleColor?: unknown; licensePlate?: unknown; photoUrl?: unknown } | null | undefined;
 const word = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+/** A vehicle type as words ('MOTORCYCLE' -> 'Motorcycle'). */
+const typeWord = (v: unknown) => {
+  const w = word(v)?.replace(/_/g, ' ').toLowerCase();
+  return w ? w.charAt(0).toUpperCase() + w.slice(1) : null;
+};
 
 /** What the store checks at the hand-over: the rider's first name and vehicle (colour make model · plate). */
 export function riderHandoverLine(rider: RiderLike): string | null {
   const name = word(rider?.user?.firstName);
-  const vehicle = [word(rider?.vehicleColor), word(rider?.vehicleMake), word(rider?.vehicleModel)].filter(Boolean).join(' ') || word(rider?.vehicleType);
+  const vehicle = [word(rider?.vehicleColor), word(rider?.vehicleMake), word(rider?.vehicleModel)].filter(Boolean).join(' ') || typeWord(rider?.vehicleType);
   const plate = word(rider?.licensePlate);
   const parts = [name, [vehicle, plate].filter(Boolean).join(' · ') || null].filter(Boolean);
   return parts.length ? parts.join(' — ') : null;

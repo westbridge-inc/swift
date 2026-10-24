@@ -506,17 +506,21 @@ export function useToggleOrders() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({ mutationFn: (accepting: boolean) => unwrap(vendorApi.toggleOrders(accepting)), onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }) });
 }
-/** Turn self-delivery on/off. When on, the server routes this store's delivery
- *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 /** [STORE-DASH · O-2] The store's "Ask for the pickup code" setting (owner/manager; rides the store profile). */
 export function useSetRequirePickupCode() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({
     mutationFn: (requirePickupCode: boolean) => unwrap(vendorApi.updateProfile({ requirePickupCode })),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+    // The orders carry pickupCodeRequired: re-read them too, so the cards switch with the setting.
+    onSuccess: () => Promise.all([
+      qc.invalidateQueries({ queryKey: ['vendor', 'profile'] }),
+      qc.invalidateQueries({ queryKey: ['vendor', 'orders'] }),
+    ]),
   });
 }
 
+/** Turn self-delivery on/off. When on, the server routes this store's delivery
+ *  orders to VENDOR_DELIVERY (the vendor delivers) instead of dispatching a rider. */
 export function useSetSelfDelivery() {
   const qc = useQueryClient();
   return usePreviewSafeMutation({

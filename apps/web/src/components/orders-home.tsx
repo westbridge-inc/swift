@@ -562,7 +562,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
   const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
-  if (actions.length === 0 && !isMmg && !paused) return null;
+  if (actions.length === 0 && !isMmg && !paused && !order.handedToRiderAt) return null;
   const busy = act.isPending || reject.isPending;
   return (
     <div className="mt-3 space-y-2">
@@ -574,10 +574,12 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}
       {/* [REVIEW-F S4-3 on #2032] One name for the MMG step: the window's own button (the reference is typed there). */}
       {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Paid by MMG</button>}
-      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
-      {/* [STORE-DASH · O-2] The rider the store checks before "Handed to rider"; then that it went. */}
+      {/* [STORE-DASH · O-2] What the store checks before a one-tap hand-over (the app card's line): the
+          customer's name and order number with the pickup code off; the rider. Then that it went. */}
+      {actions.some((a) => a.action === 'handed-to-customer') && <p className="sw-caption font-semibold">{HANDOVER_WORDS.checkName(order.customer?.firstName, order.orderNumber)}</p>}
       {!paused && canMarkHandedToRider(order) && <RiderHandoverLine rider={order.rider} />}
       {order.handedToRiderAt && <p className="sw-caption font-semibold">{HANDOVER_WORDS.handedToRider}</p>}
+      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
       {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}
       {!paused && nothingToAccept(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-red-600)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}

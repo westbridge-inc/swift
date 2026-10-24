@@ -82,6 +82,22 @@ describe('[STORE-DASH] the board: only the tapped order waits', () => {
     expect(fx.mutate).toHaveBeenCalledWith({ id: 'order-b', action: 'ready', code: undefined });
   });
 
+  it('[#2033 F S4-2 · O-2] the card\'s hand-overs go out in one tap: "Handed to customer" with no code, "Handed to rider"; the order is not opened', () => {
+    fx.orders = [{ ...order('order-t', 'READY_FOR_PICKUP'), fulfillment: 'PICKUP', pickupCodeRequired: false }, { ...order('order-r', 'RIDER_ARRIVED_PICKUP'), riderId: 'r-1', handedToRiderAt: null }];
+    fx.pending = new Set();
+    fx.mutate.mockClear();
+    const navigation = { navigate: vi.fn() };
+    const tree = VendorOps({ store: { id: 'store-A', name: 'Test store', status: 'ACTIVE', isCurrentlyOpen: true, acceptingOrders: true }, navigation });
+    const shown = cards(tree);
+    shown.find((c) => c.props.order.id === 'order-t')!.props.onAction!('handed-to-customer');
+    shown.find((c) => c.props.order.id === 'order-r')!.props.onAction!('handed-to-rider');
+    expect(fx.mutate.mock.calls).toEqual([
+      [{ id: 'order-t', action: 'handed-to-customer', code: undefined }],
+      [{ id: 'order-r', action: 'handed-to-rider', code: undefined }],
+    ]);
+    expect(navigation.navigate).not.toHaveBeenCalled();
+  });
+
   it('nothing out: no card waits', () => {
     fx.orders = [order('order-a', 'PENDING'), order('order-b', 'PREPARING')];
     fx.pending = new Set();
