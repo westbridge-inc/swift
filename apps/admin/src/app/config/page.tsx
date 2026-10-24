@@ -72,7 +72,7 @@ const NOT_EDITABLE_HERE: { title: string; body: string }[] = [
   },
   {
     title: 'Dispatch offer timeout',
-    body: 'Fixed in the app (20 seconds, 12 seconds for express). It is timed together with how offers pass from one mover to the next, so it is not safe to change while Swift is running.',
+    body: 'Fixed on the server (20 seconds, 12 seconds for express). It is timed together with how offers pass from one mover to the next, so it is not safe to change while Swift is running.',
   },
 ];
 
@@ -160,7 +160,7 @@ export default function ConfigPage() {
               <div>
                 <p className="font-semibold">Team invites need the invitee to accept</p>
                 <p className="mc-muted mt-1 text-xs">
-                  Off: a store owner adding a number adds that account straight away. On: the account gets an invite
+                  <span className="mc-mono">STAFF_INVITE_ACCEPT</span>. Off: a store owner adding a number adds that account straight away. On: the account gets an invite
                   and joins only after accepting. Turn on once the app build with the Accept card is live in both stores.
                 </p>
               </div>
