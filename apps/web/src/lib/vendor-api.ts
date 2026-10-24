@@ -291,11 +291,9 @@ export const setFulfillmentMode = (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_
  *  already recorded against another order. */
 export const confirmPayment = (id: string, reference: string) =>
   apiFetch(`${V}/orders/${id}/confirm-payment`, { method: 'POST', body: JSON.stringify({ reference }) });
-// [STORE-DASH · O-2] With the store's pickup code off, the hand-over sends no code at all.
+// [STORE-DASH · O-2] With the store's pickup code off, no code: JSON drops the undefined key, so the body is {}.
 export const completePickup = (id: string, code?: string) =>
-  apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify(code ? { code } : {}) });
-/** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
-export const handedToRider = (id: string) => apiFetch(`${V}/orders/${id}/handed-to-rider`, { method: 'PUT', body: '{}' });
+  apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
 /** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
 export const confirmReturnReceived = (id: string) =>

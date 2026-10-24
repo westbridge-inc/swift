@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { canMarkHandedToRider, handoverNeedsNoCode } from './storeOrderRules';
-import { HANDOVER_WORDS, pickupCheckWords, riderHandoverLine, riderPhotoUrl } from './storeHandover';
+import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, pickupCheckWords, riderHandoverLine, riderPhotoUrl, withHandoverSteps } from './storeHandover';
 import { cardTapFor } from './boardTaps';
 
 // ---------------------------------------------------------------------------
@@ -160,3 +159,40 @@ describe('[O-2] the phone sends the right request for each', () => {
     expect(hooks).toMatch(/const CONFIRMED_ORDER_FIELDS = \[[^\]]*'handedToRiderAt'/);
   });
 });
+
+describe('[O-2] the hand-overs ride on top of the shared steps (withHandoverSteps)', () => {
+  const pickedUp = [{ label: 'Mark picked up', action: 'complete-pickup' as const }];
+  const takeaway = (extra: Record<string, unknown> = {}) => ({ status: 'READY_FOR_PICKUP', fulfillment: 'PICKUP', ...extra });
+  const paused = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:00:00.000Z' };
+  it('code off: "Mark picked up" becomes "Handed to customer"', () => {
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false }), pickedUp)).toEqual([{ label: 'Handed to customer', action: 'handed-to-customer' }]);
+  });
+  it('code on, or an older server: the steps are unchanged', () => {
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: true }), pickedUp)).toEqual(pickedUp);
+    expect(withHandoverSteps(takeaway(), pickedUp)).toEqual(pickedUp);
+  });
+  it('a Swift rider at the counter with nothing left for the kitchen: "Handed to rider"', () => {
+    expect(withHandoverSteps(delivery(), [])).toEqual([{ label: 'Handed to rider', action: 'handed-to-rider' }]);
+  });
+  it('[REVIEW-F S4-1] a kitchen step still due ("Ready for delivery"): no "Handed to rider" yet', () => {
+    const ready = [{ label: 'Ready for delivery', action: 'ready' as const }];
+    expect(withHandoverSteps(delivery({ status: 'RIDER_ASSIGNED' }), ready)).toEqual(ready);
+  });
+  it('[REVIEW-F S3-1] paused for an MMG payment review: nothing is added or changed', () => {
+    expect(withHandoverSteps(delivery(paused), [])).toEqual([]);
+    expect(withHandoverSteps(takeaway({ pickupCodeRequired: false, ...paused }), [])).toEqual([]);
+  });
+  it('both phone screens and the web card add them to the shared steps', () => {
+    for (const f of ['src/modules/vendor/screens/VendorOps.tsx', 'src/modules/vendor/screens/VendorOrderDetailScreen.tsx']) {
+      expect(read(f), f).toMatch(/const actions = withHandoverSteps\(order, orderActions\(order\)\);/);
+    }
+    expect(read('../web/src/components/orders-home.tsx')).toMatch(/const actions = withHandoverSteps\(order, orderActions\(order\)\)\.filter\(/);
+  });
+  it('the shared step lists stay as they were (the dashboard\'s shared code does not grow)', () => {
+    for (const f of ['src/modules/vendor/shared.tsx', '../web/src/lib/vendor-hub.ts', 'src/modules/vendor/storeOrderRules.ts', '../web/src/lib/vendor-api.ts']) {
+      const src = read(f);
+      expect(src, f).not.toMatch(/handoverNeedsNoCode|canMarkHandedToRider|HANDOVER_WORDS|action: 'handed-to-|\/handed-to-rider/);
+    }
+  });
+});
+

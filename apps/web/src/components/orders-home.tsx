@@ -19,7 +19,7 @@ import {
   numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
 } from '@/lib/vendor-hub';
 import {
-  acceptOrder, completePickup, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, handedToRider, markDelivered, markPreparing, markReady,
+  acceptOrder, completePickup, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
   money, rejectOrder, toggleOpen, toggleOrders, updateProfile, type VendorOrder,
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
@@ -28,7 +28,8 @@ import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
 // The app's own O-4 rules and words (plain file, imported as is).
 import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
-import { HANDOVER_WORDS } from '../../../mobile/src/modules/vendor/storeHandover';
+import { HANDOVER_WORDS, withHandoverSteps } from '../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
 import { RiderHandoverLine } from './rider-handover-line';
 import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
@@ -562,7 +563,8 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const canConfirm = attestable && order.canConfirmPayment === true && !mmgDisputePaused(order);
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
-  const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
+  // [STORE-DASH · O-2] The hand-overs ride on top of the app's steps (storeHandover), as on the phone card.
+  const actions = withHandoverSteps(order, orderActions(order)).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
   if (actions.length === 0 && !isMmg && !paused && !order.handedToRiderAt) return null;
   const busy = act.isPending || reject.isPending;
   return (

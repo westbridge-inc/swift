@@ -186,3 +186,17 @@ describe('[REVIEW-F S3-1/S4-1 on #2054] no hand-over prompt where there is no ha
     expect(text).not.toContain('Check the rider before you hand it over:');
   });
 });
+
+describe('[O-2] the screen adds the hand-overs to the shared steps', () => {
+  it('code off: the shared "Mark picked up" shows as "Handed to customer" and sends no code', async () => {
+    await show(takeaway({ pickupCodeRequired: false }), [{ label: 'Mark picked up', action: 'complete-pickup' }]);
+    expect(button('Mark picked up')).toBeUndefined();
+    await act(async () => { button('Handed to customer')!.click(); });
+    expect(fx.act.mutate).toHaveBeenCalledWith({ id: 'a', action: 'handed-to-customer' });
+  });
+  it('a Swift rider at the counter, no shared step left: "Handed to rider"', async () => {
+    await show(riderDelivery(), []);
+    await act(async () => { button('Handed to rider')!.click(); });
+    expect(fx.act.mutate).toHaveBeenCalledWith({ id: 'a', action: 'handed-to-rider' });
+  });
+});

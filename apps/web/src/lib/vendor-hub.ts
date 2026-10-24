@@ -8,7 +8,7 @@
 // directly instead (order-dispute, delivery-owner, appointmentTime).
 // ---------------------------------------------------------------------------
 import { withoutForwardWorkWhilePaused } from '../../../mobile/src/modules/vendor/order-dispute';
-import { canMarkHandedToRider, customerDeciding, handoverNeedsNoCode, mmgAwaitingPayment, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { canVendorConfirmDelivered } from '../../../mobile/src/modules/vendor/screens/delivery-owner';
 import { addAppointmentDays, appointmentDayKey } from '../../../mobile/src/lib/appointmentTime';
 
@@ -45,16 +45,10 @@ export function statusActions(order: any): { label: string; action: VendorOrderA
   if (COURIER_ACTIVE.includes(s)) {
     if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
     if (!order?.readyAt) return [{ label: 'Ready for delivery', action: 'ready' }];
-    // [STORE-DASH · O-2] The rider is at the counter: one tap records the hand-over (custody stays the rider's "Picked up").
-    if (canMarkHandedToRider(order)) return [{ label: 'Handed to rider', action: 'handed-to-rider' }];
     return [];
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).
-  // [STORE-DASH · O-2] With the store's pickup code off, one tap after checking the name and order number.
-  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup)
-    return handoverNeedsNoCode(order) ? [{ label: 'Handed to customer', action: 'handed-to-customer' }] : [{ label: 'Mark picked up', action: 'complete-pickup' }];
-  // [STORE-DASH · O-2] A ready Swift-rider delivery whose rider is at the counter.
-  if (canMarkHandedToRider(order)) return [{ label: 'Handed to rider', action: 'handed-to-rider' }];
+  if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) return [{ label: 'Mark picked up', action: 'complete-pickup' }];
   // Store-owned delivery has its own terminal ceremony. Platform-rider orders
   // remain exclusively completable from the assigned rider's app.
   if (canVendorConfirmDelivered({

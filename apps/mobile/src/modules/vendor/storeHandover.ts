@@ -5,7 +5,55 @@
  * The rules for WHEN a hand-over step is offered stay in storeOrderRules.ts.
  */
 import { mmgDisputePaused } from './order-dispute';
-import { handoverNeedsNoCode, type HandoverOrder } from './storeOrderRules';
+
+// ─── O-2 hand-overs (owner ruling 22 Oct 19:45Z; server contract STORE-FLOW, #2055) ───────────────
+// - Takeaway: the store's requirePickupCode setting is OFF by default; the server says per order
+//   (pickupCodeRequired). Off = "Handed to customer" in one tap, after checking the customer's first
+//   name and the order number (PUT complete-pickup with no code). On = today's typed code.
+// - Delivery with a Swift rider: "Handed to rider" (PUT handed-to-rider) writes one status-log row;
+//   custody stays the rider's "Picked up". Shown only when the server knows the step (the order
+//   carries handedToRiderAt), so an older server never gets a request it cannot answer.
+// - These steps are added on top of the shared step list (shared.tsx / web vendor-hub orderActions)
+//   by withHandoverSteps, on the order screens only: the dashboard's shared code does not grow
+//   (REVIEW-F / web perf budget on #2054).
+
+export type HandoverOrder = {
+  status?: unknown; fulfillment?: unknown; fulfillmentMode?: unknown; riderId?: unknown; rider?: unknown;
+  pickupCodeRequired?: unknown; handedToRiderAt?: unknown;
+  customer?: { firstName?: unknown } | null; orderNumber?: unknown;
+  paymentMethod?: unknown; orderType?: unknown; mmgClaimMismatchAt?: unknown;
+} | null | undefined;
+
+/** The takeaway hand-over needs no code: the store's setting is off. Unknown (an older server) = the code is still needed. */
+export function handoverNeedsNoCode(order: HandoverOrder): boolean {
+  return order?.pickupCodeRequired === false;
+}
+
+const RIDER_AT_STORE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP', 'READY_FOR_PICKUP', 'READY'];
+
+/** "Handed to rider" may be tapped: a Swift-rider delivery with its rider assigned, not marked yet, on a server that knows the step. */
+export function canMarkHandedToRider(order: HandoverOrder): boolean {
+  if (!order || !('handedToRiderAt' in order) || order.handedToRiderAt) return false;
+  if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  if (!order.riderId && !order.rider) return false;
+  return RIDER_AT_STORE.includes(String(order.status ?? '').toUpperCase());
+}
+
+export type HandoverStep = 'handed-to-rider' | 'handed-to-customer';
+
+/**
+ * The order's steps with the O-2 hand-overs: with the pickup code off, "Mark picked up" becomes
+ * "Handed to customer"; a Swift-rider delivery with nothing left for the kitchen gets "Handed to
+ * rider". Nothing changes on an order paused for an MMG payment review (only Reject survives).
+ */
+export function withHandoverSteps<K extends string>(order: HandoverOrder, steps: { label: string; action: K }[]): { label: string; action: K | HandoverStep }[] {
+  if (mmgDisputePaused(order)) return steps;
+  if (handoverNeedsNoCode(order) && steps.some((s) => s.action === 'complete-pickup')) {
+    return steps.map((s) => (s.action === 'complete-pickup' ? { label: HANDOVER_WORDS.toCustomer, action: 'handed-to-customer' as const } : s));
+  }
+  if (steps.length === 0 && canMarkHandedToRider(order)) return [{ label: HANDOVER_WORDS.toRider, action: 'handed-to-rider' }];
+  return steps;
+}
 
 /**
  * [REVIEW-F S3-1 on #2054] The takeaway line when the store's pickup code is off: the name and

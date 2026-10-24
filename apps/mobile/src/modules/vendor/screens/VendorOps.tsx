@@ -62,7 +62,7 @@ import {
 } from '../../../hooks/vendorops';
 import { cardTapFor } from '../boardTaps';
 import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
-import { HANDOVER_WORDS, pickupCheckWords } from '../storeHandover';
+import { HANDOVER_WORDS, pickupCheckWords, withHandoverSteps } from '../storeHandover';
 import { RiderHandoverLine } from '../RiderHandoverLine';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
@@ -104,7 +104,8 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
   busy: boolean;
   showStore?: boolean;
 }) {
-  const actions = orderActions(order);
+  // [STORE-DASH · O-2] The hand-overs ride on top of the shared steps (storeHandover).
+  const actions = withHandoverSteps(order, orderActions(order));
   const isMmg = order.paymentMethod === 'MOBILE_MONEY';
   const mmgPaid = order.paymentStatus === 'CAPTURED';
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes((order.status || '').toUpperCase());

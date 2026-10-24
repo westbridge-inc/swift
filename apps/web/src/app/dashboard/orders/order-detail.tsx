@@ -18,14 +18,15 @@ import {
   confirmedOrderFields, customerLines, orderMoneyRows, orderPaymentLine, prepTimeLine, recoveryView, storeCanConfirmReturn, telHref, vendorStatusLabel, whenLabel,
 } from '@/lib/vendor-order-view';
 import {
-  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder, handedToRider,
+  acceptOrder, completePickup, confirmPayment, confirmReturnReceived, getItems, getOrder,
   markDelivered, markPreparing, markReady, money, proposeSubstitution, refundLine, rejectOrder,
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
 // The app's own O-4 rules and words (plain file, imported as is).
-import { OUT_OF_STOCK_WORDS, canMarkHandedToRider, canMarkOutOfStock, customerDeciding, handoverNeedsNoCode, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
-import { HANDOVER_WORDS, pickupCheckWords } from '../../../../../mobile/src/modules/vendor/storeHandover';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, pickupCheckWords } from '../../../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
 import { RiderHandoverLine } from '@/components/rider-handover-line';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
