@@ -6189,6 +6189,9 @@ model AdvertiserMember {
   userId       String
   role         AdvertiserMemberRole @default(OWNER)
   createdAt    DateTime             @default(now())
+  /// [ads security] null = an open invitation the person has not accepted: no access, never named.
+  /// No default (fail closed): a row written without an acceptance is an invitation, never a member.
+  acceptedAt   DateTime?
   advertiser   Advertiser           @relation(fields: [advertiserId], references: [id], onDelete: Cascade)
 
   @@id([advertiserId, userId])
@@ -8272,4 +8275,29 @@ model IdentityReviewCase {
   @@unique([clusterId, snapshotDigest], map: "identity_review_cases_clusterId_snapshotDigest_idx")
   @@index([tenantId, status])
   @@map("identity_review_cases")
+}
+
+/// [Off-site erasure ledger] One erasure's ledger entry (ids, timestamps, de-identified columns), written
+/// ONLY by database triggers in the erasure's own transaction. Append-only; the application reads it.
+model ErasureLedgerEntry {
+  id        String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  kind      String
+  entry     Json
+  createdAt DateTime               @default(now())
+  shipment  ErasureLedgerShipment?
+
+  @@index([createdAt])
+  @@map("erasure_ledger_entry")
+}
+
+/// [Off-site erasure ledger] An entry shipped off-site (encrypted to the owner's backup key) by the host
+/// unit deploy/erasure-ledger-ship.sh. Append-only.
+model ErasureLedgerShipment {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entryId     String             @unique @db.Uuid
+  ledgerEntry ErasureLedgerEntry @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  objectKey   String
+  shippedAt   DateTime           @default(now())
+
+  @@map("erasure_ledger_shipment")
 }

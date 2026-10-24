@@ -13,6 +13,7 @@ describe('readTaxiEstimate: only what the server priced', () => {
       tiers: [{ rideClass: 'ECONOMY', fare: 800, capacity: 4 }, { rideClass: 'GROUP', fare: 1600, capacity: 14 }],
       durationMin: 9,
       waitingText: null,
+      waitingTerms: null,
     });
   });
 
@@ -46,6 +47,23 @@ describe('readTaxiEstimate: only what the server priced', () => {
     expect(readTaxiEstimate({ tiers: [tier()], waiting: { text: '  Waiting: $200 per 5 minutes.  ' } })?.waitingText).toBe('Waiting: $200 per 5 minutes.');
     for (const waiting of [null, {}, { text: '' }, { text: '   ' }, { text: 200 }]) {
       expect(readTaxiEstimate({ tiers: [tier()], waiting })?.waitingText).toBeNull();
+    }
+  });
+
+  it('[quote proof] the terms behind the sentence are kept to echo with the booking; none without a sentence or with broken numbers', () => {
+    const text = 'Waiting: 300 per 10 minutes after your driver arrives';
+    expect(readTaxiEstimate({ tiers: [tier()], waiting: { chargePerBlock: 300, blockMinutes: 10, currencyCode: 'GYD', text } })?.waitingTerms)
+      .toEqual({ chargePerBlock: 300, blockMinutes: 10 });
+    for (const waiting of [
+      { chargePerBlock: 300, blockMinutes: 10 },
+      { chargePerBlock: 300, blockMinutes: 10, text: '  ' },
+      { chargePerBlock: '300', blockMinutes: 10, text },
+      { chargePerBlock: -1, blockMinutes: 10, text },
+      { chargePerBlock: 300, blockMinutes: 0, text },
+      { chargePerBlock: 300, blockMinutes: 2.5, text },
+      { text },
+    ]) {
+      expect(readTaxiEstimate({ tiers: [tier()], waiting })?.waitingTerms).toBeNull();
     }
   });
 });

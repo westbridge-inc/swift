@@ -90,6 +90,8 @@ revoked(rel, priv) AS (
          ('public.billing_fee_notices', 'DELETE'),
          ('public.billing_notice_handoffs', 'DELETE'),
          ('public.billing_obligation_transitions', 'UPDATE'), ('public.billing_obligation_transitions', 'DELETE'),
+         ('public.erasure_ledger_entry', 'INSERT'), ('public.erasure_ledger_entry', 'UPDATE'), ('public.erasure_ledger_entry', 'DELETE'),
+         ('public.erasure_ledger_shipment', 'INSERT'), ('public.erasure_ledger_shipment', 'UPDATE'), ('public.erasure_ledger_shipment', 'DELETE'),
          ('swift_qr.token_identities', 'SELECT'), ('swift_qr.token_identities', 'INSERT'),
          ('swift_qr.token_identities', 'UPDATE'), ('swift_qr.token_identities', 'DELETE'),
          ('swift_qr.token_identities', 'TRUNCATE'), ('swift_qr.token_identities', 'REFERENCES'),

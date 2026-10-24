@@ -33,6 +33,10 @@ export interface TaxiEstimate {
   durationMin: number | null;
   /** The server's own waiting-terms sentence, when it discloses one. */
   waitingText: string | null;
+  /** [TAXI waiting charge · quote proof] The terms behind that sentence, echoed
+   *  back with the booking so the server knows the customer saw them. Null
+   *  when the server disclosed none (or broken ones). */
+  waitingTerms: { chargePerBlock: number; blockMinutes: number } | null;
 }
 
 const isTierClass = (v: unknown): v is TaxiRideClass => typeof v === 'string' && Object.prototype.hasOwnProperty.call(TAXI_TIER_META, v);
@@ -40,7 +44,7 @@ const amount = (v: unknown): v is number => typeof v === 'number' && Number.isFi
 
 /** The server's estimate as the page may show it, or null when it holds no usable fare. */
 export function readTaxiEstimate(raw: unknown): TaxiEstimate | null {
-  const answer = raw as { tiers?: unknown; durationMin?: unknown; waiting?: { text?: unknown } | null } | null;
+  const answer = raw as { tiers?: unknown; durationMin?: unknown; waiting?: { text?: unknown; chargePerBlock?: unknown; blockMinutes?: unknown } | null } | null;
   if (!answer || !Array.isArray(answer.tiers)) return null;
   const tiers = answer.tiers.flatMap((tier: { rideClass?: unknown; fare?: unknown; capacity?: unknown }) => (
     tier && isTierClass(tier.rideClass) && amount(tier.fare) && Number.isInteger(tier.capacity) && (tier.capacity as number) > 0
@@ -50,10 +54,17 @@ export function readTaxiEstimate(raw: unknown): TaxiEstimate | null {
   if (tiers.length === 0) return null;
   const duration = answer.durationMin;
   const text = answer.waiting?.text;
+  const waitingText = typeof text === 'string' && text.trim() ? text.trim() : null;
+  const charge = answer.waiting?.chargePerBlock;
+  const block = answer.waiting?.blockMinutes;
   return {
     tiers,
     durationMin: typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
-    waitingText: typeof text === 'string' && text.trim() ? text.trim() : null,
+    waitingText,
+    // Echoed only with the sentence the page shows: terms the customer never read are never echoed.
+    waitingTerms: waitingText && Number.isInteger(charge) && (charge as number) >= 0 && Number.isInteger(block) && (block as number) >= 1
+      ? { chargePerBlock: charge as number, blockMinutes: block as number }
+      : null,
   };
 }
 

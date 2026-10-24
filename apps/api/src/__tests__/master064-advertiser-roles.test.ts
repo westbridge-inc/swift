@@ -73,6 +73,8 @@ const call = (method: 'GET' | 'POST', url: string, who: Actor, payload?: unknown
 });
 const setRole = (userId: string, role: 'OWNER' | 'MANAGER' | 'ANALYST') =>
   raw.advertiserMember.update({ where: { advertiserId_userId: { advertiserId, userId } }, data: { role } });
+const setAccepted = (userId: string, acceptedAt: Date | null) =>
+  raw.advertiserMember.update({ where: { advertiserId_userId: { advertiserId, userId } }, data: { acceptedAt } });
 const campaignBody = () => ({ advertiserId, placementId: '', name: 'New one', startWeek: '2026-11-02', endWeek: '2026-11-02' });
 
 beforeAll(async () => {
@@ -90,11 +92,13 @@ beforeAll(async () => {
   const b = await app.prisma.advertiser.create({ data: { companyName: `M064b ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: `${nanoid(6)}@x.gy`, contactPhone: '+5926000005', createdByUserId: stranger.userId, status: 'APPROVED' } });
   advertiserId = a.id; otherAdvertiserId = b.id;
   advertiserIds.push(a.id, b.id);
+  // [#1995] Members are accepted members; an open invitation (acceptedAt NULL) is graded below.
+  const acceptedAt = new Date();
   await app.prisma.advertiserMember.createMany({ data: [
-    { advertiserId, userId: owner.userId, role: 'OWNER' },
-    { advertiserId, userId: manager.userId, role: 'MANAGER' },
-    { advertiserId, userId: analyst.userId, role: 'ANALYST' },
-    { advertiserId: otherAdvertiserId, userId: stranger.userId, role: 'OWNER' },
+    { advertiserId, userId: owner.userId, role: 'OWNER', acceptedAt },
+    { advertiserId, userId: manager.userId, role: 'MANAGER', acceptedAt },
+    { advertiserId, userId: analyst.userId, role: 'ANALYST', acceptedAt },
+    { advertiserId: otherAdvertiserId, userId: stranger.userId, role: 'OWNER', acceptedAt },
   ] });
 });
 
@@ -189,6 +193,59 @@ describe('[MASTER-064] the advertiser role matrix', () => {
     } finally {
       spy.mockRestore();
       await setRole(owner.userId, 'OWNER');
+    }
+  });
+
+  it('[#1995] an open invitation opens nothing: 404 on every read and on every write capability, even one that names the OWNER role', async () => {
+    // The strongest case: a row that is still an invitation but carries the OWNER role. Not accepted
+    // means not a member, whatever the role says, so no capability is reached and nothing changes.
+    const invitee = await makeUser();
+    await raw.advertiserMember.create({ data: { advertiserId, userId: invitee.userId, role: 'OWNER', acceptedAt: null } });
+    const draft = await draftCampaign();
+    const paid = await paidCampaign();
+    const live = await paidCampaign('LIVE');
+    const p = await placement();
+    for (const url of [
+      `/api/v1/ads/advertiser/${advertiserId}/campaigns`, `/api/v1/ads/advertiser/${advertiserId}/invoices`, `/api/v1/ads/advertiser/${advertiserId}/members`,
+      `/api/v1/ads/campaigns/${live.id}/stats`, `/api/v1/ads/campaigns/${paid.id}/refund-preview`,
+    ]) expect((await call('GET', url, invitee)).statusCode, `read ${url}`).toBe(404);
+    for (const [url, body] of [
+      ['/api/v1/ads/campaigns', { ...campaignBody(), placementId: p.id }],
+      [`/api/v1/ads/campaigns/${live.id}/pause`, {}],
+      [`/api/v1/ads/campaigns/${live.id}/creatives`, {}],
+      [`/api/v1/ads/campaigns/${draft.id}/reserve`, {}],
+      [`/api/v1/ads/campaigns/${draft.id}/checkout`, {}],
+      [`/api/v1/ads/campaigns/${paid.id}/cancel`, {}],
+      [`/api/v1/ads/advertiser/${advertiserId}/members`, { phone: '+5926001234', role: 'ANALYST' }],
+    ] as const) expect((await call('POST', url, invitee, body)).statusCode, `write ${url}`).toBe(404);
+    expect(await app.prisma.adCampaign.count({ where: { placementId: p.id } })).toBe(0);
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: draft.id } })).status).toBe('DRAFT');
+    expect(await app.prisma.adBooking.count({ where: { campaignId: draft.id } })).toBe(0);
+    expect(await app.prisma.adInvoice.count({ where: { campaignId: draft.id } })).toBe(0);
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: paid.id } })).status).toBe('SCHEDULED');
+    expect(await app.prisma.adRefundIntent.count({ where: { campaignId: paid.id } })).toBe(0);
+    expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: live.id } })).status).toBe('LIVE');
+  });
+
+  it.each(['reserve', 'checkout', 'cancel'] as const)('[#1995] an OWNER whose membership turns back into an open invitation after the route check is refused inside the %s transaction', async (action) => {
+    const c = action === 'cancel' ? await paidCampaign() : await draftCampaign();
+    const real = app.prisma.adsSettings.findUnique.bind(app.prisma.adsSettings);
+    const spy = vi.spyOn(app.prisma.adsSettings, 'findUnique').mockImplementationOnce((async (args: never) => {
+      await setAccepted(owner.userId, null);
+      return real(args);
+    }) as never);
+    try {
+      const res = await call('POST', `/api/v1/ads/campaigns/${c.id}/${action}`, owner, {});
+      expect(spy).toHaveBeenCalled();
+      expect(res.statusCode).toBe(403);
+      expect(res.json().error.code).toBe('ADVERTISER_ROLE_FORBIDDEN');
+      expect((await app.prisma.adCampaign.findUniqueOrThrow({ where: { id: c.id } })).status).toBe(action === 'cancel' ? 'SCHEDULED' : 'DRAFT');
+      expect(await app.prisma.adInvoice.count({ where: { campaignId: c.id, status: 'UNPAID' } })).toBe(0);
+      if (action === 'cancel') expect(await app.prisma.adRefundIntent.count({ where: { campaignId: c.id } })).toBe(0);
+      else expect(await app.prisma.adBooking.count({ where: { campaignId: c.id } })).toBe(0);
+    } finally {
+      spy.mockRestore();
+      await setAccepted(owner.userId, new Date());
     }
   });
 

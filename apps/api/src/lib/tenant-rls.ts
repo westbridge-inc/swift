@@ -438,6 +438,8 @@ const APP_ROLE_MIGRATION_REVOCATIONS: ReadonlyArray<{ readonly table: string; re
   { table: 'public.billing_fee_notices', privileges: 'DELETE' },
   { table: 'public.billing_notice_handoffs', privileges: 'DELETE' },
   { table: 'public.billing_obligation_transitions', privileges: 'UPDATE, DELETE' },
+  { table: 'public.erasure_ledger_entry', privileges: 'INSERT, UPDATE, DELETE' }, // 20261021140000
+  { table: 'public.erasure_ledger_shipment', privileges: 'INSERT, UPDATE, DELETE' },
   { table: 'swift_qr.token_identities', privileges: 'ALL' }, // 20261005210300
 ];
 

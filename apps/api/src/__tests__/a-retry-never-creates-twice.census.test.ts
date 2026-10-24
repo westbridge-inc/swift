@@ -252,6 +252,10 @@ const OUT: Record<string, string> = {
   [`${ADMIN}|POST|/rating-reports/:id/resolve`]: 'Decides a reported rating; no order or money.',
   // [#1964 review F2 S3-1 / G S4-1] Transitions and nouns now read, that create none of the eight.
   'modules/rider/rider.routes.ts|POST|/orders/:id/accept': 'A rider takes an existing order (assignment under the order lock); no new order and no money row — earnings come at delivered.',
+  // [#1995 ads security] Accepting one's own advertiser team invitation creates nothing: one compare-and-set
+  // (updateMany where acceptedAt is null, the invitee's own row, unexpired) sets acceptedAt; a retry finds no
+  // open invitation and answers 404. No order, no money row, no new row.
+  'modules/ads/ads.routes.ts|POST|/advertiser/:id/members/accept': 'The invited person accepts their own open invitation: one compare-and-set on their row (acceptedAt null -> now); a retry finds nothing open (404). Creates no row and moves no money.',
   'modules/rider/rider.routes.ts|POST|/offers/accept': 'A rider takes an offered order (the offer is claimed once); assignment only, no money row.',
   'modules/driver/driver.routes.ts|POST|/rides/:id/accept': 'A driver takes an existing ride request (assignment); the fare is earned at complete, not here.',
   'modules/driver/driver.routes.ts|POST|/offers/accept': 'A driver takes an offered ride (the offer is claimed once); assignment only, no money row.',

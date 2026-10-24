@@ -3,6 +3,7 @@
 import { FileText } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAuditLogs } from '@/lib/api';
+import { humanise } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
 
 interface AuditEntry {
@@ -15,6 +16,13 @@ interface AuditEntry {
   createdAt: string;
 }
 
+/** "PlatformConfig" -> "Platform config". */
+const entityWords = (entity: string) => humanise(entity.replace(/([a-z])([A-Z])/g, '$1_$2'));
+
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+// [ADMIN-UI] Mission Control: the shell header is the page title; the record is
+// a light list, the action in plain words (the code stays in the row's title).
 export default function AuditPage() {
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['audit-logs'],
@@ -24,47 +32,40 @@ export default function AuditPage() {
   const entries: AuditEntry[] = data?.data ?? [];
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold mb-1">Audit Log</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Every admin action — vendor approvals, document reviews, config changes, claim payouts — append-only.
+    <div className="mc-page">
+      <p className="mc-muted mb-4">
+        Every recorded action — admins’ approvals, document decisions, setting changes and claim payouts, and the claims customers and partners make. Nothing here can be edited or deleted.
       </p>
 
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] overflow-hidden">
-        {isLoading ? (
-          <div className="p-12 text-center text-[var(--muted)] text-sm">Loading…</div>
-        ) : isError ? (
-          <QueryFailed error={error} what="the audit log" onRetry={() => void refetch()} retrying={isFetching} className="m-4" />
-        ) : entries.length === 0 ? (
-          <div className="p-12 flex flex-col items-center justify-center text-center">
-            <FileText size={48} className="text-[var(--muted)] mb-4" />
-            <h2 className="text-lg font-semibold mb-2">No audit events yet</h2>
-            <p className="text-[var(--muted)] text-sm max-w-md">
-              Admin actions are recorded here as they happen.
-            </p>
-          </div>
-        ) : (
-          <div className="divide-y divide-[var(--border)]">
-            {entries.map((e) => (
-              <div key={e.id} className="flex items-center gap-4 p-4">
-                <div className="w-2 h-2 rounded-full bg-[var(--accent)] shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium">
-                    {e.action} <span className="text-[var(--muted)] font-normal">· {e.entity} {e.entityId}</span>
-                  </p>
-                  <p className="text-xs text-[var(--muted)]">
-                    {e.userId ? `by ${e.userId}` : 'system'}
-                    {e.ipAddress ? ` · ${e.ipAddress}` : ''}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="text-xs text-[var(--muted)]">{new Date(e.createdAt).toLocaleString()}</p>
-                </div>
+      {isLoading ? (
+        <div className="mc-loading" aria-busy="true">Loading the audit log…</div>
+      ) : isError ? (
+        <QueryFailed error={error} what="the audit log" onRetry={() => void refetch()} retrying={isFetching} />
+      ) : entries.length === 0 ? (
+        <div className="mc-empty">
+          <FileText size={32} className="mx-auto mb-3" aria-hidden="true" />
+          <p className="mc-card-title mb-1">No audit events yet</p>
+          <p>Admin actions are recorded here as they happen.</p>
+        </div>
+      ) : (
+        <ul className="mc-table-wrap mc-list-plain" aria-label="Audit log">
+          {entries.map((e) => (
+            <li key={e.id} className="flex items-start gap-3 px-4 py-3">
+              <span className="mt-2 h-2 w-2 shrink-0 rounded-full bg-[var(--mc-accent)]" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold" title={e.action}>
+                  {humanise(e.action)} <span className="mc-muted font-normal">· {entityWords(e.entity)} <span className="mc-mono">{e.entityId}</span></span>
+                </p>
+                <p className="mc-muted text-xs">
+                  {e.userId ? <>By account <span className="mc-mono">{e.userId}</span></> : 'By the system'}
+                  {e.ipAddress ? <> · from <span className="mc-mono">{e.ipAddress}</span></> : null}
+                </p>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+              <p className="mc-muted mc-numbers shrink-0 text-xs">{when(e.createdAt)}</p>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

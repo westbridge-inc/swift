@@ -359,7 +359,7 @@ describe('D9-05 — account deletion (erasure)', () => {
       data: {
         companyName: `Del Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Del', contactEmail: 'del@example.com',
         contactPhone: '+5926000123', status: 'APPROVED', createdByUserId: u.userId,
-        members: { create: { userId: u.userId, role: 'OWNER' } },
+        members: { create: { userId: u.userId, role: 'OWNER', acceptedAt: new Date() } },
       },
     });
     advertiserIds.push(adv.id);
@@ -395,7 +395,7 @@ describe('D9-05 — account deletion (erasure)', () => {
       data: {
         companyName: `Co Ads ${nanoid(5)}`, industry: 'Retail', contactName: 'Co', contactEmail: 'co@example.com',
         contactPhone: '+5926000124', status: 'APPROVED', createdByUserId: owner.userId,
-        members: { create: [{ userId: owner.userId, role: 'OWNER' }, { userId: coOwner.userId, role: 'OWNER' }] },
+        members: { create: [{ userId: owner.userId, role: 'OWNER', acceptedAt: new Date() }, { userId: coOwner.userId, role: 'OWNER', acceptedAt: new Date() }] },
       },
     });
     advertiserIds.push(adv.id);
