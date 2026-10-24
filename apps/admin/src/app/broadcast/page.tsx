@@ -43,87 +43,78 @@ export default function BroadcastPage() {
   };
 
   return (
-    <div className="max-w-2xl">
-      <h1 className="text-2xl font-bold mb-1">Broadcast</h1>
-      <p className="text-[var(--muted)] text-sm mb-6">
-        Push + in-app announcement to a whole audience. It lands on real phones — read it twice.
-      </p>
+    <div className="mc-page">
+      <div className="max-w-2xl">
+        <p className="mc-muted mb-4">
+          A notification and an in-app announcement to a whole audience. It lands on real phones — read it twice.
+        </p>
 
-      {actions.banner}
-      <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 space-y-4">
-        <div>
-          <label htmlFor="broadcast-audience" className="block text-xs text-[var(--muted)] mb-1.5">Audience</label>
-          <select
-            id="broadcast-audience"
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-          >
-            {AUDIENCES.map((a) => (
-              <option key={a.value} value={a.value}>
-                {a.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="broadcast-purpose" className="block text-xs text-[var(--muted)] mb-1.5">Purpose</label>
-          <select
-            id="broadcast-purpose"
-            value={category}
-            onChange={(e) => setCategory(e.target.value as 'service' | 'marketing')}
-            className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-          >
-            <option value="service">Service notice — operational, goes to everyone</option>
-            <option value="marketing">Marketing — offers/promos, ONLY to people who said yes</option>
-          </select>
-          <p className="text-[11px] text-[var(--muted)] mt-1">
-            Marketing sends pass through the consent ledger: anyone who withdrew, or never opted in, is skipped.
-          </p>
-        </div>
-        <div>
-          <label htmlFor="broadcast-title" className="block text-xs text-[var(--muted)] mb-1.5">Title (max 150)</label>
-          <input
-            id="broadcast-title"
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            maxLength={150}
-            placeholder="e.g. Service update for Georgetown"
-            className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-          />
-        </div>
-        <div>
-          <label htmlFor="broadcast-message" className="block text-xs text-[var(--muted)] mb-1.5">Message (max 1000)</label>
-          <textarea
-            id="broadcast-message"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            maxLength={1000}
-            rows={5}
-            placeholder="What do they need to know?"
-            className="w-full bg-[var(--panel-2)] text-white px-3 py-2 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none resize-none"
-          />
-        </div>
-
-        {/* What it will look like on the phone */}
-        {(title.trim() || body.trim()) && (
-          <div className="rounded-lg bg-black/30 border border-[var(--border)] p-4">
-            <p className="text-[10px] text-[var(--muted)] tracking-widest mb-2">PREVIEW</p>
-            <div className="rounded-xl bg-[var(--panel-2)] p-3">
-              <p className="text-sm font-semibold">{title.trim() || 'Title'}</p>
-              <p className="text-xs text-[var(--muted)] mt-0.5 whitespace-pre-wrap">{body.trim() || 'Message'}</p>
-            </div>
+        {actions.banner}
+        <div className="mc-card space-y-4">
+          <div className="mc-field">
+            <label htmlFor="broadcast-audience">Audience</label>
+            <select id="broadcast-audience" value={role} onChange={(e) => setRole(e.target.value)} className="mc-input">
+              {AUDIENCES.map((a) => (
+                <option key={a.value} value={a.value}>
+                  {a.label}
+                </option>
+              ))}
+            </select>
           </div>
-        )}
+          <div className="mc-field">
+            <label htmlFor="broadcast-purpose">Purpose</label>
+            <select
+              id="broadcast-purpose"
+              value={category}
+              onChange={(e) => setCategory(e.target.value as 'service' | 'marketing')}
+              className="mc-input"
+            >
+              <option value="service">Service notice — operational, goes to everyone</option>
+              <option value="marketing">Marketing — offers/promos, ONLY to people who said yes</option>
+            </select>
+            <p className="mc-field-hint">
+              A marketing message only goes to people who said yes to offers: anyone who withdrew, or never agreed, is skipped.
+            </p>
+          </div>
+          <div className="mc-field">
+            <label htmlFor="broadcast-title">Title (max 150)</label>
+            <input
+              id="broadcast-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              maxLength={150}
+              placeholder="e.g. Service update for Georgetown"
+              className="mc-input"
+            />
+          </div>
+          <div className="mc-field">
+            <label htmlFor="broadcast-message">Message (max 1000)</label>
+            <textarea
+              id="broadcast-message"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              maxLength={1000}
+              rows={5}
+              placeholder="What do they need to know?"
+              className="mc-input"
+            />
+          </div>
 
-        <button
-          type="button"
-          onClick={send}
-          disabled={!canSend}
-          className="w-full py-2.5 rounded-lg text-sm font-semibold bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50 transition-colors"
-        >
-          {`Send to ${audience}`}
-        </button>
+          {/* What it will look like on the phone */}
+          {(title.trim() || body.trim()) && (
+            <div className="rounded-[var(--mc-radius)] bg-[var(--mc-surface)] p-4">
+              <p className="mc-label mb-2">Preview on the phone</p>
+              <div className="rounded-[var(--mc-radius)] border border-[var(--mc-line)] bg-[var(--mc-card)] p-3 shadow-sm">
+                <p className="font-semibold">{title.trim() || 'Title'}</p>
+                <p className="mc-muted mt-0.5 whitespace-pre-wrap text-xs">{body.trim() || 'Message'}</p>
+              </div>
+            </div>
+          )}
+
+          <button type="button" onClick={send} disabled={!canSend} className="mc-btn mc-btn-primary w-full">
+            {`Send to ${audience}`}
+          </button>
+        </div>
       </div>
     </div>
   );
