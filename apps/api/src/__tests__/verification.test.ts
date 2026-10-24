@@ -228,9 +228,12 @@ describe('Checklists drive from config', () => {
   it('commerce checklists carry the Guyana-real docs (registration, GRA licence, storefront) — no TIN certificate', async () => {
     const restaurant = await inject('GET', '/api/v1/verification/status?role=RESTAURANT', undefined, vendorToken);
     expect(restaurant.json().data.checklist).toEqual([
+      // [FOOD-PERMIT · owner ruling 24 Oct 2026 — a DELIBERATE change] the food handler's certificate is optional for a
+      // registered restaurant (its owner ticks for its food handlers instead: food-handlers.test.ts)
       'owner_national_id', 'business_registration',
-      'gra_restaurant_licence', 'food_handler_cert', 'storefront_photo',
+      'gra_restaurant_licence', 'storefront_photo',
     ]);
+    expect(restaurant.json().data.optional).toContain('food_handler_cert');
 
     const supermarket = await inject('GET', '/api/v1/verification/status?role=SUPERMARKET', undefined, vendorToken);
     expect(supermarket.json().data.checklist).toEqual([

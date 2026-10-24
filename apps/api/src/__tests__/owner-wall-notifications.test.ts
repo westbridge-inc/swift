@@ -562,7 +562,7 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       for (const m of text.matchAll(/\.\s*notification\s*\.\s*(create|upsert)\s*\(/g)) if (rel !== HELPER) writes.push(`${rel}: notification.${m[1]}`);
       for (let n = (text.match(/\.\s*notification\s*\.\s*createMany\s*\(/g) ?? []).length; n > 0; n -= 1) bump(bulk, rel);
       for (const m of text.matchAll(/\b(insertNoticeFor|upsertNoticeFor)\s*\(/g)) if (!/function\s+$/.test(text.slice(0, m.index))) bump(helperCalls, `${rel} ${m[1]}`);
-      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked|eraseNoticesOf)\s*\(/g)) {
+      for (const m of text.matchAll(/\b(pendingStaffInvitesOf|closeStaffInvitesOf|staffInviteesOf|publicPhoneAsked|noticeHeld|eraseNoticesOf)\s*\(/g)) {
         if (!/function\s+$/.test(text.slice(0, m.index))) bump(actionCalls, `${rel} ${m[1]}`);
       }
       if (rel !== HELPER && /swift_owner_wall_(notice_id|pending_staff_invites|close_staff_invites|staff_invitees|public_phone_asked|erase_notices)/.test(text)) writes.push(`${rel}: calls a notice action by name`);
@@ -593,7 +593,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/user/inactivity.ts insertNoticeFor': 1,
       'modules/vendor/staff-invites.ts insertNoticeFor': 2,
       'modules/vendor/store-pin-move.ts insertNoticeFor': 1,
-      'modules/verification/verification.service.ts insertNoticeFor': 5,
+      // + [FOOD-PERMIT] the food handlers tick notice (askForFoodHandlerTick)
+      'modules/verification/verification.service.ts insertNoticeFor': 6,
     });
     // The narrow SECURITY DEFINER actions: these callers only, each holding the authorization.
     expect(actionCalls).toEqual({
@@ -601,6 +602,8 @@ describe('[item 20] notifications: the narrow actions and the census', () => {
       'modules/vendor/staff-invites.ts closeStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts pendingStaffInvitesOf': 1,
       'modules/vendor/staff-invites.ts staffInviteesOf': 1,
+      // [FOOD-PERMIT] the food handlers notice's once-only check, inside the projection's transaction
+      'modules/verification/verification.service.ts noticeHeld': 1,
       'modules/verification/verification.service.ts publicPhoneAsked': 1,
     });
     // Plain accessors left: the person's own inbox (customer routes, the service's mark-read/count, the vendor's own alerts,
