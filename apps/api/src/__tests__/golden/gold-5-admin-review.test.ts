@@ -21,6 +21,7 @@ import { resetKeyProviderForTests } from '../../providers/storage/envelope';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { clusterMemberIds } from '../../modules/integrity/identity.service';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
+import { REAL_PNG, uniquePng } from '../helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // GOLD-5 · ADMIN-01 — partner document review, through the REAL mounted
@@ -60,6 +61,10 @@ const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6).toLowerCase()}`;
 const REASON = { 'x-swift-reason': 'GOLD-5 golden journey: reviewing a partner document' };
 const UPLOAD_DIR = mkdtempSync(path.join(os.tmpdir(), 'swift-gold5-review-'));
 const DOC_TYPE = 'business_registration';
+// [VERIFY-DOCS V3] Opening, approving and rejecting a document need the explicit
+// document reviewer grant, which neither `*` nor a preset confers: every
+// reviewer in this journey holds it; the support operator does not.
+const REVIEWER_GRANT = 'documents.review';
 
 let app: FastifyInstance;
 let seq = 0;
@@ -101,8 +106,8 @@ async function makeApplicant(firstName: string) {
   return { ...owner, vendorId: vendor.id };
 }
 
-/** A real PNG: magic bytes, then a body unique to this document. */
-const documentBytes = () => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`gold5-review-${nanoid(12)}`), randomBytes(64)]);
+/** [Row 108] A real PNG, unique to this document (the upload route reads every photo with the real decoder). */
+const documentBytes = () => uniquePng(`gold5-review-${nanoid(12)}-${randomBytes(16).toString('hex')}`);
 
 function upload(actor: Actor, bytes: Buffer) {
   const boundary = `----gold5${nanoid(8)}`;
@@ -300,10 +305,10 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
   beforeAll(async () => {
     // The pilot's operators hold the ADMIN default grant; the narrower
     // presets appear where their limits are the point.
-    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Rhea' });
-    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*'], firstName: 'Ravi' });
+    rev1 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Rhea' });
+    rev2 = await makeUser(['ADMIN'], 'ADMIN', { grant: ['*', REVIEWER_GRANT], firstName: 'Ravi' });
     support = await makeUser(['ADMIN'], 'ADMIN', { grant: SUPPORT_OPERATOR_CAPABILITIES, firstName: 'Suki' });
-    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, tenantId: TENANT_B, firstName: 'Bram' });
+    revB = await makeUser(['ADMIN'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], tenantId: TENANT_B, firstName: 'Bram' });
     partner = await makeApplicant('Priya');
   }, 60_000);
 
@@ -321,7 +326,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // At rest: ciphertext only; the envelope records the true type and size.
     const envelope = await sys(() => app.prisma.encryptedObject.findUniqueOrThrow({ where: { fileKey: submitted.fileUrl } }));
-    expect({ mime: envelope.mimeType, size: envelope.sizeBytes, by: envelope.createdBy, sealed: envelope.wrappedDek !== null }).toEqual({ mime: 'image/png', size: bytes.length, by: partner.userId, sealed: true });
+    expect({ mime: envelope.mimeType, size: envelope.sizeBytes, by: envelope.createdBy, sealed: envelope.wrappedDek !== null }).toEqual({ mime: 'image/png', size: REAL_PNG.length, by: partner.userId, sealed: true }); // [Row 238] sealed without its metadata
     const stored = await getStorageProvider().getObject(submitted.fileUrl);
     expect(stored.equals(bytes)).toBe(false);
     expect(stored.includes(bytes.subarray(8, 30))).toBe(false);
@@ -347,7 +352,8 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
     expect(shown.statusCode).toBe(200);
     expect(shown.headers['content-type']).toContain('image/png');
     expect(shown.headers['cache-control']).toContain('no-store');
-    expect(Buffer.from(shown.rawPayload).equals(bytes)).toBe(true);
+    // [Row 238] exactly the partner's photo, minus the metadata (the note) it was uploaded with.
+    expect(Buffer.from(shown.rawPayload).equals(REAL_PNG)).toBe(true);
     // The link is bound to its document: the same signature cannot open another.
     // (The last character always CHANGES: a cuid ending in 'x' made the
     // "forged" URL the real one about once in 36 runs.)
@@ -371,7 +377,8 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // DECISION: approved, with a stated reason, once.
     const decideAt = Date.now();
-    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: {} });
+    // [R16] the reviewer says what the registration is (a company's never expires)
+    const approved = await admin({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, token: rev1.token, payload: { registrationKind: 'COMPANY' } });
     expect(approved.statusCode, approved.body).toBe(200);
     const decided = await docRow(docId);
     expect({ status: decided.status, state: decided.state, by: decided.reviewedBy }).toEqual({ status: 'APPROVED', state: 'COMMITTED', by: rev1.userId });
@@ -438,7 +445,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
   it('RECUSAL: a reviewer cannot claim or decide their own document, nor one whose subject shares an identity node with them', async () => {
     // Their own: a reviewer who is also applying for a store.
-    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Mona' });
+    const moonlighter = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Mona' });
     const own = await uploadAndSubmit(moonlighter, documentBytes());
     const ownCase = await openCaseOf(rev1, own.docId);
     const selfClaim = await admin({ method: 'POST', url: `/api/v1/admin/verification/cases/${ownCase.caseId}/claim`, token: moonlighter.token, payload: {} });
@@ -452,7 +459,7 @@ describe('GOLD-5 · ADMIN-01 — partner document review', () => {
 
     // Linked: a reviewer whose own paperwork is byte-identical to an applicant's
     // (the same registration on two accounts — one identity-graph node).
-    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: DOC_REVIEWER_CAPABILITIES, firstName: 'Lionel' });
+    const relative = await makeUser(['ADMIN', 'VENDOR_OWNER', 'CUSTOMER'], 'ADMIN', { grant: [...DOC_REVIEWER_CAPABILITIES, REVIEWER_GRANT], firstName: 'Lionel' });
     const applicant = await makeApplicant('Lorna');
     const shared = documentBytes();
     const first = await upload(relative, shared);

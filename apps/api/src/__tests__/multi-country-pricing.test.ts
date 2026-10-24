@@ -8,6 +8,7 @@ import { registrationProofFor, mintedRegistrationProofFor } from './helpers/otp'
 import { registerErrorHandler } from '../middleware/error-handler';
 import { countryFromPhone } from '../utils/phone-country';
 import { TRIAL_DAYS } from '../modules/subscription/subscription.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Guyana-only V1 public launch. Future-market currency and phone metadata stay
@@ -94,8 +95,20 @@ describe('public pricing (price on the door)', () => {
     // Older clients read the legacy numbers, which never under-quote a bill:
     // the old card's "Large catalogues (1000+ items)" line stands for every
     // store from 1,000 items up, so it carries the 10,000+ bill [PR1270-S2-05].
-    expect(d.weekly.mover).toBe(9000);
-    expect(d.weekly.moverHeavy).toBe(9000);
+    // The mover figures cover only the vehicles a mover can register today:
+    // heavy delivery is off at launch (owner, 13 Oct 2026), so the highest is
+    // the taxi rate, car or bus.
+    // Derived from the offered quotes, as the contract test does, so hiding
+    // another vehicle (buses, #1545) cannot turn this red: the heavy figure is
+    // the highest OFFERED heavy-band quote, else none.
+    type Quote = { vehicleType: string; band: string; rate: number; offered: boolean };
+    const offered = (d.movers as Quote[]).filter((q) => q.offered);
+    const heavyOffered = offered.filter((q) => q.band === 'HEAVY');
+    expect(d.movers.find((q: Quote) => q.vehicleType === 'CANTER_LONG')?.offered).toBe(false);
+    expect(d.weekly.mover).toBe(8000);
+    expect(d.weekly.mover).toBe(Math.max(...offered.map((q) => q.rate)));
+    expect(d.weekly.moverHeavy).toBe(heavyOffered.length ? Math.max(...heavyOffered.map((q) => q.rate)) : null);
+    expect(d.weekly.moverHeavy).not.toBe(9000);
     expect(d.weekly.smallVendor).toBe(15000);
     expect(d.weekly.largeVendor).toBe(60000);
     expect(d.weekly.departmentVendor).toBe(60000);
@@ -136,7 +149,7 @@ describe('public auth stays inside the launch market', () => {
   });
 
   it('a Guyana number stays GY even if the client claims a future market', async () => {
-    const phone = `+592655${String(Math.floor(Math.random() * 9000) + 1000)}`;
+    const phone = testPhone();
     const registrationProof = await registrationProofFor(app, phone);
     const res = await inject('POST', '/api/v1/auth/register', { acceptTerms: true,
       phone,

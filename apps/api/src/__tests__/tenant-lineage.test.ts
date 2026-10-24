@@ -60,6 +60,9 @@ export const WALLED_BY_PARENT: Record<string, readonly string[]> = {
   // FK-less rider/order references it always had: that EXPAND follow-up stands, it just cannot be listed in
   // PENDING_EXPAND once the model has a tenant-bearing parent.
   ReimbursementClaim: ['CashHandoverEvidence'],
+  // [R12 · REVIEW-M #1963 S2-1] One row per (wallet debit, receipt it used): walled by its receipt (tenantId, RLS,
+  // scoped), deleted only with it (FK cascade), read only through the scoped receipt include (fee-receipt.ts).
+  FeeReceiptAllocation: ['FeeReceipt'],
 };
 
 /** These foreign keys preserve global reservations, not tenant ownership.
@@ -138,9 +141,8 @@ export const PLATFORM_WIDE: Record<string, string> = {
  *  Each is an EXPAND candidate under the child-table contract; none may be added
  *  here without a named follow-up. */
 export const PENDING_EXPAND: Record<string, string> = {
-  ReturnRequest: 'FK-less order reference',
-  CollectionContact: 'FK-less subscription/vendor reference',
-  ContentReport: 'FK-less reporter/subject references',
+  // [DB-05] ReturnRequest, CollectionContact and ContentReport left this list: they
+  // carry tenantId (EXPAND, migration 20261013221500), walled and lineage-held.
 };
 
 const models = Prisma.dmmf.datamodel.models;

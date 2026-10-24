@@ -1,13 +1,26 @@
 {
   "targetKb": 120,
   "firstLoadJsKb": {
-    "/(app)/page": 159,
-    "/(app)/order/vendor/[id]/page": 159,
-    "/store/[slug]/page": 140,
-    "/(app)/market/page": 155,
-    "/(app)/order/browse/page": 154,
-    "/(app)/cart/page": 158,
-    "/login/page": 118,
-    "/signup/page": 124
+    "/(app)/page": 156,
+    "/(app)/store/[slug]/page": 166,
+    "/(app)/market/page": 153,
+    "/(app)/order/browse/page": 150,
+    "/(app)/cart/page": 157,
+    "/(app)/checkout/page": 157,
+    "/login/page": 117,
+    "/signup/page": 123,
+    "/dashboard/orders/page": 173,
+    "/dashboard/inventory/page": 158,
+    "/dashboard/inventory/import/page": 158,
+    "/dashboard/insights/page": 150,
+    "/dashboard/weekly-fee/page": 159,
+    "/dashboard/notifications/page": 154,
+    "/dashboard/schedule/page": 155,
+    "/portal/page": 150,
+    "/portal/history/page": 147,
+    "/portal/documents/page": 149,
+    "/portal/weekly-fee/page": 154,
+    "/portal/account/page": 146,
+    "/advertiser/page": 144
   }
 }

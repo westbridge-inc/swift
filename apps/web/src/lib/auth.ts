@@ -2,6 +2,7 @@
 
 import { invalidateStorefrontContinuations } from '@/lib/storefront-continuation';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
+import { DEMO_ENDED_LOGIN, DEMO_ENDED_NOTICE, isClosedDemoAnswer, noteDemoEnded } from '@/lib/demo-ended';
 
 // ── The session ──────────────────────────────────────────────────────────────
 // [W-01] THIS APP HOLDS NO CREDENTIAL. It used to keep both tokens in
@@ -120,7 +121,8 @@ export function getSessionPrincipal(): string | null {
  * refreshes the locally tracked principal, which the mid-request account-change
  * guards below compare against.
  */
-export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export type SessionAnswer = { ok: boolean; unreachable?: true; user?: Record<string, unknown> };
+export async function sessionProbe(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
   const forget = () => {
     const known = sessionPrincipal !== null;
@@ -130,6 +132,16 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
   };
   try {
     const res = await fetch(`${API_URL}/api/v1/auth/me`, { credentials: 'include', headers: { ...clientHeaders } });
+    if (res.status === 410 && isClosedDemoAnswer(410, await res.json().catch(() => null))) {
+      // [Row 353] A demo whose session is over is signed out here, without moving the page;
+      // the sign-in page says why when the person gets there.
+      await endClosedDemo({ redirect: false });
+      return forget();
+    }
+    // [UI-SWEEP U23] A server failure says nothing about the session: it is
+    // "unreachable", never "signed out", and the principal is kept.
+    // [REVIEW-F2 #1968 S4-2] A timeout (408) or a rate limit (429) is the same: not an answer about the session.
+    if (res.status >= 500 || res.status === 408 || res.status === 429) return { ok: false, unreachable: true };
     if (!res.ok) return forget();
     const json = await res.json().catch(() => null);
     const user = json?.data?.user as { id?: unknown } | undefined;
@@ -151,7 +163,7 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: Record<strin
     return { ok: true, user: user as Record<string, unknown> };
   } catch {
     // A network failure is not "signed out" — say nothing rather than guess.
-    return { ok: false };
+    return { ok: false, unreachable: true };
   }
 }
 
@@ -179,9 +191,11 @@ export function adoptSession(principal: string | null) {
  * every page load. The shell calls this only when a signed-in answer is
  * actually needed — a private page, or an action like adding to the cart.
  */
-export async function restoreSession(): Promise<{ ok: boolean; user?: Record<string, unknown> }> {
+export async function restoreSession(): Promise<SessionAnswer> {
   if (typeof window === 'undefined') return { ok: false };
-  if (!(await tryRefresh())) return { ok: false };
+  const refresh = await tryRefresh();
+  if (refresh === 'unreachable') return { ok: false, unreachable: true };
+  if (refresh === 'signed-out') return { ok: false };
   return sessionProbe();
 }
 
@@ -200,12 +214,37 @@ export async function logout(): Promise<void> {
     // 401s clears NOTHING, leaving the month-long refresh cookie alive to sign
     // the person straight back in. The refresh-and-retry makes the sign-out
     // land. `redirectOnExpired: false` because we are already leaving.
-    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false });
+    //
+    // [Row 225] Sign out names no expected account: on a shared browser it signs
+    // THIS BROWSER out, whoever the cookie names now. A person who presses Sign
+    // out in a tab left open from earlier must never leave the browser signed in
+    // to the account another tab signed in since.
+    await apiFetch('/api/v1/auth/logout', { method: 'POST', body: '{}' }, { redirectOnExpired: false, expectPrincipal: false });
   } catch {
     // Offline, or a session already gone: nothing here can reach the cookies,
     // and the local clear below still takes the person to /login.
   }
   clearSession();
+}
+
+/**
+ * [Row 353 · DL-9] The store-review demo's session is over. Its cookies are
+ * HttpOnly, so only the server can clear them: /auth/logout/refresh needs no
+ * live access session (the demo's every authenticated route answers 410) and
+ * clears both cookies whatever it finds. Then the local sign-out, and the
+ * sign-in page, which says why.
+ */
+async function endClosedDemo({ redirect }: { redirect: boolean }): Promise<void> {
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, {
+      method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}',
+    });
+  } catch {
+    // Offline: the local sign-out below still happens.
+  }
+  clearSession();
+  noteDemoEnded();
+  if (redirect && window.location.pathname !== '/login') window.location.href = DEMO_ENDED_LOGIN;
 }
 
 export function clearSession() {
@@ -247,20 +286,25 @@ export function subscribeSelectedStore(listener: () => void): () => void {
   };
 }
 
-let refreshFlight: Promise<boolean> | null = null;
+/** [REVIEW-F2 #1968 S4-4] What the refresh step learned. Only the server saying
+ *  no is a sign-out: a 5xx, a timeout (408), a rate limit (429 — refreshes are
+ *  limited per address) or a dropped connection says nothing about the session. */
+type RefreshOutcome = 'refreshed' | 'signed-out' | 'unreachable';
+let refreshFlight: Promise<RefreshOutcome> | null = null;
 
 /** One refresh at a time: concurrent 401s share the flight, so a rotated
  *  refresh cookie is never replayed and the family is never revoked by us. */
-async function tryRefresh(): Promise<boolean> {
+async function tryRefresh(): Promise<RefreshOutcome> {
   if (!refreshFlight) {
     refreshFlight = (async () => {
       try {
         const res = await fetch(`${API_URL}/api/v1/auth/refresh`, {
           method: 'POST', credentials: 'include', headers: { ...clientHeaders },
         });
-        return res.ok;
+        if (res.ok) return 'refreshed';
+        return res.status >= 500 || res.status === 408 || res.status === 429 ? 'unreachable' : 'signed-out';
       } catch {
-        return false;
+        return 'unreachable';
       } finally {
         refreshFlight = null;
       }
@@ -269,10 +313,13 @@ async function tryRefresh(): Promise<boolean> {
   return refreshFlight;
 }
 
+/** The server refused a write because the shared cookie now names another account (row 225). */
+export const SERVER_SESSION_CHANGED = 'This browser is now signed in to another Swift account. Nothing was saved — this page now shows that account.';
+
 export async function apiFetch(
   path: string,
   options?: RequestInit,
-  policy: { redirectOnExpired?: boolean; storeId?: string | null } = {},
+  policy: { redirectOnExpired?: boolean; storeId?: string | null; expectPrincipal?: boolean } = {},
 ) {
   const requestSession = authSnapshot();
   const requestStore = 'storeId' in policy ? policy.storeId ?? null : getSelectedStore();
@@ -292,14 +339,22 @@ export async function apiFetch(
         ...(/^\/api\/v1\/(vendor|rider|driver)(?:\/|$)/.test(path) ? { 'x-client-platform': 'web' } : {}),
         ...(requestStore && { 'x-vendor-id': requestStore }),
         ...options?.headers,
+        // [Row 225] The account this page is acting as: the API refuses a write
+        // whose cookie (shared by every tab) now names someone else.
+        ...(policy.expectPrincipal !== false && requestSession.principal && { 'X-Swift-Expected-Principal': requestSession.principal }),
       },
     });
   };
 
   let res = await doFetch();
   if (res.status === 401) {
-    const refreshed = await tryRefresh();
-    if (refreshed && snapshotIsCurrent(requestSession)) res = await doFetch();
+    const refresh = await tryRefresh();
+    // [REVIEW-F2 #1968 S4-4] A refresh that could not reach Swift is not a
+    // sign-out: the session is kept, the page stays, and the caller sees an error.
+    if (refresh === 'unreachable') {
+      throw new ApiRequestError('Swift can\u2019t be reached right now. Check your connection and try again.', 503, 'UNREACHABLE');
+    }
+    if (refresh === 'refreshed' && snapshotIsCurrent(requestSession)) res = await doFetch();
     if (res.status === 401) {
       if (!snapshotIsCurrent(requestSession)) {
         throw new ApiRequestError('The signed-in account changed while this request was running. Try again.', 409, 'SESSION_CHANGED');
@@ -318,6 +373,16 @@ export async function apiFetch(
   const json = await res.json().catch(() => ({}));
   if (!responseContextIsCurrent(requestSession, requestStore)) {
     throw new ApiRequestError('The signed-in account or selected store changed while this response was loading. Try again.', 409, 'SESSION_CHANGED');
+  }
+  // [Row 225] The server saw another account behind this tab's cookie: learn who, so the page re-renders as them.
+  if (res.status === 409 && json?.error?.code === 'SESSION_CHANGED') {
+    void sessionProbe();
+    // The page re-renders as that account by itself (the probe above): say what happened, ask for nothing.
+    throw new ApiRequestError(SERVER_SESSION_CHANGED, 409, 'SESSION_CHANGED');
+  }
+  if (isClosedDemoAnswer(res.status, json)) {
+    await endClosedDemo({ redirect: policy.redirectOnExpired !== false });
+    throw new ApiRequestError(DEMO_ENDED_NOTICE, 410, 'REVIEW_SESSION_CLOSED');
   }
   if (!res.ok || json?.success === false) {
     throw new ApiRequestError(

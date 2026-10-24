@@ -26,6 +26,7 @@ import { rescueIncentiveGyd } from '../modules/dispatch/rescue';
 import { NotificationService } from '../modules/notification/notification.service';
 import { OrderService } from '../modules/order/order.service';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 const GEO = { lat: 6.8013, lng: -58.1553 };
 const DOOR = { lat: GEO.lat + 0.004, lng: GEO.lng + 0.004 };
@@ -106,7 +107,7 @@ describe('[F-07 ruling] the rescue incentive is the fee', () => {
     expect(await earnings(order.id)).toEqual([]); // the abandoner walked away from the fee
 
     // The rescuer takes the re-offered order, picks up, arrives, and collects at the door.
-    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rescuer.rider.id, status: 'ARRIVED', pickedUpAt: new Date() } });
+    await walkOrderStatus(app.prisma, order.id, 'ARRIVED', { riderId: rescuer.rider.id, pickedUpAt: new Date() });
     await app.prisma.orderStatusLog.createMany({ data: [
       { orderId: order.id, status: 'PICKED_UP', changedBy: rescuer.rider.id, note: 'rescue pickup', createdAt: new Date(Date.now() - 20 * 60_000) },
       { orderId: order.id, status: 'ARRIVED', changedBy: rescuer.rider.id, note: 'rescue arrival', createdAt: new Date(Date.now() - 5 * 60_000) },

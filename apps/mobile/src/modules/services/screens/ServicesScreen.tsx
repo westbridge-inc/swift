@@ -1,14 +1,18 @@
 /** @jsxImportSource react */
 import React, { useState } from 'react';
 import { ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Image } from 'expo-image';
+import { storePhotoUrl } from '../../../lib/images';
 import { Feather } from '@expo/vector-icons';
 import { color, font, fontSize, radius, space } from '@swift/ui';
 import { useServiceProviders, useRequestJob } from '../../../hooks';
 import { Card, Chip, DecorativeIcon, EmptyState, Header, IconChip, LinkText, LoadingBlock, Pictogram, PillButton, PopupCard, PopupTitle, RatingMeta, Screen, T, TonePill, type PictogramName } from '../../../kit';
+import { afterDismiss } from '../../../kit/after-dismiss';
 import { errorMessage } from '../../../lib/apiError';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { useAuthStore } from '../../../stores/authStore';
 import { enterServiceProvider } from '../serviceProviderEntry';
+import { licenceLabel } from '../licenceLabel';
 import { useServiceCatalog } from '../useServiceCatalog';
 import { customerServiceCategories, SERVICE_GROUP_LABELS, selectedServiceCategory, serviceRequestTrade } from '../serviceCatalogPresentation';
 
@@ -33,6 +37,8 @@ type ServiceProvider = {
   selfSkilled: boolean;
   certified: boolean;
   badges: string[];
+  /** [R7] The day a person on our team checked this provider's licence (null = none checked). */
+  licenceCheckedOn?: string | null;
 };
 
 type ProviderBrowse = {
@@ -235,8 +241,8 @@ export function ServicesScreen({ navigation }: any) {
                         />
                       </View>
                       <View style={{ marginTop: space.sm }}>
-                        {p.certified ? (
-                          <TonePill label="Certified qualification" tone="neutral" />
+                        {licenceLabel(p.licenceCheckedOn) ? (
+                          <TonePill label={licenceLabel(p.licenceCheckedOn)!} tone="neutral" />
                         ) : (
                           <T variant="caption" tone="muted">
                             {p.selfSkilled ? 'Self-skilled' : 'No trade credential shown'}
@@ -259,6 +265,23 @@ export function ServicesScreen({ navigation }: any) {
                     <T variant="label" tone="muted" numberOfLines={2} style={{ marginTop: space.md }}>
                       {p.bio}
                     </T>
+                  ) : null}
+                  {/* [IMAGES-E2E] Photos of the provider's own work (uploaded, redrawn without camera data). */}
+                  {p.portfolioPhotos?.length ? (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: space.md }} contentContainerStyle={{ gap: space.sm }}>
+                      {p.portfolioPhotos.slice(0, 6).map((photo) => {
+                        const uri = storePhotoUrl(photo, 320);
+                        return uri ? (
+                          <Image
+                            key={photo}
+                            source={{ uri }}
+                            style={{ width: 96, height: 72, borderRadius: radius.md, backgroundColor: color.surface.subtle }}
+                            contentFit="cover"
+                            accessibilityLabel={`Work by ${p.tradeLabel.toLowerCase()}`}
+                          />
+                        ) : null;
+                      })}
+                    </ScrollView>
                   ) : null}
                 </Card>
               );
@@ -338,7 +361,8 @@ export function ServicesScreen({ navigation }: any) {
           style={{ alignSelf: 'stretch', marginTop: space['2xl'] }}
           onPress={() => {
             setSentPopup(false);
-            navigation?.navigate?.('ServiceJobs');
+            // [UI-SWEEP U12] My jobs opens after the popup's teardown, never in its tick.
+            afterDismiss(() => navigation?.navigate?.('ServiceJobs'));
           }}
         />
         <PillButton label="Done" variant="soft" style={{ alignSelf: 'stretch', marginTop: space.md }} onPress={() => setSentPopup(false)} />

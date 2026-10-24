@@ -1,3 +1,8 @@
+import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
+import { scanUpload } from '../../lib/malware-scan';
+import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
+import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { assertRoadTripInMarket } from '../rides/road-trip-market';
 import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
@@ -7,14 +12,15 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
 import { readCourierRates } from '../country/pricing-config';
-import { getMapsProvider } from '../../providers/maps/maps-provider';
-import { makeDispatchService } from '../dispatch/dispatch.service';
+import { zMoneyWhole } from '../../utils/money-schema';
+import { assertRoadQuoteAvailable, getMapsProvider } from '../../providers/maps/maps-provider';
 import { OrderService, holdWindowMs, TERMINAL_ORDER_STATUSES } from '../order/order.service';
 import { RIDER_PICKUP_FROM } from '../order/order-status';
 import { NotificationService } from '../notification/notification.service';
 import { CashRulesService, gpsEvidence, orderingRestriction } from '../cash/cash-rules.service';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { goodsSizeCarriableToday } from '../../config/vehicle-classes';
 import { getStorageProvider } from '../../providers/storage/storage-provider';
 import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
 import type { OrderStatus } from '@prisma/client';
@@ -23,6 +29,8 @@ import { redactCounterpartyPhone, redactLiveLocation, riderCounterpartySelect } 
 import { invalidateHomeCache } from '../user/home-cache';
 import { SupportService } from '../support/support.service';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
+import { parcelProhibited, PROHIBITED_CLASS_LABELS } from '../compliance/prohibited-items';
+import { POSTAL_REFUSAL, postalItem } from './postal-items';
 
 // ---------------------------------------------------------------------------
 // Module C: Courier (spec §4.3) — send a parcel person-to-person. A non-cart
@@ -60,10 +68,16 @@ const orderSchema = z.object({
   packageSize: sizeSchema,
   packageDescription: z.string().trim().max(500).optional(),
   packagePhotoUrl: z.string().max(2048).optional(),
+  /** [GUARDRAILS §8 · owner #67] The sender's tick on "This parcel has no prohibited items". Absent from apps
+   *  before build 11; when sent, it is recorded on the order's own trail, and `false` books nothing. */
+  declaresNoProhibitedItems: z.boolean().optional(),
   speed: speedSchema,
   recipientName: z.string().trim().min(2).max(120),
   recipientPhone: z.string().trim().min(5).max(30),
   payer: z.enum(['SENDER', 'RECIPIENT']).default('SENDER'),
+  /** [PRICE-LOCK] The fee the sender was shown (POST /estimate totalFee). When
+   *  sent, the job is created only at it. Absent from apps before the lock. */
+  expectedFee: zMoneyWhole.optional(),
 });
 
 const cancelSchema = z.object({ reason: z.string().max(500).optional() });
@@ -160,8 +174,11 @@ async function quote(
   speed: DeliverySpeed,
   rates?: CourierRates,
 ) {
+  assertRoadTripInMarket({ pickup, dropoff });
   // Real road km when OSRM is configured; deterministic estimate otherwise.
-  const { km, source } = await courierMaps.routeKm(pickup, dropoff);
+  const route = await courierMaps.routeKm(pickup, dropoff);
+  assertRoadQuoteAvailable(route);
+  const { km, source } = route;
   // [ALG-18] Canonical BEFORE pricing: the fee and the frozen number are one number.
   const distanceKm = canonicalBillableKm(km);
   return { distanceKm, source, estimate: estimateCourierFee(distanceKm, size, speed, rates) };
@@ -169,7 +186,6 @@ async function quote(
 
 export default async function courierRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
-  const dispatch = makeDispatchService(app);
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const notifications = new NotificationService(app.prisma, app.io);
   // [M-28] The cash rail — the same one the rider's door handover and the driver's fare outcome use.
@@ -185,9 +201,19 @@ export default async function courierRoutes(app: FastifyInstance) {
     return (await readCourierRates(app.prisma, user?.countryCode ?? 'GY')).payload;
   }
 
+  /** [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] A parcel no vehicle Swift takes on today may
+   *  carry (the largest size while car deliveries are off) is refused at its quote and at its request, before
+   *  anything is written: never booked, dispatched to nobody and stranded. */
+  const assertParcelCarriable = (packageSize: string) => {
+    if (!goodsSizeCarriableToday(packageSize)) {
+      throw new AppError(409, 'PARCEL_TOO_BIG', 'No vehicle on Swift can carry a parcel this size right now. Choose a smaller size if it fits, or send it another way.');
+    }
+  };
+
   /** POST /estimate — price quote (size + distance + speed) before requesting. */
   app.post('/estimate', auth, async (request) => {
     const body = estimateSchema.parse(request.body);
+    assertParcelCarriable(body.packageSize);
     const { distanceKm, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(request.user.userId));
     return { success: true, data: { ...estimate, distanceKm: Math.round(distanceKm * 10) / 10 } };
   });
@@ -205,21 +231,67 @@ export default async function courierRoutes(app: FastifyInstance) {
     // dispatched — refused before the routing provider is asked for a quote.
     if (customer.tenant.kind === 'REVIEW') throw new ReviewDemoOrderRefusedError(REVIEW_DEMO_NO_BOOKINGS_MESSAGE);
 
-    const restriction = await orderingRestriction(app.prisma, userId);
-    if (restriction === 'banned') {
-      throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Courier is disabled on this account after repeated failed payments. Contact support.');
+    const receiptKey = courierReceiptKey(request.headers['idempotency-key']);
+    const requestHash = checkoutRequestHash(body);
+    const receiptContext = checkoutRequestHash({ userId, receiptKey, requestHash });
+    const replay = async (db: Prisma.TransactionClient) => {
+      if (!receiptKey) return null;
+      const receipt = await db.checkoutReceipt.findUnique({ where: { userId_idempotencyKey: { userId, idempotencyKey: receiptKey } } });
+      if (!receipt) return null;
+      if (receipt.requestHash !== requestHash) throw new AppError(422, 'IDEMPOTENCY_MISMATCH', 'This request key was already used for a different parcel. Use a new key for a new job.');
+      return { answer: await openCourierAnswer(receipt.result, receiptContext), orderId: receipt.orderIds[0]! };
+    };
+    const existing = await replay(app.prisma);
+    if (existing) { reply.code(201); return existing.answer; }
+    assertParcelCarriable(body.packageSize);
+    const assertCashAllowed = async (db: Prisma.TransactionClient) => {
+      const restriction = await orderingRestriction(db, userId);
+      if (restriction !== null) throw new AppError(403, 'ACCOUNT_RESTRICTED', 'Cash courier requests are disabled on this account after failed payments. Contact support.');
+    };
+    await assertCashAllowed(app.prisma);
+
+    // [GUARDRAILS §8 · owner #67] Swift never delivers banned goods: the description is screened against the
+    // same list as the catalogue (disguises included) and refused in plain words, before anything is written.
+    if (body.declaresNoProhibitedItems === false) {
+      throw new AppError(409, 'PROHIBITED_PARCEL', 'Swift can\'t carry a parcel with a prohibited item in it.');
+    }
+    // A brand-first word ("Banks", "Corona", "Tiger") alone is not enough, but with a pack or a measure ("Banks 6
+    // pack", "Halls 9 pack") it is the goods. [DS1109 S4-1, DS1112 S4-2]
+    const prohibited = parcelProhibited(body.packageDescription);
+    if (prohibited) {
+      throw new AppError(409, 'PROHIBITED_PARCEL',
+        `Swift can't carry this parcel: Swift never delivers ${PROHIBITED_CLASS_LABELS[prohibited.prohibitedClass]}. If it's something else, describe it in other words.`,
+        { prohibitedClass: prohibited.prohibitedClass });
+    }
+    // [Legal research A10 · R1] Courier = goods only: letters, documents and mail are the Post Office's to carry.
+    if (postalItem(body.packageDescription)) {
+      throw new AppError(409, 'PROHIBITED_PARCEL', POSTAL_REFUSAL, { prohibitedClass: 'POSTAL' });
     }
 
     const { distanceKm, source, estimate } = await quote(body.pickup, body.dropoff, body.packageSize, body.speed, await ratesFor(userId));
+    // [PRICE-LOCK · owner: the price shown is the price charged] A fee that
+    // moved since the sender's quote (rates, the road) is shown to them again
+    // before anything is written; the job always stores the SERVER's fee. An
+    // app from before the lock sends none and books at the server fee.
+    if (body.expectedFee === undefined) {
+      request.log.info({ event: 'courier_order_unquoted' }, '[PRICE-LOCK] courier job requested without the fee the sender was shown (an app from before the lock); created at the server fee');
+    } else if (body.expectedFee !== estimate.totalFee) {
+      throw new AppError(409, 'PRICE_CHANGED', 'The fee for this parcel has changed. Check the new fee, then send it again.',
+        { expectedFee: body.expectedFee, fee: estimate.totalFee, currencyCode: estimate.currency });
+    }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayCount = await app.prisma.order.count({ where: { placedAt: { gte: today } } });
 
     const trackingToken = randomBytes(32).toString('base64url');
-    const order = await app.prisma.$transaction(async (tx) => {
+    const committed = await app.prisma.$transaction(async (tx) => {
       await lockActiveOrderCustomer(tx, userId, customer.tenantId);
-      return tx.order.create({
+      // A racing retry observes the first commit under the same customer lock.
+      const existing = await replay(tx);
+      if (existing) return existing;
+      await assertCashAllowed(tx);
+      const order = await tx.order.create({
         data: {
           tenantId: customer.tenantId,
           orderNumber: generateOrderNumber(todayCount + 1),
@@ -260,43 +332,39 @@ export default async function courierRoutes(app: FastifyInstance) {
           estimatedDeliveryTime: estimate.estimatedMinutes,
           paymentMethod: 'CASH',
           statusHistory: {
-            create: { status: 'READY_FOR_PICKUP', changedBy: userId, note: `Courier requested — fee $${estimate.totalFee}` },
+            create: {
+              status: 'READY_FOR_PICKUP', changedBy: userId,
+              note: `Courier requested — fee $${estimate.totalFee}${body.declaresNoProhibitedItems ? '. The sender declared the parcel holds no prohibited items.' : ''}`,
+            },
           },
         },
       });
+      const answer = {
+        success: true,
+        data: {
+          orderId: order.id, orderNumber: order.orderNumber, fee: estimate.totalFee,
+          distanceKm: Math.round(distanceKm * 10) / 10,
+          trackingToken, trackingUrl: `/track/${trackingToken}`,
+          expiresAt: new Date(order.placedAt.getTime() + TRACKING_TTL_MS),
+        },
+      };
+      if (!order.holdExpiresAt) await persistDispatchCommandInTransaction(tx, {
+        orderId: order.id, tenantId: order.tenantId, reason: 'courier-created', priority: 5, now: order.placedAt,
+      });
+      if (receiptKey) await persistCheckoutReceiptInTransaction(tx, {
+        userId, tenantId: order.tenantId, idempotencyKey: receiptKey, requestHash,
+        orderIds: [order.id], result: await sealCourierAnswer(answer, receiptContext),
+      });
+      return { answer, orderId: order.id };
     });
 
-    // Held courier jobs dispatch at release (the worker enqueues); otherwise now.
-    // SWIFT-097: enqueue the first-pass dispatch like taxi does (SWIFT-AUD-D6-08),
-    // instead of awaiting the offer cascade inline — the cascade does ETA
-    // round-trips that would pin this handler (and a DB connection) open. The
-    // client listens for the dispatch:offer socket event either way. Inline
-    // fallback when no queue is up (tests / degraded boot).
-    if (!order.holdExpiresAt) {
-      if (app.dispatchQueue) {
-        await app.dispatchQueue.add('dispatch-order', { orderId: order.id }, {
-          priority: 5,
-          removeOnComplete: 100,
-          removeOnFail: 50,
-        });
-      } else {
-        await dispatch.dispatchOrder(order.id);
-      }
-    }
-
+    // The existing worker sweep recovers a crash or outage after commit.
+    // A failed fast publication never turns a committed order into a failure.
+    if (app.dispatchQueue) await drainCheckoutOutbox({
+      prisma: app.prisma, queues: { ...app.queues, dispatchQueue: app.dispatchQueue }, log: request.log,
+    }, { orderIds: [committed.orderId] }).catch((err: unknown) => request.log.warn({ err }, 'Courier dispatch remains in the outbox'));
     reply.code(201);
-    return {
-      success: true,
-      data: {
-        orderId: order.id,
-        orderNumber: order.orderNumber,
-        fee: estimate.totalFee,
-        distanceKm: Math.round(distanceKm * 10) / 10,
-        trackingToken,
-        trackingUrl: `/track/${trackingToken}`,
-        expiresAt: new Date(order.placedAt.getTime() + TRACKING_TTL_MS),
-      },
-    };
+    return committed.answer;
   });
 
   /** GET /orders — the sender's courier history. */
@@ -402,10 +470,15 @@ export default async function courierRoutes(app: FastifyInstance) {
       cancellation: { by: request.user.userId, reason },
       releaseStaleMoverPointer: true,
       invalidStatus: courierNotCancellable,
+      // [owner #50] The sender's cancel follows the one cancellation rule on
+      // the locked row: free while no rider has taken the parcel, inside the
+      // one-minute window, or when the rider is very late — otherwise refused
+      // (contact the rider). Never a fee.
+      customerCancel: true,
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'CANCELLED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier cancellation socket publication failed after commit');
     }
@@ -452,6 +525,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
     // The pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued URL
     // and the rider it was issued to. /pickup-proof exact-matches it, so pickup
@@ -503,6 +577,9 @@ export default async function courierRoutes(app: FastifyInstance) {
       `Rider confirmed collecting the parcel with a pickup photo — ${gpsEvidence(body.gps.lat, body.gps.lng)}`, {
         allowedFrom: RIDER_PICKUP_FROM,
         expectedRiderId: rider.id,
+        // [Opus review 14 Oct #1695 S3-1] The assignment this request read: a
+        // release and re-assignment while it runs is refused at the lock.
+        expectedRiderAssignmentVersion: order.riderAssignmentVersion,
         withinTransaction: async (tx) => {
           await tx.order.update({ where: { id }, data: {
             courierPickupProofPhotoUrl: body.proofPhotoUrl,
@@ -596,7 +673,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       }
       const result = await cashRules.handover(id, request.user.userId, { outcome: body.outcome, gps: body.gps, photoUrl: body.proofPhotoUrl, courierProofPhotoUrl: body.proofPhotoUrl, sessionId: request.authSessionId ?? undefined });
       try {
-        app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: result.order.status });
+        await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: result.order.status });
       } catch (error) {
         request.log.warn({ err: error, orderId: id }, 'courier outcome socket publication failed after commit');
       }
@@ -632,7 +709,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'DELIVERED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier proof socket publication failed after commit');
     }
@@ -705,7 +782,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       data: { orderId: id, status: 'RETURNING' },
     }).catch((error) => request.log.warn({ err: error, orderId: id }, 'courier return notification failed after commit'));
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNING', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'RETURNING', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return socket publication failed after commit');
     }
@@ -769,6 +846,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
 
+    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
 
     const { order: updated } = await orderService.transitionOrderAtomically({
@@ -788,7 +866,7 @@ export default async function courierRoutes(app: FastifyInstance) {
     });
 
     try {
-      app.io.to(`order:${id}`).emit('order:status_changed', { orderId: id, status: 'RETURNED', timestamp: new Date().toISOString() });
+      await emitToOrderRoom(app.prisma, app.io, id, 'order:status_changed', { orderId: id, status: 'RETURNED', timestamp: new Date().toISOString() });
     } catch (error) {
       request.log.warn({ err: error, orderId: id }, 'courier return-proof socket publication failed after commit');
     }

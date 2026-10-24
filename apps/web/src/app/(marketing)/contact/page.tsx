@@ -56,7 +56,7 @@ export default function ContactPage() {
                 {site.phone}
               </a>
               <p className="mt-2 text-sm text-[var(--swift-muted)]">
-                Business hours, {site.domain.replace('.com', '')} time.
+                {site.supportHours}
               </p>
             </dd>
           </div>
@@ -67,6 +67,7 @@ export default function ContactPage() {
             </dt>
             <dd className="mt-3">
               <p className="text-lg font-semibold">{site.legalEntityName}</p>
+              <p className="text-sm text-[var(--swift-muted)]">Registration no. {site.registrationNo}</p>
               <address className="mt-1 not-italic text-[var(--swift-muted)]">{site.address}</address>
             </dd>
           </div>
@@ -110,7 +111,8 @@ export default function ContactPage() {
 
         <p className="mt-12 text-sm text-[var(--swift-muted)]">
           Swift is operated by{' '}
-          <b className="font-semibold text-[var(--swift-ink)]">{site.legalEntityName}</b>.
+          <b className="font-semibold text-[var(--swift-ink)]">{site.legalEntityName}</b> (registration no.{' '}
+          {site.registrationNo}).
         </p>
       </div>
     </Section>

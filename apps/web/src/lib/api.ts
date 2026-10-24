@@ -17,6 +17,9 @@ export interface MoverPriceQuote {
   band: 'STANDARD' | 'HEAVY';
   tier: 'courier' | 'courierHeavy' | 'taxi';
   rate: number;
+  /** Whether a mover can register this vehicle today. Absent from a server
+   *  that predates it. Heavy delivery is not offered at launch. */
+  offered?: boolean;
 }
 
 /** One catalogue step: from `minItems` active items, `rate` per week. */
@@ -37,9 +40,11 @@ export interface CountryPricing {
   movers?: MoverPriceQuote[];
   /** Services are flat; catalogue businesses step up by active items. */
   vendors?: { service: number; catalogue: CataloguePriceBand[] };
-  /** From `minLocations` stores, every location takes `discountPct` off its
-   *  own weekly rate. Null in a market with no franchise pricing. */
-  franchise: { minLocations: number; discountPct: number } | null;
+  /** @deprecated Null from a server with the 13 Oct 2026 ruling (every store
+   *  pays its own tier); an older server still sends its old multi-store rule
+   *  here. The page never shows a discount, and claims "every store pays its
+   *  own rate" only when this is null. */
+  franchise?: unknown;
   /** @deprecated Conflated numbers kept for older clients — never render them:
    *  one figure here can stand for several kinds of partner at once. */
   weekly?: Record<string, number | null>;
@@ -90,12 +95,27 @@ export interface StorefrontSummary {
   isFeatured: boolean;
 }
 
+/** [R3 · CAA s.70] The seller block every store page shows (GET /public/storefronts/:slug `seller`).
+ *  A null fact is not on file: the page says "Ask the store". Null block = the store's details are withheld. */
+export interface StorefrontSeller {
+  legalName: string | null;
+  address: string | null;
+  phone: string | null;
+  payment: { cash: true; storeMmg: boolean };
+  refundRule: string | null;
+  statutoryRights: string;
+}
+
 export interface StorefrontDetail extends StorefrontSummary {
   addressLine1: string;
+  /** Absent from an API older than R3. */
+  seller?: StorefrontSeller | null;
   operatingHours: Array<{ dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }>;
   categories: Array<{
     id: string;
     name: string;
+    /** [IMAGES-E2E PR5] The section's own photo (a kept one; absent from an older API). */
+    imageUrl?: string | null;
     items: Array<{
       id: string;
       name: string;
@@ -130,10 +150,11 @@ export async function fetchStorefronts(params: { type?: string; city?: string; q
  * [W2] ONE read per visit: the page and its metadata share it (React `cache`
  * remembers it for the length of the request). The server keeps the answer for
  * 30 seconds — a scanned counter code is a commerce surface, but this copy
- * only draws the page: the storefront re-reads the live store and menu the
- * moment it opens and takes no order until that live read has answered
- * (storefront-experience.tsx `orderable`), and the API re-checks everything
- * at add and at checkout.
+ * only draws the page: the storefront takes no order until it holds a live
+ * menu at most 30 seconds old (storefront-experience.tsx `orderable`) — the
+ * one the server drew into the page (browse-server.ts `storeMenuForPage`) or,
+ * failing that, its own read the moment it opens — and the API re-checks
+ * everything at add and at checkout.
  */
 export const STOREFRONT_REVALIDATE_SECONDS = 30;
 

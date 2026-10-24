@@ -36,6 +36,8 @@ const riderFields = (Prisma.dmmf.datamodel.models.find((m) => m.name === 'Rider'
 /** Columns that must never reach a counterparty. Named individually so the
  *  reason for each is on the record. */
 const FORBIDDEN: Record<string, string> = {
+  averageRating: 'the courier’s LIVE rating mean — moves with each single rating (COORD 18 Oct option S: a star is shown from whole groups of 5 only)',
+  totalRatings: 'the courier’s LIVE rating count — moves with each single rating (option S)',
   nationalIdUrl: 'KYC document',
   driverLicenseUrl: 'KYC document',
   vehicleInsuranceUrl: 'KYC document',
@@ -144,9 +146,13 @@ describe('[F-027-07] the counterparty view of a mover', () => {
     // order, and keeping them in the default view is what made every
     // historical surface a tracking surface. Live position is opt-in and
     // status-gated now — see the F-028-11 block below.
-    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl', 'averageRating']) {
+    // TRANSFORMED (COORD 18 Oct, option S): 'averageRating' was listed as needed. It is the courier's LIVE mean,
+    // which moves with each single rating; no client read it, and the star a customer sees now comes from whole
+    // groups of 5 (rating-groups.ts). So it is pinned OUT, with totalRatings.
+    for (const needed of ['vehicleMake', 'vehicleModel', 'vehicleColor', 'licensePlate', 'vehiclePhotoUrl']) {
       expect(Object.keys(RIDER_COUNTERPARTY_SELECT), needed).toContain(needed);
     }
+    for (const live of ['averageRating', 'totalRatings']) expect(Object.keys(RIDER_COUNTERPARTY_SELECT), live).not.toContain(live);
   });
 
   it('withPhone gates the contact number — only surfaces where the parties actually meet', () => {

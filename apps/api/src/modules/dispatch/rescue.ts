@@ -1,12 +1,18 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
 import { algoConfig } from '../algo/algo-config';
+import { rescueIncentivePayable } from './rescue-incentive-guard';
 import { recordDecision } from '../algo/decisions';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { log } from '../../utils/logger';
+import { runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { sweepPage } from '../../lib/sweep-cursor';
+import { CHECKOUT_OUTBOX_VERSION, checkoutOutboxId } from '../order/checkout-outbox';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
+import { isStoreOrder } from '../order/cancel-policy';
 import {
   deliveryGenerationSuffix,
   dispatchDeclinedKey,
@@ -57,6 +63,17 @@ import {
  * is already handling what nobody has acknowledged. An operator releases the
  * hold through `releaseFoodAgeHold`.
  *
+ * [RESCUE S1 · AUD-CX04-001] The cancellation is ONE transaction with its
+ * record: the CANCELLED write, its status-log line, its decision row and a
+ * durable obligation (an OrderOutbox row of kind `rescue-notice`) to clear the
+ * offer, tell the customer, tell the store and page operations. A refused
+ * record rolls the cancellation back; a crash after the commit leaves the
+ * obligation owed, and the outbox sweep delivers it (`drainRescueNotices`),
+ * each notice on its own dedupe key, so nothing is lost and nothing doubles.
+ * [AUD-CX05-001] Both sweep passes walk a durable (time, id) keyset cursor
+ * (`sweep_cursors`), so orders that share a timestamp never hide behind a
+ * full page, and one order that fails is skipped for the pass, not the tick.
+ *
  * Conflict registered, not decided here: the algorithm document widens the
  * rescue radius by 500 m per cascade capped at 4 km; the shipped ladder
  * already goes 5 → 10 → 15 km per round (BASE_RADIUS_KM / RADIUS_STEP_KM in
@@ -73,15 +90,24 @@ export const FOOD_TOO_OLD_PAID_HELD_OUTCOME = 'FOOD_TOO_OLD_PAID_HELD';
 /** [hold v3] Page sizes for the sweep's two passes. Mutable so a test can
  *  shrink them and prove the cursors walk past a page across ticks. */
 export const SWEEP_PAGE = { retire: 200, holds: 50 };
-const RETIRE_CURSOR = 'rescue:cursor:retire';
-const HOLDS_CURSOR = 'rescue:cursor:holds';
-async function cursorGet(redis: Redis, key: string): Promise<Date | null> {
-  const v = await redis.get(key).catch(() => null);
-  return v ? new Date(v) : null;
+/** [RESCUE S1 · CX05] The two passes' durable cursors (`sweep_cursors` rows).
+ *  The S-05 stalled-pass and repeat-poison pager covers them like every other
+ *  sweep. */
+export const RESCUE_SWEEPS = { retire: 'rescue.food-age.retire', holds: 'rescue.food-age.holds' } as const;
+
+/** A (time, id) keyset position, written as `<ISO time>|<id>`. */
+function keysetCursor(at: Date | null, id: string): string {
+  return `${(at ?? new Date(0)).toISOString()}|${id}`;
 }
-async function cursorSet(redis: Redis, key: string, at: Date | null): Promise<void> {
-  if (at) await redis.set(key, at.toISOString(), 'EX', 3600).catch(() => {});
-  else await redis.del(key).catch(() => {});
+/** The rows strictly after a keyset position in (field, id) order. An
+ *  unreadable cursor starts the pass from the top — never skips a row. */
+function afterKeyset(field: 'readyAt' | 'foodAgeHeldAt', cursor: string | null): Prisma.OrderWhereInput {
+  if (!cursor) return {};
+  const bar = cursor.indexOf('|');
+  const at = new Date(bar > 0 ? cursor.slice(0, bar) : Number.NaN);
+  const id = bar > 0 ? cursor.slice(bar + 1) : '';
+  if (Number.isNaN(at.getTime()) || !id) return {};
+  return { OR: [{ [field]: { gt: at } }, { [field]: at, id: { gt: id } }] };
 }
 
 /** [TA-S0-001] The one predicate: money the store already holds on the MMG
@@ -131,6 +157,52 @@ export function foodAge(order: { readyAt: Date | null }, limitMinutes: number | 
   return { tooOld: ageMinutes > limitMinutes, ageMinutes };
 }
 
+/** The fields the one-order cutoff reads; full order rows fit. */
+export interface TooOldSubject {
+  status: string;
+  orderType: string;
+  tenantId: string;
+  riderId: string | null;
+  driverId: string | null;
+  fulfillment: string;
+  fulfillmentMode: string | null;
+  readyAt: Date | null;
+  foodAgeWaivedAt: Date | null;
+}
+
+/**
+ * [owner #46] The food-age cutoff as a fact about ONE order — "too late to
+ * deliver". The same scope `sweepFoodAge` selects (riderless, still waiting,
+ * ready, platform-rider delivery, cutoff not waived by an operator) and the
+ * same tenant cutoff and age arithmetic, so the customer's free cancel and the
+ * system's cancel can never disagree about which orders are too old.
+ */
+export async function isTooOldToDeliver(prisma: PrismaClient, order: TooOldSubject, now = new Date()): Promise<boolean> {
+  if (order.riderId != null || order.driverId != null) return false;
+  if (!(WAITING_STATUSES as readonly string[]).includes(order.status)) return false;
+  if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY') return false;
+  if (order.readyAt == null || order.foodAgeWaivedAt != null) return false;
+  const limit = await foodAgeLimitMinutes(prisma, order.orderType, order.tenantId);
+  return foodAge(order, limit, now).tooOld;
+}
+
+/**
+ * [owner #46] Is this store order too late to deliver, for the ONE cancel
+ * predicate (order/cancel-policy.ts)? Only a store order can be; any other
+ * kind is never read, so a ride or a parcel never touches the cutoff's
+ * configuration. `config` reads the tenant's cutoff; the order fields come
+ * from the caller's row (the cancel path's is the locked one). Lives here,
+ * not in cancel-policy, so that file stays importable by the boot checks.
+ */
+export async function readTooLateToDeliver(
+  config: PrismaClient,
+  order: TooOldSubject,
+  now: Date = new Date(),
+): Promise<boolean> {
+  if (!isStoreOrder(order)) return false;
+  return isTooOldToDeliver(config, order, now);
+}
+
 export interface RetireableOrder {
   id: string;
   orderNumber: string;
@@ -163,77 +235,294 @@ export async function retireTooOldOrder(deps: RescueDeps, order: RetireableOrder
  *  (too old, but the store already holds the money — a person decides) or
  *  UNTOUCHED (a rider claimed it, or it moved on). */
 export async function settleTooOldOrder(deps: RescueDeps, order: RetireableOrder, ageMinutes: number, limitMinutes: number, now = new Date()): Promise<RetireOutcome> {
-  const r = await deps.prisma.order.updateMany({
-    where: {
-      id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
-      // [REPORT-070 F-06] "No rider found" is only a fact about work that
-      // NEEDS a platform rider: a pickup order or a store's own delivery is
-      // riderless by design and must never be retired for it.
-      fulfillment: 'DELIVERY',
-      foodAgeHeldAt: null,
-      AND: [notSelfDeliveredFilter()],
-      // [TA-S0-001] The guard lives in the CAS, not only in the caller's
-      // snapshot: money captured between the caller's read and this write is
-      // respected by the database, not by luck.
-      NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
-    },
-    data: { status: 'CANCELLED', cancelledAt: now, cancelledBy: 'system', cancellationReason: FOOD_TOO_OLD_REASON },
-  });
-  if (r.count === 0) return holdPaidTooOldOrder(deps, order, ageMinutes, limitMinutes, now);
-
-  await deps.prisma.orderStatusLog.create({
-    data: {
-      orderId: order.id, status: 'CANCELLED', changedBy: 'system',
-      note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`,
-    },
-  }).catch(() => {});
-  // [DISPATCH 1/3 · B4] The live card first, as a pair: the bare key delete
-  // below took the order's side and left the mover's pointer holding them.
-  await withdrawOfferOfClosedOrder(deps, order.id);
-  await deps.redis.del(...dispatchKeys(order.id, order.fulfillmentModeVersion)).catch(() => {});
-  await recordDecision(deps.prisma, {
-    algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: 'FOOD_TOO_OLD',
-    sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found: too old to deliver, cancelled by the system and handed to a person — nobody is marked.`,
-    inputs: { ageMinutes, limitMinutes, orderType: order.orderType, readyAt: order.readyAt?.toISOString() ?? null },
-  });
-
-  deps.io.to(`order:${order.id}`).emit('order:status_changed', { orderId: order.id, status: 'CANCELLED', timestamp: now.toISOString() });
-  const money = order.paymentMethod === 'CASH'
-    ? 'Nothing to pay.'
-    : order.paymentMethod === 'MOBILE_MONEY'
-      ? 'If you already paid by MMG, the store refunds you.'
-      : 'Nothing is charged for it.';
-  await deps.notifications.send({
-    userId: order.customerId,
-    type: 'ORDER_UPDATE',
-    title: 'We couldn’t find a rider in time',
-    body: `Order ${order.orderNumber} was ready but no rider could be found, so we cancelled it rather than deliver it cold. ${money} We’re sorry.`,
-    audience: 'customer',
-    data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
-    dedupeKey: `food-too-old:customer:${order.id}`,
-  });
-  if (order.vendor?.owner.userId) {
-    await deps.notifications.send({
-      userId: order.vendor.owner.userId,
-      type: 'ORDER_UPDATE',
-      title: 'Order cancelled — too old to deliver',
-      body: `${order.orderNumber} was ready ${ageMinutes} min ago and no rider could be found. It has been cancelled; it has been flagged for a Swift operator.`,
-      audience: 'business',
-      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
-      dedupeKey: `food-too-old:vendor:${order.id}`,
+  const notice: RescueNotice = {
+    orderId: order.id, tenantId: order.tenantId, effect: 'RETIRED', ageMinutes, limitMinutes,
+    deliveryAuthorityVersion: order.fulfillmentModeVersion ?? null,
+  };
+  // [RESCUE S1 · CX04] The cancellation, its log line, its decision row and the
+  // obligation to tell everyone commit together or not at all. A refused
+  // record rolls the cancellation back: the order stays waiting and the next
+  // tick (or dispatch pass) settles it again, whole.
+  const outboxId = await deps.prisma.$transaction(async (tx) => {
+    const r = await tx.order.updateMany({
+      where: {
+        id: order.id, tenantId: order.tenantId, riderId: null, status: { in: [...WAITING_STATUSES] },
+        // [REPORT-070 F-06] "No rider found" is only a fact about work that
+        // NEEDS a platform rider: a pickup order or a store's own delivery is
+        // riderless by design and must never be retired for it.
+        fulfillment: 'DELIVERY',
+        foodAgeHeldAt: null,
+        AND: [notSelfDeliveredFilter()],
+        // [TA-S0-001] The guard lives in the CAS, not only in the caller's
+        // snapshot: money captured between the caller's read and this write is
+        // respected by the database, not by luck.
+        NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+      },
+      data: { status: 'CANCELLED', cancelledAt: now, cancelledBy: 'system', cancellationReason: FOOD_TOO_OLD_REASON },
     });
-  }
-  // Dynamic like dispatch.service does it: jobs/queue imports this module's neighbours.
-  const { opsPageOnce } = await import('../../jobs/queue');
-  await opsPageOnce({ redis: deps.redis }, `food_too_old:${order.id}`, 6 * 3600, () =>
-    pageOperators(deps, {
-      title: 'Food too old to deliver — cancelled, needs a person',
-      body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${ageMinutes} min with no rider. Check supply in that area and whether the store should be paid.`,
-      data: { kind: 'ops_food_too_old', orderId: order.id },
-      tenantId: order.tenantId,
-    }),
-  ).catch((err: unknown) => log().warn({ err, orderId: order.id }, 'rescue: ops page failed'));
+    if (r.count === 0) return null;
+    await tx.orderStatusLog.create({
+      data: {
+        orderId: order.id, status: 'CANCELLED', changedBy: 'system',
+        note: `Food-age cutoff: ready ${ageMinutes} min ago, limit ${limitMinutes} min, no rider found — routed to a human. Nobody is marked.`,
+      },
+    });
+    // recordDecision never throws on a database refusal (it returns null); for
+    // the cutoff a missing decision is a missing record, so it rolls back.
+    const decisionId = await recordDecision(tx, {
+      algo: ALGO_ID, subjectType: 'ORDER', subjectId: order.id, tenantId: order.tenantId, outcome: 'FOOD_TOO_OLD',
+      sentence: `Ready ${ageMinutes} min ago against a ${limitMinutes}-min limit with no rider found: too old to deliver, cancelled by the system and handed to a person — nobody is marked.`,
+      inputs: { ageMinutes, limitMinutes, orderType: order.orderType, readyAt: order.readyAt?.toISOString() ?? null },
+    });
+    if (!decisionId) throw new Error('rescue: the food-age decision row was refused; the cancellation rolls back with it');
+    return persistRescueNotice(tx, notice, now);
+  });
+  if (!outboxId) return holdPaidTooOldOrder(deps, order, ageMinutes, limitMinutes, now);
+
+  // [DISPATCH 1/3 · B4] The live card first, as a pair, once the cancellation
+  // is committed. (The obligation below withdraws again on every retry; the
+  // compare-and-delete makes a second pass a no-op.)
+  await withdrawOfferOfClosedOrder(deps, order.id);
+  // The fast path. Anything it cannot finish stays owed on the outbox row and
+  // the checkout-outbox sweep delivers it: the verdict never depends on a notice.
+  await completeRescueNotice(deps, { outboxId, notice })
+    .catch((err: unknown) => log().warn({ err, orderId: order.id }, 'rescue: notices after the cutoff are owed; the outbox sweep retries them'));
   return 'RETIRED';
+}
+
+// ---------------------------------------------------------------------------
+// [RESCUE S1 · CX04] The cutoff's durable obligation
+// ---------------------------------------------------------------------------
+
+/** The outbox kind. In-process only: the generic publisher must never claim it
+ *  (checkout-outbox IN_PROCESS_OUTBOX_KINDS), because a published row closes
+ *  the moment a queue accepts it — and this one stays owed until every notice
+ *  it names is held by its recipient. */
+export const RESCUE_NOTICE_KIND = 'rescue-notice' as const;
+
+export interface RescueNotice {
+  orderId: string;
+  tenantId: string;
+  effect: 'RETIRED';
+  ageMinutes: number;
+  limitMinutes: number;
+  /** The delivery generation whose dispatch keys the cleanup drops. */
+  deliveryAuthorityVersion: number | null;
+}
+
+export interface RescueDelivery {
+  /** Every notice the obligation owes is held by its recipient. */
+  complete: boolean;
+  sent: Array<'customer' | 'business' | 'admin'>;
+  failed: Array<'customer' | 'business' | 'admin'>;
+}
+
+/** One obligation per cancellation: the order's CANCELLED is terminal, so the
+ *  cutoff can commit it once. */
+export function rescueNoticeDedupeKey(orderId: string): string {
+  return `order:${orderId}:${RESCUE_NOTICE_KIND}`;
+}
+
+async function persistRescueNotice(tx: Prisma.TransactionClient, notice: RescueNotice, now: Date): Promise<string> {
+  const dedupeKey = rescueNoticeDedupeKey(notice.orderId);
+  const id = checkoutOutboxId(dedupeKey);
+  await tx.orderOutbox.create({
+    data: {
+      id, tenantId: notice.tenantId, dedupeKey, orderId: notice.orderId, kind: RESCUE_NOTICE_KIND, queue: 'notification',
+      payload: { version: CHECKOUT_OUTBOX_VERSION, ...notice } as Prisma.InputJsonValue, delayMs: 0, availableAt: now,
+    },
+  });
+  return id;
+}
+
+/** The worker's payload, parsed strictly: a malformed obligation fails closed. */
+export function parseRescueNoticePayload(raw: unknown): RescueNotice {
+  const p = (raw ?? {}) as Record<string, unknown>;
+  const text = (v: unknown) => typeof v === 'string' && v.length > 0;
+  const minutes = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  if (!text(p['orderId']) || !text(p['tenantId'])) throw new Error('rescue-notice: orderId and tenantId are required');
+  if (p['effect'] !== 'RETIRED') throw new Error('rescue-notice: unknown effect');
+  if (!minutes(p['ageMinutes']) || !minutes(p['limitMinutes'])) throw new Error('rescue-notice: ageMinutes and limitMinutes must be whole minutes');
+  const version = p['deliveryAuthorityVersion'];
+  if (version != null && !(typeof version === 'number' && Number.isInteger(version))) throw new Error('rescue-notice: deliveryAuthorityVersion must be an integer');
+  return {
+    orderId: p['orderId'] as string, tenantId: p['tenantId'] as string, effect: 'RETIRED',
+    ageMinutes: p['ageMinutes'] as number, limitMinutes: p['limitMinutes'] as number,
+    deliveryAuthorityVersion: (version as number | null | undefined) ?? null,
+  };
+}
+
+/**
+ * Deliver one obligation against the CURRENT row. Each step is idempotent, so
+ * the fast path, the sweep and any retry collapse into one delivery: the card
+ * withdrawal is a compare-and-delete, the search memory a plain delete, and
+ * every notice carries a stable key (the customer and store keys are the ones
+ * the cutoff always used; operations get one per admin). Every notice is tried
+ * even when another fails — one recipient's outage never silences the rest —
+ * and the obligation is complete only when all of them are held.
+ */
+export async function deliverRescueNotice(deps: RescueDeps, notice: RescueNotice): Promise<RescueDelivery> {
+  return runWithTenant(notice.tenantId, async () => {
+    const sent: RescueDelivery['sent'] = [];
+    const failed: RescueDelivery['failed'] = [];
+    const order = await deps.prisma.order.findFirst({
+      where: { id: notice.orderId, tenantId: notice.tenantId },
+      select: {
+        id: true, orderNumber: true, customerId: true, status: true, cancellationReason: true, cancelledAt: true, paymentMethod: true,
+        vendor: { select: { name: true, owner: { select: { userId: true } } } },
+      },
+    });
+    // The cutoff's cancellation, still in its cancelled family: an operator may
+    // have moved it on to REFUNDED (a declared edge) before an owed notice was
+    // drained, and the notices are still owed then. Anything else — the order
+    // gone, or not cancelled by the cutoff — closes the obligation, loudly.
+    const deliverable = !!order && order.cancellationReason === FOOD_TOO_OLD_REASON
+      && (order.status === 'CANCELLED' || order.status === 'REFUNDED');
+    if (!order || !deliverable) {
+      log().warn({ orderId: notice.orderId, status: order?.status ?? null, reason: order?.cancellationReason ?? null }, 'rescue: an owed food-age notice was closed undelivered — the order is gone or no longer the cutoff\'s cancellation');
+      return { complete: true, sent, failed };
+    }
+
+    await withdrawOfferOfClosedOrder(deps, order.id);
+    await deps.redis.del(...dispatchKeys(order.id, notice.deliveryAuthorityVersion)).catch(() => {});
+    // A hint for open screens: they re-read the order, so a repeat is harmless.
+    await emitToOrderRoom(deps.prisma, deps.io, order.id, 'order:status_changed', { orderId: order.id, status: order.status, timestamp: (order.cancelledAt ?? new Date()).toISOString() });
+
+    const attempt = async (role: 'customer' | 'business' | 'admin', deliver: () => Promise<boolean>) => {
+      try {
+        if (await deliver()) sent.push(role); else failed.push(role);
+      } catch (err) {
+        failed.push(role);
+        log().warn({ err, orderId: order.id, role }, 'rescue: a food-age notice was not delivered; it stays owed');
+      }
+    };
+    const money = order.paymentMethod === 'CASH'
+      ? 'Nothing to pay.'
+      : order.paymentMethod === 'MOBILE_MONEY'
+        ? 'If you already paid by MMG, the store refunds you.'
+        : 'Nothing is charged for it.';
+    // send() answers '' when the inbox row could not be written: not delivered.
+    await attempt('customer', async () => Boolean(await deps.notifications.send({
+      userId: order.customerId,
+      type: 'ORDER_UPDATE',
+      title: 'We couldn’t find a rider in time',
+      body: `Order ${order.orderNumber} was ready but no rider could be found, so we cancelled it rather than deliver it cold. ${money} We’re sorry.`,
+      audience: 'customer',
+      data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
+      dedupeKey: `food-too-old:customer:${order.id}`,
+    })));
+    const ownerUserId = order.vendor?.owner.userId;
+    if (ownerUserId) {
+      await attempt('business', async () => Boolean(await deps.notifications.send({
+        userId: ownerUserId,
+        type: 'ORDER_UPDATE',
+        title: 'Order cancelled — too old to deliver',
+        body: `${order.orderNumber} was ready ${notice.ageMinutes} min ago and no rider could be found. It has been cancelled; it has been flagged for a Swift operator.`,
+        audience: 'business',
+        data: { orderId: order.id, orderNumber: order.orderNumber, status: 'CANCELLED', reason: FOOD_TOO_OLD_REASON },
+        dedupeKey: `food-too-old:vendor:${order.id}`,
+      })));
+    }
+    // [REPORT-070 F-02] "Ops paged" means an operator inbox holds it: the page
+    // must reach every admin it names (requireAll throws otherwise), and the
+    // per-admin key collapses a retry into the first delivery.
+    await attempt('admin', async () => {
+      await notifyAdmins(deps.prisma, deps.notifications, {
+        title: 'Food too old to deliver — cancelled, needs a person',
+        body: `Order ${order.orderNumber} (${order.vendor?.name ?? 'store'}) was ready ${notice.ageMinutes} min with no rider. Check supply in that area and whether the store should be paid.`,
+        data: { kind: 'ops_food_too_old', orderId: order.id },
+        tenantId: notice.tenantId,
+        dedupeKey: `food-too-old:ops:${order.id}`,
+        requireAll: true,
+      });
+      return true;
+    });
+    return { complete: failed.length === 0, sent, failed };
+  });
+}
+
+/** The cutoff's own fast path: deliver now, and close the obligation only when
+ *  nothing it owes is outstanding. Anything left stays owed for the sweep. */
+export async function completeRescueNotice(deps: RescueDeps, input: { outboxId: string; notice: RescueNotice }): Promise<RescueDelivery> {
+  const result = await deliverRescueNotice(deps, input.notice);
+  if (result.complete) {
+    await runWithTenant(input.notice.tenantId, () => deps.prisma.orderOutbox.updateMany({
+      where: { id: input.outboxId, processedAt: null },
+      data: { processedAt: new Date(), claimedAt: null, lastError: null },
+    }));
+  }
+  return result;
+}
+
+const NOTICE_DRAIN_LEASE_MS = 60_000;
+const NOTICE_RETRY_BASE_MS = 30_000;
+const NOTICE_RETRY_MAX_MS = 15 * 60_000;
+
+/** How long an obligation still owed after `attempts` tries waits before the
+ *  next: 30 s, doubling, never more than 15 minutes apart — and never dropped. */
+export function rescueNoticeRetryDelayMs(attempts: number): number {
+  return Math.min(NOTICE_RETRY_MAX_MS, NOTICE_RETRY_BASE_MS * 2 ** Math.min(Math.max(0, attempts - 1), 10));
+}
+
+/**
+ * The checkout-outbox sweep's drain of the cutoff's obligations (the same
+ * shape as the direct-MMG claim notices). Each row is leased by
+ * compare-and-set on its attempt counter (two sweeps never hold one; a crashed
+ * drain's lease lapses), delivered against the current row, and closed only
+ * when the delivery was complete. Anything still owed is released with its
+ * reason and backed off; it is never dead-lettered away.
+ */
+export async function drainRescueNotices(
+  deps: RescueDeps & { now?: () => Date },
+  options: { limit?: number; leaseMs?: number } = {},
+): Promise<{ delivered: number; owed: number; failed: number }> {
+  const limit = Math.max(1, options.limit ?? 50);
+  const leaseMs = Math.max(1_000, options.leaseMs ?? NOTICE_DRAIN_LEASE_MS);
+  const outbox = deps.prisma.orderOutbox;
+  const clock = () => deps.now?.() ?? new Date();
+  const system = <T>(fn: () => Promise<T>) => runAsSystem('rescue-notice-drain', fn);
+  let delivered = 0;
+  let owed = 0;
+  let failed = 0;
+  for (let i = 0; i < limit; i += 1) {
+    const now = clock();
+    const due = {
+      kind: RESCUE_NOTICE_KIND,
+      processedAt: null,
+      availableAt: { lte: now },
+      OR: [{ claimedAt: null }, { claimedAt: { lt: new Date(now.getTime() - leaseMs) } }],
+    };
+    const row = await system(() => outbox.findFirst({
+      where: due,
+      orderBy: [{ availableAt: 'asc' }, { id: 'asc' }],
+      select: { id: true, payload: true, attempts: true },
+    }));
+    if (!row) break;
+    const lease = await system(() => outbox.updateMany({
+      where: { ...due, id: row.id, attempts: row.attempts },
+      data: { claimedAt: now, attempts: { increment: 1 } },
+    }));
+    if (lease.count !== 1) continue; // another sweep took it first
+    const attempts = row.attempts + 1;
+    const settle = (data: Prisma.OrderOutboxUpdateManyArgs['data']) =>
+      system(() => outbox.updateMany({ where: { id: row.id, processedAt: null, attempts }, data }));
+    const retryLater = (lastError: string) =>
+      settle({ claimedAt: null, lastError: lastError.slice(0, 2_000), availableAt: new Date(clock().getTime() + rescueNoticeRetryDelayMs(attempts)) });
+    try {
+      const result = await deliverRescueNotice(deps, parseRescueNoticePayload(row.payload));
+      if (result.complete) {
+        await settle({ processedAt: clock(), claimedAt: null, lastError: null });
+        delivered += 1;
+      } else {
+        await retryLater(`incomplete: sent ${result.sent.join(',') || 'none'}; owed ${result.failed.join(',')}`);
+        owed += 1;
+      }
+    } catch (err) {
+      failed += 1;
+      await retryLater(`failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => undefined);
+    }
+  }
+  return { delivered, owed, failed };
 }
 
 /**
@@ -411,6 +700,7 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
     fulfillmentModeVersion: true,
     vendor: { select: { name: true, owner: { select: { userId: true } } } },
   } as const;
+  type WaitingRow = Prisma.OrderGetPayload<{ select: typeof select }>;
   // [REPORT-070 F-04/F-06] Oldest first, a bounded page, held rows excluded,
   // and only work that needs a platform rider — so a shelf of held paid
   // orders can never occupy the page, and a pickup order is never "no rider".
@@ -418,47 +708,62 @@ export async function sweepFoodAge(deps: RescueDeps, now = new Date()): Promise<
   // could not be retired this tick (a tenant with no cutoff, a row not yet
   // old enough) never occupies the page forever — the next tick continues
   // past it and wraps to the start when the set is exhausted.
-  const retireAfter = await cursorGet(deps.redis, RETIRE_CURSOR);
-  const waiting = await deps.prisma.order.findMany({
-    where: {
-      riderId: null, status: { in: [...WAITING_STATUSES] }, readyAt: retireAfter ? { gt: retireAfter } : { not: null },
-      fulfillment: 'DELIVERY', foodAgeHeldAt: null, foodAgeWaivedAt: null,
-      AND: [notSelfDeliveredFilter()],
+  // [RESCUE S1 · CX05] The cursor is (readyAt, id), durable in sweep_cursors:
+  // a timestamp-only cursor jumped past every row sharing the last row's time,
+  // so a tie that straddled a page starved its tail forever. A row that throws
+  // is recorded and skipped for this pass; the rest of the page is served.
+  await sweepPage<WaitingRow>(deps.prisma, RESCUE_SWEEPS.retire, {
+    pageSize: SWEEP_PAGE.retire,
+    cursorOf: (o) => keysetCursor(o.readyAt, o.id),
+    fetch: (after, limit) => deps.prisma.order.findMany({
+      where: {
+        riderId: null, status: { in: [...WAITING_STATUSES] }, readyAt: { not: null },
+        fulfillment: 'DELIVERY', foodAgeHeldAt: null, foodAgeWaivedAt: null,
+        AND: [notSelfDeliveredFilter(), afterKeyset('readyAt', after)],
+      },
+      select,
+      orderBy: [{ readyAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+    }),
+    handle: async (o) => {
+      // [REPORT-070 F-05] The order's own tenant decides its cutoff.
+      const limit = await foodAgeLimitMinutes(deps.prisma, o.orderType, o.tenantId);
+      if (limit == null) return;
+      const age = foodAge(o, limit, now);
+      if (!age.tooOld || age.ageMinutes == null) return;
+      const outcome = await settleTooOldOrder(deps, o, age.ageMinutes, limit, now);
+      if (outcome === 'RETIRED') retired.push(o.id);
+      else if (outcome === 'HELD_PAID') held.push(o.id);
     },
-    select,
-    orderBy: { readyAt: 'asc' },
-    take: SWEEP_PAGE.retire,
+    now,
   });
-  await cursorSet(deps.redis, RETIRE_CURSOR, waiting.length === SWEEP_PAGE.retire ? waiting[waiting.length - 1]!.readyAt : null);
-  for (const o of waiting) {
-    // [REPORT-070 F-05] The order's own tenant decides its cutoff.
-    const limit = await foodAgeLimitMinutes(deps.prisma, o.orderType, o.tenantId);
-    if (limit == null) continue;
-    const age = foodAge(o, limit, now);
-    if (!age.tooOld || age.ageMinutes == null) continue;
-    const outcome = await settleTooOldOrder(deps, o, age.ageMinutes, limit, now);
-    if (outcome === 'RETIRED') retired.push(o.id);
-    else if (outcome === 'HELD_PAID') held.push(o.id);
-  }
   // [REPORT-070 F-01/F-02] Existing holds: every effect is idempotent, so
   // re-running them repairs a crash after the claim or a page nobody took.
-  const holdsAfter = await cursorGet(deps.redis, HOLDS_CURSOR);
-  const holds = await deps.prisma.order.findMany({
-    where: { foodAgeHeldAt: holdsAfter ? { gt: holdsAfter } : { not: null }, riderId: null, status: { in: [...WAITING_STATUSES] } },
-    select: { ...select, foodAgeHeldAt: true },
-    orderBy: { foodAgeHeldAt: 'asc' },
-    take: SWEEP_PAGE.holds,
+  // [RESCUE S1 · CX05] (foodAgeHeldAt, id): one tick holds many orders at the
+  // same `now`, so held times tie by construction.
+  await sweepPage<WaitingRow & { foodAgeHeldAt: Date | null }>(deps.prisma, RESCUE_SWEEPS.holds, {
+    pageSize: SWEEP_PAGE.holds,
+    cursorOf: (h) => keysetCursor(h.foodAgeHeldAt, h.id),
+    fetch: (after, limit) => deps.prisma.order.findMany({
+      where: {
+        foodAgeHeldAt: { not: null }, riderId: null, status: { in: [...WAITING_STATUSES] },
+        AND: [afterKeyset('foodAgeHeldAt', after)],
+      },
+      select: { ...select, foodAgeHeldAt: true },
+      orderBy: [{ foodAgeHeldAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+    }),
+    handle: async (h) => {
+      const limit = (await foodAgeLimitMinutes(deps.prisma, h.orderType, h.tenantId)) ?? 0;
+      const age = foodAge(h, limit, now);
+      // The repair pass: a hold whose audit never landed (pre-v3 code, or a
+      // decision write that was refused) gets its record now, idempotently.
+      await recordHoldAudit(deps.prisma, h, age.ageMinutes ?? 0, limit).catch((err: unknown) => log().warn({ err, orderId: h.id }, 'rescue: hold audit repair failed'));
+      await deliverHoldEffects(deps, h, age.ageMinutes ?? 0, limit);
+      if (!held.includes(h.id)) held.push(h.id);
+    },
+    now,
   });
-  await cursorSet(deps.redis, HOLDS_CURSOR, holds.length === SWEEP_PAGE.holds ? holds[holds.length - 1]!.foodAgeHeldAt : null);
-  for (const h of holds) {
-    const limit = (await foodAgeLimitMinutes(deps.prisma, h.orderType, h.tenantId)) ?? 0;
-    const age = foodAge(h, limit, now);
-    // The repair pass: a hold whose audit never landed (pre-v3 code, or a
-    // decision write that was refused) gets its record now, idempotently.
-    await recordHoldAudit(deps.prisma, h, age.ageMinutes ?? 0, limit).catch((err: unknown) => log().warn({ err, orderId: h.id }, 'rescue: hold audit repair failed'));
-    await deliverHoldEffects(deps, h, age.ageMinutes ?? 0, limit);
-    if (!held.includes(h.id)) held.push(h.id);
-  }
   return { retired, held };
 }
 
@@ -470,7 +775,8 @@ export async function rescueIncentiveGyd(prisma: PrismaClient, cascade: number, 
   const [amount, from] = await Promise.all([algoConfig(prisma, 'rescue.incentiveGyd', tenantId), algoConfig(prisma, 'rescue.incentiveFromCascade', tenantId)]);
   const gyd = Math.max(0, Math.round(Number(amount.value) || 0));
   const fromCascade = Math.max(1, Math.round(Number(from.value) || 2));
-  return gyd > 0 && cascade >= fromCascade ? gyd : 0;
+  // [Row 208 guard] Production pays no incentive until a payout path and a deletion block ship.
+  return gyd > 0 && cascade >= fromCascade ? rescueIncentivePayable(gyd) : 0;
 }
 
 /** The offer carried an incentive and the rider accepted: the payable exists now. Idempotent per order. */

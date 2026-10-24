@@ -58,7 +58,7 @@ export const SERV_01: Journey<Ctx> = {
 
 export const SERV_02: Journey<Ctx> = {
   id: 'SERV-02',
-  estimateSeconds: 60,
+  estimateSeconds: 90,
   title: 'Job → quote → schedule → confirm → complete',
   cases: 'request; quote; schedule; confirm; complete; slot race/timezone/retry',
   async run(rec, ctx) {
@@ -106,14 +106,30 @@ export const SERV_02: Journey<Ctx> = {
     rec.expect('the loser retries an hour later and gets it', await POST(`/services/jobs/${loser.id}/schedule`, { scheduledFor: slot(2, 15) }, loser.s.token), 200);
 
     // complete and rate
+    // [#1712] A confirmed job starts (and so completes) only once its agreed
+    // time has arrived. The 09:00 job above is tomorrow, so completing it now
+    // is refused; the completion is proven on a second job booked seconds
+    // ahead, once it is due.
     rec.deny('the customer cannot complete the job', await POST(`/services/jobs/${id}/complete`, {}, C1.token), [403]);
-    rec.expect('the provider completes the job', await POST(`/services/jobs/${id}/complete`, {}, p.token), 200);
-    rec.deny('completing twice', await POST(`/services/jobs/${id}/complete`, {}, p.token), [400], ['BAD_STATE']);
-    const read = (await GET(`/services/jobs/${id}`, C1.token)).json?.data;
+    rec.deny('the provider cannot complete before the agreed time', await POST(`/services/jobs/${id}/complete`, {}, p.token), [409], ['JOB_NOT_DUE']);
+    const due = await POST('/services/jobs', { providerId, description: `Fix a loose hinge, due now (journey ${ctx.runId})` }, C1.token);
+    const dueId = due.json?.data?.id as string | undefined;
+    rec.require('a second job, due in seconds', !!dueId, `→ ${brief(due)}`);
+    rec.expect('the provider quotes the due job', await POST(`/services/jobs/${dueId}/quote`, { amount: 15000 }, p.token), 200);
+    const dueAt = new Date(Date.now() + 20_000);
+    rec.expect('the customer books it 20 s ahead', await POST(`/services/jobs/${dueId}/schedule`, { scheduledFor: dueAt.toISOString() }, C1.token), 200);
+    rec.expect('the provider confirms the due job', await POST(`/services/jobs/${dueId}/confirm`, {}, p.token), 200);
+    await sleep(Math.max(0, dueAt.getTime() - Date.now()) + 1_500);
+    rec.expect('the provider completes the job once it is due', await POST(`/services/jobs/${dueId}/complete`, {}, p.token), 200);
+    rec.deny('completing twice', await POST(`/services/jobs/${dueId}/complete`, {}, p.token), [400], ['BAD_STATE']);
+    const read = (await GET(`/services/jobs/${dueId}`, C1.token)).json?.data;
     rec.check('the job reads COMPLETED', read?.status === 'COMPLETED', `status=${read?.status}`);
-    rec.expect('the customer rates the job', await POST(`/services/jobs/${id}/rate`, { score: 5, comment: 'journey' }, C1.token), [200, 201]);
-    rec.deny('a second rating', await POST(`/services/jobs/${id}/rate`, { score: 4 }, C1.token), [409], ['ALREADY_RATED']);
-    for (const [jid, s] of [[ja, C2], [jb, C3]] as const) await POST(`/services/jobs/${jid}/cancel`, {}, s.token);
+    rec.expect('the customer rates the job', await POST(`/services/jobs/${dueId}/rate`, { score: 5, comment: 'journey' }, C1.token), [200, 201]);
+    rec.deny('a second rating', await POST(`/services/jobs/${dueId}/rate`, { score: 4 }, C1.token), [409], ['ALREADY_RATED']);
+    // Cleanup: a customer cancels only a request (#1712); a booked job is the
+    // provider's to cancel, so the provider frees the three booked slots (the
+    // race slots repeat on a same-day rerun and would read SLOT_TAKEN).
+    for (const jid of [id, ja, jb]) await POST(`/services/jobs/${jid}/cancel`, {}, p.token);
     // Note: the visit reminder runs from the hourly :30 job and shares the Guyana-time formatter proven above.
     void req; void sleep; void pick;
   },

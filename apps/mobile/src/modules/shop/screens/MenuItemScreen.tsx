@@ -9,14 +9,16 @@ import { useAddToCart, useItemSlots, useVendor } from '../../../hooks/customer';
 import { requestAuthContinuation, type MenuItemAddDraft } from '../../../navigation/authContinuation';
 import { useAuthStore } from '../../../stores/authStore';
 import { useBookingStore, type ServiceVisitMode } from '../../../stores/bookingStore';
-import { itemPhoto } from '../../../lib/images';
+import { HERO_PHOTO_WIDTH, itemPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { addAppointmentDays, appointmentDayKey, appointmentWeekday, formatAppointmentClock } from '../../../lib/appointmentTime';
 import {
   Photo,
   Chip,
+  EmptyState,
   CircleChip,
   ErrorState,
+  Header,
   IconChip,
   LabeledInput,
   LoadingBlock,
@@ -29,6 +31,7 @@ import {
   T,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { STORE_PICK } from '../../../lib/storePick';
 
 const SCREEN_W = Dimensions.get('window').width;
 const GUTTER = space['2xl'];
@@ -190,14 +193,33 @@ export function MenuItemScreen() {
     onAdd();
   }, [route.params?.addAfterSignIn, isAuthenticated, item, vendor.isLoading, vendor.isError, outOfStock, requiredUnmet, addToCart.isPending, selected, groups, isBooking, slot, daySlots, slotsQ.isError, slotsQ.isPending, navigation, onAdd]);
 
-  if (vendor.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
+  if (vendor.isLoading) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
   if (vendor.isError || !item) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
-        <ErrorState
-          onRetry={() => vendor.refetch()}
-          message={!item && !vendor.isError ? 'This item is no longer on the menu.' : undefined}
-        />
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        {vendor.isError ? (
+          <ErrorState onRetry={() => vendor.refetch()} />
+        ) : (
+          // The store answered and the item is gone: Retry cannot bring it back.
+          <EmptyState
+            icon="slash"
+            title="This item is no longer on the menu."
+            body="The store took it off. Pick something else from its menu."
+            // [#1915 review S4-1] Opened from Home, Market or Search, Back does not lead to the store.
+            actionLabel="Go back"
+            onAction={() => navigation.goBack()}
+          />
+        )}
       </View>
     );
   }
@@ -212,7 +234,7 @@ export function MenuItemScreen() {
         {/* Hero + floating header */}
         <View>
           <Photo
-            uri={itemPhoto(item)}
+            uri={itemPhoto(item, HERO_PHOTO_WIDTH)}
             label={item.name}
             transition={200}
             style={{ width: SCREEN_W, height: 340 }}
@@ -296,9 +318,9 @@ export function MenuItemScreen() {
             </View>
             {item.isPopular ? (
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Feather name="trending-up" size={14} color={color.brand[600]} />
+                <Feather name="thumbs-up" size={14} color={color.brand[600]} />
                 <T variant="label" tone="deep">
-                  Popular
+                  {STORE_PICK}
                 </T>
               </View>
             ) : null}
@@ -557,7 +579,7 @@ export function MenuItemScreen() {
             size="md"
             onPress={() => {
               setAdded(false);
-              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }));
+              afterDismiss(() => navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true }));
             }}
           />
           <PillButton label="Keep browsing" variant="soft" size="md" onPress={() => setAdded(false)} />

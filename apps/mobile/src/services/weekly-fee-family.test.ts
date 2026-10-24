@@ -28,6 +28,8 @@ vi.mock('react-native', () => ({ Platform: { OS: 'ios' }, Pressable: 'Pressable'
 vi.mock('@react-navigation/native', () => ({
   createNavigationContainerRef: () => ({ isReady: () => true, navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
   useFocusEffect: () => {},
+  // The fee screen's own navigation (its held-payment support door) goes through the same dispatch.
+  useNavigation: () => ({ navigate: (screen: string, params?: object) => fx.dispatch(screen, params) }),
 }));
 vi.mock('@react-navigation/native-stack', () => ({ createNativeStackNavigator: () => ({ Navigator: 'Navigator', Screen: 'Screen' }) }));
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0 }) }));
@@ -49,6 +51,8 @@ vi.mock('../stores/storeSwitcher', async () => {
 });
 vi.mock('../kit', () => Object.fromEntries(['Card', 'ErrorState', 'Header', 'LoadingBlock', 'PillButton', 'Screen', 'T'].map((name) => [name, name])));
 vi.mock('../hooks', () => ({ useMoverKind: fx.moverKind, useMoverSubscription: () => ({ data: { id: 'mover-sub', status: 'ACTIVE' }, refetch: vi.fn() }) }));
+// The live job feed has its own tests (hooks/moverJobFeed.test.ts, lib/moverJobFeed.test.ts).
+vi.mock('../hooks/moverJobFeed', () => ({ useMoverJobFeed: () => undefined }));
 vi.mock('../hooks/vendorops', () => ({ useVendorSubscription: () => ({ data: { id: 'subscription-A', status: 'ACTIVE' }, refetch: vi.fn() }) }));
 vi.mock('../hooks/usePullToRefresh', () => ({ usePullToRefresh: () => ({ refreshing: false }) }));
 vi.mock('../components/onboarding/WentLive', () => ({ useWentLive: vi.fn(), WentLivePopup: 'WentLivePopup' }));

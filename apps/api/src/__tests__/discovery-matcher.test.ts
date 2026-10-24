@@ -103,10 +103,11 @@ describe('CAT-D: the 120-line accuracy gate', () => {
 });
 
 describe('the seed taxonomy (CAT-A slice)', () => {
-  it('seeds 42 categories idempotently; founder edits survive; alias unions reach existing tenants', async () => {
-    expect(SEED_TAXONOMY).toHaveLength(42);
+  // 41: the `pharmacy` row left the seed with the medicines ban (GUARDRAILS §8, owner 13 Oct 2026).
+  it('seeds 41 categories idempotently; founder edits survive; alias unions reach existing tenants', async () => {
+    expect(SEED_TAXONOMY).toHaveLength(41);
     const first = await seedDiscoveryTaxonomy(prisma, TENANT);
-    expect(first.created).toBe(42);
+    expect(first.created).toBe(41);
 
     const again = await seedDiscoveryTaxonomy(prisma, TENANT);
     expect(again.created).toBe(0);
@@ -128,13 +129,13 @@ describe('the seed taxonomy (CAT-A slice)', () => {
     expect(chinese.aliases).toContain('chowmein'); // seeds still present
   });
 
-  it('slugs are unique per tenant and kebab-case; every category has an emoji', () => {
+  it('slugs are unique per tenant and kebab-case; no seeded category carries an emoji (owner 17 Oct: the app draws its own icon)', () => {
     const seen = new Set<string>();
     for (const c of SEED_TAXONOMY) {
       expect(seen.has(c.slug)).toBe(false);
       seen.add(c.slug);
       expect(c.slug).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
-      expect(c.emoji.length).toBeGreaterThan(0);
+      expect(c.emoji).toBe('');
       expect(c.aliases.every((a) => a === a.toLowerCase())).toBe(true);
     }
   });

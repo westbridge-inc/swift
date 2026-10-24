@@ -14,13 +14,13 @@ import { readFileSync } from 'node:fs';
 const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
 const HOME = strip(readFileSync(new URL('./HomeScreen.tsx', import.meta.url), 'utf8'));
 
-describe('the "0% fees" row wraps inside its band', () => {
+describe('the price-promise row wraps inside its band', () => {
   it('the body sits in a flex: 1 column beside the icon, and neither line is held to one line', () => {
     // The column takes exactly the width the row has left after the icon, and
     // the text wraps inside it. A numberOfLines here, or a column that sizes
     // to its text instead of to the row, is how a line runs off the screen.
     expect(HOME).toMatch(
-      /flexDirection: 'row', alignItems: 'flex-start', gap: space\.sm \}\}>\s*<Feather name="check-circle"[^>]*\/>\s*<View style=\{\{ flex: 1 \}\}>\s*<T variant="bodyStrong">0% fees, always\.<\/T>\s*<T variant="caption" tone="muted" style=\{\{ marginTop: 2 \}\}>\s*Swift never marks up your order — pay cash when it arrives\.\s*<\/T>\s*<\/View>/,
+      /flexDirection: 'row', alignItems: 'flex-start', gap: space\.sm \}\}>\s*<Feather name="check-circle"[^>]*\/>\s*<View style=\{\{ flex: 1 \}\}>\s*(?:\{\}\s*)?<T variant="bodyStrong">\{PRICE_PROMISE_TITLE\}<\/T>\s*<T variant="caption" tone="muted" style=\{\{ marginTop: 2 \}\}>\s*\{PRICE_PROMISE_BODY\}\s*<\/T>\s*<\/View>/,
     );
   });
 });

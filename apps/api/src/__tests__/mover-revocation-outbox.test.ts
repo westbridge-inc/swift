@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin } from '../plugins/prisma';
@@ -23,6 +23,12 @@ import { ExpoPushProvider } from '../providers/notifications/channels';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const userIds: string[] = [];
+/** The users the RUNNING test made (reset before each test). Batches claim
+ *  only their rows: a row an EARLIER test left due (a retry whose 100 ms
+ *  backoff elapsed, a delivery that outlived its budget on a loaded runner)
+ *  must not be counted, or burn single-shot mocks, in a later test. Seen on
+ *  CI: 'retries failed live push fanout' got { processed: 1, failed: 1 }. */
+let testUserIds: string[] = [];
 const orderIds: string[] = [];
 const redisKeys = new Set<string>();
 const phoneBase = 592_780_000_000 + Math.floor(Math.random() * 100_000_000);
@@ -44,6 +50,7 @@ async function makeUser(role: 'CUSTOMER' | 'MOVER' | 'SUPER_ADMIN' = 'CUSTOMER')
     },
   });
   userIds.push(user.id);
+  testUserIds.push(user.id);
   const session = await app.prisma.session.create({
     data: {
       userId: user.id,
@@ -104,9 +111,10 @@ async function makeOrder(customerId: string, riderId: string, status: 'RIDER_ASS
 /** [task #25 flake-harden] The outbox table is shared across parallel test
  *  files; an unscoped batch can claim ANOTHER file's rows (starving this
  *  file's counts) or burn this file's single-shot mocks on foreign rows.
- *  Every batch call here scopes the claim to this file's own users. */
+ *  Every batch call here scopes the claim to the running test's own users
+ *  (`testUserIds`), which also keeps an earlier test's leftover row out. */
 function processMoverRevocationOutboxBatch_SCOPED(rt: ReturnType<typeof runtime>) {
-  return processMoverRevocationOutboxBatch(rt, 25, { onlyUserIds: [...userIds] });
+  return processMoverRevocationOutboxBatch(rt, 25, { onlyUserIds: [...testUserIds] });
 }
 
 function runtime(dispatch: MoverRevocationDispatchEffects) {
@@ -131,6 +139,10 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.ready();
   await makeUser('SUPER_ADMIN');
+});
+
+beforeEach(() => {
+  testUserIds = [];
 });
 
 afterEach(() => {
@@ -332,7 +344,7 @@ describe('durable mover revocation outbox', () => {
         retryDispatch: vi.fn().mockResolvedValue({}),
       }),
       io: io as never,
-    }, 25, { onlyUserIds: [...userIds] })).resolves.toEqual({ processed: 1, failed: 0 });
+    }, 25, { onlyUserIds: [...testUserIds] })).resolves.toEqual({ processed: 1, failed: 0 });
 
     const incident = await app.prisma.incidentCase.findFirstOrThrow({
       where: { subjectUserId: mover.user.id, orderId: order.id, category: 'MOVER_SESSION_LOST_IN_CUSTODY' },
@@ -678,12 +690,12 @@ describe('durable mover revocation outbox', () => {
     };
     process.env['MOVER_REVOCATION_EFFECT_TIMEOUT_MS'] = '50';
 
-    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...userIds] }))
+    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...testUserIds] }))
       .resolves.toEqual({ processed: 0, failed: 1 });
     const timedOut = await app.prisma.moverRevocationOutbox.findUniqueOrThrow({ where: { id: outboxId! } });
     expect(timedOut.claimedAt).not.toBeNull();
 
-    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...userIds] }))
+    await expect(processMoverRevocationOutboxBatch(withDeferredPush, 25, { onlyUserIds: [...testUserIds] }))
       .resolves.toEqual({ processed: 0, failed: 0 });
     expect(retryDispatch).toHaveBeenCalledTimes(1);
     expect(push).toHaveBeenCalledTimes(1);
@@ -760,7 +772,7 @@ describe('durable mover revocation outbox', () => {
     };
     const withPush = { ...runtime(dispatch), channels: { push: { sendPush: push } } };
 
-    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...userIds] }))
+    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...testUserIds] }))
       .resolves.toEqual({ processed: 0, failed: 1 });
     expect(await app.prisma.notification.count({
       where: { userId: customer.user.id, data: { path: ['eventId'], string_starts_with: outboxId! } },
@@ -770,7 +782,7 @@ describe('durable mover revocation outbox', () => {
       where: { id: outboxId! },
       data: { availableAt: new Date(0) },
     });
-    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...userIds] }))
+    await expect(processMoverRevocationOutboxBatch(withPush, 25, { onlyUserIds: [...testUserIds] }))
       .resolves.toEqual({ processed: 1, failed: 0 });
     expect(push).toHaveBeenCalledTimes(2);
     expect(push.mock.calls[0]?.[3]).toMatchObject({

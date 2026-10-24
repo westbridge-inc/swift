@@ -48,7 +48,7 @@ class ManualKyc implements KycProvider {
 async function admin(n: number) {
   const u = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59274${NUM}${n}`, firstName: 'Rev', lastName: `Iewer${n}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   users.push(u.id);
   const token = app.jwt.sign({ userId: u.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
@@ -72,7 +72,7 @@ async function pendingCase(userId: string) {
   return { doc, kase };
 }
 const post = (adminId: string, path: string) => adminApp.inject({ method: 'POST', url: `/api/v1/admin/verification/cases/${path}`, payload: {}, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json' } });
-const approve = (adminId: string, docId: string) => adminApp.inject({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: {}, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
+const approve = (adminId: string, docId: string) => adminApp.inject({ method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: { registrationKind: 'COMPANY' } /* [R16] */, headers: { authorization: `Bearer ${tokens.get(adminId)}`, 'content-type': 'application/json', 'x-swift-reason': REASON } });
 const caseRow = (id: string) => system(() => app.prisma.reviewCase.findUniqueOrThrow({ where: { id } }));
 
 beforeAll(async () => {

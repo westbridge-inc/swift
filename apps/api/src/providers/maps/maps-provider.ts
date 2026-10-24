@@ -2,6 +2,7 @@ import { haversineDistance, estimateDrivingDistance } from '../../utils/distance
 import { AppError } from '../../utils/errors';
 import { osrmOutcomeCounter } from '../../plugins/observability';
 import { isOsrmDurationOrAbsent, isOsrmMeasure } from './osrm-measure';
+import { isProduction } from '../../utils/runtime-mode';
 
 // ---------------------------------------------------------------------------
 // MapsProvider — hard rule 4: swappable interface. Dispatch only ever asks for
@@ -34,6 +35,22 @@ export interface RouteEstimate {
   /** Real driving minutes when the engine knows them; null = caller applies
    *  its own deterministic speed model (keeps haversine mode bit-identical). */
   minutes: number | null;
+}
+
+/** THE one rule: a production taxi/courier quote needs the road the customer
+ * will travel. `source` already distinguishes every deterministic fallback,
+ * including a deliberately configured straight-line provider (whose routes say
+ * degraded: false, because the estimate IS its engine). Keep that signal
+ * intact. A single-leg quote and a route with stops both ask this. [DS981] */
+export function isRoadQuote(route: Pick<RouteEstimate, 'source'>): boolean {
+  return !isProduction() || route.source === 'osrm';
+}
+
+/** A single-leg quote that is not a road quote is refused in plain words. */
+export function assertRoadQuoteAvailable(route: RouteEstimate): void {
+  if (!isRoadQuote(route)) {
+    throw new AppError(503, 'ROUTE_UNAVAILABLE', 'Road routing is unavailable. Try again in a moment.');
+  }
 }
 
 /** [TAXI multi-stop] One leg of a routed itinerary: one point to the next. */
@@ -80,6 +97,37 @@ export interface MapsProvider {
    *  for money purposes; never per ping. A provider that cannot match returns
    *  the trace's own path length and says so (`matched: false`). */
   matchTrace(points: TracePoint[]): Promise<MatchedRoute>;
+  /** [TAXI route line] The road through every point in order, to DRAW on the
+   *  driver's map — never money. Optional: a provider without it (the
+   *  straight-line one, Google) has no road to give, and the map keeps its
+   *  straight heading line. Never throws; null when the engine fails or
+   *  answers anything that is not a line. */
+  routeLine?(points: LatLng[]): Promise<RouteLine | null>;
+}
+
+/** [TAXI route line] The road as points in order (for drawing only). */
+export interface RouteLine {
+  points: LatLng[];
+}
+
+/** The most points a drawn line may carry: a simplified road across the whole
+ *  country is a few hundred; anything near this is not a map line. */
+export const ROUTE_LINE_MAX_POINTS = 5000;
+
+/** A road line from OSRM's geojson coordinates ([lng, lat] pairs), rounded to
+ *  5 decimals (about 1 m); null unless it is 2 to ROUTE_LINE_MAX_POINTS real
+ *  points on the globe. */
+export function routeLineFrom(coordinates: unknown): RouteLine | null {
+  if (!Array.isArray(coordinates) || coordinates.length < 2 || coordinates.length > ROUTE_LINE_MAX_POINTS) return null;
+  const points: LatLng[] = [];
+  for (const pair of coordinates) {
+    if (!Array.isArray(pair) || pair.length < 2) return null;
+    const [lng, lat] = pair as unknown[];
+    if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+    points.push({ lat: Math.round(lat * 1e5) / 1e5, lng: Math.round(lng * 1e5) / 1e5 });
+  }
+  return { points };
 }
 
 export interface TracePoint extends LatLng {
@@ -382,8 +430,8 @@ export class OsrmMapsProvider implements MapsProvider {
 
   /** Real road distance + duration via the OSRM `route` service. Falls back to
    *  the deterministic estimate when OSRM fails to answer (down, an error, no
-   *  route, no distance beside a valid or absent duration), so an outage never
-   *  blocks a fare. An answer that
+   *  route, no distance beside a valid or absent duration). Callers that need
+   *  a real road quote refuse the fallback in production. An answer that
    *  PRESENTS an invalid distance or duration (negative, Infinity, NaN, not a
    *  number) is refused instead: 503 ROUTE_UNAVAILABLE, never priced and never
    *  swapped for the estimate. An absent duration stays null, as always: the
@@ -456,6 +504,28 @@ export class OsrmMapsProvider implements MapsProvider {
       };
     } catch {
       return await this.degradedLegs(points);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** [TAXI route line] ONE `route` call through the points in order with the
+   *  road's simplified geometry (geojson), for the driver's map. Display only:
+   *  nothing is counted as a routing fallback (the fare path counts its own),
+   *  and any failure or malformed answer is simply null. */
+  async routeLine(points: LatLng[]): Promise<RouteLine | null> {
+    if (points.length < 2) return null;
+    const coords = points.map((p) => `${p.lng},${p.lat}`).join(';');
+    const url = `${this.baseUrl.replace(/\/$/, '')}/route/v1/driving/${coords}?overview=simplified&geometries=geojson`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), OSRM_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (!res.ok) return null;
+      const data = (await res.json()) as { code?: string; routes?: Array<{ geometry?: { coordinates?: unknown } }> };
+      return data.code === 'Ok' ? routeLineFrom(data.routes?.[0]?.geometry?.coordinates) : null;
+    } catch {
+      return null;
     } finally {
       clearTimeout(timer);
     }

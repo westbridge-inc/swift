@@ -80,7 +80,8 @@ export const cancelPendingMmgPayUrl = () =>
 // ── Documents (verification) ────────────────────────────────────────────────
 export interface DocStatus {
   checklist: string[];
-  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string }>;
+  // [REPLACE-PENDING] `replaced`: this copy replaced an earlier one that was still waiting for review.
+  documents: Array<{ id: string; docType: string; status: string; expiresAt: string | null; reviewNote: string | null; createdAt: string; replaced?: boolean }>;
   missing: string[];
   vehicleType?: string | null;
   roleVerified: boolean;
@@ -99,6 +100,7 @@ export const uploadVerificationFile = (file: File) => {
 export const submitVerificationDocument = (docType: string, fileUrl: string) =>
   apiFetch('/api/v1/verification/documents', {
     method: 'POST',
-    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5)
-    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1' }),
+    // consent: the uploader ticks the privacy-notice box before this fires (DPA §3.5); [R17] the API records that
+    // tick in the consent ledger, anchored to the box's exact words (document_v1)
+    body: JSON.stringify({ role: 'MOVER', docType, fileUrl, consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' }),
   });

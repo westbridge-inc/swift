@@ -72,10 +72,23 @@ jobs:
       - name: Desktop unit tests
         run: pnpm --filter @swift/desktop test
 
-  api-test:
-    name: API Tests
+  # [CI-SPLIT] The API suite was one ~28-minute job behind Lint (~36 minutes a
+  # round). It now runs as 4 shards, each a full copy of the old job: its OWN
+  # Postgres and Redis, the real migrations and the seed, then its quarter of
+  # the files, one after another on that database as before. Shards start at
+  # once (no wait for Lint, which is still its own required check); the
+  # "API Tests" job below gives the single verdict branch protection reads.
+  # Changing the shard count = the `shard` list, `total`, and the aggregate's
+  # --count together (ci-api-shards.test.ts holds them in lockstep).
+  api-test-shard:
+    name: API Tests shard ${{ matrix.shard }}/${{ matrix.total }}
     runs-on: ubuntu-latest
-    needs: lint-and-type-check
+    strategy:
+      # Every shard runs to the end, so one red shard still shows every failure.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+        total: [4]
     services:
       postgres:
         image: postgis/postgis:16-3.4
@@ -135,22 +148,23 @@ jobs:
           SEED_DEMO_CONFIRM: "YES"
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           REDIS_URL: redis://localhost:6379
-      - name: Run tests
-        run: pnpm --filter @swift/api test -- --coverage
+      # Explicit reporters replace vitest's defaults, so github-actions (the
+      # failure annotations) is listed by name. The blob carries this shard's
+      # results and coverage for the merge; the JUnit report names every file
+      # the shard ran, for the partition proof.
+      - name: Run tests (shard ${{ matrix.shard }} of ${{ matrix.total }})
+        run: >-
+          pnpm --filter @swift/api test -- --coverage
+          --shard=${{ matrix.shard }}/${{ matrix.total }}
+          --reporter=default --reporter=github-actions --reporter=blob --reporter=junit
+          --outputFile.blob=ci-shard-report/blob/blob-${{ matrix.shard }}-${{ matrix.total }}.json
+          --outputFile.junit=ci-shard-report/junit/junit-${{ matrix.shard }}.xml
         env:
           NODE_ENV: test
           DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
           # [R048-001] The tests' own Redis database, never 0; the global setup refuses anything else.
           REDIS_URL: redis://localhost:6379/15
           JWT_SECRET: ci-test-jwt-secret-not-for-production
-      # SWIFT-165: publish the coverage number to the run summary. Measured, not
-      # gated — no thresholds yet (ratchet later once the baseline is watched).
-      - name: Publish coverage to the run summary
-        if: always()
-        run: |
-          test -f apps/api/coverage/coverage-summary.json || exit 0
-          echo "### API test coverage" >> "$GITHUB_STEP_SUMMARY"
-          node -e "const t=require('./apps/api/coverage/coverage-summary.json').total; for (const k of ['lines','statements','branches','functions']) console.log('- **'+k+'**: '+t[k].pct+'% ('+t[k].covered+'/'+t[k].total+')');" >> "$GITHUB_STEP_SUMMARY"
 
       # Step 15: an untested backup does not exist. Dump the post-suite
       # database and prove it restores into a scratch DB with sane contents.
@@ -169,6 +183,66 @@ jobs:
           test "$USERS" -ge 4
           test "$CONFIGS" -ge 1
           test "$VENDORS" -ge 4
+      - name: Keep this shard's reports for the API Tests verdict
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-test-shard-${{ matrix.shard }}
+          path: apps/api/ci-shard-report/
+          if-no-files-found: error
+          retention-days: 5
+          # "Re-run all jobs" re-uploads under the same name; replace, don't fail.
+          overwrite: true
+
+  # The one required "API Tests" check. It passes only when every shard passed,
+  # every test file ran in exactly one shard, and the merged results agree.
+  # always(): it must report a verdict even when a shard failed or the run was
+  # cancelled — a SKIPPED required check reads as passing to branch protection.
+  api-test:
+    name: API Tests
+    runs-on: ubuntu-latest
+    needs: api-test-shard
+    if: always()
+    steps:
+      - name: Every API test shard passed
+        env:
+          SHARDS_RESULT: ${{ needs.api-test-shard.result }}
+        run: |
+          echo "API test shards: $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::API Tests: a shard did not pass ($SHARDS_RESULT); the failing tests are in the API Tests shard jobs"
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      - run: cd apps/api && npx prisma generate
+      - name: Collect the shard reports
+        uses: actions/download-artifact@v8
+        with:
+          pattern: api-test-shard-*
+          path: apps/api/ci-shard-report
+          merge-multiple: true
+      - name: Every API test file ran in exactly one shard
+        working-directory: apps/api
+        run: |
+          npx vitest list --filesOnly --json=ci-shard-report/expected-files.json
+          node ../../scripts/ci-api-shard-partition.mjs --root "$PWD" --expected ci-shard-report/expected-files.json --junit-dir ci-shard-report/junit --blob-dir ci-shard-report/blob --count 4
+      # The merge replays every shard's results (red if any test failed) and
+      # merges their coverage into the one suite-wide number.
+      - name: Merge the shard results and coverage
+        working-directory: apps/api
+        run: npx vitest run --merge-reports=ci-shard-report/blob --coverage --reporter=default
+      # SWIFT-165: publish the coverage number to the run summary. Measured, not
+      # gated — no thresholds yet (ratchet later once the baseline is watched).
+      - name: Publish coverage to the run summary
+        if: always()
+        run: |
+          test -f apps/api/coverage/coverage-summary.json || exit 0
+          echo "### API test coverage" >> "$GITHUB_STEP_SUMMARY"
+          node -e "const t=require('./apps/api/coverage/coverage-summary.json').total; for (const k of ['lines','statements','branches','functions']) console.log('- **'+k+'**: '+t[k].pct+'% ('+t[k].covered+'/'+t[k].total+')');" >> "$GITHUB_STEP_SUMMARY"
 
   api-build:
     name: API Build
@@ -189,7 +263,111 @@ jobs:
       - run: corepack enable && corepack prepare --activate
       - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
       - run: cd apps/api && npx prisma generate
+      # Built the way apps/api/Dockerfile builds it: @swift/ui first (the
+      # compiled CommonJS API requires the package's built "require" export),
+      # then the API's production build (tsconfig.build.json).
+      - run: pnpm --filter @swift/ui build
       - run: pnpm --filter @swift/api build
+      - name: Keep the compiled API for the API Boot Smoke
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-dist
+          path: |
+            apps/api/dist/
+            packages/ui/dist/
+          if-no-files-found: error
+          retention-days: 1
+          # "Re-run all jobs" re-uploads under the same name; replace, don't fail.
+          overwrite: true
+
+  # [HARDEN item 0] 15 Oct 2026: main was green while the compiled API could
+  # not start at all (#1712 imported a value from the source-only @swift/types;
+  # production crash-looped; hotfix #1773). vitest runs the TypeScript source,
+  # so no job ever ran apps/api/dist. This job starts API Build's own compiled
+  # output the way the production containers run it (deploy/docker-compose.yml):
+  # migrations through dist/boot/migrate-deploy.js, then the API
+  # (RUN_WORKERS=0) and the worker (RUN_WORKERS=1) side by side. It fails when
+  # any compiled module or a package it names does not load, a process exits,
+  # /health or /ready never answer 200, the worker never writes its heartbeat,
+  # or SIGTERM does not stop both cleanly (scripts/compiled-api-boot-smoke.mjs).
+  # Posture: loadtest, the staging posture (production needs real providers
+  # and a production database identity). Secrets arrive as NAME_FILE, like
+  # production's, holding throwaway stand-ins from deploy/wall/stand-in.sh.
+  # No boot guard is relaxed: both processes run their own guards unchanged.
+  api-boot-smoke:
+    name: API Boot Smoke
+    runs-on: ubuntu-latest
+    needs: api-build
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: swift
+          POSTGRES_PASSWORD: swift
+          POSTGRES_DB: swift_boot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U swift"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      NODE_ENV: loadtest
+      # The database as PARTS plus a password file, as production delivers it:
+      # dist/boot/secret-files.js assembles DATABASE_URL in memory.
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: swift
+      POSTGRES_DB: swift_boot
+      REDIS_URL: redis://localhost:6379
+      LOG_LEVEL: warn
+      # Managed storage on a local volume (the staging pilot's overlay,
+      # deploy/docker-compose.storage-local.yml): every storage guard applies.
+      STORAGE_DEPLOYMENT: managed
+      STORAGE_PROVIDER: local
+      STORAGE_ALLOW_LOCAL: "1"
+      STORAGE_LOCAL_BACKUP_ACK: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+      - run: corepack enable && corepack prepare --activate
+      - run: pnpm install --frozen-lockfile || pnpm install --frozen-lockfile
+      - run: cd apps/api && npx prisma generate
+      - name: Take API Build's compiled output
+        uses: actions/download-artifact@v8
+        with:
+          name: api-dist
+          path: .
+      - name: Throwaway stand-in secrets, delivered as files like production's
+        run: |
+          dir="$RUNNER_TEMP/swift-secrets"
+          mkdir -m 700 "$dir" "$RUNNER_TEMP/uploads"
+          printf 'swift' > "$dir/POSTGRES_PASSWORD"
+          echo "POSTGRES_PASSWORD_FILE=$dir/POSTGRES_PASSWORD" >> "$GITHUB_ENV"
+          for name in JWT_SECRET OTP_HASH_SECRET MASTER_KEK STORAGE_SIGNING_SECRET CONSENT_IP_PEPPER \
+                      ATTRIB_SALT IDENTITY_SALT SCAN_IP_SALT ADS_EVENT_SECRET METRICS_TOKEN HEALTH_DETAIL_TOKEN; do
+            bash deploy/wall/stand-in.sh "$name" > "$dir/$name"
+            echo "${name}_FILE=$dir/$name" >> "$GITHUB_ENV"
+          done
+          echo "UPLOAD_DIR=$RUNNER_TEMP/uploads" >> "$GITHUB_ENV"
+      - name: Apply the migrations the way production does
+        working-directory: apps/api
+        run: node dist/boot/migrate-deploy.js
+      - name: Load, boot, serve, ready and stop the compiled API and worker
+        run: node scripts/compiled-api-boot-smoke.mjs
 
   admin-build:
     name: Admin Build
@@ -547,10 +725,11 @@ jobs:
   # scripts/secret-canary.js). The app config refuses a CI export without that
   # key, so this gate hands it a placeholder that is visibly not a key: this
   # export is a gate, never a distributable.
+  # [CI-SPLIT] No wait for Lint: this is the longest job after the API split,
+  # and Lint & Type Check is still its own required check.
   mobile-bundle-gate:
     name: Mobile Bundle Gate
     runs-on: ubuntu-latest
-    needs: lint-and-type-check
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -571,6 +750,10 @@ jobs:
       # certifies THIS artifact and writes a receipt for it; both stay with the run as the scan attestation.
       - name: Artifact manifest (mobile)
         run: node scripts/artifact-manifest.js apps/mobile/dist --app mobile --commit ${{ github.sha }} --entry ios/metadata.json --entry android/metadata.json --out artifact-mobile.manifest.json
+      - name: Test and record mobile JS size budgets
+        run: |
+          node --test scripts/mobile-size-budget.test.js
+          node scripts/mobile-size-budget.js --manifest artifact-mobile.manifest.json --out artifact-mobile-size.json
       - name: No unlisted public variable reached the mobile bundles
         run: node scripts/public-secrets-gate.js --bundle apps/mobile/dist --manifest artifact-mobile.manifest.json --app mobile --commit ${{ github.sha }} --receipt artifact-mobile.receipt.json
       - name: Keep the mobile manifest and scan receipt with the run
@@ -585,6 +768,89 @@ jobs:
         run: node scripts/secret-canary.js --scan apps/mobile/dist
       - name: No secret-shaped value in the mobile bundles
         run: bash scripts/fetch-gitleaks.sh && ./gitleaks detect --no-git --source apps/mobile/dist --redact --exit-code 1
+      # Reference ARM64 builds measure native overhead without signing credentials,
+      # stores or EAS. These are CI measurements, never distributed binaries.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      # [CI-SPLIT] Every run downloaded the two NDKs and CMake this build needs
+      # (the runner image does not carry them) and every Maven dependency, so
+      # one bad download failed a whole round (a dependency jar answered 500 on
+      # 13 Oct; "Archive is not a ZIP archive" before that). Both are restored
+      # from the cache; only a main run saves, and only after a green build, so
+      # PR runs never fill the cache with copies. The NDK/CMake list is what the
+      # build log shows Gradle installing; if it installs a new version, add it
+      # here (the key changes with it).
+      - name: Restore the Android NDK and CMake
+        id: android-ndk
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.1.12297006
+            /usr/local/lib/android/sdk/ndk/27.0.12077973
+            /usr/local/lib/android/sdk/cmake/3.22.1
+          key: android-ndk-27.1.12297006-27.0.12077973-cmake-3.22.1-${{ runner.os }}
+      - name: Restore the Gradle downloads
+        id: gradle-downloads
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+            !~/.gradle/caches/modules-2/*.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: gradle-downloads-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            gradle-downloads-${{ runner.os }}-
+      - name: Generate Android release project
+        working-directory: apps/mobile
+        env:
+          ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
+        run: npx expo prebuild --platform android --no-install
+      - name: Build reference release APK and AAB
+        working-directory: apps/mobile/android
+        env:
+          ANDROID_GOOGLE_MAPS_API_KEY: ci-gate-placeholder-not-a-key
+          NODE_OPTIONS: --max-old-space-size=3072
+        # The template's 2 GB heap / 512 MB metaspace ran out of Metaspace once
+        # main added Sentry and expo-updates; lint-vital measures nothing here.
+        run: >-
+          ./gradlew :app:assembleRelease :app:bundleRelease
+          -PreactNativeArchitectures=arm64-v8a --no-daemon --max-workers=2
+          -x lintVitalAnalyzeRelease
+          "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1536m"
+          "-Pkotlin.daemon.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=1g"
+      - name: Save the Android NDK and CMake (main only)
+        if: github.ref == 'refs/heads/main' && steps.android-ndk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/27.1.12297006
+            /usr/local/lib/android/sdk/ndk/27.0.12077973
+            /usr/local/lib/android/sdk/cmake/3.22.1
+          key: android-ndk-27.1.12297006-27.0.12077973-cmake-3.22.1-${{ runner.os }}
+      - name: Save the Gradle downloads (main only)
+        if: github.ref == 'refs/heads/main' && steps.gradle-downloads.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/wrapper/dists
+            !~/.gradle/caches/modules-2/*.lock
+            !~/.gradle/caches/modules-2/gc.properties
+          key: gradle-downloads-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+      - name: Record and enforce native size budgets
+        run: node scripts/mobile-size-budget.js --apk apps/mobile/android/app/build/outputs/apk/release/app-release.apk --aab apps/mobile/android/app/build/outputs/bundle/release/app-release.aab --out artifact-native-size.json
+      - name: Keep mobile size measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mobile-size-budget
+          path: |
+            artifact-mobile-size.json
+            artifact-native-size.json
+          if-no-files-found: warn
 
   public-env-gate:
     name: Public Env Gate
@@ -604,6 +870,30 @@ jobs:
       # No install needed: the script is dependency-free Node.
       - name: Every public-prefixed variable is allowlisted and justified
         run: node scripts/public-secrets-gate.js
+
+  # The deploy contract tests (deploy/tests, Python standard library only):
+  # pilot-up and deploy.sh, the encrypted secret store, the migration gate,
+  # the staging, website and console Caddy contracts. Until this job they ran
+  # only on a builder's machine, so a red one could reach main unseen (a
+  # pilot-up contract test sat red for days in review). It pulls the stack's
+  # pinned Caddy image so the rendered-config and live gate tests run instead
+  # of skipping; Compose renders client-side (no daemon state is changed).
+  # NOT a required check yet: it becomes one after three green runs on main
+  # (owner's decision). First run: 246 tests, none skipped, about 3.5 minutes.
+  deploy-python-tests:
+    name: Deploy Python Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: The stack's pinned Caddy image (the Caddyfile tests render and serve with it)
+        run: docker pull caddy:2.10
+      # [Row 312] The stack's pinned upload malware scanner, so the EICAR test
+      # (deploy/tests/test_clamd_scanner.py) runs against the real clamd.
+      - name: The stack's pinned clamd image (the scanner test refuses EICAR with it)
+        run: docker pull clamav/clamav:1.4.6@sha256:3bba6dd5ac6663d55b80f86a3126e146612d93b593cc2617188d13f637d91260
+      - name: Run every deploy contract test
+        run: python3 -m unittest discover -s deploy/tests -v
 
   secret-scan:
     name: Secret Scan
@@ -658,3 +948,8 @@ jobs:
         run: |
           curl -sSfL https://github.com/aquasecurity/trivy/releases/download/v0.72.0/trivy_0.72.0_Linux-64bit.tar.gz | tar -xz trivy
           ./trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml pnpm-lock.yaml
+      # [AUD-1 row 303] The desktop cockpit (apps/desktop, Tauri) pins its Rust
+      # crates in Cargo.lock, which the pnpm scan above never reads. Same
+      # scanner, same HIGH+ blocking threshold, same scoped ignore file.
+      - name: Audit the desktop app's Rust crates (HIGH+ blocks)
+        run: ./trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --ignorefile .trivyignore.yaml apps/desktop/src-tauri/Cargo.lock

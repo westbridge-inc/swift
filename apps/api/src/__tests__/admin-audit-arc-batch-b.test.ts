@@ -8,7 +8,7 @@ import { socketPlugin } from '../plugins/socket';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, allowAuditAgain, dropAuditRefusal } from './helpers/audit-refusal';
 import { CashRulesService } from '../modules/cash/cash-rules.service';
@@ -16,6 +16,7 @@ import { NotificationService } from '../modules/notification/notification.servic
 import { OrderService } from '../modules/order/order.service';
 import { issueSyntheticHandoverPhoto, syntheticMoverSession } from './helpers/handover-proof';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] ARC BATCH B — the settlement digest, the top-up command, the three
@@ -26,7 +27,7 @@ import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } f
 // ---------------------------------------------------------------------------
 
 let app: FastifyInstance;
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REFUSAL = refusalName('arcb');
 const userIds: string[] = [];
 const vendorIds: string[] = [];
@@ -62,8 +63,8 @@ async function freshVendor() {
   const ownerUser = await person('VENDOR_OWNER', 'Own');
   const owner = await app.prisma.vendorOwner.create({ data: { userId: ownerUser.id } }); ownerIds.push(owner.id);
   const vendor = await app.prisma.vendor.create({ data: {
-    ownerId: owner.id, name: `B Kitchen ${RUN} ${nanoid(3)}`, slug: `arcb-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
-    phone: `+59271${String(Math.floor(Math.random() * 90000) + 10000)}`, addressLine1: '2 Audit Row', city: 'Georgetown',
+    ownerId: owner.id, name: `B Kitchen ${RUN} ${wordFreeTag(8)}`, slug: `arcb-${RUN}-${nanoid(5).toLowerCase()}`, vendorType: 'RESTAURANT',
+    phone: testPhone(), addressLine1: '2 Audit Row', city: 'Georgetown',
     region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15, status: 'ACTIVE', acceptingOrders: true, isVerified: true } });
   vendorIds.push(vendor.id); return vendor;
 }
@@ -150,7 +151,7 @@ beforeAll(async () => {
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`,
+    phone: testPhone(),
     firstName: 'ArcB', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
     activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
     admin: { create: { permissions: ['*'] } } } });
@@ -187,8 +188,7 @@ afterAll(async () => {
     await app.prisma.settlement.deleteMany({ where: { vendorId: { in: vendorIds } } }).catch(() => {});
     await app.prisma.vendor.deleteMany({ where: { id: { in: without(vendorIds, kept.vendorIds) } } });
     await app.prisma.vendorOwner.deleteMany({ where: { id: { in: ownerIds }, userId: { in: without(userIds, kept.userIds) } } });
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'arcb').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'arcb').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'admin-audit-arc-batch-b');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: without(userIds, kept.userIds) } } });
@@ -232,13 +232,14 @@ describe('[ADM-002] the sales digest', () => {
 });
 
 describe('[ADM-002] the top-up command', () => {
+  // [owner #62] One week at a time: each recorded payment here is the coming week's fee (GY$2,100).
   it('writes ONE canonical row inside the command transaction — no PREPAID_TOPUP duplicate', async () => {
     const v = await freshVendor(); const sub = await subscription(v.id);
-    const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 5000, reference: `MMG${RUN}A1` }, { 'idempotency-key': `arcb-${RUN}-topup-1` });
+    const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 2100, reference: `MMG${RUN}A1` }, { 'idempotency-key': `arcb-${RUN}-topup-1` });
     expect(res.statusCode, res.body).toBe(200);
     const rows = await rowsFor(sub.id);
     expect(rows.length).toBe(1);
-    expect(changesOf(rows[0]!)['amount']).toBe(5000);
+    expect(changesOf(rows[0]!)['amount']).toBe(2100);
     expect(typeof changesOf(rows[0]!)['billingEventId']).toBe('string');
     expect(rows.some((r) => r.action === 'PREPAID_TOPUP')).toBe(false);
   });
@@ -246,7 +247,7 @@ describe('[ADM-002] the top-up command', () => {
     const v = await freshVendor(); const sub = await subscription(v.id);
     await refuseAuditWhere(app, REFUSAL, { entityId: sub.id });
     try {
-      const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 5000, reference: `MMG${RUN}B1` }, { 'idempotency-key': `arcb-${RUN}-topup-2` });
+      const res = await call('POST', `/api/v1/admin/subscriptions/${sub.id}/topup`, { amount: 2100, reference: `MMG${RUN}B1` }, { 'idempotency-key': `arcb-${RUN}-topup-2` });
       expect(res.statusCode, res.body).toBe(500);
     } finally { await allowAuditAgain(app, REFUSAL); }
     expect(await app.prisma.billingEvent.count({ where: { subscriptionId: sub.id } })).toBe(0);

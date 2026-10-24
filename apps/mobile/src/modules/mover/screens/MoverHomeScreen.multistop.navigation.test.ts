@@ -13,7 +13,11 @@ import { BOARD_STOPS } from '../../../lib/taxiContract.fixtures';
 // order; a ride without them is exactly today's card.
 // ---------------------------------------------------------------------------
 
-const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any }));
+const fx = vi.hoisted(() => ({ jobs: [] as any[], offer: null as any, active: null as any, boardArgs: [] as unknown[], pins: [] as string[], boardAt: undefined as number | undefined }));
+// [RINGER] The ring itself (audio, vibration, AppState) is unit-tested in
+// hooks/useJobRing + services/jobRinger; here, only WHEN the card asks for it.
+const ring = vi.hoisted(() => ({ useJobRing: vi.fn() }));
+vi.mock('../../../hooks/useJobRing', () => ring);
 
 vi.mock('react-native', async () => {
   const R = await import('react');
@@ -25,9 +29,11 @@ vi.mock('react-native', async () => {
   return { View, Pressable, Text: View, StyleSheet: { create: (s: unknown) => s, flatten: (s: unknown) => s, hairlineWidth: 1 }, Platform: { OS: 'ios' } };
 });
 vi.mock('react-native-safe-area-context', () => ({ useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }) }));
+// [STORE-ALERT] The push-off strip reads the OS permission; this suite grades the board only.
+vi.mock('../../../components/PushOffStrip', () => ({ PushOffStrip: () => null }));
 vi.mock('react-native-maps', async () => {
   const R = await import('react');
-  return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: () => null, PROVIDER_DEFAULT: 'default' };
+  return { __esModule: true, default: (p: any) => R.createElement('div', null, p.children), Marker: (p: any) => { fx.pins.push(String(p.title ?? '')); return null; }, PROVIDER_DEFAULT: 'default' };
 });
 vi.mock('@gorhom/bottom-sheet', async () => {
   const R = await import('react');
@@ -41,7 +47,7 @@ vi.mock('../../../kit', async () => {
   const T = (p: any) => h('span', a11y(p), p.children);
   return {
     T, Screen: (p: any) => h('div', null, p.children), ErrorState: () => null, LoadingBlock: () => null, Pictogram: () => null,
-    TonePill: (p: any) => h('span', null, p.label), FareSlider: () => null, canAdjustFare: () => true, cardShadow: {},
+    TonePill: (p: any) => h('span', null, p.label), cardShadow: {},
     PillButton: (p: any) => h('button', { type: 'button', 'aria-label': p.label, onClick: p.onPress }, p.label),
   };
 });
@@ -54,9 +60,9 @@ vi.mock('../../../hooks', () => {
     useEarningsToday: () => ({ data: { total: 0 } }),
     useDailyEarnings: () => ({ data: [] }),
     useDemand: () => ({ data: {} }),
-    useAvailableJobs: () => ({ data: fx.jobs }),
+    useAvailableJobs: (...args: unknown[]) => { fx.boardArgs = args; return { data: fx.jobs, dataUpdatedAt: fx.boardAt }; },
     useDispatchOffers: () => ({ offer: fx.offer, queuedBehind: 0, dismiss: vi.fn() }),
-    useActiveJob: () => ({ data: null }),
+    useActiveJob: () => ({ data: fx.active }),
     useActiveJobs: () => ({ legs: [], run: null }),
     useGoOnline: mutation, useGoOffline: mutation, useAcceptJob: mutation, useAcceptOffer: mutation, useDeclineOffer: mutation, useSelectMoverKind: mutation,
     useVerificationStatus: () => ({ data: null }),
@@ -97,6 +103,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   fx.jobs = [];
   fx.offer = null;
+  fx.active = null;
+  fx.boardArgs = [];
+  fx.pins = [];
+  fx.boardAt = undefined;
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => {
@@ -144,6 +154,8 @@ describe('the open board (§6.1)', () => {
 });
 
 describe('[review 2] flag off: the offer card and the board are main’s, byte for byte', () => {
+  // [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] The snapshot lost the slider's
+  // "Slide to set your fare · Market max" row; nothing else on the card moved.
   it('the live offer without stops', async () => {
     await draw(offerCard(baseOffer));
     await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-offer.html');
@@ -153,5 +165,84 @@ describe('[review 2] flag off: the offer card and the board are main’s, byte f
     fx.jobs = [{ id: 'plain-1', pickupAddress: 'Bourda Market', dropoffAddress: 'Kitty', fareTotal: 1800, paymentMethod: 'CASH' }];
     await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
     await expect(host.innerHTML).toMatchFileSnapshot('./__flagoff__/driver-board.html');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER RULING 8 Oct: REMOVE THE FARE SLIDER] "we go by the thing we set up,
+// base fee plus km": a mover never sets the price. The offer card shows the
+// formula price as YOUR PRICE ("100% yours" stays) with no slider, no "Market
+// max", and Accept sends no fare.
+// ---------------------------------------------------------------------------
+describe('[owner ruling 8 Oct] the offer card has no fare slider', () => {
+  it('shows the booked price, 100% yours, and nothing to slide', async () => {
+    await draw(offerCard(baseOffer));
+    const all = text();
+    expect(all).toContain('YOUR PRICE');
+    expect(all).toContain('$3,400');
+    expect(all).toContain('100% yours · cash');
+    expect(all).not.toMatch(/Slide to set your fare|Market max|No time left to adjust/);
+  });
+
+  it('Accept sends no fare — the server books the formula price', async () => {
+    const onAccept = vi.fn();
+    await draw(React.createElement(DispatchOfferCard, { offer: baseOffer as never, job: null, kind: 'DRIVER', accepting: false, onAccept, onDecline: vi.fn() }));
+    await act(async () => { (host.querySelector('button[aria-label="Accept ride"]') as HTMLButtonElement).click(); });
+    expect(onAccept).toHaveBeenCalledTimes(1);
+    expect(onAccept.mock.calls[0]).toEqual([]);
+  });
+});
+
+describe('[RINGER] the offer rings until it is answered', () => {
+  it('rings from the moment the card shows, until the offer clock; stops the moment Accept is tapped', async () => {
+    const before = Date.now();
+    await draw(offerCard(baseOffer));
+    const [active, deadline] = ring.useJobRing.mock.lastCall as [boolean, number];
+    expect(active).toBe(true);
+    // A 30 s offer: the ring may last no longer than the offer does.
+    expect(deadline).toBeGreaterThanOrEqual(before + 30_000);
+    expect(deadline).toBeLessThanOrEqual(Date.now() + 30_000);
+
+    await draw(React.createElement(DispatchOfferCard, { offer: baseOffer as never, job: null, kind: 'DRIVER', accepting: true, onAccept: vi.fn(), onDecline: vi.fn() }));
+    expect(ring.useJobRing).toHaveBeenLastCalledWith(false, deadline);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// [PERF partner #4] A taxi driver carries one ride at a time, so during a ride
+// the job board rests: Home tells the board hook the driver is on a ride (it
+// stops polling) and the board's last pins leave the map.
+// ---------------------------------------------------------------------------
+describe('[PERF partner #4] a taxi driver\'s board rests during a ride', () => {
+  const pinJob = { id: 'pin-1', pickupLat: 6.81, pickupLng: -58.16, vendor: { name: 'Board Pin' }, pickupAddress: 'Bourda Market', dropoffAddress: 'Kitty', fareTotal: 1800, paymentMethod: 'CASH' };
+
+  it('on a ride: the board hook hears it, and no board pin is drawn', async () => {
+    fx.jobs = [pinJob];
+    fx.active = { id: 'ride-1', status: 'ARRIVED', dropoffAddress: 'Kitty', fareTotal: 1800 };
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.boardArgs[2]).toBe(true);
+    expect(fx.pins).not.toContain('Board Pin');
+  });
+
+  it('between rides: the board polls and its pins are drawn', async () => {
+    fx.jobs = [pinJob];
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.boardArgs[2]).toBe(false);
+    expect(fx.pins).toContain('Board Pin');
+  });
+
+  it('right after a ride: the board\'s answer from before the ride draws no pin until the fresh read (#1919 review S4-1)', async () => {
+    fx.jobs = [pinJob];
+    fx.boardAt = Date.now() - 30 * 60_000; // read before a 30-minute ride
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.pins).not.toContain('Board Pin');
+  });
+
+  it('a recent board answer is drawn', async () => {
+    fx.jobs = [pinJob];
+    fx.boardAt = Date.now() - 5_000;
+    await draw(React.createElement(MoverHomeScreen, { navigation: { navigate: vi.fn() } }));
+    expect(fx.pins).toContain('Board Pin');
   });
 });

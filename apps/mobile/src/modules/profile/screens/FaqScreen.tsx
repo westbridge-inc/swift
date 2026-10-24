@@ -4,6 +4,8 @@ import { Pressable, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, space } from '@swift/ui';
 import { Card, Header, Screen, T } from '../../../kit';
+import { TAXI_DOCUMENTS_FAQ } from '../../../components/onboarding/taxiDocumentCopy';
+import { CANCEL_ORDER_FAQ_ANSWER } from '../../../lib/cancelPolicyCopy';
 
 // Kit FAQ (54): accordion rows. Static product truths — no invented data.
 const FAQS: { q: string; a: string }[] = [
@@ -24,17 +26,21 @@ const FAQS: { q: string; a: string }[] = [
     a: 'Open the order from Home or My Orders. You’ll see the live map, the rider’s position, and every stage from the kitchen to your gate.',
   },
   {
-    q: 'What is identity verification for?',
-    a: 'Bigger orders and taxi rides need a verified ID (a quick photo of your ID plus a selfie). It keeps both sides of every trip accountable.',
+    q: 'Why does Swift ask for my ID?',
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] on file at once, no selfie. [16 Oct] Customers take no photos, taxi included.
+    a: 'Bigger orders and taxi rides need your ID on file — a quick photo of your government ID, no selfie. It goes on file right away (sometimes a person checks it first).',
   },
   {
     q: 'Can I cancel an order?',
-    a: 'Yes — within the first few minutes while the order is pending. Cash orders cancel free. If you already sent an MMG payment for the order, the store refunds you directly. After the store starts preparing, cancellation may not be available.',
+    // [Terms 2026-10-15 §7] free or refused, never a fee
+    a: CANCEL_ORDER_FAQ_ANSWER,
   },
   {
     q: 'How do refunds work with cash?',
     a: 'If something goes wrong, report it from the order. Claims are reviewed with GPS and photo evidence and settled under Swift’s guarantee policy.',
   },
+  // [Owner ruling 11 Oct 2026] the two licences, said plainly
+  TAXI_DOCUMENTS_FAQ,
 ];
 
 export function FaqScreen() {

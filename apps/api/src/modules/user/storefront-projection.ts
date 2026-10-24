@@ -9,6 +9,7 @@
  * by field, so a column added to the schema later stays private until someone
  * decides to publish it here.
  */
+import { servedPhotoAddress } from '../../utils/photo-address';
 
 /** Item stock is published only as "sold out" (0) or "not sold out" (null):
  *  clients test `stockQuantity === 0`; the real count is the store's business. */
@@ -98,7 +99,7 @@ export function publicStorefrontItem(item: ItemRow) {
     id: item.id,
     name: item.name,
     description: item.description,
-    imageUrl: item.imageUrl,
+    imageUrl: servedPhotoAddress(item.imageUrl), // [IMAGES-E2E PR4] never an outside host
     basePrice: price,
     customerPrice: price,
     fulfillment: item.fulfillment,
@@ -124,7 +125,7 @@ export function publicStorefrontCategory(cat: CategoryRow) {
     id: cat.id,
     name: cat.name,
     description: cat.description,
-    imageUrl: cat.imageUrl,
+    imageUrl: servedPhotoAddress(cat.imageUrl),
     sortOrder: cat.sortOrder,
     items: cat.items.map(publicStorefrontItem),
   };

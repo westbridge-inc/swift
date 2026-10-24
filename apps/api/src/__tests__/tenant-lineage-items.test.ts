@@ -12,17 +12,17 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
-import { nanoid } from 'nanoid';
 import { prismaPlugin, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { TENANT_TABLES, TENANT_LINEAGE_TABLES, allRlsDdl, appRoleDdl, tenantLineageDdl } from '../lib/tenant-rls';
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('ddl');
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const REVIEW = `lineage-${RUN}`;
 const PRODUCTION = 'swift-default';
@@ -79,7 +79,7 @@ afterAll(async () => {
 
 const item = (data: Prisma.ItemUncheckedCreateInput) => app.prisma.item.create({ data });
 const plate = (vendorId: string, categoryId: string, extra: Partial<Prisma.ItemUncheckedCreateInput> = {}): Prisma.ItemUncheckedCreateInput =>
-  ({ vendorId, categoryId, name: `Plate ${nanoid(4)}`, basePrice: 1000, isAvailable: true, ...extra });
+  ({ vendorId, categoryId, name: `Plate ${wordFreeTag(8)}`, basePrice: 1000, isAvailable: true, ...extra });
 
 describe('[STA-1 §4 lineage] items and categories carry their tenant on the row', () => {
   it('both tables are in BOTH walls and are FORCED', async () => {

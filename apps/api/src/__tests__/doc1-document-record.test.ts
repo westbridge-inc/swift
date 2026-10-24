@@ -33,6 +33,7 @@ import { isProviderVerified, providerChecklist } from '../modules/services/servi
 import { installDdl } from './helpers/install-ddl';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { rlsDdlFor, tenantLineageDdl } from '../lib/tenant-rls';
+import { reviewerTyped } from './helpers/reviewer-typed';
 
 grantSuiteCapability('ddl');
 
@@ -85,7 +86,7 @@ beforeAll(async () => {
   await system(() => seedDocRegistry(app.prisma));
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
     phone: `+59279${NUM}0`, firstName: 'Rec', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true,
-    admin: { create: { permissions: ['*'] } },
+    admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   adminId = a.id; users.push(adminId);
   adminToken = app.jwt.sign({ userId: a.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
@@ -118,7 +119,8 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const u = await owner(1);
     const doc = await submit(u, 'business_registration');
     expect(await recordOf(doc.id)).toBeNull(); // queued for a human: no record yet
-    const res = await admin('PUT', `/verification/${doc.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() });
+    // [R16] a business registration is approved with its kind (a company's never expires)
+    const res = await admin('PUT', `/verification/${doc.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), registrationKind: 'COMPANY' });
     expect(res.statusCode).toBe(200);
     const rec = await recordOf(doc.id);
     expect(rec).toMatchObject({ status: 'VALID', accountId: u, docType: 'business_registration', approvedBy: adminId, subjectId: (await docOf(doc.id)).subjectId, tenantId: 'swift-default', recheckBy: null });
@@ -133,7 +135,8 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const ids: string[] = [];
     for (const t of checklist) {
       const d = await submit(u, t);
-      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() })).statusCode).toBe(200);
+      // [VERIFY-DOCS] the reviewer also types the ID number or the clearance's issue date where the type needs it
+      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...reviewerTyped(t, d.id) })).statusCode).toBe(200);
       ids.push(d.id);
     }
     expect(await system(() => service.isRoleVerified(u, 'RESTAURANT'))).toBe(true);
@@ -158,11 +161,11 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const u = await owner(3);
     const first = await submit(u, 'business_registration');
     // inside the 30-day renewal window, so a renewal is accepted (a document valid beyond it cannot be resubmitted)
-    expect((await admin('PUT', `/verification/${first.id}/approve`, { expiresAt: new Date(Date.now() + 20 * DAY).toISOString() })).statusCode).toBe(200);
+    expect((await admin('PUT', `/verification/${first.id}/approve`, { expiresAt: new Date(Date.now() + 20 * DAY).toISOString(), registrationKind: 'COMPANY' })).statusCode).toBe(200);
     expect((await recordOf(first.id))!.status).toBe('VALID');
     // renewal: the same type commits again → the older record and submission are SUPERSEDED
     const second = await submit(u, 'business_registration');
-    expect((await admin('PUT', `/verification/${second.id}/approve`, { expiresAt: new Date(Date.now() + 400 * DAY).toISOString() })).statusCode).toBe(200);
+    expect((await admin('PUT', `/verification/${second.id}/approve`, { expiresAt: new Date(Date.now() + 400 * DAY).toISOString(), registrationKind: 'COMPANY' })).statusCode).toBe(200);
     expect((await recordOf(second.id))!.status).toBe('VALID');
     expect((await recordOf(first.id))!.status).toBe('SUPERSEDED');
     expect(await docOf(first.id)).toMatchObject({ state: 'SUPERSEDED', status: 'APPROVED' });
@@ -175,7 +178,7 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     expect(await system(() => approvedEvidenceFor(app.prisma, u, ['business_registration'], new Date()))).toHaveLength(0);
     // expiry through the sweep
     const third = await submit(u, 'business_registration');
-    expect((await admin('PUT', `/verification/${third.id}/approve`, { expiresAt: new Date(Date.now() + 5 * DAY).toISOString() })).statusCode).toBe(200);
+    expect((await admin('PUT', `/verification/${third.id}/approve`, { expiresAt: new Date(Date.now() + 5 * DAY).toISOString(), registrationKind: 'COMPANY' })).statusCode).toBe(200);
     await system(() => app.prisma.verificationDocument.update({ where: { id: third.id }, data: { expiresAt: new Date(Date.now() - DAY) } }));
     await system(() => service.expireLapsedDocuments());
     expect((await recordOf(third.id))!.status).toBe('EXPIRED');
@@ -190,7 +193,8 @@ describe('[DOC-1 P4-2] the record is kept by the database', () => {
     const ids: string[] = [];
     for (const t of checklist) {
       const d = await runWithTenant('swift-default', async () => service.submitDocument(u, 'SERVICE_PROVIDER', t, await ownedVerificationFixture(app.prisma, u), 'v1'));
-      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString() })).statusCode).toBe(200);
+      // [VERIFY-DOCS] the reviewer also types the ID number or the clearance's issue date where the type needs it
+      expect((await admin('PUT', `/verification/${d.id}/approve`, { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...reviewerTyped(t, d.id) })).statusCode).toBe(200);
       ids.push(d.id);
     }
     expect(await system(() => isProviderVerified(app.prisma, u))).toBe(true);

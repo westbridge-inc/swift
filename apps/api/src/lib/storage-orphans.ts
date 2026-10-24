@@ -1,9 +1,17 @@
 import type { PrismaClient } from '@prisma/client';
+import { runAsSystem } from '../plugins/tenant-context';
+import { censusSeesEveryRow, type CensusVisibilityRow } from './census-visibility';
 import {
   isOwnedAvatarKey,
   resolveUnreferencedAvatarObject,
   resolveVerificationObject,
 } from '../modules/verification/object-authority';
+import {
+  PUBLIC_PHOTO_DELETE_REASONS,
+  parsePublicPhotoKey,
+  publicPhotoFolderOwner,
+  publicPhotoStillReferenced,
+} from '../utils/public-photo-deletion';
 
 /**
  * [F-026-02] The durable census of storage objects the platform still owes a
@@ -58,21 +66,24 @@ export function isAvatarErasureObligation(
 }
 
 /** Global completion census. The request-scoped StorageOrphan delegate would
- * hide a mismatched historical tenant row, so completion uses raw SQL while
- * the current privileged application credential can genuinely see all rows.
- * Once the app moves to the NOBYPASSRLS credential, this no-migration bridge
- * refuses to certify completion until structural object lineage/system-DB
- * transaction support replaces it. */
+ * hide a mismatched historical tenant row, so completion uses raw SQL on a
+ * connection that genuinely sees every tenant's rows, proven on that
+ * connection (storageOrphanCensusSeesEveryRow), never inferred from config.
+ *
+ * [Phase C] On the walled credentials (TENANT_RLS_BIND=1, least-privilege
+ * request login) the request's connection is tenant-filtered, so the census
+ * is system work: runAsSystem makes its transaction BEGIN on the system login,
+ * whose swift_bypass_rls membership the tenant policy admits. It is never
+ * called inside a caller's transaction (it takes the client and opens its
+ * own), where a system query would be refused rather than moved. With the
+ * wall off it runs on the one connection, as before. Without a system login
+ * the census still refuses, and the account answer stays pending. */
 export async function openAvatarErasureObligationIds(
   db: PrismaClient,
   userId: string,
 ): Promise<string[]> {
-  return db.$transaction(async (tx) => {
-    const visibility = await tx.$queryRaw<Array<{ active: boolean }>>`
-      SELECT row_security_active('storage_orphans'::regclass) AS "active"
-      /* avatar-obligation-global-census-visibility */
-    `;
-    if (visibility.length !== 1 || visibility[0]?.active !== false) {
+  return runAsSystem('account:erasure-avatar-census', () => db.$transaction(async (tx) => {
+    if (!(await storageOrphanCensusSeesEveryRow(tx))) {
       throw new Error('Global avatar erasure census is filtered by row-level security');
     }
     const rows = await tx.$queryRaw<Array<{ id: string; key: string; reason: string; userId: string | null }>>`
@@ -83,7 +94,71 @@ export async function openAvatarErasureObligationIds(
       /* avatar-obligation-global-census */
     `;
     return rows.filter((row) => isAvatarErasureObligation(row, userId)).map((row) => row.id);
-  });
+  }));
+}
+
+/** [IMAGES-E2E · REVIEW-G S3-1 / DUP-AUDIT B-4 on #1918] This person's open public-photo
+ *  deletion obligations (store and portfolio photos), read the way the avatar census is: its
+ *  own transaction under runAsSystem (so under the wall it begins on the system login), on a
+ *  connection storageOrphanCensusSeesEveryRow PROVES sees every tenant's rows. Null when that
+ *  cannot be proven: the caller reports the erasure pending, never a blind "nothing owed". */
+export async function openPublicPhotoObligationIds(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+): Promise<string[] | null> {
+  return runAsSystem('account:erasure-public-photo-census', () => db.$transaction(async (tx) => {
+    if (!(await storageOrphanCensusSeesEveryRow(tx))) return null;
+    const rows = await tx.$queryRaw<Array<{ id: string; reason: string }>>`
+      SELECT "id", "reason"
+      FROM "storage_orphans"
+      WHERE "userId" = ${userId} AND "purgedAt" IS NULL
+      ORDER BY "createdAt" ASC, "id" ASC
+      /* public-photo-obligation-global-census */
+    `;
+    return rows.filter((row) => reasons.includes(row.reason)).map((row) => row.id);
+  }));
+}
+
+/** How many of this person's public-photo deletions are still owed after one retry pass
+ *  (at most 100, oldest first). Unproven (null census) counts as owed: never a false "deleted". */
+export async function owedPublicPhotoCount(
+  db: PrismaClient,
+  userId: string,
+  reasons: readonly string[],
+  retry: (orphanId: string) => Promise<unknown>,
+): Promise<number> {
+  const owed = await openPublicPhotoObligationIds(db, userId, reasons);
+  if (owed === null) return 1;
+  for (const id of owed.slice(0, 100)) await retry(id);
+  const still = await openPublicPhotoObligationIds(db, userId, reasons);
+  return still === null ? 1 : still.length;
+}
+
+type RawTx = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
+
+/** Does THIS connection see every row of storage_orphans? Either row security
+ * is not applied to it at all (a superuser, a BYPASSRLS login, the owner of an
+ * unforced table: the wall-off posture), or it is a swift_bypass_rls member
+ * (the system login) and every policy that filters its reads is the tenant
+ * contract itself, whose escape admits that membership, with no restrictive
+ * policy to narrow it. Postgres reports row security ACTIVE for the system
+ * login (the escape is a policy term, not a role attribute), so the bare
+ * row_security_active check would refuse it for ever. */
+export async function storageOrphanCensusSeesEveryRow(tx: RawTx): Promise<boolean> {
+  const rows = await tx.$queryRaw<CensusVisibilityRow[]>`
+    SELECT row_security_active('storage_orphans'::regclass) AS "active",
+           COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false) AS "bypass",
+           COALESCE((SELECT json_agg(json_build_object(
+                       'permissive', p.polpermissive,
+                       'cmd', p.polcmd::text,
+                       'applies', p.polroles = '{0}'::oid[]
+                                  OR EXISTS (SELECT 1 FROM pg_roles r WHERE r.oid = ANY(p.polroles) AND pg_has_role(current_user, r.oid, 'MEMBER')),
+                       'qual', pg_get_expr(p.polqual, p.polrelid)))
+                       FROM pg_policy p WHERE p.polrelid = 'storage_orphans'::regclass), '[]'::json) AS "policies"
+    /* avatar-obligation-global-census-visibility */
+  `;
+  return censusSeesEveryRow(rows);
 }
 
 /** The strict writer is used when an object pointer is about to disappear.
@@ -146,7 +221,15 @@ export async function deleteStorageObjectAndConfirmAbsent(storage: StorageLike, 
 /** Retry one exact row under locks. User-before-orphan is the fixed lock order
  * for avatars, shared with the selfie/account writers. The row is re-read after
  * both locks and closed with a compare-and-set so a stale page cannot retire a
- * newly reopened obligation. */
+ * newly reopened obligation.
+ *
+ * [Phase C · copy run #5a] The retry is system work: its whole transaction
+ * (both locks, the global "no one else points at it" census, the close)
+ * BEGINs on the system login, so the census proves visibility on the very
+ * connection that holds the locks. On the request's tenant-filtered
+ * connection that census refused, so a walled erasure answered "pending"
+ * until the background sweep came by. It always opens its own transaction
+ * (it takes the client); with the wall off it runs on the one connection. */
 export async function retryStorageOrphan(
   db: PrismaClient,
   storage: StorageLike,
@@ -154,7 +237,7 @@ export async function retryStorageOrphan(
   orphanId: string,
 ): Promise<boolean> {
   try {
-    return await db.$transaction(async (tx) => {
+    return await runAsSystem('storage:orphan-exact-retry', () => db.$transaction(async (tx) => {
       const seed = await tx.storageOrphan.findUnique({ where: { id: orphanId } });
       if (!seed || seed.purgedAt) return false;
 
@@ -189,6 +272,33 @@ export async function retryStorageOrphan(
         return closed.count === 1;
       }
 
+      // [IMAGES-E2E · REVIEW-F S2-1] A photo customers were shown (a store's or a provider's
+      // portfolio). The reason alone grants nothing: the key must be one of the two public
+      // folders' exact shapes, the row's user must own that folder, and no row may still
+      // point at the photo when it is deleted.
+      if (PUBLIC_PHOTO_DELETE_REASONS.has(seed.reason)) {
+        if (!seed.userId || !parsePublicPhotoKey(seed.key)) return false;
+        const photoLock = await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT "id" FROM "storage_orphans" WHERE "id" = ${seed.id} AND "purgedAt" IS NULL
+          FOR UPDATE /* public-photo-orphan-row-authority */
+        `;
+        if (!photoLock[0]) return false;
+        const row = await tx.storageOrphan.findUnique({ where: { id: seed.id } });
+        if (!row || row.purgedAt || row.key !== seed.key || row.reason !== seed.reason
+          || row.userId !== seed.userId || row.tenantId !== seed.tenantId) return false;
+        if (await publicPhotoFolderOwner(tx, row.key) !== row.userId) return false;
+        if (await publicPhotoStillReferenced(tx, row.key)) return false;
+        if (!await deleteStorageObjectAndConfirmAbsent(storage, row.key)) return false;
+        const closed = await tx.storageOrphan.updateMany({
+          where: {
+            id: row.id, key: row.key, reason: row.reason, userId: row.userId,
+            tenantId: row.tenantId, purgedAt: null,
+          },
+          data: { purgedAt: new Date() },
+        });
+        return closed.count === 1;
+      }
+
       const orphanLock = await tx.$queryRaw<Array<{ id: string }>>`
         SELECT "id" FROM "storage_orphans" WHERE "id" = ${seed.id} AND "purgedAt" IS NULL
         FOR UPDATE /* verification-orphan-row-authority */
@@ -207,7 +317,7 @@ export async function retryStorageOrphan(
         data: { purgedAt: new Date() },
       });
       return closed.count === 1;
-    }, { timeout: 15_000 });
+    }, { timeout: 15_000 }));
   } catch (err) {
     log.error({ err, orphanId }, '[F-026-02] storage-orphan retry failed — stays open');
     return false;

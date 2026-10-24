@@ -44,10 +44,12 @@ ARG SWIFT_WEB_CHANNEL
 # Unset or empty keeps src/site.config.ts refusing to build while a company
 # detail is still a {{TOKEN}}; only an explicit 1 lets such a build through.
 ARG NEXT_PUBLIC_ALLOW_SITE_TOKENS
-# [Item 7] The pre-launch switch for the public site: `live` opens ordering on
-# the apex and www; unset or empty shows the "Launching soon" front door there.
-# Other hosts this image answers (staging) keep the full marketplace either way.
-ARG NEXT_PUBLIC_WEB_ORDERING
+# [WEB-TILES] The MapTiler browser key: public by design (inlined into the
+# bundle) and restricted in MapTiler to the site's own origins. Empty: the
+# site draws no map tiles (apps/web/src/lib/map-tiles.ts), never OpenStreetMap's.
+ARG NEXT_PUBLIC_MAPTILER_KEY
+# [Item 7 · S1] The pre-launch switch is NOT a build argument: the site reads
+# SWIFT_WEB_ORDERING from its environment while it runs (deploy/docker-compose.yml).
 # next.config.ts: the standalone server, and the type check and lint stay
 # with CI (the reason is written there).
 ENV SWIFT_WEB_IMAGE_BUILD=1
@@ -66,6 +68,26 @@ COPY apps/mobile/src/kit apps/mobile/src/kit
 # anything but @swift/types (packages/, copied above), so exactly these files.
 COPY apps/mobile/src/lib/homeReliability.ts apps/mobile/src/lib/homeReliability.ts
 COPY apps/mobile/src/modules/cart/cartPayment.ts apps/mobile/src/modules/cart/cartPayment.ts
+# [PAYMENT-SIMPLIFY] The order page reads the store's MMG number with the phone's own parser (pure; types only).
+COPY apps/mobile/src/lib/mmgStorePayment.ts apps/mobile/src/lib/mmgStorePayment.ts
+# [UI-SWEEP U14 / U17] The order pages speak the phone's status words and its
+# reorder notice (src/lib/order-words.ts imports them by path). Both are pure:
+# orderStatus.ts imports only types from @swift/types, reorderNotice.ts nothing.
+COPY apps/mobile/src/lib/orderStatus.ts apps/mobile/src/lib/orderStatus.ts
+COPY apps/mobile/src/lib/reorderNotice.ts apps/mobile/src/lib/reorderNotice.ts
+# [W6] The store page judges an item's choices with the API's own validator
+# (src/lib/menu-options.ts imports it by path, never a second copy). It is a
+# pure module with no imports of its own, so exactly this file.
+COPY apps/api/src/modules/order/options.ts apps/api/src/modules/order/options.ts
+# The business console reuses the app's plain board files by path (PR A): the
+# role matrix, the accept clock, the MMG-dispute pause, the store-delivery rule
+# and the market-calendar helpers. None imports anything but @swift/types.
+COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
+COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
+COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
+COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
+COPY apps/mobile/src/modules/vendor/storeOrderRules.ts apps/mobile/src/modules/vendor/storeOrderRules.ts
+COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
 WORKDIR /app/apps/web
 RUN pnpm run build
 
