@@ -28,7 +28,7 @@ let redis: Redis;
 /** A fake card gateway answering in the guide's shapes. `credentials` also
  *  models answers that say nothing about them (another status, no JSON, a
  *  system error, no answer at all). */
-type ProbeAnswer = boolean | 'http404' | 'http500' | 'not-json' | 'system-error' | 'no-answer';
+type ProbeAnswer = boolean | 'http401' | 'http403' | 'http404' | 'http500' | 'not-json' | 'system-error' | 'no-answer';
 function gateway(opts: { alive?: boolean; credentials?: ProbeAnswer; page?: boolean } = {}) {
   const paths: string[] = [];
   const headers: Array<Record<string, string>> = [];
@@ -42,6 +42,8 @@ function gateway(opts: { alive?: boolean; credentials?: ProbeAnswer; page?: bool
     }
     if (path === '/api/spi/riskmgmt') {
       if (opts.credentials === 'no-answer') throw new TypeError('fetch failed');
+      if (opts.credentials === 'http401') return new Response('', { status: 401 });
+      if (opts.credentials === 'http403') return new Response('', { status: 403 });
       if (opts.credentials === 'http404') return new Response('not found', { status: 404 });
       if (opts.credentials === 'http500') return new Response(JSON.stringify({ Errors: [{ Code: '999', Message: 'Server error' }] }), { status: 500 });
       if (opts.credentials === 'not-json') return new Response('<html>maintenance</html>', { status: 200 });
@@ -101,6 +103,14 @@ describe('the card self-check', () => {
     expect(printed).toBe('FAIL card: settings complete (POWERTRANZ_PAGE_SET, POWERTRANZ_PAGE_NAME)');
     expect(formatSelfCheck(await runPaymentsSelfCheck(['card'], { ...CARD_ENV, POWERTRANZ_PASSWORD: '' }, { redis }))).toBe('FAIL card: settings complete (POWERTRANZ_PASSWORD)');
     expect(formatSelfCheck(await runPaymentsSelfCheck(['card'], { ...CARD_ENV, CARD_RAIL_PROVIDER: 'simulator' }, { redis }))).toBe('FAIL card: CARD_RAIL_PROVIDER is set to powertranz');
+  });
+
+  it('the gateway refusing the credentials outright (401, 403, ISO 89 / error 312) is the plain refusal FAIL, not "could not tell"', async () => {
+    for (const credentials of ['http401', 'http403', false] as const) {
+      const printed = formatSelfCheck(await runPaymentsSelfCheck(['card'], CARD_ENV, { redis, fetch: gateway({ credentials }).fetch }));
+      expect(printed.split('\n'), String(credentials)).toContain('FAIL card: credentials accepted');
+      expect(printed, String(credentials)).not.toContain('could not tell');
+    }
   });
 
   it('[DS845 S3] an answer that says nothing about the credentials (404, 5xx, not JSON, a system error, no answer): FAIL, "could not tell" — never "accepted"', async () => {
