@@ -17,7 +17,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 // is on screen, the app is in front and something is in progress.
 // ---------------------------------------------------------------------------
 
-type Row = { id: string; status: string; orderType: string; orderNumber: string; placedAt: string; totalAmount: number; vendor: { name: string } };
+type Row = { id: string; status: string; orderType: string; orderNumber: string; placedAt: string; totalAmount: number; vendor: { name: string; logoUrl?: string | null; coverImageUrl?: string | null } };
 const fx = vi.hoisted(() => ({
   goBack: vi.fn(),
   live: [] as Row[],
@@ -78,17 +78,26 @@ vi.mock('../../../stores/authStore', () => {
   };
 });
 vi.mock('../../../kit/toast', () => ({ toast: { show: vi.fn(), error: vi.fn(), success: vi.fn() } }));
-vi.mock('../../../lib/images', () => ({ vendorPhoto: () => undefined }));
+// The real photo choice (lib/images vendorPhoto): the U-P3 tile reads it.
+vi.mock('../../../lib/images', async (importOriginal) => ({ ...(await importOriginal<typeof import('../../../lib/images')>()) }));
 vi.mock('../../../kit/controls', async () => {
   const { createElement: h } = await import('react');
   return { TonePill: (p: any) => h('span', { 'data-status': '' }, p.label) };
 });
 vi.mock('../../../kit', async () => {
   const { createElement: h } = await import('react');
+  const { useNavigation } = await import('@react-navigation/native');
   const Box = (p: any) => h('div', null, p.children);
   return {
     Screen: Box, T: (p: any) => h('span', null, p.children),
-    Photo: () => null, Pictogram: () => null, Money: (p: any) => h('span', null, p.amount),
+    // The kit Header every pushed screen uses (kit/screen.tsx): Back, top left, goBack by default.
+    Header: (p: any) => {
+      const nav = useNavigation<any>();
+      return h('header', { 'data-kit-header': '' }, h('button', { 'aria-label': 'Back', onClick: p.onBack ?? (() => nav.goBack()) }), p.title ?? null);
+    },
+    // The store tile: what it would draw, so a test can read it (kit/photo-placeholder.tsx Photo).
+    Photo: (p: any) => h('figure', { 'data-uri': p.uri ?? '', 'data-show-label': String(p.showLabel ?? true), 'data-label': p.label ?? '' }),
+    Pictogram: () => null, Money: (p: any) => h('span', null, p.amount),
     PillButton: (p: any) => h('button', { onClick: p.onPress }, p.label),
     CircleChip: (p: any) => h('button', { 'aria-label': p.label, onClick: p.onPress }),
     EmptyState: (p: any) => h('section', null, p.title), ErrorState: () => h('div', null, 'Error'), LoadingBlock: () => h('div', null, 'Loading'),
@@ -143,6 +152,52 @@ describe('[UI-SWEEP U11] Your activity is a pushed screen with its own way back'
     await act(async () => back!.click());
     expect(fx.goBack).toHaveBeenCalledTimes(1);
     fx.goBack.mockClear();
+  });
+});
+
+describe('[UI-SWEEP U-P2, owner 22 Oct] Back is the kit Header, top left, like every pushed screen', () => {
+  it.each([
+    ['with orders', true],
+    ['with nothing yet', false],
+  ] as const)('%s, the one Back is the kit Header', async (_case, withRows) => {
+    if (withRows) fx.history = [order('h1', 'DELIVERED')];
+    await render();
+    const backs = host.querySelectorAll('button[aria-label="Back"]');
+    expect(backs, 'exactly one Back').toHaveLength(1);
+    expect(backs[0]!.closest('[data-kit-header]'), 'Back sits in the kit Header').not.toBeNull();
+    expect(host.firstElementChild?.firstElementChild?.matches('[data-kit-header]'), 'the Header is the first thing on the screen').toBe(true);
+  });
+});
+
+describe('[UI-SWEEP U-P3 + U-P4, owner 22 Oct] the activity rows', () => {
+  it('a store with no logo or photo gets the icon alone, never its name squeezed into the tile', async () => {
+    fx.history = [order('h1', 'DELIVERED')];
+    fx.live = [order('a1', 'PREPARING')];
+    await render();
+    const tiles = [...host.querySelectorAll('figure')];
+    expect(tiles).toHaveLength(2);
+    for (const tile of tiles) {
+      expect(tile.getAttribute('data-show-label'), 'the tile draws no name').toBe('false');
+      expect(tile.getAttribute('data-label'), 'the screen reader still hears the store').toMatch(/^Store /);
+    }
+  });
+
+  it('the tile is the store logo when it has one, before its cover', async () => {
+    fx.history = [{ ...order('h1', 'DELIVERED'), vendor: { name: 'Store h1', logoUrl: 'https://img.test/logo.png', coverImageUrl: 'https://img.test/cover.png' } }];
+    fx.history.push({ ...order('h2', 'DELIVERED'), vendor: { name: 'Store h2', logoUrl: null, coverImageUrl: 'https://img.test/cover-2.png' } });
+    await render();
+    const uris = [...host.querySelectorAll('figure')].map((t) => t.getAttribute('data-uri'));
+    expect(uris).toEqual(['https://img.test/logo.png', 'https://img.test/cover-2.png']);
+  });
+
+  it('no row prints the order number (Details shows it in full); status, store and amount stay', async () => {
+    fx.history = [{ ...order('h1', 'DELIVERED'), orderNumber: 'SW-261020-00042' }];
+    fx.live = [{ ...order('a1', 'PREPARING'), orderNumber: 'SW-261020-00043' }];
+    await render();
+    expect(text()).not.toMatch(/SW-261020-0004[23]/);
+    expect(text()).toContain('Store h1');
+    expect(text()).toContain('Store a1');
+    expect(text()).toContain('2500');
   });
 });
 

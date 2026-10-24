@@ -1,5 +1,5 @@
 import { VENDOR_MMG_DESTINATION_CLEARED } from '../../utils/store-mmg';
-import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT } from './account-closure';
+import { ACCOUNT_CLOSURE_MESSAGE, ACCOUNT_CLOSURE_SUBJECT, ACCOUNT_ERASURE_CUTOFF } from './account-closure';
 import { deidentifyCaseRecords, deidentifyProfiles, deidentifySafetyRecords, eraseOwedRowsInTransaction, retireCardsAndSessions } from './erasure-coverage';
 import { eraseUserDevices } from '../../lib/owner-rls';
 import { closeOpenMmgStagesFor } from '../integrity/money-surface';
@@ -273,6 +273,9 @@ export class AccountService {
         data: { status: 'DEACTIVATED', phone: `deleted:${userId}`, avatar: null },
       });
       await revokeAccessBeforeCleanup();
+      // [erasure exceptions] The erasure's own record of its cut-off, committed with the marker. audit_logs is
+      // immutable to app logins; the database's erasure exceptions (swift_erased_person) require this row too.
+      await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: 'User', entityId: userId } });
       return { hold, avatarOrphanId: avatarOrphan?.id ?? null };
     });
     if ('closureTicketId' in preflight && preflight.closureTicketId) return this.closureReceipt(userId, preflight.closureTicketId);

@@ -108,10 +108,10 @@ describe('a menu section\'s photo sheet', () => {
 
   beforeEach(() => { cat = { id: 'c1', name: 'Mains', imageUrl: KEPT, items: [] }; });
 
-  it('promises only that Home CAN show it, and says the camera data goes [REVIEW-F S3-1]', () => {
+  it('says where customers see it (the store page; Home only can), and that the camera data goes [REVIEW-F S3-1 · #1973 S4-1]', () => {
     const tree = open();
     expect(sheet(tree).props.visible).toBe(true);
-    expect(texts(tree)).toContain('This photo can show on Home as the picture for “Mains”. Location and camera details are removed.');
+    expect(texts(tree)).toContain('Customers see it above “Mains” on your store page, and it can show on Home. Location and camera details are removed.');
     expect(texts(tree).join(' ')).not.toMatch(/Customers see it on Home/);
   });
 

@@ -59,7 +59,8 @@ describe('GOLD-7 · AUTH-04 — completed-order erasure retry', () => {
 
     // LIFECYCLE_V2 hold timing is separately covered by the existing suites.
     await h.sys(() => h.app.prisma.order.update({ where: { id }, data: { holdExpiresAt: null } }));
-    for (const [step, status] of [['accept', 'ACCEPTED'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
+    // [O-3] Accept starts preparation; an older build's "Start preparing" tap is a 200 no-op.
+    for (const [step, status] of [['accept', 'PREPARING'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
       const next = await h.call('PUT', `/api/v1/vendor/orders/${id}/${step}`, owner.token, undefined, { 'x-vendor-id': store.vendorId });
       expect(next.statusCode, next.json().error?.code).toBe(200);
       expect(next.json().data.status).toBe(status);

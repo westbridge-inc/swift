@@ -53,7 +53,8 @@ export function categoryPhoto(
 ): string | null {
   // [IMAGES-E2E PR4] Through storePhotoUrl like every store photo: the stored value is a bare
   // key ("items/<store>/<file>") that no image view can load without the API origin.
-  return storePhotoUrl(category.imageUrl, width);
+  // [IMAGES-E2E PR5 · COORD ruling 19 Oct (a)] Only a photo Swift keeps: never an outside host.
+  return isKeptPhoto(category.imageUrl) ? storePhotoUrl(category.imageUrl, width) : null;
 }
 
 /**

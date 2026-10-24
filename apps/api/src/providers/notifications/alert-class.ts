@@ -70,6 +70,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
     'mmg_customer_says_paid',
+    // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
+    'vendor_customer_answered',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
@@ -115,6 +117,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
     'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
+    // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
+    'ops_places_failing',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
     // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)

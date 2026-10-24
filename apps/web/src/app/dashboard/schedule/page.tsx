@@ -11,7 +11,7 @@ import { storeKey, useStoreId } from '@/lib/store-scope';
 import { useStoreRole } from '@/lib/store-role';
 import { getStores, money } from '@/lib/vendor-api';
 import {
-  createBookingException, deleteBookingException, getBookingExceptions, getBookings,
+  createBookingException, deleteBookingException, getBookingExceptions, getBookings, getListingNames,
   type VendorBooking, type VendorBookingException,
 } from '@/lib/booking-api';
 import { formatAppointmentClock, formatAppointmentDay } from '@/lib/appointmentTime';
@@ -31,10 +31,36 @@ function useSelectedStoreType(): { vendorType: string | undefined; known: boolea
   return { vendorType: store?.vendorType, known: stores.isSuccess, failed: stores.isError && stores.data === undefined };
 }
 
-/** The app's two words for a booking on the day (VendorScheduleScreen AppointmentCard). */
-const bookingWords = (status: string) => (status === 'CONFIRMED' ? 'Confirmed' : 'Reserved');
+/** [UI-SWEEP, REVIEW-F #2013 S4-1] The app's words for a booking
+ *  (VendorScheduleScreen bookingStatusPill). This is BookingStatus (RESERVED,
+ *  CONFIRMED, COMPLETED, CANCELLED), its own vocabulary, not an order's.
+ *  GET /vendor/bookings drops only CANCELLED, so a COMPLETED appointment is
+ *  served, and it used to read 'Reserved'. A status this build was not taught
+ *  says so, never a guess. */
+function bookingWords(status: string): string {
+  switch (status) {
+    case 'RESERVED': return 'Reserved';
+    case 'CONFIRMED': return 'Confirmed';
+    case 'COMPLETED': return 'Completed';
+    case 'CANCELLED': return 'Cancelled';
+    default: return 'Status unavailable';
+  }
+}
 
 const blockWhen = (e: VendorBookingException) => (e.start && e.end ? `${e.start}–${e.end}` : 'all day');
+
+/** [UI-SWEEP, REVIEW-F #2013 S4-2] A block with an itemId closes ONE listing;
+ *  it used to read 'Blocked · all day', as if the whole store were closed. The
+ *  app's words: '<listing> blocked · …', 'One listing blocked · …' when the
+ *  name is not known. */
+const blockTitle = (e: VendorBookingException, names: Map<string, string> | undefined) => {
+  if (!e.itemId) return `Blocked · ${blockWhen(e)}`;
+  return `${names?.get(e.itemId) ?? 'One listing'} blocked · ${blockWhen(e)}`;
+};
+const blockSpoken = (e: VendorBookingException, names: Map<string, string> | undefined) => {
+  if (!e.itemId) return blockWhen(e);
+  return `${names?.get(e.itemId) ?? 'one listing'}, ${blockWhen(e)}`;
+};
 
 function AppointmentRow({ b }: { b: VendorBooking }) {
   const confirmed = b.status === 'CONFIRMED';
@@ -132,6 +158,8 @@ export default function SchedulePage() {
   const enabled = manager && service;
   const bookings = useQuery({ queryKey: storeKey(storeId, 'bookings'), queryFn: getBookings, enabled, refetchInterval: 60_000 });
   const blocks = useQuery({ queryKey: storeKey(storeId, 'booking-exceptions'), queryFn: getBookingExceptions, enabled, staleTime: 30_000 });
+  // A label only: while it is out or if it fails, a one-listing block says 'One listing'.
+  const listingNames = useQuery({ queryKey: storeKey(storeId, 'listing-names'), queryFn: getListingNames, enabled, staleTime: 60_000 });
   const removeBlock = useMutation({
     mutationFn: (id: string) => deleteBookingException(id),
     onSuccess: () => {
@@ -203,10 +231,10 @@ export default function SchedulePage() {
                 <li key={e.id} className="flex items-center gap-4 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-sunken)] p-4">
                   <Ban size={16} aria-hidden className="text-[var(--swift-muted)]" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold">Blocked · {blockWhen(e)}</p>
+                    <p className="text-sm font-semibold">{blockTitle(e, listingNames.data)}</p>
                     {e.reason && <p className="truncate text-xs text-[var(--swift-muted)]">{e.reason}</p>}
                   </div>
-                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockWhen(e)}`} disabled={removeBlock.isPending}
+                  <button type="button" className="sw-icon-btn" aria-label={`Remove block, ${blockSpoken(e, listingNames.data)}`} disabled={removeBlock.isPending}
                     onClick={() => removeBlock.mutate(e.id)}>
                     <X size={18} aria-hidden />
                   </button>

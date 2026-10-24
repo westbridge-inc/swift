@@ -23,7 +23,7 @@ const fx = vi.hoisted(() => {
 
 vi.mock('react', async (importOriginal) => {
   const real = await importOriginal<typeof import('react')>();
-  return { ...real, useEffect: (effect: () => void) => { effect(); }, useState: (v: unknown) => [v, vi.fn()], useCallback: (f: unknown) => f, useMemo: (f: () => unknown) => f() };
+  return { ...real, useEffect: (effect: () => void) => { effect(); }, useState: (v: unknown) => [v, vi.fn()], useCallback: (f: unknown) => f, useMemo: (f: () => unknown) => f(), useRef: (v: unknown) => ({ current: v }) };
 });
 vi.mock('react-native', () => ({ Vibration: { vibrate: vi.fn() } }));
 vi.mock('@tanstack/react-query', async (importOriginal) => {
@@ -32,7 +32,11 @@ vi.mock('@tanstack/react-query', async (importOriginal) => {
     ...real,
     useQuery: (options: unknown) => { fx.opts.push(options); return options; },
     useMutation: (options: unknown) => options,
-    useQueryClient: () => ({ invalidateQueries: (filter: { queryKey: unknown }) => { fx.invalidated.push(filter.queryKey); } }),
+    useQueryClient: () => ({
+      invalidateQueries: (filter: { queryKey: unknown }) => { fx.invalidated.push(filter.queryKey); },
+      // [STORE-DASH] the live layer also watches the board for a customer's answer (vendorops.answerRaises.navigation.test.ts)
+      getQueryData: () => undefined, getQueryCache: () => ({ subscribe: () => () => {} }), removeQueries: () => {},
+    }),
   };
 });
 vi.mock('../services/api', () => ({ vendorApi: {}, vendorDiscoveryApi: {} }));

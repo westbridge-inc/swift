@@ -76,6 +76,14 @@ export interface OwnerWallFacts {
    *  policies, or carrying another permissive policy (permissive policies are
    *  OR-ed: any other one widens the wall). */
   unwalledTables: string[];
+  /** [REVIEW-M S4-1] Owner-wall actions (public.swift_owner_wall_*) the wall
+   *  itself would reach: not SECURITY DEFINER, or defined by a role the owner
+   *  policy walls (a swift_owner_wall member that is neither a superuser,
+   *  BYPASSRLS nor a swift_bypass_rls member). Inside a definer action
+   *  current_user is its owner, so such an action sees only the BOUND person's
+   *  rows: for anyone else it finds and touches nothing, silently (an invite
+   *  outlives its withdrawal, a device is never revoked, a case never closes). */
+  walledActions: string[];
 }
 
 type RawDb = { $queryRaw<T = unknown>(query: TemplateStringsArray, ...values: unknown[]): Promise<T> };
@@ -94,6 +102,17 @@ export async function readOwnerWallFacts(db: RawDb): Promise<OwnerWallFacts> {
       FROM unnest(${Object.keys(OWNER_WALLED_TABLES)}::text[]) AS t(name)
       LEFT JOIN pg_class c ON c.relname = t.name AND c.relnamespace = 'public'::regnamespace AND c.relkind = 'r'
       LEFT JOIN pg_policy p ON p.polrelid = c.oid`;
+  const walledActions = await db.$queryRaw<Array<{ name: string }>>`
+    SELECT p.proname::text AS name
+      FROM pg_proc p
+      JOIN pg_roles o ON o.oid = p.proowner
+     WHERE p.pronamespace = 'public'::regnamespace
+       AND starts_with(p.proname::text, 'swift_owner_wall_')
+       AND (NOT p.prosecdef
+            OR (NOT o.rolsuper AND NOT o.rolbypassrls
+                AND COALESCE((SELECT pg_has_role(o.oid, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_owner_wall'), false)
+                AND NOT COALESCE((SELECT pg_has_role(o.oid, r.oid, 'MEMBER') FROM pg_roles r WHERE r.rolname = 'swift_bypass_rls'), false)))
+     ORDER BY 1`;
   const unwalled = Object.keys(OWNER_WALLED_TABLES).filter((table) => {
     const policies = rows.filter((r) => r.name === table);
     const layout = OWNER_POLICY_LAYOUT[table] ?? OWNER_ALL;
@@ -107,6 +126,7 @@ export async function readOwnerWallFacts(db: RawDb): Promise<OwnerWallFacts> {
     walledLogin: login?.walled ?? false,
     bypassLogin: login?.bypass ?? false,
     unwalledTables: unwalled.sort(),
+    walledActions: walledActions.map((r) => r.name),
   };
 }
 
@@ -123,6 +143,9 @@ export function ownerWallRefusal(facts: OwnerWallFacts, env: EnvLike = process.e
   }
   if (bind && facts.unwalledTables.length > 0) {
     return `OWNER_RLS_BIND=1 but ${facts.unwalledTables.join(', ')} lack(s) row security, FORCE or the ${OWNER_POLICY_NAME} policy`;
+  }
+  if (bind && facts.walledActions.length > 0) {
+    return `OWNER_RLS_BIND=1 but ${facts.walledActions.join(', ')} run(s) inside the wall (not SECURITY DEFINER, or defined by a ${OWNER_WALL_ROLE} member): each would see only the bound person's rows and silently miss everyone else's`;
   }
   if (!bind && facts.walledLogin) {
     return `this login is a member of ${OWNER_WALL_ROLE} but OWNER_RLS_BIND is not 1: no request would bind its person, so every owner-walled read would see nothing`;

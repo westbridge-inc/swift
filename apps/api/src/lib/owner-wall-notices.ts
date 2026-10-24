@@ -74,7 +74,8 @@ export async function insertNoticeFor<D extends NoticeData>(db: NoticeWriter, da
  * action, inside the caller's transaction. As the upsert did:
  *  - keyed by id (`data.id` given): the given id, whether written now or
  *    earlier; a DIFFERENT notice already holding the person's dedupe key fails
- *    with P2002, as the unique index failed the upsert's insert;
+ *    with P2002 from the unique index itself, as the upsert's insert failed
+ *    (inside a transaction it aborts that transaction, as before);
  *  - keyed by (userId, dedupeKey) (no id): the new id, or the existing one.
  */
 export async function upsertNoticeFor(db: NoticeWriter & TxRaw, data: NoticeData & { dedupeKey: string }): Promise<{ id: string }> {
@@ -94,9 +95,11 @@ export async function upsertNoticeFor(db: NoticeWriter & TxRaw, data: NoticeData
     return { id: existing };
   }
   if (existing !== null && existing !== data.id) {
-    throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`userId`,`dedupeKey`)', {
-      code: 'P2002', clientVersion: Prisma.prismaVersion.client, meta: { modelName: 'Notification', target: ['userId', 'dedupeKey'] },
-    });
+    // [REVIEW-M S4-2] Fail as the upsert's insert failed: the same INSERT again, now without skipping the conflict, so
+    // the unique index itself refuses it — Prisma's P2002 from the database, which aborts the caller's transaction
+    // exactly as it did with the wall off (an error made up here would leave the transaction usable, and a caller
+    // catching it inside would carry on where it once could not). Should the holder be gone by now, it is written.
+    await db.notification.createMany({ data: [{ ...data, id: data.id }] });
   }
   return { id: data.id };
 }

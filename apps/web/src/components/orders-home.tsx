@@ -19,13 +19,15 @@ import {
   numericFact, orderActions, reconciledRevenueDays, storeStatusEyebrow, subscriptionTone, windowTotals,
 } from '@/lib/vendor-hub';
 import {
-  acceptOrder, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markPreparing, markReady,
+  acceptOrder, getHours, getItems, getOps, getOverview, getProfile, getQr, getRevenue, getSubscription, markDelivered, markPreparing, markReady,
   money, rejectOrder, toggleOpen, toggleOrders, updateProfile, type VendorOrder,
 } from '@/lib/vendor-api';
 import { MutationNotice } from './mutation-notice';
 import { pickProfileStore, type HubStore } from '@/lib/profile-store';
 import { instantSwitch } from '@/lib/instant-toggle';
 import { confirmedOrderFields } from '@/lib/vendor-order-view';
+// The app's own O-4 rules and words (plain file, imported as is).
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { subscriptionWords } from '@/lib/subscription-words';
 import { acceptHeldForPayment, mmgMovedLabel, mmgMoneyMoved, mmgPayBlockedReason } from '@/lib/mmg-pay-words';
 // Plain app files, imported as is (and copied into the web image by the Dockerfile).
@@ -476,14 +478,16 @@ export function SelfDeliveryCard({ store, readFailed = false, onRetryRead = () =
 
 /**
  * The app's actions on an order card (VendorOrderCard): Accept, Reject with a
- * reason, Start preparing, Mark ready, Mark complete. Steps that need more
- * than a tap — the collection code, confirming a store delivery — open the
- * order window, where those checks live.
+ * reason, Start preparing, Ready for pickup / delivery, Mark complete. The
+ * collection code opens the order window, where it is typed. [STORE-DASH]
+ * Confirming a store delivery is asked right on the card (one more tap, the
+ * same words as the window), no window first.
  */
 export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen: () => void }) {
   const storeId = useStoreId();
   const client = useQueryClient();
   const [rejecting, setRejecting] = useState(false);
+  const [confirmingDelivered, setConfirmingDelivered] = useState(false);
   const refresh = () => {
     void client.invalidateQueries({ queryKey: storeKey(storeId, 'orders') });
     void client.invalidateQueries({ queryKey: storeKey(storeId, 'order', order.id) });
@@ -493,6 +497,7 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
       if (kind === 'accept') return acceptOrder(order.id);
       if (kind === 'preparing') return markPreparing(order.id);
       if (kind === 'ready') return markReady(order.id);
+      if (kind === 'delivered') return markDelivered(order.id);
       if (kind === 'complete-appointment') return apiFetch(`/api/v1/vendor/orders/${order.id}/complete-appointment`, { method: 'PUT', body: '{}' });
       throw new Error(`Unknown action ${kind}`);
     },
@@ -519,7 +524,8 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
   const moneyMoved = mmgMoneyMoved(order.paymentStatus);
   const terminal = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED'].includes(status);
   const attestable = isMmg && canAttestPayment(order.paymentStatus) && !terminal;
-  const canConfirm = attestable && order.canConfirmPayment === true;
+  // [STORE-DASH] A disputed (paused) order offers no MMG step on the card either, as in the window.
+  const canConfirm = attestable && order.canConfirmPayment === true && !mmgDisputePaused(order);
   const blockedReason = isMmg && !moneyMoved && !attestable && !terminal ? mmgPayBlockedReason(order.paymentStatus) : null;
   const paused = mmgDisputePaused(order);
   const actions = orderActions(order).filter((a) => !(a.action === 'accept' && acceptHeldForPayment(order)));
@@ -533,7 +539,11 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
         </p>
       )}
       {blockedReason && <p className="sw-caption">{blockedReason}</p>}
-      {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Confirm MMG payment</button>}
+      {/* [REVIEW-F S4-3 on #2032] One name for the MMG step: the window's own button (the reference is typed there). */}
+      {canConfirm && <button type="button" onClick={onOpen} className="sw-btn sw-btn-md sw-btn-outline w-full">Paid by MMG</button>}
+      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+      {!paused && customerDeciding(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-warning)]">{OUT_OF_STOCK_WORDS.deciding}</p>}
+      {!paused && nothingToAccept(order) && <p role="status" className="text-[13px] font-semibold text-[var(--swift-red-600)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
       {attestable && !canConfirm && <p className="sw-caption">Only the owner or a manager can confirm MMG payments.</p>}
       {/* The card's status chip already reads the notice's title (orders page statusChip). */}
       {paused && (
@@ -552,11 +562,20 @@ export function OrderCardActions({ order, onOpen }: { order: VendorOrder; onOpen
             <button type="button" disabled={busy} onClick={() => setRejecting(false)} className="sw-btn sw-btn-md">Keep it</button>
           </div>
         </div>
+      ) : confirmingDelivered && !paused ? (
+        <div role="group" aria-label="Confirm store delivery" className="rounded-xl bg-[var(--swift-soft-warning)] p-3">
+          <p className="text-[13px] font-semibold">Did your store hand this order to the customer?</p>
+          <p className="sw-caption mt-1">Only confirm after the handoff. This closes the order as delivered.</p>
+          <div className="mt-2 flex gap-2">
+            <button type="button" disabled={busy} onClick={() => { setConfirmingDelivered(false); act.mutate('delivered'); }} className="sw-btn sw-btn-md flex-1">Yes, delivered</button>
+            <button type="button" disabled={busy} onClick={() => setConfirmingDelivered(false)} className="sw-btn sw-btn-md sw-btn-outline flex-1">Not yet</button>
+          </div>
+        </div>
       ) : actions.length > 0 && (
         <div className="flex gap-2">
           {actions.map((a) => (
-            <button key={a.action} type="button" disabled={busy}
-              onClick={() => (a.action === 'reject' ? setRejecting(true) : ['complete-pickup', 'delivered', 'confirm-payment'].includes(a.action) ? onOpen() : act.mutate(a.action))}
+            <button key={a.action} type="button" disabled={busy} aria-busy={act.isPending && act.variables === a.action}
+              onClick={() => (a.action === 'reject' ? setRejecting(true) : a.action === 'delivered' ? setConfirmingDelivered(true) : ['complete-pickup', 'confirm-payment'].includes(a.action) ? onOpen() : act.mutate(a.action))}
               className={`sw-btn sw-btn-md flex-1 ${a.action === 'reject' ? 'sw-btn-outline' : ''}`}>
               {a.label}
             </button>

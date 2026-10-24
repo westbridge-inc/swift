@@ -86,6 +86,7 @@ COPY apps/mobile/src/lib/vendorRbac.ts apps/mobile/src/lib/vendorRbac.ts
 COPY apps/mobile/src/lib/appointmentTime.ts apps/mobile/src/lib/appointmentTime.ts
 COPY apps/mobile/src/modules/vendor/acceptClock.ts apps/mobile/src/modules/vendor/acceptClock.ts
 COPY apps/mobile/src/modules/vendor/order-dispute.ts apps/mobile/src/modules/vendor/order-dispute.ts
+COPY apps/mobile/src/modules/vendor/storeOrderRules.ts apps/mobile/src/modules/vendor/storeOrderRules.ts
 COPY apps/mobile/src/modules/vendor/screens/delivery-owner.ts apps/mobile/src/modules/vendor/screens/delivery-owner.ts
 WORKDIR /app/apps/web
 RUN pnpm run build

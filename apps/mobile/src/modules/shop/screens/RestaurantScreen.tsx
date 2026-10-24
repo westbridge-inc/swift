@@ -16,6 +16,7 @@ import { HERO_PHOTO_WIDTH, itemPhoto, vendorPhoto } from '../../../lib/images';
 import { money } from '../../../lib/money';
 import { formatPhoneForDisplay } from '../../../lib/phoneDisplay';
 import { SellerInfo } from '../../../components/SellerInfo';
+import { SectionPhotoHeader } from '../../../components/SectionPhotoHeader';
 import { toast } from '../../../kit/toast';
 import { Scrim } from '../../../kit/scrim';
 import { STORE_PICKS_TITLE } from '../../../lib/storePick';
@@ -182,9 +183,12 @@ function ServiceRow({ item, onOpen }: { item: any; onOpen: () => void }) {
             padding: space.md,
           }}
         >
+          {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+              beside the tile; squeezed into 64pt it broke across lines. */}
           <Photo
             uri={itemPhoto(item)}
             label={item.name}
+            showLabel={false}
             style={{ width: 64, height: 64, borderRadius: radius.md }}
             contentFit="cover"
           />
@@ -740,7 +744,7 @@ function RestaurantStore() {
             .map((cat: any) =>
               (cat.items?.length ?? 0) > 0 ? (
                 <View key={cat.id}>
-                  <SectionHeader title={cat.name} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
+                  <SectionPhotoHeader title={cat.name} imageUrl={cat.imageUrl} style={{ paddingHorizontal: GUTTER, marginTop: space['2xl'] }} />
                   <View
                     style={{
                       marginHorizontal: GUTTER,

@@ -11,8 +11,8 @@ import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
-import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
@@ -650,6 +650,31 @@ const VENDOR_ORDER_ITEMS = {
 function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
   const { selectedOptions, ...rest } = line;
   return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
+}
+
+/** [O-4 · owner 22 Oct 2026] An order with an open "Out of stock" question (a swap or a removal
+ *  the customer has not answered yet) is not accepted: the customer agrees to the changed order
+ *  first. The refusal names the item and how long the answer can take. An order whose every line
+ *  came off has nothing to accept: the store rejects it instead (with its reason). */
+export function assertNoOpenCustomerQuestion(
+  lines: ReadonlyArray<{ name: string; subStatus: string; substituteDecideBy?: Date | null }>,
+  now: Date = new Date(),
+): void {
+  const open = lines.find((line) => line.subStatus === 'PENDING');
+  if (!open) {
+    if (lines.length > 0 && lines.every((line) => line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED')) {
+      throw new AppError(409, 'NOTHING_TO_ACCEPT', 'Every item on this order was removed. Reject the order instead, with the reason.');
+    }
+    return;
+  }
+  const minutes = open.substituteDecideBy
+    ? Math.max(1, Math.ceil((open.substituteDecideBy.getTime() - now.getTime()) / 60_000))
+    : null;
+  throw new AppError(
+    409,
+    'CUSTOMER_DECIDING',
+    `The customer is still deciding about ${open.name}${minutes ? ` (up to ${minutes} more minute${minutes === 1 ? '' : 's'})` : ''}. Accept the order after they answer.`,
+  );
 }
 
 /**
@@ -1945,6 +1970,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // below is never reserved for an order that cannot proceed; the canonical
     // transition seam re-checks on the locked row.
     assertMmgFulfilmentAllowed(order, 'ACCEPTED');
+    // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order — after the customer answered every
+    // "Out of stock" question asked before acceptance (early answer; the authority is the locked
+    // re-check inside the transition below).
+    assertNoOpenCustomerQuestion(order.items);
     const body = acceptOrderSchema.parse(request.body ?? {});
 
     // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
@@ -1958,12 +1987,22 @@ export async function vendorRoutes(app: FastifyInstance) {
     const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
       ? order.items[0]?.itemId ?? null
       : null;
-    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
+    // [O-3 · owner 22 Oct 2026] Accept IS the start of preparation (STORE_ACCEPT_PATH): one tap,
+    // PENDING -> ACCEPTED -> PREPARING in this one commit, one push to the customer. A booking or an
+    // MMG order still waiting for "Paid by MMG" stops at ACCEPTED (preparationMayStart).
+    const [acceptedStatus, preparingStatus] = STORE_ACCEPT_PATH;
+    const updated = await orderService.updateStatus(order.id, acceptedStatus, request.user.userId, 'Accepted by vendor', {
+      continueTo: { target: preparingStatus, note: 'Preparing: the store accepted the order', when: preparationMayStart },
       withinTransaction: async (tx, lockedOrder) => {
         // [Q12 · AX289 F1] An order whose hold lapsed before the release sweep
         // reached it: accepting takes it out of the sweep's reach, so the
         // acceptance releases it — counted for the store once, here.
         await releaseLapsedHoldInTransaction(tx, order.id);
+        // [O-4] On the locked row: a question asked after the route's read is seen here.
+        assertNoOpenCustomerQuestion(await tx.orderItem.findMany({
+          where: { orderId: order.id },
+          select: { name: true, subStatus: true, substituteDecideBy: true },
+        }));
         if (appointmentItemId && order.appointmentSlot) {
           await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
         }
@@ -2109,6 +2148,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
     }
+    // [O-3] Accept already started preparation. Store builds 9/11/12 (and a stale web tab) still
+    // show "Start preparing" after an accept: their tap is a 200 no-op that answers with the order
+    // as it is — never an error, never a second status row or push. A closed order still refuses.
+    if (order.preparingAt && !isTerminalOrderStatus(order.status)) {
+      return { success: true, data: order };
+    }
     if (COURIER_ACTIVE.includes(order.status)) {
       if (order.preparingAt) return { success: true, data: order }; // double-tap safe
       const updated = await recordPrepProgress(order, 'PREPARING', request.user.userId);
@@ -2134,7 +2179,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (v && ['SUPERMARKET', 'STORE'].includes(v.vendorType)) {
         const state = await picking.readiness(order.id);
         if (state.unresolved > 0) {
-          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} line${state.unresolved === 1 ? '' : 's'} still need picking or a substitution decision`);
+          // [O-4] Ticks are optional: only an open customer question holds the bag.
+          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} item${state.unresolved === 1 ? ' is' : 's are'} still waiting for the customer's answer`);
         }
         // [W-28] Settled is not fulfilled. If every line was refunded or the
         // customer rejected every substitute, the bag is empty: marking this
@@ -2265,9 +2311,10 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
 
@@ -2275,10 +2322,22 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
+    // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
+
+  /** [O-4] A store that asked the customer about an item before accepting has answered its new-order
+   *  alert: the "still waiting" ladder stops (the same ack an accept or a reject gives). */
+  async function ackPreAcceptQuestion(order: { id: string; status: OrderStatus }, userId: string) {
+    if (order.status !== 'PENDING') return;
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
+    await ackVendorAlert(app, userId, order.id);
+  }
 
   /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
    *  atomic and logged. The audit trail behind quantity-on-hand. */
@@ -2488,7 +2547,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
-    const updated = capture.order;
+    // [O-3 · STORE_ACCEPT_PATH] An MMG order the store accepted before the money arrived stopped at
+    // ACCEPTED (payment-first). "Paid by MMG" is where its preparation starts: the rest of the
+    // store's one-tap accept, never a separate "Start preparing". After the claim committed, and on
+    // its own: a booking, a disputed claim (the seam re-decides payment-first on the locked row) or
+    // an order that moved on first is left as it is, and the claim stands either way.
+    const startPreparation = capture.order.status === STORE_ACCEPT_PATH[0] && preparationMayStart(capture.order);
+    const prepared = startPreparation
+      ? await orderService.updateStatus(order.id, STORE_ACCEPT_PATH[1], request.user.userId, 'Preparing: the store confirmed the MMG payment', {
+        allowedFrom: [STORE_ACCEPT_PATH[0]],
+      }).catch((err: unknown) => {
+        request.log.warn({ err, orderId: order.id }, '[O-3] preparation did not start with the MMG payment; the store can still start it');
+        return null;
+      })
+      : null;
+    const updated = prepared ?? capture.order;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
