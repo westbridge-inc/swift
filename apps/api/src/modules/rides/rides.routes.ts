@@ -1,11 +1,16 @@
+import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor } from '../rating/rating-groups';
+import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RideClass } from '@prisma/client';
-import { z } from 'zod';
+import { isRideClassServed } from '../../config/vehicle-classes';
+import { z } from '../../lib/zod';
 import { FareService } from './fare.service';
 import {
   assertRideGates,
   assertL2,
   createRideRequest,
+  fareChanged,
   replayRideRequestAnswer,
   rideRequestClaimKey,
   rideRequestReceiptKey,
@@ -13,7 +18,12 @@ import {
   type RideRequestBody,
 } from './rides.service';
 import { assertQuotedFare, planTaxiStops, refuseQueuedStops, taxiMaxStops } from './taxi-stops-flag';
+import { assertHirePassengers } from './hire-passengers';
+import { assertWebBookingCarriesQuoteAndKey, taxiMobileAppRequired, webTaxiBookingEnabled } from './web-taxi-booking';
 import { readRideItinerary } from './taxi-stops-read';
+import { hasTaxiPassengerCustody } from './passenger-custody';
+import { customerCancelView, readAssignedAt, readNoMoverFound } from '../order/cancel-policy';
+import { decorateRideWaiting, taxiWaitingEnabled, waitingDisclosure } from './taxi-waiting';
 import {
   CHECKOUT_CLAIM_TTL_S,
   checkoutRequestHash,
@@ -29,11 +39,12 @@ import { getSupplySnapshot, queueStatusFor, presenceNear, RIDE_QUEUE_TTL_MIN } f
 import { OrderService } from '../order/order.service';
 import { SosService } from '../safety/sos.service';
 import { makeDispatchService } from '../dispatch/dispatch.service';
+import { readNoDriverFoundSinceAssignment, rideSearchFacts } from './search-facts';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { tenantCacheKey } from '../../utils/tenant-cache';
-import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
-import { enterTenant, getTenantId } from '../../plugins/prisma';
+import { offeredDriverMmgPayUrl } from '../../utils/mmg-pay-url';
+import { enterOwner, enterTenant, getTenantId } from '../../plugins/prisma';
 import { invalidateHomeCache } from '../user/home-cache';
 
 // ---------------------------------------------------------------------------
@@ -90,6 +101,7 @@ async function authenticatedTenantId(app: FastifyInstance, userId: string): Prom
     throw new AppError(401, 'UNAUTHORIZED', 'Authenticated customer no longer exists');
   }
   enterTenant(user.tenantId);
+  enterOwner(userId);
   return user.tenantId;
 }
 
@@ -98,9 +110,13 @@ export async function ridesRoutes(app: FastifyInstance) {
   const creationAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
     // Cookie provenance is set only after JWT and live-session verification.
     // A bearer is not proof of a mobile app; do not trust a client-name header.
-    if (request.authCredentialSource === 'cookie') {
-      throw new AppError(403, 'TAXI_MOBILE_APP_REQUIRED', 'Book taxi rides in the Swift mobile app for your safety PIN and SOS.');
-    }
+    if (request.authCredentialSource === 'cookie') throw taxiMobileAppRequired();
+  }] };
+  // [Row 117] The booking door itself: shut to a browser session exactly as
+  // above unless WEB_TAXI_BOOKING is on (web-taxi-booking.ts). The queue keeps
+  // creationAuth: it stays phone-only either way.
+  const requestAuth = { preHandler: [app.authenticate, async (request: FastifyRequest) => {
+    if (request.authCredentialSource === 'cookie' && !webTaxiBookingEnabled()) throw taxiMobileAppRequired();
   }] };
   const fareService = new FareService(app.prisma);
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
@@ -168,23 +184,39 @@ export async function ridesRoutes(app: FastifyInstance) {
     // Refused while TAXI_MAX_STOPS is 0, else validated and numbered here,
     // before anything is read or priced.
     const stops = planTaxiStops(body);
+    if (stops.length === 0) assertRoadTripInMarket(body);
     const user = await app.prisma.user.findUniqueOrThrow({
       where: { id: request.user.userId },
       select: { countryCode: true, tenantId: true },
     });
+    // [TAXI waiting charge] While TAXI_WAITING_CHARGE is on, every estimate
+    // (with or without stops) discloses the waiting terms beside the fare
+    // (CONTRACT §8.2), as its last key. Off: today's answer, byte for byte.
+    const waiting = taxiWaitingEnabled()
+      ? { waiting: waitingDisclosure(await fareService.waitingTerms(user.countryCode)) }
+      : {};
     if (stops.length === 0) {
       // [M-34] Zone pricing is the requester's tenant's, in the requester's country.
       const estimate = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
-      return { success: true, data: estimate };
+      return { success: true, data: { ...estimate, ...waiting } };
     }
     const estimate = await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, user.tenantId);
-    return { success: true, data: { ...estimate, maxStops: taxiMaxStops(), stopCount: stops.length } };
+    return { success: true, data: { ...estimate, maxStops: taxiMaxStops(), stopCount: stops.length, ...waiting } };
   });
 
   /** GET /capabilities — [TAXI multi-stop] what the app may offer before a
    *  booking: how many stops a ride may carry (TAXI_MAX_STOPS, 0 = none). The
    *  app shows "+ Add stop" only while this is above 0. */
-  app.get('/capabilities', auth, async () => ({ success: true, data: { maxStops: taxiMaxStops() } }));
+  app.get('/capabilities', auth, async (request) => {
+    // [Row 117] A browser session is told it may book only while
+    // WEB_TAXI_BOOKING is on; every other answer is today's, byte for byte.
+    const web = request.authCredentialSource === 'cookie' && webTaxiBookingEnabled() ? { webBooking: true as const } : {};
+    // [TAXI waiting charge] With TAXI_WAITING_CHARGE on, the waiting terms of
+    // the customer's market too (CONTRACT §8.2). Off: today's answer exactly.
+    if (!taxiWaitingEnabled()) return { success: true, data: { maxStops: taxiMaxStops(), ...web } };
+    const user = await app.prisma.user.findUniqueOrThrow({ where: { id: request.user.userId }, select: { countryCode: true } });
+    return { success: true, data: { maxStops: taxiMaxStops(), waiting: waitingDisclosure(await fareService.waitingTerms(user.countryCode)), ...web } };
+  });
 
   /** POST /request — create the ride at the quoted fare and start dispatch.
    *  The core lives in rides.service createRideRequest (one source of truth
@@ -193,16 +225,27 @@ export async function ridesRoutes(app: FastifyInstance) {
    *  [TAXI multi-stop 3/8] With `stops` (TAXI_MAX_STOPS above 0) the ride is
    *  one trip over its whole road at the server's fare, booked only at the
    *  route fare the passenger was quoted (expectedFare). Without them it is
-   *  exactly the ride of today. An Idempotency-Key makes the request one
+   *  exactly the ride of today, except that [PRICE-LOCK] a ride without stops
+   *  that carries the fare the passenger was shown is booked only at it (409
+   *  FARE_CHANGED with the fare now otherwise); an app from before the lock
+   *  sends none and books as before (logged). An Idempotency-Key makes the request one
    *  command, the checkout way: a retry under the same key is answered with
    *  the first answer (201, replayed) and never books a second ride. */
-  app.post('/request', creationAuth, async (request, reply) => {
+  app.post('/request', requestAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
+    // [R9] No hire for more than 7 passengers: refused first, nothing read or written.
+    assertHirePassengers(body.passengerCount);
     // Judged before anything is read, priced or claimed: the switch, the
     // count, each stop and where the route lies, then the quoted fare a ride
     // with stops must carry. A malformed request never consumes a key.
     const stops = planTaxiStops(body);
+    if (stops.length === 0) assertRoadTripInMarket(body);
     assertQuotedFare(stops.length, body.expectedFare);
+    const idemKey = request.headers['idempotency-key'];
+    const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
+    // [Row 117] A browser booking (only past requestAuth while WEB_TAXI_BOOKING
+    // is on) carries the fare it showed and one key, before anything is read.
+    if (request.authCredentialSource === 'cookie') assertWebBookingCarriesQuoteAndKey(body.expectedFare, key);
     const ride: RideRequestBody = {
       pickup: body.pickup,
       dropoff: body.dropoff,
@@ -210,12 +253,18 @@ export async function ridesRoutes(app: FastifyInstance) {
       dropoffAddress: body.dropoffAddress,
       passengerCount: body.passengerCount,
       rideClass: body.rideClass,
-      ...(stops.length > 0 ? { stops, expectedFare: body.expectedFare } : {}),
+      ...(stops.length > 0 ? { stops } : {}),
+      // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
+      // passenger was shown travels to the booking for every ride that has one.
+      ...(body.expectedFare !== undefined ? { expectedFare: body.expectedFare } : {}),
     };
     const userId = request.user.userId;
+    if (body.expectedFare === undefined) {
+      // Only a ride without stops gets here unquoted (the stops check above
+      // refuses the rest): an app from before the price lock. Booked as before.
+      request.log.info({ event: 'ride_request_unquoted', rideClass: body.rideClass }, '[PRICE-LOCK] ride requested without the fare the passenger was shown (an app from before the lock); booked at the server fare');
+    }
 
-    const idemKey = request.headers['idempotency-key'];
-    const key = typeof idemKey === 'string' && idemKey.length >= 8 && idemKey.length <= 128 ? idemKey : null;
     if (!key) {
       const { answer } = await createRideRequest(app, fareService, dispatch, userId, ride);
       reply.code(201);
@@ -299,14 +348,40 @@ export async function ridesRoutes(app: FastifyInstance) {
   /** POST /queue/join — enter the waitlist with the full trip, gates mirrored
    *  from the request path (no availability pre-check: the queue exists FOR
    *  the no-supply case). Replaces any prior WAITING entry (newest trip wins,
-   *  same semantic as the supply watch). */
+   *  same semantic as the supply watch).
+   *  [PRICE-LOCK · row 448] With the fare the passenger was shown (expectedFare),
+   *  the join is refused if the fare has already moved (409 FARE_CHANGED, the
+   *  fare now), and the entry keeps that fare: the scan books only at it. An
+   *  app from before the lock sends none: the entry keeps the server's fare at
+   *  the join (as an unquoted request is booked at the fare of its moment), so a
+   *  fare that moves while they wait is never charged either (logged). */
   app.post('/queue/join', creationAuth, async (request, reply) => {
     const body = requestRideSchema.parse(request.body);
     // [TAXI multi-stop] The queue never holds a trip with stops (v1): its entry
     // has no place for them, and the trip would be booked later without them.
     refuseQueuedStops(body.stops);
+    // [R9] No hire for more than 7 passengers, queued or not.
+    assertHirePassengers(body.passengerCount);
+    if (!isRideClassServed(body.rideClass)) throw new AppError(400, 'INVALID_RIDE_CLASS', 'This ride class is no longer offered. Choose one of the available ride classes.');
+    assertRoadTripInMarket(body);
     const user = await assertRideGates(app, request.user.userId);
     assertL2(user);
+
+    // [PRICE-LOCK · owner: the price shown is the price charged] The fare the
+    // passenger saw is checked now and kept with the entry; nothing is queued
+    // at a fare they were not shown. An app from before the lock (every store
+    // build today) sends none: the entry keeps the fare of this moment, the one
+    // its screen was quoted, so the wait can never move what they pay.
+    const tiered = await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, user.tenantId);
+    const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
+    if (!tier) throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
+    if (body.expectedFare !== undefined && body.expectedFare !== tier.fare) {
+      throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
+    }
+    if (body.expectedFare === undefined) {
+      request.log.info({ event: 'ride_queue_join_unquoted', rideClass: body.rideClass }, '[PRICE-LOCK] queue joined without the fare the passenger was shown (an app from before the lock); the entry keeps the fare at the join');
+    }
+    const quotedFare = tier.fare;
 
     const ttlMin = RIDE_QUEUE_TTL_MIN();
     await app.prisma.rideQueueEntry.updateMany({
@@ -326,6 +401,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         rideClass: body.rideClass,
         passengerCount: body.passengerCount,
         expiresAt: new Date(Date.now() + ttlMin * 60_000),
+        quotedFare,
       },
     });
 
@@ -426,22 +502,45 @@ export async function ridesRoutes(app: FastifyInstance) {
     // [TAXI multi-stop] A ride with stops shows them in order, with the one it
     // is heading for; a ride without them gains no key.
     const itinerary = ride ? await readRideItinerary(app.prisma, ride) : null;
-    if (!ride?.driver) return { success: true, data: ride && itinerary ? { ...ride, ...itinerary } : ride };
+    // [owner #50] Whether the passenger may still cancel, and who to contact
+    // when not — the one cancellation verdict, so the app never re-derives it
+    // (additive keys; older apps ignore them). A passenger already aboard is
+    // the driver's custody: no cancel at all.
+    const aboard = ride ? hasTaxiPassengerCustody(ride) || ride.status === 'RIDE_IN_PROGRESS' : false;
+    const noMoverFound = ride && !aboard ? await readNoMoverFound(app.prisma, ride) : false;
+    const cancel = ride
+      ? (aboard
+          ? { canCancel: false, freeCancellationExpiresAt: null, cancellationMessage: null, cancelUnavailable: null }
+          : customerCancelView({ ...ride, noMoverFound, assignedAt: await readAssignedAt(app.prisma, ride) }))
+      : null;
+    // [TAXI-FLOW 22 Oct 2026] A waiting ride's search, in the server's words
+    // (additive keys; builds 9/11/12 ignore them): an empty search SINCE the
+    // latest driver took the ride, and when the slow lane releases it — never
+    // promised for a ride it holds for a person (search-facts.ts).
+    const search = ride
+      ? rideSearchFacts(ride, await readNoDriverFoundSinceAssignment(app.prisma, ride))
+      : {};
+    // [TAXI waiting charge] From the driver's arrival on, the live wait (and each
+    // stop's own); nothing while the switch is off.
+    const waiting = ride ? await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null) : {};
+    if (!ride?.driver) return { success: true, data: ride ? { ...ride, ...itinerary, ...cancel, ...waiting, ...search } : ride };
     // Vehicle visual identity [rides spec 6B]: shape + tint the client renders
     // on the card, the map marker, and the arrival screen. Classify-on-read
     // heals rows born before the assignment hook/backfill.
     const { vehicleIdentityFor } = await import('./vehicle-identity');
     // R8.4: the ride card shows "{Driver} · {display}★" from the ONE mapper.
-    const { ratingSurfaces } = await import('../rating/rating-surface');
-    const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
+    // [COORD 18 Oct, option S] The driver's star is shown from whole groups of 5 only (display; dispatch keeps its math).
+    const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
     // MMG is a trip-END surface (rides spec 5.9/Part 7): the driver's own pay
     // link rides along only once the trip is underway, so the post-trip sheet
     // holds it — never shown while they're still deciding on a driver.
-    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: surface?.displayRating ?? null };
+    // [owner 17 Oct · PAYMENT-SIMPLIFY] And only while DRIVER_MMG_PAY_LINK is on:
+    // off (the default), the passenger pays the driver directly at drop-off.
+    const driver = { ...ride.driver, ...vehicleIdentityFor(ride.driver), displayRating: shown.displayRating, averageRating: shown.average };
     (driver as { mmgPayUrl?: string | null }).mmgPayUrl = ride.status === 'RIDE_IN_PROGRESS'
-      ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+      ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
       : null;
-    return { success: true, data: { ...ride, driver, ...itinerary } };
+    return { success: true, data: { ...ride, driver, ...itinerary, ...cancel, ...waiting } };
   });
 
   /** GET /:id — one owned ride. */
@@ -461,20 +560,22 @@ export async function ridesRoutes(app: FastifyInstance) {
     });
     if (!ride) throw new NotFoundError('Ride', request.params.id);
     if (ride.driver) {
-      const { ratingSurfaces } = await import('../rating/rating-surface');
-      const surface = (await ratingSurfaces(app.prisma, 'DRIVER', [ride.driver.userId])).get(ride.driver.userId);
-      (ride.driver as { displayRating?: number | null }).displayRating = surface?.displayRating ?? null;
+      const shown = await shownRatingFor(app.prisma, 'DRIVER', ride.driver.userId);
+      Object.assign(ride.driver as object, { displayRating: shown.displayRating, averageRating: shown.average });
     }
     // Same trip-end rule as /active: the pay link only for a ride that is
     // underway or done (receipt / pay-later), never during matching.
     if (ride.driver) {
       (ride.driver as { mmgPayUrl?: string | null }).mmgPayUrl = ['RIDE_IN_PROGRESS', 'DELIVERED', 'COMPLETED'].includes(ride.status)
-        ? safeMmgPayUrl(ride.driver.mmgPayUrl)
+        ? offeredDriverMmgPayUrl(ride.driver.mmgPayUrl)
         : null;
     }
     // [TAXI multi-stop] As /active: the stops in order, and the next one.
     const itinerary = await readRideItinerary(app.prisma, ride);
-    return { success: true, data: itinerary ? { ...ride, ...itinerary } : ride };
+    // [TAXI waiting charge] As /active while the ride is live; once finished, the
+    // fare it was paid at, itemised (route fare + waiting = total).
+    const waiting = await decorateRideWaiting(app.prisma, ride, itinerary?.stops ?? null);
+    return { success: true, data: itinerary || waiting.waiting || waiting.fareBreakdown ? { ...ride, ...itinerary, ...waiting } : ride };
   });
 
   /** POST /:id/cancel — rides ride the same state machine as everything else. */
@@ -515,7 +616,7 @@ export async function ridesRoutes(app: FastifyInstance) {
         note: 'Driver arrival confirmed by the passenger — GPS gate overridden',
       },
     });
-    app.io.to(`order:${request.params.id}`).emit('order:status_changed',
+    await emitToOrderRoom(app.prisma, app.io, request.params.id, 'order:status_changed',
       { orderId: request.params.id, status: 'DRIVER_ARRIVED' });
     return { success: true, data: { orderId: request.params.id, status: 'DRIVER_ARRIVED' } };
   });

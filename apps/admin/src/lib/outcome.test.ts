@@ -228,3 +228,86 @@ describe('[MC-PR1] the reason header can always be sent (lib/api.ts)', () => {
     expect(o.link).toEqual({ label: 'Sign in', href: '/login' });
   });
 });
+
+describe('[MC-PR2] the activation refusals (admin.routes.ts PUT /vendors/:id/approve)', () => {
+  it('409 DISCLOSURE_INCOMPLETE says the documents are fine and what holds the store', async () => {
+    replyWith(409, {
+      success: false,
+      error: {
+        code: 'DISCLOSURE_INCOMPLETE',
+        message: "Target Store's documents are complete, but its storefront supplier information is not: missing Swift's own operator details (server configuration). It goes live by itself once that is complete.",
+        details: { missing: ['operator'] },
+      },
+    });
+    const o = outcomeOf(await thrownBy(() => approveVendor('vnd_1', REASON)));
+    expect(o).toMatchObject({ tone: 'refused', title: "The store's supplier information is incomplete", code: 'DISCLOSURE_INCOMPLETE', status: 409 });
+    expect(o.serverMessage).toMatch(/operator details/);
+  });
+
+  it('409 OWNER_ACCOUNT_RESTRICTED explains the account must be reinstated first', () => {
+    const o = outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'OWNER_ACCOUNT_RESTRICTED' }));
+    expect(o.tone).toBe('refused');
+    expect(o.next).toMatch(/owner.*account.*reinstated.*first/i);
+  });
+
+  it('409 ACCOUNT_CLOSED: the owner closed their account; nothing reopens it', async () => {
+    replyWith(409, { success: false, error: { code: 'ACCOUNT_CLOSED', message: "Target Store's owner has closed their Swift account, so the store stays closed. It cannot be reopened from the console." } });
+    const o = outcomeOf(await thrownBy(() => approveVendor('vnd_1', REASON)));
+    expect(o.title).toBe('The owner closed their Swift account');
+    expect(o.next).toMatch(/Nothing was changed/);
+  });
+
+  it('[MC-AD2] 409 FEE_UNPAID: the console cannot lift a weekly-fee hold; a confirmed payment does', () => {
+    const o = outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'FEE_UNPAID' }));
+    expect(o).toMatchObject({ tone: 'refused', title: 'This store is held by its weekly fee' });
+    expect(o.next).toMatch(/Nothing was changed\..*MMG checkout/);
+  });
+
+  it('409 ACTIVATION_HELD and STORE_CLOSED have words too', () => {
+    expect(outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'ACTIVATION_HELD' })).title).toMatch(/changed while you were acting/);
+    expect(outcomeOf(Object.assign(new Error('x'), { status: 409, code: 'STORE_CLOSED' })).title).toBe('This store is closed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [U06] One ask per act: the server refuses a second ask while the first still
+// stands (409 APPROVAL_ALREADY_OPEN). Nothing new was asked, so it is the
+// queued answer, never a failure; and only the admin who asked can apply (or
+// withdraw) an ask, so another admin is told whose it is.
+// ---------------------------------------------------------------------------
+describe('[U06] 409 APPROVAL_ALREADY_OPEN — the earlier ask still stands', () => {
+  const standing = (approvalStatus: 'PENDING' | 'APPROVED', askedByYou: boolean) => replyWith(409, {
+    success: false,
+    error: { code: 'APPROVAL_ALREADY_OPEN', message: 'Nothing new was asked.', details: { approvalId: 'apr_9', approvalStatus, askedByYou } },
+  });
+
+  it('your own waiting ask: queued, names Approvals, keeps the id', async () => {
+    standing('PENDING', true);
+    const o = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(o.tone).toBe('queued');
+    expect(o.title).toBe("Already waiting for a second admin's approval");
+    expect(o.next).toMatch(/Nothing new was asked/);
+    expect(o.link).toEqual({ label: 'Open Approvals', href: APPROVALS_HREF });
+    expect(o.approvalId).toBe('apr_9');
+  });
+
+  it('your own approved ask: apply it, do not ask again', async () => {
+    standing('APPROVED', true);
+    const o = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(o.tone).toBe('queued');
+    expect(o.title).toBe('Already approved and waiting for you to apply it');
+  });
+
+  it('another admin\'s ask: says whose it is, never tells you to apply or cancel it', async () => {
+    standing('PENDING', false);
+    const pending = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(pending.tone).toBe('queued');
+    expect(pending.title).toBe('Another admin already asked for this');
+    expect(pending.next).not.toMatch(/cancel|apply it/i);
+
+    standing('APPROVED', false);
+    const approved = outcomeOf(await thrownBy(() => settleOrderRefund('ord_1', 'REF-1001', 500, REASON)));
+    expect(approved.title).toBe('Another admin already asked for this');
+    expect(approved.next).toMatch(/the admin who asked/);
+  });
+});

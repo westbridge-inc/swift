@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../modules/fulfillment/kitchen-capacity';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // FUL-007: vendor kitchen-capacity guard (Part 5D — protect the kitchen).
@@ -31,7 +32,7 @@ async function makeUser(roles: UserRole[], activeRole: UserRole) {
   seq += 1;
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59200711${String(seq).padStart(2, '0')}`,
+      phone: testPhone(),
       firstName: 'Cap', lastName: `User${seq}`,
       roles, activeRole, isPhoneVerified: true,
       selfieCapturedAt: new Date(), avatar: '/uploads/avatars/cap.jpg',
@@ -96,7 +97,7 @@ beforeAll(async () => {
   const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.userId } });
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Capacity Diner ${nanoid(4)}`, slug: `capacity-${nanoid(6)}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Capacity Diner ${wordFreeTag(8)}`, slug: `capacity-${nanoid(6)}`, vendorType: 'RESTAURANT',
       phone: '+5920071900', addressLine1: '2 Kitchen St', city: 'Georgetown', region: 'Demerara-Mahaica',
       latitude: 6.801, longitude: -58.156, status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

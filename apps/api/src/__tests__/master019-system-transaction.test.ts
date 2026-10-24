@@ -6,6 +6,7 @@ import { scopedPrisma as prisma, setSystemPrismaClient, scopedClientFor } from '
 import { runAsSystem, runWithTenant } from '../plugins/tenant-context';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { SosService } from '../modules/safety/sos.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // [R048-001] this suite creates the same NOLOGIN probe group and the SYSTEM
 // login the tenant-wall suite uses, by raw DDL — a stated, reviewable capability.
@@ -72,7 +73,7 @@ beforeAll(async () => {
   await runAsSystem('test-setup', async () => {
     for (const t of [T, U]) await prisma.tenant.create({ data: { id: t, name: `M019 ${t}`, slug: t } });
     for (const t of [T, U]) {
-      const u = await prisma.user.create({ data: { phone: `+5928${String(Math.floor(Math.random() * 1e8)).padStart(8, '0')}`, firstName: 'Original', lastName: t, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: t } });
+      const u = await prisma.user.create({ data: { phone: testPhone(), firstName: 'Original', lastName: t, roles: ['CUSTOMER'], activeRole: 'CUSTOMER', tenantId: t } });
       userIds.push(u.id);
       if (t === T) userId = u.id; else otherUserId = u.id;
     }

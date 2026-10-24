@@ -11,6 +11,7 @@ import { getTenantContext } from '../../plugins/tenant-context';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
 import type { OnAudit } from '../../lib/audit-writer';
 import { CARD_PAY_NOW_KEY_PREFIX, cardChargesInFlight, cardExpiredAt, closeUnsentCardIntents, type BillingService } from './billing.service';
+import { assertPayAheadRoom } from './pay-ahead';
 import { sealVaultToken } from './card-vault';
 import { observedStatus, recordCardObservation } from './card-observations';
 import {
@@ -269,6 +270,9 @@ export class CardRailService {
             || current.nextBillingDate.getTime() !== priced.periodStart.getTime()) {
             throw new AppError(409, 'MOVER_FEE_PRICE_CHANGED', 'The weekly fee changed. Reload it before opening a payment page.');
           }
+          // [OWNER RULING 8 Oct (2) · owner #62] A Pay now pays the next unpaid
+          // week: one week ahead at most, refused before any page exists.
+          await assertPayAheadRoom(tx, sub.id, priced.amount, now, 'partner');
         }
         await lockBillingAuthority(tx, sub.id);
         const created = await tx.cardSession.create({
@@ -1005,7 +1009,7 @@ export class CardRailService {
     log().error({ sessionId: session.id, subscriptionId: session.subscriptionId, failureCode }, '[PT-1] card session held for a person — nothing granted');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: session.tenantId,
-      title: '💳 Card session held for review',
+      title: 'Card session held for review',
       body: `Card session ${session.id} (${session.purpose}) for subscription ${session.subscriptionId} was held: ${failureCode}. Nothing was granted or booked. ${detail ?? `${recordedRef ? `Provider transaction ${recordedRef}. ` : ''}Check the provider before acting.`}`,
       data: {
         kind: 'billing_invariants', alert: 'card-session-held', subscriptionId: session.subscriptionId, sessionId: session.id, failureCode,
@@ -1020,7 +1024,7 @@ export class CardRailService {
     log().error({ sessionId: session.id, bound: describeBinding(bindingOf(session)), configured: describeBinding(provider.binding) }, '[PT-1 C2] card session belongs to another provider setup — nothing asked, nothing granted');
     await notifyAdmins(this.prisma, this.notifications, {
       tenantId: session.tenantId,
-      title: '💳 Card session refused — it belongs to another provider setup',
+      title: 'Card session refused — it belongs to another provider setup',
       body: `Card session ${session.id} was opened with ${describeBinding(bindingOf(session))}, but this server is set up for ${describeBinding(provider.binding)}. Nothing was granted. Restore the configuration; the session is checked again on the next sweep.`,
       data: { kind: 'billing_invariants', alert: 'card-session-binding-mismatch', subscriptionId: session.subscriptionId, sessionId: session.id },
       dedupeKey: `card-session-binding:${session.id}:${describeBinding(provider.binding)}`,
@@ -1032,12 +1036,14 @@ export class CardRailService {
     await this.notifications.send({
       userId: session.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'Card payment received — added to your balance',
-      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and added to your balance. It did not change your plan; your balance pays a coming weekly fee.`,
+      title: 'Card payment received — kept for your next weekly fee',
+      body: `Your card payment of $${Number(session.amount).toLocaleString()} ${session.currencyCode} was received and kept for your next weekly fee. It did not change your plan.`,
       audience: sub?.vendorId ? 'business' : 'earner',
       data: { kind: 'billing_banked', subscriptionId: session.subscriptionId },
       dedupeKey: `card-paynow-banked:${paymentId}`,
     }).catch(() => {});
+    // [OWNER RULING 8 Oct (2) · owner #62] Kept, never refused; past one week ahead the operators refund the excess.
+    await this.billing.pageIfPayAheadOverCap(session.subscriptionId);
   }
 
   private async resultOf(session: CardSession): Promise<CardConfirmResult> {
@@ -1094,6 +1100,12 @@ export class CardRailService {
     const ref = input.providerReference.trim();
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(ref)) throw new AppError(400, 'PROVIDER_REFERENCE_INVALID', 'Enter the card provider\'s transaction reference you checked.');
     if (!Number.isFinite(input.amount) || input.amount <= 0) throw new AppError(400, 'AMOUNT_INVALID', 'State the amount the provider shows was taken.');
+    // [Opus S3-3] A refund never sends more than the card payment took. A
+    // session has at most ONE refund (its durable claim below), so nothing was
+    // refunded before one can be sent: the cap is the session's own amount.
+    if (input.action === 'REFUND' && Math.round(input.amount * 100) > Math.round(Number(session.amount) * 100)) {
+      throw new AppError(409, 'REFUND_ABOVE_PAYMENT', 'A refund can never be more than this card payment took.');
+    }
     if (input.action === 'BOOK') {
       // A TEST system never books a week, whoever asks.
       if (session.environment !== 'live' && !cardTestSubscriptions().has(session.subscriptionId)) {

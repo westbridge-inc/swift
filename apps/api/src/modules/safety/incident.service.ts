@@ -15,6 +15,7 @@ import { sweepPage } from '../../lib/sweep-cursor';
 import { createHash } from 'node:crypto';
 import { incidentIntakeCounter, incidentIntakeGauge } from '../../plugins/observability';
 import { placeLegalHold, drainLegalHoldVault, type LegalHoldObserver } from './legal-hold';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 // Incident Management (safety spec §8) — the case machine. Server-owned like
 // the order and SOS machines: explicit transition table, CAS updates, illegal
@@ -284,7 +285,7 @@ export class IncidentService {
     }
 
     // AUDIT-FIX (siren note): read the FINAL severity, not the pre-hook local.
-    const siren = kase.severity === 'S0' || kase.severity === 'S1' ? '🚨 ' : '';
+    const siren = kase.severity === 'S0' || kase.severity === 'S1' ? 'URGENT: ' : '';
     await notifyAdmins(this.prisma, this.notifications, {
       // Scoped to the case's tenant [NOC-A F45].
       tenantId: kase.tenantId ?? null,
@@ -400,21 +401,18 @@ export class IncidentService {
         });
         // Liability evidence and due process: suspension cannot commit without
         // a durable subject notice, and reporter identity is never included.
-        const notice = await tx.notification.create({
+        const notice = await insertNoticeFor(tx, {
+          userId: input.subjectUserId,
+          type: 'SAFETY',
+          title: 'Account suspended pending review',
+          body: `A ${this.categoryLabel(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
           data: {
-            userId: input.subjectUserId,
-            type: 'SAFETY',
-            title: 'Account suspended pending review',
-            body: `A ${this.categoryLabel(input.category)} report is under review on your account. You are offline while our safety team reviews it — contact support to respond.`,
-            data: {
-              kind: 'incident_interim_suspension',
-              caseId: kase.id,
-              caseNumber: kase.caseNumber,
-              category: input.category,
-            },
-            createdAt: now,
+            kind: 'incident_interim_suspension',
+            caseId: kase.id,
+            caseNumber: kase.caseNumber,
+            category: input.category,
           },
-          select: { id: true },
+          createdAt: now,
         });
         suspensionNotificationId = notice.id;
       }

@@ -9,6 +9,7 @@ import type { NotificationService } from '../modules/notification/notification.s
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { ensureSan } from '../modules/billing/san.service';
 import { importSettlementCsv } from '../modules/billing/settlement-import';
+import { testPhone } from './helpers/fixture-ids';
 
 const prisma = new PrismaClient();
 const migration = readFileSync(join(process.cwd(), 'prisma/migrations/20260930140000_mmg_one_live_identity/migration.sql'), 'utf8');
@@ -46,7 +47,7 @@ async function applyMigration(tx: Prisma.TransactionClient) {
 }
 async function account(db: PrismaClient) {
   const tag = nanoid(10);
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(1_000_000_000 + Math.random() * 8_000_000_000)}`, firstName: 'Alias', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
+  const user = await db.user.create({ data: { phone: testPhone(), firstName: 'Alias', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER', isPhoneVerified: true } });
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: {
     ownerId: owner.id, name: 'Alias fixture', slug: `alias-${tag.toLowerCase()}`, vendorType: 'RESTAURANT', phone: user.phone,
@@ -191,7 +192,8 @@ describe('[SX394] original stored aliases survive the exact migration', () => {
       await applyMigration(tx);
       const first = ` \tFILE-${nanoid(10)}-straße\t `;
       const second = mode === 'distinct' ? first.toUpperCase() : `\t${first}\t`;
-      const report = await importSettlementCsv(db, svc, `transaction_id,account_number,amount,paid_at\n${first},${san},2100,2026-09-01T10:00:00Z\n${second},${san},2100,2026-09-01T10:00:00Z\nTOTAL,4200`, { source: 'sx394-alias-test' });
+      // [owner #62] The two rows together are one week's fee (GY$2,100): one week at a time.
+      const report = await importSettlementCsv(db, svc, `transaction_id,account_number,amount,paid_at\n${first},${san},1050,2026-09-01T10:00:00Z\n${second},${san},1050,2026-09-01T10:00:00Z\nTOTAL,2100`, { source: 'sx394-alias-test' });
       expect(report.status).toBe(mode === 'distinct' ? 'PUBLISHED' : 'REJECTED');
       const staged = await db.settlementImport.findUniqueOrThrow({ where: { id: report.importId } });
       expect((staged.rows as Array<{ txnId: string }>).map((r) => r.txnId)).toEqual([first, second]);

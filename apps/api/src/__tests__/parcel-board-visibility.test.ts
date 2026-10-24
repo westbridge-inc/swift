@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // PARCELS WERE INVISIBLE ON EVERY RIDER'S BOARD.
@@ -54,7 +55,7 @@ beforeAll(async () => {
 
   const rider = await app.prisma.user.create({
     data: {
-      phone: `+59200962${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Parcel', lastName: 'Rider',
       roles: ['MOVER', 'CUSTOMER'] as UserRole[], activeRole: 'MOVER', isPhoneVerified: true,
     },
@@ -80,7 +81,7 @@ beforeAll(async () => {
 
   const cust = await app.prisma.user.create({
     data: {
-      phone: `+59200963${String(Math.floor(Math.random() * 90) + 10)}`,
+      phone: testPhone(),
       firstName: 'Parcel', lastName: 'Sender',
       roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true,
       customer: { create: {} },

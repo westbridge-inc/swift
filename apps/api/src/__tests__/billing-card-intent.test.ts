@@ -298,6 +298,59 @@ describe('[July P0] a card instruction nobody answered is never charged twice', 
   });
 });
 
+// [PROD-PATH · #1448 review, Opus S3-2] While a fee is paused (no live way to
+// pay, or its clock held for repair), recording a failure refuses with
+// FEE_PAUSED. The card reconciler had no per-row boundary, so one paused
+// subscription's proven decline threw out of the whole pass: every later
+// card row, and the rest of the poll job after it (session sweep, invariant
+// scans), was skipped on every tick. A paused row now stays UNKNOWN, with no
+// failure and no dunning, and the pass goes on to the next row.
+describe('[PROD-PATH · #1448 review] a proven card decline while the fee is paused', () => {
+  it('leaves each paused row UNKNOWN (no failure, no dunning), finishes the pass, and applies the decline once a pay path is live', async () => {
+    const due = new Date(Date.now() - DAY); const periodKey = due.toISOString().slice(0, 10);
+    const first = await makeCardSub(due);
+    const second = await makeCardSub(due);
+    fake.mode = 'timeout-no-capture';
+    expect(await bill(first)).toBe('pending');
+    expect(await bill(second)).toBe('pending');
+    fake.mode = 'ok';
+    const intents = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: [first, second] } } });
+    expect(intents.map((p) => p.status)).toEqual(['UNKNOWN', 'UNKNOWN']);
+    // The processor now answers each instruction with a proven decline.
+    for (const intent of intents) fake.captures.set(intent.clientKey!, { status: 'failed', providerRef: `ch_${nanoid(6)}`, reason: 'Card declined' });
+
+    // MMG off and no live card rail: no live way to pay, so every fee is paused.
+    const mmgDriver = process.env['MMG_DRIVER'];
+    process.env['MMG_DRIVER'] = 'disabled';
+    let paused: Awaited<ReturnType<BillingService['reconcileUnknownCardCharges']>>;
+    try {
+      paused = await billing.reconcileUnknownCardCharges();
+    } finally {
+      if (mmgDriver === undefined) delete process.env['MMG_DRIVER']; else process.env['MMG_DRIVER'] = mmgDriver;
+    }
+    expect(paused.declined).toBe(0);
+    expect(paused.stillUnknown).toBeGreaterThanOrEqual(2);
+    for (const subId of [first, second]) {
+      const held = await facts(subId, periodKey);
+      expect(held).toMatchObject({ status: 'ACTIVE', failedAttempts: 0, failures: 0, successes: 0, nextBillingDate: due.getTime() });
+      expect(held.payments.map((p) => p.status)).toEqual(['UNKNOWN']);
+    }
+    // Both rows were reached: the first refusal did not end the pass.
+    const stamped = await app.prisma.subscriptionPayment.findMany({ where: { id: { in: intents.map((p) => p.id) } }, select: { lastPolledAt: true } });
+    expect(stamped.every((p) => p.lastPolledAt !== null)).toBe(true);
+    expect(fake.keysSeen).toHaveLength(2); // retrieved, never re-sent
+
+    // MMG on again: the same proven declines are applied, once each.
+    await billing.reconcileUnknownCardCharges();
+    for (const subId of [first, second]) {
+      const after = await facts(subId, periodKey);
+      expect(after).toMatchObject({ failedAttempts: 1, failures: 1, successes: 0 });
+      expect(after.payments.map((p) => p.status)).toEqual(['FAILED']);
+    }
+    expect(fake.keysSeen).toHaveLength(2);
+  });
+});
+
 describe('[M-01 · operations] the kill switch and the unreachable processor', () => {
   it('the processor cannot say: the intent waits, its age is published, no instruction is sent; when it can, it settles', async () => {
     const due = new Date(Date.now() - DAY); const periodKey = due.toISOString().slice(0, 10);

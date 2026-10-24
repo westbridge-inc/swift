@@ -1,9 +1,11 @@
 import type { PrismaClient, TripSafetySession, GuardianCloseReason, Prisma } from '@prisma/client';
 import type { Server } from 'socket.io';
+import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { haversineDistance } from '../../utils/distance';
 import { log } from '../../utils/logger';
 import { AppError, NotFoundError } from '../../utils/errors';
-import { createHash, randomBytes } from 'node:crypto';
+import { enterOwner, runAsSystem, runWithTenant } from '../../plugins/tenant-context';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { guardianDriverConfirmCounter } from '../../plugins/observability';
@@ -11,6 +13,7 @@ import { sweepPage } from '../../lib/sweep-cursor';
 import { stageCheckinDeliveries, drainCheckinDeliveries, hardPromptState, checkinDeliveryKilled, passengerAsk, driverAsk, type CheckinDeliveryObserver } from './guardian-delivery';
 import { guardianDeliveryCounter } from '../../plugins/observability';
 import { SosService } from './sos.service';
+import { loadTaxiStops, nextStopSequence, type TaxiStopRow } from '../rides/taxi-stops-read';
 
 // Trip Guardian (safety spec §5) — server-side monitoring of live taxi rides.
 // Same runtime doctrine as the SOS grace sweep: a scheduled tick that owns ALL
@@ -66,6 +69,20 @@ const sustainSeconds = () => num('GUARDIAN_DEVIATION_SUSTAIN_SECONDS', 90);
 const stopRadiusM = () => num('GUARDIAN_STOP_RADIUS_M', 60);
 const nearEndpointM = () => num('GUARDIAN_NEAR_ENDPOINT_M', 150);
 const overdueMinMinutes = () => num('GUARDIAN_OVERDUE_MIN_MINUTES', 15);
+/** [TAXI multi-stop 5/8] Extra time each stop of a ride adds to its ETA
+ *  allowance (pulling in, the passenger getting out and back), on top of the
+ *  measured wait at the stop itself. */
+const stopAllowanceMinutes = () => num('GUARDIAN_STOP_ALLOWANCE_MINUTES', 10);
+/** [TAXI multi-stop 5/8] The longest wait at a stop the detectors forgive: past
+ *  it, a car still parked at an arrived stop is watched like any other stop
+ *  (the long-stop timer arms, and the overdue clock stops being extended). */
+const stopMaxWaitMinutes = () => num('GUARDIAN_STOP_MAX_WAIT_MINUTES', 30);
+
+/** Whether the car has waited at this ARRIVED stop longer than the forgiven wait. */
+export function stopWaitBeyondCap(stop: Pick<GuardianStop, 'status' | 'arrivedAt'>, now: Date): boolean {
+  return stop.status === 'ARRIVED' && stop.arrivedAt != null
+    && now.getTime() - stop.arrivedAt.getTime() > stopMaxWaitMinutes() * 60_000;
+}
 const staleGpsMinutes = () => num('GUARDIAN_STALE_GPS_MINUTES', 3);
 /** §5.4 — how far from the destination a "completed" trip may end before it
  *  is flagged for post-trip review. Generous: addresses are imprecise and the
@@ -116,7 +133,11 @@ interface DetectorState {
   /** [S-04] The hard-check cycle the session is in: minted at L3 with a
    *  one-time driver nonce, replaced by the next L3, and the ONLY thing a
    *  driver confirmation can answer. */
-  checkinCycle?: { id: string; requestedAtMs: number; level?: 'SOFT' | 'HARD'; hardRequestedAtMs?: number; driverNonceHash?: string; driverNonceUsedAtMs?: number; undeliveredPagedAtMs?: number };
+  checkinCycle?: {
+    id: string; requestedAtMs: number; level?: 'SOFT' | 'HARD'; hardRequestedAtMs?: number; driverNonceHash?: string; driverNonceUsedAtMs?: number; undeliveredPagedAtMs?: number;
+    /** [WEB-TAXI] sha256 of each passenger ask's one-time answer-link secret (the texted link); the secrets themselves are never kept. */
+    answerHashes?: string[];
+  };
   /** [S-04] The driver's confirmation, bound to a cycle, with who / which
    *  device / when — a stale one can never absolve a later cycle. */
   driverConfirm?: { cycleId: string; atMs: number; actorUserId: string; deviceId: string | null };
@@ -125,6 +146,10 @@ interface DetectorState {
   lastFix?: { lat: number; lng: number; atMs: number };
   /** §5.4 — completion happened far from the destination; set once at close. */
   completionFlag?: { distM: number; at: string };
+  /** [TAXI multi-stop 5/8] What the position detectors aim at on a ride with
+   *  stops: 'STOP_<n>' (the next open stop) or 'DESTINATION'. A change resets
+   *  the divergence baseline. Never set on a ride without stops. */
+  targetKey?: string;
   events?: Array<{ t: string; kind: string; detail?: Record<string, unknown> }>;
 }
 
@@ -142,6 +167,10 @@ const pushEvent = (state: DetectorState, now: Date, kind: string, detail?: Recor
  *  hard check — the auto-SOS proceeds rather than accepting any driver proof. */
 const driverDeescalationKilled = () => process.env['GUARDIAN_DRIVER_DEESCALATION_KILL'] === '1';
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
+/** [WEB-TAXI] 128 bits, URL-safe: one passenger ask's answer-link secret. */
+const newAnswerToken = () => randomBytes(16).toString('base64url');
+/** Constant-time compare of two hex digests of equal length. */
+const sameDigest = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 /** [S-04] A driver confirmation counts only for the cycle it answers,
  *  made after that cycle asked. */
 const confirmBoundToCycle = (state: DetectorState): boolean =>
@@ -166,7 +195,50 @@ type OrderSnapshot = {
   deliveryLat: unknown;
   deliveryLng: unknown;
   driver: { currentLat: number | null; currentLng: number | null; lastLocationUpdate: Date | null } | null;
+  /** [TAXI multi-stop 5/8] null = a ride without stops: every detector exactly as before. */
+  taxiStopCount?: number | null;
+  /** The ride's stops in the passenger's order (read with the page; only for a ride with stops). */
+  stops?: readonly GuardianStop[];
 };
+
+/** A stop as the detectors read it. */
+export type GuardianStop = Pick<TaxiStopRow, 'sequence' | 'lat' | 'lng' | 'status' | 'arrivedAt' | 'departedAt' | 'skippedAt'>;
+
+/**
+ * [TAXI multi-stop 5/8] Where a ride with stops is heading now: the next open
+ * stop (the stop law's PENDING or ARRIVED, in the passenger's order), else the
+ * final destination. Null for a ride without stops (the detectors keep aiming
+ * at the destination, unchanged).
+ */
+export function guardianTarget(
+  stops: readonly GuardianStop[] | undefined,
+  dest: { lat: number; lng: number },
+): { key: string; point: { lat: number; lng: number } } | null {
+  if (!stops) return null;
+  const next = nextStopSequence(stops);
+  const stop = next == null ? null : stops.find((s) => s.sequence === next);
+  return stop ? { key: `STOP_${stop.sequence}`, point: { lat: stop.lat, lng: stop.lng } } : { key: 'DESTINATION', point: dest };
+}
+
+/**
+ * [TAXI multi-stop 5/8] The time a ride's stops add to its ETA allowance: a
+ * fixed allowance per stop plus the measured wait at each (its arrival to its
+ * departure or skip, or to now while the car is still there), each wait
+ * counted up to GUARDIAN_STOP_MAX_WAIT_MINUTES. A passenger shopping at a
+ * stop the car waits for is not an overdue trip; a car parked there for hours
+ * is. Zero for a ride without stops.
+ */
+export function stopsAllowanceMs(stops: readonly GuardianStop[] | undefined, now: Date): number {
+  if (!stops) return 0;
+  let ms = 0;
+  for (const s of stops) {
+    ms += stopAllowanceMinutes() * 60_000;
+    if (!s.arrivedAt) continue;
+    const end = s.departedAt ?? s.skippedAt ?? (s.status === 'ARRIVED' ? now : null);
+    if (end) ms += Math.min(stopMaxWaitMinutes() * 60_000, Math.max(0, end.getTime() - s.arrivedAt.getTime()));
+  }
+  return ms;
+}
 
 export interface GuardianSweepResult {
   opened: number;
@@ -367,10 +439,14 @@ export class GuardianService {
         pickupLng: true,
         deliveryLat: true,
         deliveryLng: true,
+        taxiStopCount: true,
         driver: { select: { currentLat: true, currentLng: true, lastLocationUpdate: true } },
       },
         });
-        const byId = new Map(orders.map((o) => [o.id, o]));
+        // [TAXI multi-stop 5/8] The page's rides with stops, their stops in one
+        // query (none for a page without them).
+        const stops = await loadTaxiStops(this.prisma, orders.filter((o) => o.taxiStopCount != null).map((o) => o.id));
+        const byId = new Map(orders.map((o): [string, OrderSnapshot] => [o.id, o.taxiStopCount != null ? { ...o, stops: stops.get(o.id) ?? [] } : o]));
         return sessions.map((session) => ({ ...session, order: byId.get(session.orderId) ?? null }));
       },
       handle: async ({ order, ...session }) => {
@@ -441,7 +517,11 @@ export class GuardianService {
         ? { lat: Number(order.deliveryLat), lng: Number(order.deliveryLng) }
         : null;
     if (!dest || !state.lastFix) return;
-    const distM = Math.round(metersBetween(state.lastFix.lat, state.lastFix.lng, dest.lat, dest.lng));
+    const fix = state.lastFix;
+    // [TAXI multi-stop 5/8] A trip that ended at a stop the car was waiting at
+    // (the passenger did not come back) ended where the passenger chose.
+    const ends = [dest, ...(order.stops ?? []).filter((st) => st.status === 'ARRIVED').map((st) => ({ lat: st.lat, lng: st.lng }))];
+    const distM = Math.round(Math.min(...ends.map((e) => metersBetween(fix.lat, fix.lng, e.lat, e.lng))));
     if (distM <= completionToleranceM()) return;
 
     state.completionFlag = { distM, at: now.toISOString() };
@@ -534,21 +614,35 @@ export class GuardianService {
       const lng = fix.currentLng as number;
       state.lastFix = { lat, lng, atMs: fixAt.getTime() };
       const distToDest = metersBetween(lat, lng, dest.lat, dest.lng);
+      // [TAXI multi-stop 5/8] A ride with stops is aimed at its NEXT open stop
+      // (a stop away from the destination is the passenger's route, not a
+      // deviation), and a new target starts a new baseline: the ratchet only
+      // ever compares the car with the place it is heading for now.
+      const target = guardianTarget(order.stops, dest);
+      const targetStop = target && order.stops ? order.stops.find((st) => `STOP_${st.sequence}` === target.key) : undefined;
+      if (target && state.targetKey !== target.key) {
+        if (state.targetKey != null) pushEvent(state, now, 'TARGET_CHANGED', { from: state.targetKey, to: target.key });
+        state.targetKey = target.key;
+        state.minDistToDestM = undefined;
+        state.divergingSinceMs = null;
+      }
+      const distToTarget = target ? metersBetween(lat, lng, target.point.lat, target.point.lng) : distToDest;
 
       // Divergence ratchet (§5.2, adapted — see header).
       const prevMin = state.minDistToDestM;
-      state.minDistToDestM = prevMin == null ? distToDest : Math.min(prevMin, distToDest);
+      state.minDistToDestM = prevMin == null ? distToTarget : Math.min(prevMin, distToTarget);
       const threshold = deviationMeters()[band];
-      const diverging = distToDest > state.minDistToDestM + threshold;
+      const diverging = distToTarget > state.minDistToDestM + threshold;
       if (diverging) {
         state.divergingSinceMs = state.divergingSinceMs ?? fixAt.getTime();
         const sustainedMs = fixAt.getTime() - state.divergingSinceMs;
         if (sustainedMs >= sustainSeconds() * 1000 && !state.flags!.deviation) {
           raise('deviation', {
-            distToDestM: Math.round(distToDest),
+            distToDestM: Math.round(distToTarget),
             minDistToDestM: Math.round(state.minDistToDestM),
             thresholdM: threshold,
             sustainedS: Math.round(sustainedMs / 1000),
+            ...(target ? { target: target.key } : {}),
           });
         }
       } else {
@@ -558,9 +652,15 @@ export class GuardianService {
       // Long-stop (§5.2): stationary beyond the band budget, measured on the
       // fix clock (frozen GPS can't advance it), suppressed near either
       // endpoint (boarding/alighting are legitimate stops).
+      // [TAXI multi-stop 5/8] The stop a ride is heading for is an endpoint too
+      // (pulling in before the arrival tap, and the wait there: a stop the car
+      // waits at, ARRIVED, is always the next open one), but only for the
+      // forgiven wait: past GUARDIAN_STOP_MAX_WAIT_MINUTES the long-stop timer
+      // arms there like anywhere else.
       const nearEndpoint =
         distToDest < nearEndpointM() ||
-        (pickup ? metersBetween(lat, lng, pickup.lat, pickup.lng) < nearEndpointM() : false);
+        (pickup ? metersBetween(lat, lng, pickup.lat, pickup.lng) < nearEndpointM() : false) ||
+        (target && !(targetStop && stopWaitBeyondCap(targetStop, now)) ? distToTarget < nearEndpointM() : false);
       if (nearEndpoint) {
         state.stopAnchor = null;
         state.stopSinceMs = null;
@@ -583,7 +683,8 @@ export class GuardianService {
       const plannedMinutes =
         order.taxiDuration ??
         (order.pickedUpAt ? (session.plannedEtaAt.getTime() - order.pickedUpAt.getTime()) / 60_000 : 0);
-      const allowanceMs = Math.max(overdueMinMinutes(), plannedMinutes * 0.5) * 60_000;
+      // [TAXI multi-stop 5/8] + each stop's allowance and its measured wait.
+      const allowanceMs = Math.max(overdueMinMinutes(), plannedMinutes * 0.5) * 60_000 + stopsAllowanceMs(order.stops, now);
       if (now.getTime() > session.plannedEtaAt.getTime() + allowanceMs) {
         raise('overdue', {
           plannedEtaAt: session.plannedEtaAt.toISOString(),
@@ -609,7 +710,10 @@ export class GuardianService {
       // obligation: the cycle, the status change and the delivery rows commit
       // together. [S-04] A new climb owes nothing to the last one.
       const cycleId = nanoid(12);
-      const committed: DetectorState = { ...state, checkinCycle: { id: cycleId, requestedAtMs: now.getTime(), level: 'SOFT' }, driverConfirm: undefined, driverConfirmedAtMs: undefined };
+      // [WEB-TAXI] The ask's answer link: the secret travels only in the text
+      // a push-less passenger gets; the cycle keeps its hash.
+      const answerToken = newAnswerToken();
+      const committed: DetectorState = { ...state, checkinCycle: { id: cycleId, requestedAtMs: now.getTime(), level: 'SOFT', answerHashes: [sha256(answerToken)] }, driverConfirm: undefined, driverConfirmedAtMs: undefined };
       const moved = await this.prisma.$transaction(async (tx) => {
         const m = await tx.tripSafetySession.updateMany({
           where: { id: session.id, status: 'MONITORING', checkinRequestedAt: null },
@@ -619,7 +723,7 @@ export class GuardianService {
         });
         if (m.count !== 1) return 0;
         if (session.passengerUserId) {
-          await stageCheckinDeliveries(tx, session, [{ cycleId, level: 'SOFT', recipient: 'PASSENGER', userId: session.passengerUserId, payload: passengerAsk(session, cycleId, 'SOFT', null) }]);
+          await stageCheckinDeliveries(tx, session, [{ cycleId, level: 'SOFT', recipient: 'PASSENGER', userId: session.passengerUserId, payload: passengerAsk(session, cycleId, 'SOFT', null, answerToken) }]);
         }
         return 1;
       });
@@ -629,7 +733,7 @@ export class GuardianService {
         state.driverConfirmedAtMs = undefined;
         pushEvent(state, now, 'L2_SOFT_CHECKIN', { cycleId });
         await this.deliverAsks(session.id, now);
-        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+        await this.orderEmit(session.orderId, 'guardian:checkin', {
           level: 'SOFT',
           sessionId: session.id,
           orderId: session.orderId,
@@ -655,7 +759,9 @@ export class GuardianService {
       // [S-06] The status change and both delivery rows commit together.
       const driverNonce = randomBytes(16).toString('hex');
       const base = state.checkinCycle ?? { id: nanoid(12), requestedAtMs: now.getTime(), level: 'SOFT' as const };
-      const hardCycle = { ...base, level: 'HARD' as const, hardRequestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce), driverNonceUsedAtMs: undefined, undeliveredPagedAtMs: undefined };
+      // [WEB-TAXI] The hard ask gets its own answer link; the soft one's stays good until the cycle ends.
+      const answerToken = newAnswerToken();
+      const hardCycle = { ...base, level: 'HARD' as const, hardRequestedAtMs: now.getTime(), driverNonceHash: sha256(driverNonce), driverNonceUsedAtMs: undefined, undeliveredPagedAtMs: undefined, answerHashes: [...(base.answerHashes ?? []), sha256(answerToken)] };
       const committed: DetectorState = { ...state, checkinCycle: hardCycle, driverConfirm: undefined, driverConfirmedAtMs: undefined };
       const moved = await this.prisma.$transaction(async (tx) => {
         const m = await tx.tripSafetySession.updateMany({
@@ -664,7 +770,7 @@ export class GuardianService {
         });
         if (m.count !== 1) return 0;
         const asks = [];
-        if (session.passengerUserId) asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'PASSENGER' as const, userId: session.passengerUserId, payload: passengerAsk(session, hardCycle.id, 'HARD', deadline) });
+        if (session.passengerUserId) asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'PASSENGER' as const, userId: session.passengerUserId, payload: passengerAsk(session, hardCycle.id, 'HARD', deadline, answerToken) });
         // Low-key driver-side prompt (§5.3): a stopped driver with a flat
         // tire will answer — and that answer is a record.
         asks.push({ cycleId: hardCycle.id, level: 'HARD' as const, recipient: 'DRIVER' as const, userId: session.driverUserId, payload: driverAsk(session, hardCycle.id, driverNonce, deadline) });
@@ -677,7 +783,7 @@ export class GuardianService {
         state.driverConfirmedAtMs = undefined;
         pushEvent(state, now, 'L3_HARD_CHECKIN', { deadline: deadline.toISOString(), cycleId: hardCycle.id });
         await this.deliverAsks(session.id, now);
-        this.roomEmit(`order:${session.orderId}`, 'guardian:checkin', {
+        await this.orderEmit(session.orderId, 'guardian:checkin', {
           level: 'HARD',
           sessionId: session.id,
           orderId: session.orderId,
@@ -860,7 +966,35 @@ export class GuardianService {
       orderBy: { createdAt: 'desc' },
     });
     if (!session) throw new NotFoundError('SafetyCheckin', passengerUserId);
+    return this.answerSession(session, passengerUserId, response);
+  }
 
+  /**
+   * [WEB-TAXI · owner 21 Oct 2026] The texted answer link: the same two
+   * answers as the card, without signing in — a passenger the push could not
+   * reach (a website booking, a phone with push off) is texted a link, and a
+   * sign-in code would eat the deadline. The secret is one ask's, good only
+   * while that check-in is waiting in the cycle that asked it: any other case
+   * (a wrong or old secret, an answered or escalated check, a closed trip) is
+   * the same null — no oracle. Answered exactly as the passenger's own tap.
+   */
+  async answerByLink(ref: string, secret: string, response: 'OK' | 'NEED_HELP') {
+    if (typeof ref !== 'string' || ref.length < 8 || ref.length > 64 || typeof secret !== 'string' || secret.length < 16 || secret.length > 64) return null;
+    const session = await runAsSystem('guardian-answer-link', () => this.prisma.tripSafetySession.findUnique({ where: { id: ref } }));
+    if (!session?.passengerUserId || (session.status !== 'MONITORING' && session.status !== 'CHECKIN_PENDING')) return null;
+    if (!session.checkinRequestedAt || session.checkinRespondedAt) return null;
+    const hashes = ((session.deviationState as DetectorState | null)?.checkinCycle?.answerHashes ?? []);
+    const digest = sha256(secret);
+    if (!hashes.some((h) => typeof h === 'string' && sameDigest(h, digest))) return null;
+    const passengerUserId = session.passengerUserId;
+    guardianDeliveryCounter.labels('answered_by_link').inc();
+    return runWithTenant(session.tenantId, async () => {
+      enterOwner(passengerUserId);
+      return this.answerSession(session, passengerUserId, response);
+    });
+  }
+
+  private async answerSession(session: TripSafetySession, passengerUserId: string, response: 'OK' | 'NEED_HELP') {
     if (response === 'NEED_HELP') {
       const alert = await this.sos.create({
         actorUserId: passengerUserId,
@@ -967,9 +1101,13 @@ export class GuardianService {
     } catch { /* advisory only */ }
   }
 
-  private roomEmit(room: string, event: string, payload: Record<string, unknown>) {
+  /** [L05] The order room hears a check-in only through the current-audience
+   *  gate: the passenger, the ride's CURRENT driver and the visible store — a
+   *  driver taken off the ride stops hearing it. The pushes above stay the
+   *  check-in's real channel; this socket hint is advisory and never throws. */
+  private async orderEmit(orderId: string, event: string, payload: Record<string, unknown>) {
     try {
-      this.io.to(room).emit(event, payload);
+      await emitToOrderRoom(this.prisma, this.io, orderId, event, payload);
     } catch { /* advisory only */ }
   }
 }

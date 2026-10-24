@@ -24,9 +24,10 @@ import { prismaPlugin, TENANT_MODEL_NAMES } from '../plugins/prisma';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { TENANT_LINEAGE_TABLES, TENANT_TABLES, policyPredicateIsCanonical } from '../lib/tenant-rls';
+import { testPhone } from './helpers/fixture-ids';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
-const PHONE = `+59200742${String(Date.now()).slice(-5)}`;
+const PHONE = testPhone();
 const REVIEW = `pt1s-${RUN.toLowerCase()}`;
 const PRODUCTION = 'swift-default';
 const TABLES = ['payment_instruments', 'card_sessions', 'card_observations'] as const;
@@ -130,6 +131,9 @@ describe('[PT-1] the three tables are walled like every tenant table', () => {
       // decision only move forward; a booking never stands beside a void or refund that may have worked.
       'card_sessions.card_sessions_provider_actions',
       'card_sessions.card_sessions_tenant_matches_user',
+      // [Off-site erasure ledger, #1984] AFTER DELETE: a closed account's card session the erasure deletes is
+      // recorded off-site (ids only), so a backup restore cannot bring it back; writes nothing for open accounts.
+      'card_sessions.erasure_ledger_deleted_row',
       'payment_instruments.payment_instruments_frozen',
       'payment_instruments.payment_instruments_no_delete',
       'payment_instruments.payment_instruments_tenant_matches_user',

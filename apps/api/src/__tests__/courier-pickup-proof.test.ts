@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { nanoid } from 'nanoid';
@@ -15,6 +15,8 @@ import { OrderService } from '../modules/order/order.service';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
+import { REAL_PNG } from './helpers/real-image';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [E16] Courier pickup custody proof.
@@ -115,7 +117,7 @@ async function atPickup(status: OrderStatus = 'RIDER_ARRIVED_PICKUP', payer: 'SE
   return { sender, mover, rider, order };
 }
 
-const REAL_PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
 
 function multipartBody(filename: string, mime: string, content: Buffer) {
   const boundary = `----swift${nanoid(8)}`;
@@ -337,6 +339,50 @@ describe('[E16] pickup is confirmed only with the issued photo and a location', 
       const data = n.data as { orderId?: string; status?: string } | null;
       return data?.orderId === order.id && data?.status === 'PICKED_UP';
     })).toBe(true);
+  });
+
+  it('a pickup photo issued to an earlier assignment never proves the current one: released, given back, refused [Opus review 14 Oct #1695 S3-1]', async () => {
+    const { mover, rider, order } = await atPickup();
+    const up = await uploadPickupPhoto(order.id, mover.token);
+    expect(up.statusCode, up.body).toBe(200);
+    const firstAssignmentUrl = up.json().data.url as string;
+    // The rider hands the job back, then is given it again (A -> none -> A).
+    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+    await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
+
+    const stale = await confirmPickup(order.id, mover.token, { proofPhotoUrl: firstAssignmentUrl, gps: PICKUP_GPS });
+    expect(stale.statusCode, stale.body).toBe(400);
+    expect(stale.json().error.code).toBe('PICKUP_PROOF_NOT_ISSUED');
+    expect(await pickupRow(order.id)).toMatchObject({ status: 'RIDER_ARRIVED_PICKUP', courierPickupProofIssuedUrl: null });
+
+    // A photo taken in THIS assignment still takes custody.
+    const fresh = (await uploadPickupPhoto(order.id, mover.token)).json().data.url as string;
+    const ok = await confirmPickup(order.id, mover.token, { proofPhotoUrl: fresh, gps: PICKUP_GPS });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.json().data.status).toBe('PICKED_UP');
+  });
+
+  it('a release and re-assignment while the pickup proof is in flight is refused as a changed assignment, with no custody [Opus review 14 Oct #1695 S3-1]', async () => {
+    const { mover, rider, order } = await atPickup();
+    const issued = (await uploadPickupPhoto(order.id, mover.token)).json().data.url as string;
+    let entered!: () => void; let resume!: () => void;
+    const waiting = new Promise<void>((r) => { entered = r; }); const gate = new Promise<void>((r) => { resume = r; });
+    const original = OrderService.prototype.updateStatus;
+    const paused = vi.spyOn(OrderService.prototype, 'updateStatus').mockImplementationOnce(async function (this: OrderService, ...args) {
+      entered(); await gate; return original.apply(this, args);
+    });
+    try {
+      const pending = confirmPickup(order.id, mover.token, { proofPhotoUrl: issued, gps: PICKUP_GPS });
+      await waiting;
+      try {
+        await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
+        await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
+      } finally { resume(); }
+      const res = await pending;
+      expect(res.statusCode, res.body).toBe(409);
+      expect(res.json().error.code).toBe('ACTOR_NOT_ASSIGNED');
+    } finally { paused.mockRestore(); }
+    expect(await pickupRow(order.id)).toMatchObject({ status: 'RIDER_ARRIVED_PICKUP', pickedUpAt: null, courierPickupProofPhotoUrl: null });
   });
 
   it('refuses a fabricated pickup-proof URL that the server never issued', async () => {

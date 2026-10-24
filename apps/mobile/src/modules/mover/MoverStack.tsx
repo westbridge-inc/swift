@@ -9,6 +9,7 @@ import { LoadingBlock, Screen, T } from '../../kit';
 import { ConversationScreen } from '../chat/screens/ConversationScreen';
 import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
 import { shouldTrackMoverLocation } from '../../lib/moverLocation';
+import { useMoverJobFeed } from '../../hooks/moverJobFeed';
 import { useMoverPreview } from '../../stores/moverPreview';
 import { useAuthStore } from '../../stores/authStore';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -25,6 +26,7 @@ import { MoverOnboardingScreen } from './screens/MoverOnboardingScreen';
 // [B-support] The ticket screen is role-agnostic (generic create+list); the
 // mover stack simply never registered it — an earner mid-shift had NO route
 // to a human. Registration, not a rewrite.
+import { PersonalDataScreen } from '../profile/screens/PersonalDataScreen';
 import { GetHelpScreen } from '../profile/screens/GetHelpScreen';
 // [E12 §7.1] The shift identity check — go-online's 428 and the mid-shift
 // push both land here.
@@ -72,6 +74,9 @@ function MoverLocationSupervisor() {
     kind,
     !preview && shouldTrackMoverLocation(!!profile?.isOnline, active.data),
   );
+  // [PERF partner #1] Above every mover screen, like the GPS stream: a live
+  // job's change (passenger cancel, order ready) reaches the screen at once.
+  useMoverJobFeed(kind);
   return null;
 }
 
@@ -128,6 +133,7 @@ export function MoverStack() {
             asks for it used to route to Delivery — a screen this stack never
             mounts — so a safety question had nowhere to be answered. */}
         <Stack.Screen name="GuardianDriverConfirm" component={GuardianDriverConfirmScreen} />
+      <Stack.Screen name="PersonalData" component={PersonalDataScreen} />
       </Stack.Navigator>
       {preview ? <MoverPreviewBanner /> : null}
     </View>

@@ -199,6 +199,7 @@ const fx = vi.hoisted(() => {
   };
 });
 
+vi.mock('../../profile/screens/PersonalDataScreen', () => ({ PersonalDataScreen: 'PersonalDataScreen' }));
 vi.mock('react', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown> & { default?: Record<string, unknown> }>();
   const hooks = { ...fx.hooks, useLayoutEffect: fx.hooks.useEffect };
@@ -218,6 +219,8 @@ vi.mock('zustand', async () => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
+  // [STORE-DASH] the board's per-order wait reads the mutation cache: nothing is out here.
+  useMutationState: () => [],
   useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
     const invoke = (variables: unknown) => fx.runMutations ? options.mutationFn?.(variables) : undefined;
     const result = { mutate: vi.fn(invoke), mutateAsync: vi.fn(invoke), isPending: false, isError: false, isSuccess: false };
@@ -262,8 +265,10 @@ vi.mock('../../../kit/toast', () => ({ toast: { error: fx.toastError, info: vi.f
 vi.mock('../../../components/SwiftLogo', () => ({ SwiftMark: 'SwiftMark' }));
 vi.mock('../../../components/MmgPayLinkCard', () => ({ MmgPayLinkCard: 'MmgPayLinkCard' }));
 vi.mock('../../../components/PublicCallNumberCard', () => ({ PublicCallNumberCard: 'PublicCallNumberCard' }));
+vi.mock('../../../components/RefundRuleCard', () => ({ RefundRuleCard: 'RefundRuleCard' }));
 // [Q8] The store map: react-native-maps and expo-location are native. Its props are the contract.
 vi.mock('../../../components/StoreLocationPicker', () => ({ StoreLocationPicker: 'StoreLocationPicker' }));
+vi.mock('../../../components/StorePhotosCard', () => ({ StorePhotosCard: 'StorePhotosCard' }));
 vi.mock('../../../components/onboarding/DocumentChecklist', () => ({ DocumentChecklist: 'DocumentChecklist' }));
 vi.mock('../../../hooks/useStepUp', () => ({
   useStepUp: () => ({ withStepUp: (fn: unknown) => fn, sheet: null, active: false }),
@@ -592,6 +597,16 @@ describe('a signed-in account keeps the server-authorized switch', () => {
 describe('[Q8] the Account tab moves the store pin', () => {
   const pinnedStore = { ...liveStore, addressLine1: '12 Regent Street', city: 'Georgetown', latitude: 6.8046, longitude: -58.1553 };
   const moved = { latitude: 6.8102, longitude: -58.1623, address: '14 Regent St, Georgetown' };
+
+  it('[PIN-OWNER] a manager has no store-pin move control', async () => {
+    await signIn('manager-a', ['CUSTOMER']);
+    fx.profile = { data: { myRole: 'MANAGER', vendors: [pinnedStore] }, error: null };
+    const account = fx.mount(VendorAccountScreen, {});
+
+    expect(named(account.output, 'StoreLocationCard')).toHaveLength(0);
+    expect(named(account.output, 'StoreLocationPicker')).toHaveLength(0);
+    expect(fx.updateProfile).not.toHaveBeenCalled();
+  });
 
   /** The Account tab's store-location card, rendered, with its map opened from the row. */
   async function openStoreMap() {

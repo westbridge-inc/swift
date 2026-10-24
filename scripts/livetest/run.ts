@@ -8,7 +8,7 @@
 // Requires DEV_OTP_BYPASS=1 on the target API (local/staging only — the boot
 // guard forbids it in production).
 //
-// [TASK-057] `--suite=journeys` runs the 42 pilot-launch journeys instead
+// [TASK-057] `--suite=journeys` runs the 43 pilot-launch journeys instead
 // (scripts/livetest/journeys/) and writes journeys-result.json +
 // journeys-summary.md to LIVETEST_OUT_DIR. It first refuses any target that is
 // not the private journeys instance (guard.ts), before its first write:

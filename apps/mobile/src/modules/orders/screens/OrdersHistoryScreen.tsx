@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
-import React, { useEffect } from 'react';
-import { FlatList, Pressable, RefreshControl, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { AppState, FlatList, Pressable, RefreshControl, View } from 'react-native';
 import { useNavigation, useIsFocused } from '@react-navigation/native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
@@ -8,14 +8,17 @@ import { color, radius, space } from '@swift/ui';
 import { useLiveOrders, useOrdersInfinite, useReorder } from '../../../hooks/customer';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { useAuthStore } from '../../../stores/authStore';
+import { POLL } from '../../../lib/pollPolicy';
 import { vendorPhoto } from '../../../lib/images';
 import { formatAppointmentSlot } from '../../../lib/appointmentTime';
+import { reorderNotice } from '../../../lib/reorderNotice';
+import { toast } from '../../../kit/toast';
 // The single authority for what a status is CALLED — type-aware, so a ride is
 // never described with a store's words. This screen owns tone, never wording.
 import { orderStatusLabel, presentedVertical } from '../../../lib/orderStatus';
 import type { OrderVerticalFacts } from '@swift/types';
 import {
-  Photo,
+  Header, Photo,
   EmptyState, ErrorState, LoadingBlock, Money,
   Pictogram, PillButton, Screen, T,
 } from '../../../kit';
@@ -149,9 +152,9 @@ function itemsSummary(o: any): string | null {
   return rest > 0 ? `${head.join(', ')} +${rest} more` : head.join(', ');
 }
 
-/** The amount the row is allowed to show, or null. `money()` turns a missing
- *  value into "$0", which is a lie on a ledger — so a row with no server
- *  amount prints an em-dash instead. */
+/** The amount the row is allowed to show, or null. A missing value shown as
+ *  "$0" is a lie on a ledger — so a row with no server amount prints an
+ *  em-dash instead (as money() itself now does). */
 function rowAmount(o: any, isRide: boolean): number | null {
   const raw = isRide ? (o.taxiFareTotal ?? o.totalAmount) : (o.totalAmount ?? o.total);
   const n = Number(raw);
@@ -172,7 +175,13 @@ export function OrdersHistoryScreen() {
   const navigation = useNavigation<any>();
   const { isAuthenticated, promptLogin } = useAuthStore();
   const orders = useOrdersInfinite();
-  const liveOrders = useLiveOrders();
+  // [row 5 · ANDROID-QA] The list must follow orders in progress while the
+  // customer looks at it: no socket event reaches this screen, so the live
+  // query re-asks (15 s; 30 s on a slow network) while the tab is on screen,
+  // the app is in front and something is in progress (hooks/customer).
+  const isFocused = useIsFocused();
+  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const liveOrders = useLiveOrders(isFocused && appActive && isAuthenticated ? POLL.customerLiveOrders : undefined);
   const reorder = useReorder();
   // The pull spinner is the person's own gesture (lib/pullToRefresh). The
   // focus refetch below runs on EVERY switch to this tab, and a spinner bound
@@ -185,7 +194,6 @@ export function OrdersHistoryScreen() {
   // BOTH queries refresh: an order that finishes while the tab sits in the
   // background leaves the live list and joins history, and refreshing only one
   // of them would show it in neither — or in both.
-  const isFocused = useIsFocused();
   useEffect(() => {
     if (isFocused && isAuthenticated) {
       orders.refetch();
@@ -194,9 +202,48 @@ export function OrdersHistoryScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
 
+  // Back from the background with this tab on screen: the same refresh as a
+  // tab switch (Home does the same). The poll above stops while backgrounded.
+  const foreground = useRef({ isFocused, isAuthenticated, refresh: () => {} });
+  foreground.current = {
+    isFocused,
+    isAuthenticated,
+    refresh: () => { void orders.refetch(); void liveOrders.refetch(); },
+  };
+  useEffect(() => {
+    let previous = AppState.currentState;
+    const subscription = AppState.addEventListener('change', (next) => {
+      setAppActive(next === 'active');
+      const { isFocused: focused, isAuthenticated: signedIn, refresh } = foreground.current;
+      if (next === 'active' && previous !== 'active' && focused && signedIn) refresh();
+      previous = next;
+    });
+    return () => subscription.remove();
+  }, []);
+
+  // An order that leaves the live list (finished or cancelled) must join
+  // history in the same moment, or it shows in neither: re-read history when
+  // a live order drops out. Membership by id, never by status.
+  const liveIdsKey = (liveOrders.data?.items ?? []).map((o) => String(o.id)).sort().join(',');
+  const previousLiveIds = useRef<string | null>(null);
+  useEffect(() => {
+    const before = previousLiveIds.current;
+    previousLiveIds.current = liveIdsKey;
+    if (before === null || !isAuthenticated) return;
+    const now = new Set(liveIdsKey ? liveIdsKey.split(',') : []);
+    if (before.split(',').some((id) => id && !now.has(id))) void orders.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveIdsKey]);
+
+  // [UI-SWEEP U11 → U-P2, owner 22 Oct] A pushed screen since Activity left
+  // the tab bar, so it gets the kit Header every pushed screen uses: Back at
+  // the top LEFT, a 44pt target. It used to be a bare back chip inside this
+  // column; its 44pt touch box stretched across the column and centred the
+  // chip, so Back sat in the top centre of the screen.
+  const backBar = <Header />;
   // THE PAPER HEADER — ink on the page ground, no slab, no white pill.
   const header = (
-    <View style={{ paddingTop: space.lg, paddingBottom: space.lg }}>
+    <View style={{ paddingTop: space.sm, paddingBottom: space.lg }}>
       <T variant="micro" tone="muted">ORDERS & RIDES</T>
       <T variant="title" style={{ marginTop: 2 }}>Your activity</T>
     </View>
@@ -206,6 +253,7 @@ export function OrdersHistoryScreen() {
   if (!isAuthenticated) {
     return (
       <Screen>
+        {backBar}
         {headerBlock}
         <EmptyState picto="orders" title="Sign in to see orders" body="Your order history lives on your account." actionLabel="Sign in" onAction={promptLogin} />
       </Screen>
@@ -254,7 +302,12 @@ export function OrdersHistoryScreen() {
   }
 
   /** The 56pt identity square. Photography carries its own radius and sits on
-   *  paper; a ride, having no storefront, gets a hairline-bordered tile. */
+   *  paper; a ride, having no storefront, gets a hairline-bordered tile.
+   *  [UI-SWEEP U-P3, owner 22 Oct] A store's square is its LOGO when it has
+   *  one (a cover is a wide banner, cropped to 56pt it shows nothing), else
+   *  its cover, else the shop icon alone. Never the store's name: the row
+   *  already prints it beside the tile, and squeezed into 56pt it wrapped
+   *  and broke ("SWIF / T M..."). */
   const identity = (o: any, isRide: boolean, size: number) =>
     isRide ? (
       <View
@@ -273,8 +326,9 @@ export function OrdersHistoryScreen() {
       </View>
     ) : (
       <Photo
-        uri={vendorPhoto(o.vendor)}
+        uri={vendorPhoto(o.vendor ? { logoUrl: o.vendor.logoUrl ?? null } : null) ?? vendorPhoto(o.vendor)}
         label={o.vendor?.name}
+        showLabel={false}
         glyph="shops"
         transition={150}
         style={{ width: size, height: size, borderRadius: radius.md }}
@@ -329,13 +383,10 @@ export function OrdersHistoryScreen() {
           </View>
           {amountText(o, isRide)}
         </View>
+        {/* [UI-SWEEP U-P4] The status only: the order number is shown in
+            full on the order's own screen (Track / Details), never cut off here. */}
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
           <TonePill label={st.label} tone={st.tone} />
-          {o.orderNumber ? (
-            <T variant="label" tone="muted" numberOfLines={1}>
-              #{o.orderNumber}
-            </T>
-          ) : null}
         </View>
         <PillButton
           label={isRide ? 'Track ride' : 'Track order'}
@@ -359,9 +410,12 @@ export function OrdersHistoryScreen() {
     const sub = isRide && (o.pickupAddress || o.deliveryAddress)
       ? `${o.pickupAddress ?? 'Pickup'} → ${o.deliveryAddress ?? 'Drop-off'}`
       : itemsSummary(o);
-    // Status · time · order number — every part dropped when the server did
-    // not send it, so the line never carries an invented value.
-    const meta = [st.label, timeOfDay(o.placedAt), o.orderNumber ? `#${o.orderNumber}` : null]
+    // Status · time — every part dropped when the server did not send it, so
+    // the line never carries an invented value. [UI-SWEEP U-P4, owner 22 Oct]
+    // No order number: on one line it was cut off ("#SW-261020-00..."), and
+    // the row already names the day, time, store and items. Details shows it
+    // in full.
+    const meta = [st.label, timeOfDay(o.placedAt)]
       .filter(Boolean)
       .join(' · ');
     const inner = (
@@ -418,7 +472,13 @@ export function OrdersHistoryScreen() {
                   loading={reorder.isPending && reorder.variables === o.id}
                   onPress={() =>
                     reorder.mutate(o.id, {
-                      onSuccess: () => navigation.navigate('Tabs', { screen: 'Cart' }),
+                      onSuccess: (result) => {
+                        // [L09] Lines left out (sold out, or choices to make
+                        // again) are named before the cart opens.
+                        const notice = reorderNotice(result);
+                        if (notice) toast.show(notice.title, notice.description);
+                        navigation.navigate('Tabs', { screen: 'Cart' }, { pop: true });
+                      },
                     })
                   }
                 />
@@ -444,6 +504,7 @@ export function OrdersHistoryScreen() {
 
   return (
     <Screen>
+      {backBar}
       {orders.isLoading || liveOrders.isLoading ? (
         <>
           {headerBlock}

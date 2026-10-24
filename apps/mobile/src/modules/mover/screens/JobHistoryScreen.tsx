@@ -1,8 +1,10 @@
 /** @jsxImportSource react */
 import React, { useEffect, useState } from 'react';
-import { ScrollView, View } from 'react-native';
+import { RefreshControl, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, fontSize, radius, space } from '@swift/ui';
+import { useQueryClient } from '@tanstack/react-query';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, Chip, EmptyState, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '../../../kit';
 import { useJobHistory, useMoverKind } from '../../../hooks';
 import { money } from '../../../lib/money';
@@ -121,6 +123,14 @@ export function JobHistoryScreen({ navigation: _navigation }: any) {
 
   const status = isDriver ? DRIVER_FILTERS[filter]?.status : undefined;
   const q = useJobHistory(kind, page, status);
+  const qc = useQueryClient();
+  // [UI-SWEEP U33] A pull reloads from the newest page: back to page 1 (the
+  // page-1 answer REPLACES the list) and every cached page of this history is
+  // re-read, so a pull deep in the list can never append a page twice.
+  const pull = usePullToRefresh(async () => {
+    setPage(1);
+    await qc.invalidateQueries({ queryKey: ['mover', 'history', kind] });
+  });
   const historyKey = `${kind ?? 'none'}:${status ?? 'all'}`;
 
   useEffect(() => {
@@ -215,6 +225,7 @@ export function JobHistoryScreen({ navigation: _navigation }: any) {
           <ScrollView
             contentContainerStyle={{ paddingHorizontal: space['2xl'], paddingBottom: space['3xl'] }}
             showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
           >
             {valid === true && total != null ? (
               <T variant="caption" weight="semibold" tone="muted" style={{ marginBottom: space.md }}>

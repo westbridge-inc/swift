@@ -12,6 +12,11 @@ import { getTenantId, runAsSystem, runWithTenant } from '../../plugins/tenant-co
 import { log } from '../../utils/logger';
 import { weeklyFeeAmount } from './subscription-fee';
 import { amountDueNow } from './amount-due';
+import { PAY_AHEAD_LIMIT, payAheadRefusal, readPayAhead } from './pay-ahead';
+/** [REVIEW S3-2] A provider transaction whose money was refunded to the payer. */
+export const PROVIDER_REFUNDED = 'REFUNDED';
+import { MANUAL_FEE_CREDIT_HELD_MESSAGE, manualFeeCreditHeld } from '../../utils/fee-credit-hold';
+import { AppError } from '../../utils/errors';
 
 // Agent-cash ingestion [san spec PART 4] — three channels, ONE pipeline:
 //   persist raw → idempotency → sanity → cross-channel dedupe → resolve SAN
@@ -71,6 +76,33 @@ async function databaseNow(db: Pick<PrismaClient, '$queryRaw'>): Promise<Date> {
 const DB_NOW = Prisma.sql`timezone('UTC'::text, clock_timestamp())`;
 /** A verdict another finisher already wrote: this finisher lost the race. */
 const LOST_RACE = new Set(['NOT_RECEIVED', 'PAYMENT_NOT_RECEIVED']);
+
+/** [#1609 review S3-1] The refund an observation's verdict must yield to.
+ *  FOR SHARE waits for a refund (or a credit) of the same MMG transaction
+ *  still in flight. Refunded: the record the refund was flagged on (or the
+ *  transaction itself, for history); otherwise null. */
+async function refundedObservation(tx: Prisma.TransactionClient, providerPaymentId: string): Promise<string | null> {
+  const [identity] = await tx.$queryRaw<Array<{ status: string }>>`
+    SELECT "status" FROM "provider_payments" WHERE "id" = ${providerPaymentId} FOR SHARE`;
+  if (identity?.status !== PROVIDER_REFUNDED) return null;
+  const flagged = await tx.mmgAgentPayment.findFirst({ where: { providerPaymentId, status: 'REFUND_FLAGGED' }, select: { id: true } });
+  return flagged?.id ?? providerPaymentId;
+}
+
+/** [#1609 review] Refund-flag refusals, in words an operator cannot misread. */
+const CONFLICT_NOT_REFUNDABLE = 'This payment does not agree with MMG\'s record of the same transaction (amount, currency or reference), so it is held for finance review. Check it against the MMG statement before any refund. Nothing changed.';
+function notRefundable(status: string): AppError {
+  switch (status) {
+    case 'REFUND_FLAGGED':
+      return new AppError(409, 'NOT_UNMATCHED', 'Do not refund this payment again: it is already flagged for refund. Nothing changed.');
+    case 'RECONCILED':
+      return new AppError(409, 'NOT_UNMATCHED', 'Do not refund this payment: it is a second record of an MMG payment that was already credited or refunded once. Nothing changed.');
+    case 'RECEIVED':
+      return new AppError(409, 'NOT_UNMATCHED', 'This payment is still being processed. Look again in a few minutes. Nothing changed.');
+    default:
+      return new AppError(409, 'NOT_UNMATCHED', 'Only unmatched payments can be refund-flagged.');
+  }
+}
 
 /** [MMG-RECV · ADM-002] The repair pass is the actor when it credits a
  *  stranded observation: a system audit row (no user) joins the credit
@@ -166,7 +198,8 @@ export async function payInfo(
       const { resolveRateForRun, dualDisplay } = await import('./fx');
       const role = { RESTAURANT: 'VENDOR', SUPERMARKET: 'VENDOR', RETAIL_STORE: 'VENDOR', SERVICE_PROVIDER: 'SERVICE', DELIVERY_RIDER: 'RIDER', COURIER_RIDER: 'RIDER', TAXI_DRIVER: 'DRIVER' }[sub.type] ?? 'VENDOR';
       const [entry, rate] = await Promise.all([
-        prisma.priceBookEntry.findFirst({ where: { role, active: true }, orderBy: { effectiveFrom: 'desc' } }),
+        // [F2] The row in force now, never a scheduled one.
+        prisma.priceBookEntry.findFirst({ where: { role, active: true, effectiveFrom: { lte: new Date() } }, orderBy: { effectiveFrom: 'desc' } }),
         resolveRateForRun(prisma, tenant.settlementCurrency),
       ]);
       if (entry && rate) {
@@ -280,6 +313,12 @@ export class AgentCashService {
     //    own later attach.
     const identity = await this.identityFor(row, p.channel);
     if (identity.conflict) return this.suspense(row.id, 'PROVIDER_ID_CONFLICT');
+    // [REVIEW S3-2] A payment already refunded to the payer is never credited:
+    // a later observation of it is reconciled against the refund (no money).
+    if (identity.payment.status === PROVIDER_REFUNDED) {
+      const refunded = await this.prisma.mmgAgentPayment.findFirst({ where: { providerPaymentId: identity.payment.id, status: 'REFUND_FLAGGED' }, select: { id: true } });
+      return this.reconcileAgainst(row.id, refunded?.id ?? identity.payment.id, 'observed after its refund');
+    }
     if (identity.payment.status === 'CREDITED' && identity.payment.creditedPaymentId && identity.payment.creditedPaymentId !== row.id) {
       agentCashDuplicateCreditsCounter.labels(p.channel, 'observed').inc();
       return this.reconcileAgainst(row.id, identity.payment.creditedPaymentId, 'observed after credit');
@@ -294,6 +333,10 @@ export class AgentCashService {
     // 4. Resolve the SAN platform-wide.
     const res = await resolveSan(this.prisma, p.sanRaw, { tenantId: row.tenantId }); // [AX363-F2] this tenant's accounts only
     if (!res.ok) return this.suspense(row.id, res.code);
+
+    // [OWNER 8 Oct (4)] Production credits no fee by agent (BILLING_TOPUP_HOLD):
+    //    the money is recorded and held for a person, who refunds it.
+    if (manualFeeCreditHeld()) return this.suspense(row.id, 'TOPUP_ON_HOLD');
 
     // 5. Credit through the SAME pipeline every rail uses.
     return this.credit(row.id, res.subscription.id, p, onAudit);
@@ -479,6 +522,18 @@ export class AgentCashService {
         || Number(identity.amount) !== Number(payment.amount) || identity.currencyCode !== payment.currencyCode) {
         throw new Error('PROVIDER_ID_CONFLICT');
       }
+      if (identity.status === PROVIDER_REFUNDED) {
+        if (resolution.expectedStatus === 'UNMATCHED') {
+          throw new AppError(409, 'PAYMENT_REFUNDED', 'This MMG payment was refunded to the payer, so it cannot be credited. Nothing changed.');
+        }
+        // [#1609 review S3-1] An observation still being judged when the
+        // refund committed reaches its credit here: reconciled against the
+        // refund (no money), not refused with an error and left RECEIVED.
+        const refundedAs = (await refundedObservation(tx, providerPaymentId))!;
+        await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'RECONCILED', note: `duplicate of ${refundedAs} (observed after its refund)`, resolvedAt: new Date() } });
+        await onAudit?.(tx, { paymentId, subscriptionId: requestedSubscriptionId, credited: false, refundedAs });
+        return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, refundedAs };
+      }
       if (identity.status !== 'OPEN' && !(identity.status === 'CREDITED' && identity.creditedPaymentId)) {
         throw new Error('PROVIDER_ID_CONFLICT');
       }
@@ -487,6 +542,24 @@ export class AgentCashService {
       // never crosses a tenant.
       if ((await subscriptionOwnerTenant(tx, requestedSubscriptionId)) !== payment.tenantId) {
         throw new Error('DESTINATION_TENANT_MISMATCH');
+      }
+
+      // [OWNER RULING 8 Oct (2) · owner #62] One week ahead at most, decided under
+      // the payer lock and BEFORE the provider transaction is marked credited.
+      // Arriving money past the cap is held for a person (refund), never
+      // credited and never dropped; an admin attaching it is refused in words.
+      // Only an observation that would really credit is measured: a second
+      // observation of a transaction already credited is reconciled below
+      // (no money moves), and a legacy credit is linked, never re-credited.
+      const wouldCredit = identity.status === 'OPEN' && !await tx.billingEvent.findFirst({
+        where: { type: 'PREPAID_TOPUP', idempotencyKey: { endsWith: `:agent:${p.channel}:${p.externalId}` } },
+        select: { id: true },
+      });
+      const position = wouldCredit ? await readPayAhead(tx, requestedSubscriptionId, new Date()) : null;
+      if (position && Math.round(p.amount * 100) / 100 > position.room) {
+        if (resolution.expectedStatus === 'UNMATCHED') throw payAheadRefusal(position, 'attach');
+        await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode: PAY_AHEAD_LIMIT } });
+        return { paymentId, subscriptionId: requestedSubscriptionId, credited: false, duplicateOf: null, payAheadLimit: true as const };
       }
 
       // [M-18] THE single CAS: exactly one observation of a provider
@@ -561,6 +634,13 @@ export class AgentCashService {
       if (resolution.expectedStatus === 'UNMATCHED') throw new Error('PROVIDER_ID_CONFLICT');
       return { status: 'received_unmatched', paymentId, failureCode: 'PROVIDER_ID_CONFLICT' };
     }
+    if ('refundedAs' in committed && committed.refundedAs) {
+      return { status: 'reconciled', paymentId, originalPaymentId: committed.refundedAs };
+    }
+    if ('payAheadLimit' in committed && committed.payAheadLimit) {
+      log().warn({ paymentId, subscriptionId: committed.subscriptionId }, 'agent payment held: it would take the weekly fee past one week ahead; a person refunds it');
+      return { status: 'received_unmatched', paymentId, failureCode: PAY_AHEAD_LIMIT };
+    }
     if (committed.duplicateOf) {
       // [M-18] A credit attempt on an already-credited transaction: the race
       // loser, or an admin attaching the unmatched original after the second
@@ -600,11 +680,29 @@ export class AgentCashService {
   }
 
   private async suspense(paymentId: string, failureCode: string): Promise<IngestResult> {
-    const decided = await this.prisma.mmgAgentPayment.updateMany({
-      where: { id: paymentId, status: 'RECEIVED' },
-      data: { status: 'UNMATCHED', failureCode },
+    // [#1609 review S3-1] The verdict re-reads the MMG transaction under its
+    // lock. A refund that committed after this observation's identity was
+    // read (the link can land after the refund closed the transaction) wins:
+    // the observation is reconciled against that refund, never held as a
+    // second refund case. Lock order is every writer's: the observation, then
+    // the transaction. A conflict stays a conflict for finance review.
+    const verdict = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      const [row] = await tx.$queryRaw<Array<{ status: string; providerPaymentId: string | null }>>`
+        SELECT "status", "providerPaymentId" FROM "mmg_agent_payments" WHERE "id" = ${paymentId} FOR UPDATE`;
+      if (row?.status !== 'RECEIVED') return null; // [MMG-RECV] another finisher decided it first
+      if (row.providerPaymentId && failureCode !== 'PROVIDER_ID_CONFLICT') {
+        const refundedAs = await refundedObservation(tx, row.providerPaymentId);
+        if (refundedAs) {
+          await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'RECONCILED', note: `duplicate of ${refundedAs} (observed after its refund)`, resolvedAt: new Date() } });
+          return { refundedAs };
+        }
+      }
+      await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'UNMATCHED', failureCode } });
+      return { refundedAs: null };
     });
-    if (decided.count !== 1) throw new Error('NOT_RECEIVED'); // [MMG-RECV] another finisher decided it first
+    if (!verdict) throw new Error('NOT_RECEIVED');
+    if (verdict.refundedAs) return { status: 'reconciled', paymentId, originalPaymentId: verdict.refundedAs };
     log().warn({ paymentId, failureCode }, 'agent payment suspensed — money recorded, human resolution needed');
     return { status: 'received_unmatched', paymentId, failureCode };
   }
@@ -691,11 +789,109 @@ export class AgentCashService {
     return row ? (row.status as 'RECEIVED' | 'UNMATCHED') : null;
   }
 
+  /** [REVIEW S3-2 · owner 11 Oct] Refund a held agent payment — ONCE per MMG
+   *  transaction. Under the hold every agent payment is held for a refund, and
+   *  one payment can arrive as several observations (webhook, statement). The
+   *  refund closes the provider transaction (status REFUNDED: no later
+   *  observation, attach, checkout or top-up can credit it) and reconciles its
+   *  other observations, held or still being judged, so nobody refunds it
+   *  twice. A transaction another channel already credited is never also
+   *  refunded; a record of a payment already refunded is answered 409 in words
+   *  that say do not refund (and closed as a duplicate); a record that
+   *  disagrees with its MMG transaction (PROVIDER_ID_CONFLICT) is for finance
+   *  review and is never closed by a refund. Money never moves here: the
+   *  refund is made at MMG/the agent, outside Swift. */
+  async flagRefund(paymentId: string, adminId: string, note: string, onAudit?: OnAudit): Promise<{ status: 'refund_flagged'; paymentId: string; refundedPaymentId: string }> {
+    const conflict = () => new AppError(409, 'PROVIDER_ID_CONFLICT', CONFLICT_NOT_REFUNDABLE);
+    const seen = await this.prisma.mmgAgentPayment.findUnique({ where: { id: paymentId } });
+    if (!seen) throw new AppError(404, 'NOT_FOUND', 'No such payment');
+    if (seen.status !== 'UNMATCHED') throw notRefundable(seen.status);
+    if (seen.failureCode === 'PROVIDER_ID_CONFLICT') throw conflict();
+    let providerPaymentId = seen.providerPaymentId;
+    if (!providerPaymentId) {
+      // [#1609 review] A held record never linked to its MMG transaction (its
+      // delivery died before the link) is linked first, exactly as attach
+      // links it: a refund that closed nothing would leave the transaction
+      // open, and a later record of the same payment would be refunded again.
+      const identity = await this.identityFor(seen, seen.channel).catch(async (e: unknown) => {
+        if (e instanceof Error && e.message === 'NOT_UNMATCHED') {
+          const now = await this.prisma.mmgAgentPayment.findUnique({ where: { id: paymentId }, select: { status: true } });
+          throw notRefundable(now?.status ?? 'UNKNOWN');
+        }
+        throw e;
+      });
+      if (identity.conflict || !identity.payment) throw conflict();
+      providerPaymentId = identity.payment.id;
+    }
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      await bindTenantTransaction(tx);
+      // [#1609 review S3-1 · S4] Lock order is every verdict's: the records of
+      // this MMG payment first, in id order (two refunds of one payment queue
+      // here instead of deadlocking), then the transaction.
+      const rows = await tx.$queryRaw<MmgAgentPayment[]>`
+        SELECT * FROM "mmg_agent_payments" WHERE "id" = ${paymentId} OR "providerPaymentId" = ${providerPaymentId}
+         ORDER BY "id" FOR UPDATE`;
+      const row = rows.find((r) => r.id === paymentId);
+      if (!row) throw new AppError(404, 'NOT_FOUND', 'No such payment');
+      if (row.status !== 'UNMATCHED') throw notRefundable(row.status);
+      if (row.failureCode === 'PROVIDER_ID_CONFLICT' || row.providerPaymentId !== providerPaymentId) throw conflict();
+      const [identity] = await tx.$queryRaw<ProviderPayment[]>`SELECT * FROM "provider_payments" WHERE "id" = ${providerPaymentId} FOR UPDATE`;
+      // [#1609 review S3-2] A record that disagrees with its MMG transaction
+      // is a conflict for finance review: it never closes the transaction.
+      if (!identity || identity.status === 'HELD_DUPLICATE'
+        || Number(identity.amount) !== Number(row.amount) || identity.currencyCode !== row.currencyCode) {
+        throw conflict();
+      }
+      if (identity.status === 'CREDITED') {
+        throw new AppError(409, 'ALREADY_CREDITED', 'This MMG payment was already credited to a weekly fee, so it is not refunded. Nothing changed.');
+      }
+      if (identity.status === PROVIDER_REFUNDED) {
+        const first = await tx.mmgAgentPayment.findFirst({ where: { providerPaymentId: identity.id, status: 'REFUND_FLAGGED' }, select: { id: true } });
+        const refundedPaymentId = first?.id ?? identity.id;
+        await tx.$executeRaw`
+          UPDATE "mmg_agent_payments"
+             SET "status" = 'RECONCILED', "resolvedBy" = ${adminId}, "resolvedAt" = ${DB_NOW},
+                 "note" = ${`same MMG payment as ${refundedPaymentId}, already refunded once`} || COALESCE(' (earlier note: ' || "note" || ')', '')
+           WHERE "id" = ${paymentId}`;
+        await onAudit?.(tx, { paymentId, refundedPaymentId, alreadyRefunded: true });
+        return { alreadyRefundedAs: refundedPaymentId };
+      }
+      if (identity.status !== 'OPEN') throw conflict();
+      const closed = await tx.providerPayment.updateMany({ where: { id: identity.id, status: 'OPEN' }, data: { status: PROVIDER_REFUNDED } });
+      if (closed.count !== 1) throw new Error('PROVIDER_ID_CONFLICT');
+      // [#1609 review S3-1] Its other records, held or still being judged
+      // (RECEIVED), are closed under these locks: a verdict still in flight
+      // then writes nothing (a lost race), so none reaches the refund queue
+      // again. [S3-2] Never a conflict record, and never one whose amount or
+      // currency disagrees with the transaction: those wait for a person.
+      await tx.$executeRaw`
+        UPDATE "mmg_agent_payments" m
+           SET "status" = 'RECONCILED', "resolvedBy" = ${adminId}, "resolvedAt" = ${DB_NOW},
+               "note" = ${`same MMG payment as ${paymentId}, refunded once`} || COALESCE(' (earlier note: ' || m."note" || ')', '')
+          FROM "provider_payments" p
+         WHERE p."id" = ${identity.id} AND m."providerPaymentId" = p."id" AND m."id" <> ${paymentId}
+           AND m."status" IN ('UNMATCHED', 'RECEIVED')
+           AND m."failureCode" IS DISTINCT FROM 'PROVIDER_ID_CONFLICT'
+           AND m."amount" = p."amount" AND m."currencyCode" = p."currencyCode"`;
+      await tx.mmgAgentPayment.update({ where: { id: paymentId }, data: { status: 'REFUND_FLAGGED', note, resolvedBy: adminId, resolvedAt: new Date() } });
+      await onAudit?.(tx, { paymentId, refundedPaymentId: paymentId, providerPaymentId });
+      return { alreadyRefundedAs: null };
+    });
+    // [#1609 review S3-1] Never a success an operator could read as "refund
+    // it": the record is closed as a duplicate, and the answer says stop.
+    if (outcome.alreadyRefundedAs) {
+      throw new AppError(409, 'ALREADY_REFUNDED', `Do not refund this payment: the same MMG payment was already flagged for refund once (record ${outcome.alreadyRefundedAs}). This record is a duplicate of it and is now closed. Nothing else changed.`);
+    }
+    return { status: 'refund_flagged', paymentId, refundedPaymentId: paymentId };
+  }
+
   /** Suspense resolution [spec 4.6]: attach to an account — credits via the
    *  normal pipeline with the original payment linked. [M-18] If the
    *  transaction was credited by another channel meanwhile, the attach is
    *  answered `reconciled` and moves nothing. */
   async attach(paymentId: string, subscriptionId: string, adminId: string, onAudit?: OnAudit): Promise<IngestResult> {
+    // [OWNER 8 Oct (4)] Under the hold an agent payment is refunded, never credited by hand.
+    if (manualFeeCreditHeld()) throw new AppError(503, 'TOPUP_ON_HOLD', MANUAL_FEE_CREDIT_HELD_MESSAGE);
     const row = await this.prisma.mmgAgentPayment.findUniqueOrThrow({ where: { id: paymentId } });
     if (row.status !== 'UNMATCHED') throw new Error('NOT_UNMATCHED');
     // [AX363-F1] The provider identity first, resolved (or minted) and
@@ -739,7 +935,10 @@ export class AgentCashService {
               ? 'paid to a closed account — refund flag likely'
               : r.failureCode === 'UNFINISHED'
                 ? 'saved but never credited: the repair pass kept failing (check it against the MMG statement, then attach)'
-                : r.failureCode ?? 'unknown',
+                : r.failureCode === 'PROVIDER_ID_CONFLICT'
+                  // [#1609 review S3-2] Refused for refund and attach alike.
+                  ? 'disagrees with MMG\'s record of the same transaction (amount, currency or reference): held for finance review against the MMG statement; it cannot be refunded or attached here'
+                  : r.failureCode ?? 'unknown',
       hoursOld: Math.round((now - r.createdAt.getTime()) / 3_600_000),
       breachesSla: now - r.createdAt.getTime() > 24 * 3_600_000,
     }));

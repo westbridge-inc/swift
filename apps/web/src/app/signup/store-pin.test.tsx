@@ -1,7 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import SignupPage from './page';
+import { MAP_TILES_UNAVAILABLE } from '@/lib/map-tiles';
+import { TEST_MAPTILER_KEY } from '@/test/map-tiles-fixture';
+import { axeViolations } from '@/test/axe';
 
 const fx = vi.hoisted(() => ({
   send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(),
@@ -9,17 +12,23 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, apiFetch: fx.api }));
-vi.mock('@/lib/customer', () => ({
+vi.mock('@/lib/customer-account', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
+}));
+vi.mock('@/lib/customer-places', () => ({
   placesAutocomplete: fx.search, placeDetails: fx.details,
 }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: fx.coords }));
+// [Row 628] The weekly fee block has its own tests (weekly-fee.test.tsx); here it says what an API older than the tick says.
+vi.mock('./weekly-fee-loader', () => ({ loadWeeklyFee: () => import('@/test/weekly-fee-fixture') }));
 
 const DOOR = { placeId: 'door', primary: '12 Regent Street', secondary: 'Georgetown', lat: 6.812, lng: -58.163 };
 const DEVICE = { lat: 6.79, lng: -58.12 };
 const OUTSIDE = 'That pin is outside Guyana, where Swift works today. Move it to the entrance of your store.';
 const disabled = (name: string) => (screen.getByRole('button', { name }) as HTMLButtonElement).disabled;
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
+
+afterEach(() => { vi.unstubAllEnvs(); });
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -42,6 +51,9 @@ async function business() {
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Merchant' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
   fireEvent.change(await screen.findByLabelText('Business name'), { target: { value: 'Test shop' } });
   for (const [label, value] of [['Street address', '12 Regent Street'], ['City or town', 'Georgetown'], ['Region', 'Demerara-Mahaica']]) {
@@ -224,6 +236,33 @@ describe('Q8 website store pin', () => {
     expect(disabled('Confirm store location')).toBe(false);
   });
 
+  // [WEB-TILES] The store map's tiles are MapTiler's, credited in its words, and
+  // each tells MapTiler the site (its key is restricted to the site's origins).
+  it('draws MapTiler tiles that send the site as Referer, credited to MapTiler and OpenStreetMap', async () => {
+    const user = await business();
+    await picker(user);
+    const tiles = [...screen.getByRole('application').querySelectorAll('img')];
+    expect(tiles.length).toBeGreaterThan(0);
+    for (const tile of tiles) {
+      expect(tile.getAttribute('src')!.startsWith('https://api.maptiler.com/maps/streets-v2/256/')).toBe(true);
+      expect(tile.getAttribute('src')!.endsWith(`.png?key=${TEST_MAPTILER_KEY}`)).toBe(true);
+      expect(tile.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
+    }
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === '© MapTiler © OpenStreetMap contributors')).toBeTruthy();
+  });
+
+  it('a built site without the MapTiler key draws no tiles, says so, and cannot confirm a pin', async () => {
+    vi.stubEnv('NEXT_PUBLIC_MAPTILER_KEY', '');
+    const user = await business();
+    await user.click(screen.getByRole('button', { name: 'Place your store on the map' }));
+    await user.click(await screen.findByRole('button', { name: /12 Regent Street.*Georgetown/ }));
+    expect(screen.getByRole('application').querySelectorAll('img')).toHaveLength(0);
+    expect(screen.getByText(new RegExp(MAP_TILES_UNAVAILABLE))).toBeTruthy();
+    expect(screen.queryByText('Loading map…')).toBeNull();
+    expect(screen.queryByText(/OpenStreetMap contributors/)).toBeNull();
+    expect(disabled('Confirm store location')).toBe(true);
+  });
+
   it('closing the picker without confirming does not save the draft', async () => {
     const user = await business();
     await picker(user);
@@ -324,5 +363,14 @@ describe('Q8 website store pin', () => {
     fireEvent.change(input, { target: { value: 'New address' } });
     expect(disabled('Find address')).toBe(false);
     expect(screen.queryByRole('button', { name: /12 Regent Street.*Georgetown/ })).toBeNull();
+  });
+});
+
+// [Row 111 · W8] Sign-up with the store map open, as a page.
+describe('[W8] sign-up is accessible', () => {
+  it('the business step with its store map open has no accessibility violations axe can find', async () => {
+    const user = await business();
+    await picker(user);
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

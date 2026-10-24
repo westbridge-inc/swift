@@ -325,25 +325,56 @@ export function authenticationDecision(
   return { proceed: false, note: `NOT_AUTHENTICATED_${code ?? 'NONE'}_${status ?? 'NONE'}` };
 }
 
-/** sec. 8.4: ECI values that mean 3-D Secure failed or was not used (Visa/Amex 07; Mastercard 00; NPA N0). */
-const UNAUTHENTICATED_ECI = new Set(['07', '00', 'N0']);
+/**
+ * [Opus S4-c] sec. 8.4 "ECI value", as an ALLOW-list: the values that say 3-D
+ * Secure authentication was successful or attempted —
+ *   A) Visa and American Express: 05 successful, 06 attempted (07 failed or not
+ *      available: considered non-3DS);
+ *   B) Mastercard: 02 successful, 01 attempted (00 failed or not available:
+ *      considered non-3DS). N2 / N0 are NPA (non-payment authentication)
+ *      results, never a Sale's proof.
+ * When the answer names the card's brand, only that brand's values count; when
+ * it does not, the values of every brand (they do not collide). Anything else —
+ * 07, 00, N2, N0, an undocumented value — is not authenticated.
+ */
+const AUTHENTICATED_ECI = {
+  visaAmex: new Set(['05', '06']),
+  mastercard: new Set(['02', '01']),
+  anyBrand: new Set(['05', '06', '02', '01']),
+} as const;
+
+function eciSetFor(brand: unknown): ReadonlySet<string> {
+  const name = str(brand)?.trim().toLowerCase().replace(/[\s_-]+/g, '') ?? '';
+  if (name === 'visa' || name === 'amex' || name === 'americanexpress') return AUTHENTICATED_ECI.visaAmex;
+  if (name === 'mastercard' || name === 'mc') return AUTHENTICATED_ECI.mastercard;
+  return AUTHENTICATED_ECI.anyBrand;
+}
+
+/** The answer's ECI as two characters: a number (5) reads like its text ("05"). Undefined when absent or not an ECI. */
+function eciOf(raw: unknown): string | undefined {
+  if (typeof raw === 'number') return Number.isInteger(raw) && raw >= 0 && raw <= 99 ? String(raw).padStart(2, '0') : undefined;
+  const text = str(raw)?.trim();
+  return text ? text : undefined;
+}
 
 /**
  * The 3-D Secure proof carried by PowerTranz's OWN server-side answer (sec. 6:
  * RiskManagement.ThreeDSecure; the completion sample omits it): authenticated
- * only when AuthenticationStatus is Y or A (sec. 8.3) and the ECI, when given,
- * is not a failed / non-3DS value (sec. 8.4). Nothing the browser sent counts here.
+ * only when AuthenticationStatus is Y or A (sec. 8.3: N or R is never
+ * completed) AND the ECI is a success or attempt value for the card's brand
+ * (sec. 8.4). Sec. 5 lists the ECI as "Provided if AuthenticationStatus is Y or
+ * A", so a Y or A without one is not proof: held for a person, never booked.
+ * Nothing the browser sent counts here.
  */
-export function serverAuthentication(json: Record<string, unknown>): { authenticated: boolean; note: string } {
+export function serverAuthentication(json: Record<string, unknown>): { authenticated: boolean; note: string; eci?: string } {
   const rm = isObject(json['RiskManagement']) ? json['RiskManagement'] : null;
   const tds = rm && isObject(rm['ThreeDSecure']) ? rm['ThreeDSecure'] : null;
   const status = str(tds?.['AuthenticationStatus']);
-  // [Review S4] An ECI may arrive as a number (5) or text ("05").
-  const rawEci = tds?.['Eci'];
-  const eci = typeof rawEci === 'number' && Number.isInteger(rawEci) ? String(rawEci).padStart(2, '0') : str(rawEci)?.trim();
   if (status !== 'Y' && status !== 'A') return { authenticated: false, note: `SERVER_3DS_${status ?? 'ABSENT'}` };
-  if (eci !== undefined && UNAUTHENTICATED_ECI.has(eci)) return { authenticated: false, note: `SERVER_ECI_${eci}` };
-  return { authenticated: true, note: `SERVER_3DS_${status}` };
+  const eci = eciOf(tds?.['Eci']);
+  if (eci === undefined) return { authenticated: false, note: 'SERVER_ECI_ABSENT' };
+  if (!eciSetFor(json['CardBrand']).has(eci)) return { authenticated: false, note: `SERVER_ECI_${eci.replace(/[^A-Za-z0-9]/g, '').slice(0, 4) || 'UNREADABLE'}` };
+  return { authenticated: true, note: `SERVER_3DS_${status}`, eci };
 }
 
 /** Appendix 1 numeric response codes that say an earlier identical call may have been taken. */
@@ -402,12 +433,14 @@ export function readCompletion(json: unknown, held: HeldCompletion): CompletionR
     if (!currencyCode || amountMinor === null) return unbookable('APPROVED_AMOUNT_UNREADABLE');
     if (amountMinor !== held.amountMinor || currencyCode !== held.currencyCode) return unbookable('APPROVED_AMOUNT_MISMATCH');
     const tds = (json['RiskManagement'] as { ThreeDSecure: Record<string, unknown> }).ThreeDSecure;
-    const eci = typeof tds['Eci'] === 'number' ? String(tds['Eci']).padStart(2, '0') : str(tds['Eci']);
+    const brand = str(json['CardBrand'])?.trim();
     return { status: 'succeeded', amountMinor, currencyCode, completionEvidence: {
       Approved: true, IsoResponseCode: '00', TransactionType: 2,
       TransactionIdentifier: held.txnId, OrderIdentifier: held.orderId,
       TotalAmount: totalAmountOf(amountMinor, currencyCode), CurrencyCode: CURRENCY_NUMERIC[currencyCode]!,
-      RiskManagement: { ThreeDSecure: { AuthenticationStatus: String(tds['AuthenticationStatus']), ...(eci === undefined ? {} : { Eci: eci }) } },
+      // The brand is kept when the answer named it, so a later re-check judges the same ECI the same way.
+      ...(brand ? { CardBrand: brand.slice(0, 32) } : {}),
+      RiskManagement: { ThreeDSecure: { AuthenticationStatus: String(tds['AuthenticationStatus']), Eci: auth.eci! } },
     } };
   }
   if (approved === false) {

@@ -16,6 +16,7 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
 import { admittedHandoverEvidence } from './handover-evidence';
 import { notifyAdmins, type NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
@@ -272,7 +273,7 @@ export async function adjustReserve(
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'rlp_reserve:' + input.countryCode}))`;
   const balance = await reserveBalance(tx, input.countryCode);
   if (balance + input.amount < 0) {
-    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (balance ${balance.toLocaleString()}).`);
+    throw new AppError(409, 'RLP_RESERVE_UNFUNDED', `That correction would take the ${input.countryCode} reserve below zero (it holds ${balance.toLocaleString()}).`);
   }
   const row = await tx.rlpReserveEntry.create({ data: { countryCode: input.countryCode, kind: 'ADJUSTMENT', amount: input.amount, createdById: input.byId, note: input.note } });
   return { id: row.id, balanceAfter: balance + input.amount };
@@ -458,10 +459,11 @@ export async function sweepLossProtection(
 }
 
 async function noticedToday(prisma: PrismaClient, kind: string, today: string): Promise<boolean> {
-  const already = await prisma.notification.findFirst({
+  // [item 20] Any admin's notice today, looked up by the reserve job: the named capability under the owner wall.
+  const already = await ownerWallSystem('rlp:noticed-today', () => prisma.notification.findFirst({
     where: { data: { path: ['kind'], equals: kind }, createdAt: { gte: new Date(`${today}T00:00:00Z`) } },
     select: { id: true },
-  });
+  }));
   return Boolean(already);
 }
 

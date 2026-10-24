@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiRequestError, apiFetch } from '@/lib/auth';
 import { useStoreId } from '@/lib/store-scope';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
+import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '@/lib/weekly-fee';
 import { liveCard } from '@/lib/card-fee';
 import { CardPay } from '@/components/card-pay';
 
@@ -88,7 +88,14 @@ function WeeklyFeeContext({ family, storeId }: { family: FeeFamily; storeId: str
         <p>{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</p>
         {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
         {checkoutReferences(shown).map((r) => <p key={r.label} className="text-sm text-[var(--swift-muted)]">{r.label}: <span className="font-mono">{r.value}</span></p>)}
+        {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
+        {checkoutSeller(shown) ? <p className="text-sm text-[var(--swift-muted)]" data-testid="fee-seller">{checkoutSeller(shown)}</p> : null}
       </div>;
     }) : <p className="text-sm text-[var(--swift-muted)]">No recent checkouts.</p>}
+    <h2 className="text-lg font-bold">Receipts</h2>
+    {/* [owner legal plan R12] Printed by the API, line by line: the same receipt support and the accountant see. */}
+    {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <div key={r.receiptNumber} aria-label={`Receipt ${r.receiptNumber}`} className="space-y-1 rounded-2xl border border-black/5 bg-white p-5 text-sm">
+      {r.lines.map((line, i) => <p key={i} className={i === 0 ? 'font-semibold' : undefined}>{line}</p>)}
+    </div>) : <p className="text-sm text-[var(--swift-muted)]">No receipts yet.</p>}
   </section>;
 }

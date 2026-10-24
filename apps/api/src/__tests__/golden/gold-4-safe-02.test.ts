@@ -10,6 +10,7 @@ import { safetyRoutes } from '../../modules/safety/safety.routes';
 import { registerErrorHandler } from '../../middleware/error-handler';
 import { GuardianService } from '../../modules/safety/guardian.service';
 import { tripShareDigest } from '../../modules/safety/trip-share.service';
+import { walkOrderStatus } from '../helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // GOLD-4 · SAFE-02 — trip share + Trip Guardian golden journey, through the
@@ -345,7 +346,7 @@ describe('GOLD-4 · SAFE-02 — share a trip, follow it publicly, revoke it', ()
 
     // The trip ends. (The completion ceremony is GOLD-3's journey; only its
     // durable outcome — the order's terminal state — is written here.)
-    await runWithoutTenant(() => app.prisma.order.update({ where: { id: ride.id }, data: { status: 'COMPLETED', deliveredAt: new Date() } }));
+    await runWithoutTenant(() => walkOrderStatus(app.prisma, ride.id, 'COMPLETED', { deliveredAt: new Date() }));
     const ended = await publicGet(token);
     expect(ended.statusCode).toBe(200);
     expect(ended.json().data).toMatchObject({ ended: true, status: 'Trip completed', location: null });

@@ -25,10 +25,17 @@ export type ConsentDocumentType =
   | 'marketing_consent'
   | 'location_bg_consent'
   /** [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — versioned, hashed, a row in this ledger */
-  | 'unregistered_trader_declaration';
+  | 'unregistered_trader_declaration'
+  /** [R17] the tick before a document upload, and before a customer ID upload (verification/upload-consent.ts) */
+  | 'document_processing_consent'
+  | 'customer_id_consent'
+  /** [Owner ruling 15 Oct 2026] the sign-up's "I am 18 or older" tick (auth/age-declaration.ts) */
+  | 'age_declaration'
+  /** [COORD ruling 22 Oct 2026 · row 628] the partner sign-up's "I understand the weekly fee" tick (partner/weekly-fee-ack.ts) */
+  | 'weekly_fee_acknowledgement';
 export type ConsentAction = 'granted' | 'withdrawn' | 're_granted';
 /** 'mobile' = the RN app when the platform isn't client-attested (signup). */
-export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket';
+export type ConsentSurface = 'ios' | 'android' | 'mobile' | 'web' | 'vendor_web' | 'admin' | 'support_ticket' | 'sms';
 
 /** The document set each subject type must grant at account creation (INV-NR1a). */
 export const REQUIRED_CONSENTS: Record<ConsentSubjectType, ConsentDocumentType[]> = {

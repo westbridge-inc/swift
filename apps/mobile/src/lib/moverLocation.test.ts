@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
   commitLiveDeviceLocation,
@@ -40,6 +42,10 @@ function locationApi(status: 'granted' | 'denied'): DeviceLocationApi {
     getCurrentPositionAsync: vi.fn().mockResolvedValue({
       coords: { latitude: 6.81234, longitude: -58.14321 },
     }),
+    // [GO-LOC-1] The fallbacks fail unless a test says otherwise, so a failed
+    // Balanced fix still means "unavailable" wherever that is what is tested.
+    getLastKnownPositionAsync: vi.fn().mockResolvedValue(null),
+    getHighAccuracyPositionAsync: vi.fn().mockRejectedValue(new Error('no GPS fix in this fake')),
     reverseGeocodeAsync: vi.fn().mockResolvedValue([
       { name: 'Regent Street', city: 'Georgetown' },
     ]),
@@ -305,6 +311,58 @@ describe('requestUsableMoverBackgroundPermission', () => {
     // every single morning, is nagging — not compliance.
     expect(disclose).not.toHaveBeenCalled();
     expect(requestBackgroundPermission).not.toHaveBeenCalled();
+  });
+
+  // [R18] The yes goes to the consent ledger: only a fresh yes (disclosure
+  // accepted AND the system sheet granted), once, and never in GO's way.
+  it('[R18] a fresh yes is recorded once: disclosure accepted and the system grant given', async () => {
+    const onConsentGranted = vi.fn().mockResolvedValue(undefined);
+    await expect(requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true,
+      getForegroundPermission: granted(),
+      getBackgroundPermission: undetermined(),
+      requestBackgroundPermission: granted(),
+      disclose: accepts(),
+      onConsentGranted,
+    })).resolves.toBe(true);
+    expect(onConsentGranted).toHaveBeenCalledOnce();
+  });
+
+  it('[R18] nothing is recorded without both: declined, system-denied, or no fresh question', async () => {
+    const onConsentGranted = vi.fn();
+    await requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true, getForegroundPermission: granted(), getBackgroundPermission: undetermined(),
+      requestBackgroundPermission: granted(), disclose: vi.fn().mockResolvedValue(false), onConsentGranted,
+    });
+    await requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true, getForegroundPermission: granted(), getBackgroundPermission: undetermined(),
+      requestBackgroundPermission: vi.fn().mockResolvedValue({ status: 'denied' }), disclose: accepts(), onConsentGranted,
+    });
+    await requestUsableMoverBackgroundPermission({
+      taskManagerAvailable: true, getForegroundPermission: granted(), getBackgroundPermission: granted(),
+      requestBackgroundPermission: vi.fn(), disclose: vi.fn(), onConsentGranted,
+    });
+    expect(onConsentGranted).not.toHaveBeenCalled();
+  });
+
+  it('[R18] a failed recording never fails or delays going online', async () => {
+    const rejecting = vi.fn().mockRejectedValue(new Error('offline'));
+    const throwing = vi.fn(() => { throw new Error('boom'); });
+    const never = vi.fn(() => new Promise(() => {}));
+    for (const onConsentGranted of [rejecting, throwing, never]) {
+      await expect(requestUsableMoverBackgroundPermission({
+        taskManagerAvailable: true, getForegroundPermission: granted(), getBackgroundPermission: undetermined(),
+        requestBackgroundPermission: granted(), disclose: accepts(), onConsentGranted,
+      })).resolves.toBe(true);
+      expect(onConsentGranted).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('[R18] the app records the yes through the partner consent route, naming its platform', () => {
+    const service = readFileSync(join(process.cwd(), 'src/services/backgroundLocation.ts'), 'utf8');
+    expect(service).toContain('onConsentGranted: () => partnerApi.recordBackgroundLocationConsent(true)');
+    const client = readFileSync(join(process.cwd(), 'src/services/api.ts'), 'utf8');
+    expect(client).toContain("api.post('/partner/consent/background-location', { granted }, { headers: { 'x-client-platform': Platform.OS } })");
   });
 
   it('never discloses without a foreground grant to build on', async () => {

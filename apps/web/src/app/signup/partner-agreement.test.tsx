@@ -18,11 +18,15 @@ const fx = vi.hoisted(() => ({
 }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: fx.api }));
-vi.mock('@/lib/customer', () => ({
+vi.mock('@/lib/customer-account', () => ({
   verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become,
+}));
+vi.mock('@/lib/customer-places', () => ({
   placesAutocomplete: fx.search, placeDetails: fx.details,
 }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
+// [Row 628] The weekly fee block has its own tests (weekly-fee.test.tsx); here it says what an API older than the tick says.
+vi.mock('./weekly-fee-loader', () => ({ loadWeeklyFee: () => import('@/test/weekly-fee-fixture') }));
 
 const DOOR = { placeId: 'door', primary: '12 Regent Street', secondary: 'Georgetown', lat: 6.812, lng: -58.163 };
 const loadMap = () => screen.getByRole('application').querySelectorAll('img').forEach((tile) => fireEvent.load(tile));
@@ -53,21 +57,28 @@ async function newAccount(user: ReturnType<typeof userEvent.setup>, tile: RegExp
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Partner' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
 }
 
 async function driverDetails() {
   const user = userEvent.setup();
   render(<SignupPage />);
-  await user.click(screen.getByRole('button', { name: /Drive & deliver/ }));
+  // [W9] The taxi driver's door (a car: vehicle details and the agreement).
+  await user.click(screen.getByRole('button', { name: /Drive a taxi with Swift/ }));
   fireEvent.change(screen.getByLabelText('Phone number'), { target: { value: '+5926001004' } });
   await user.click(screen.getByRole('button', { name: 'Send code' }));
   fireEvent.change(await screen.findByLabelText('Verification code'), { target: { value: '246810' } });
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Driver' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
-  for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+  for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
     fireEvent.change(await screen.findByLabelText(label!), { target: { value } });
   }
   return user;
@@ -120,6 +131,9 @@ describe('web partner sign-up records the partner agreement', () => {
     await user.click(screen.getByRole('button', { name: 'Continue' }));
     fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
     fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Merchant' } });
+    // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+    await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+    await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
     const box = (await screen.findByRole('checkbox', { name: /I agree to the Vendor Partner Agreement/ })) as HTMLInputElement;
     expect(box.checked).toBe(false);
@@ -140,6 +154,9 @@ describe('web partner sign-up records the partner agreement', () => {
     const user = await driverDetails();
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
     await back(user); // vehicle -> name
+    // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+    await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+    await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
     await user.click(screen.getByRole('button', { name: 'Create account' }));
     const box = (await screen.findByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ })) as HTMLInputElement;
     expect(box.checked).toBe(false);

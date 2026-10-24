@@ -9,12 +9,17 @@ export interface CheckoutStatus {
   swiftReference?: string;
   /** MMG's transaction, sent only once CONFIRMED. */
   mmgTransactionId?: string | null;
+  /** [Owner 15 Oct 2026 · ruling #63] Who sold the weekly fee (Swift's operator), as the API states it. Absent from an older API. */
+  seller?: { name: string; tradingAs?: string; registrationNo?: string; registeredAddress: string; phone?: string; email?: string };
 }
 export interface FeeSubscription {
   id?: string; status: string; amountDueGyd?: number | string; nextBillingDate?: string | null;
   currentPeriodEnd?: string | null; gracePeriodEnd?: string | null;
   payActions?: PayAction[]; latestMmgCheckout?: CheckoutStatus | null; recentCheckouts?: CheckoutStatus[];
+  /** [owner legal plan R12] The weekly-fee receipts, printed by the API (one source for every screen). */
+  feeReceipts?: FeeReceipt[];
 }
+export interface FeeReceipt { receiptNumber: string; lines: string[] }
 export interface CheckoutStart { ref: string; status: CheckoutState; checkoutUrl: string | null; amountGyd: number; currencyCode: 'GYD'; expiresAt: string }
 export const feeMoney = (n: number) => `GY$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
 export function feeDate(value?: string | null): string {
@@ -53,6 +58,13 @@ export function checkoutReferences(c: CheckoutStatus): Array<{ label: string; va
     ...(c.swiftReference ? [{ label: 'Swift reference', value: c.swiftReference }] : []),
     ...(c.status === 'CONFIRMED' && c.mmgTransactionId ? [{ label: 'MMG transaction ID', value: c.mmgTransactionId }] : []),
   ];
+}
+/** [Owner 15 Oct 2026 · ruling #63] The receipt's seller line, in the API's words; null when an older API sent none. */
+export function checkoutSeller(c: CheckoutStatus): string | null {
+  return c.seller
+    ? `Sold by ${c.seller.name}${c.seller.registrationNo ? ` (registration no. ${c.seller.registrationNo})` : ''}, ${c.seller.registeredAddress}`
+      + (c.seller.phone && c.seller.email ? `. Phone ${c.seller.phone}, email ${c.seller.email}` : '')
+    : null;
 }
 export function pollDelay(elapsed: number, state?: CheckoutState): number | null {
   if (state === 'CONFIRMED' || state === 'NOT_PAID' || state === 'HELD' || elapsed >= 660_000) return null;
@@ -112,7 +124,7 @@ export class FeeCheckoutSession {
       } else if (f.status === 403 || f.code === 'PAY_ACTION_OFF') {
         this.emit({ blocked: true }); this.transport.refresh();
       } else {
-        this.emit({ error: f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
+        this.emit({ error: f.code === 'PAY_AHEAD_LIMIT' ? 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.' : f.code === 'MMG_CHECKOUT_UNAVAILABLE' || f.status === 429 ? 'Try again in a minute.' : 'Could not open MMG. Try again.' });
         if (f.code === 'SUBSCRIPTION_NOT_FOUND') this.transport.refresh();
       }
     } finally { this.emit({ busy: false }); }

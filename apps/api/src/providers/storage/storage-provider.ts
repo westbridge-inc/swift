@@ -1,4 +1,4 @@
-import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, unlink, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { nanoid } from 'nanoid';
@@ -9,7 +9,7 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl as presignS3 } from '@aws-sdk/s3-request-presigner';
-import { stripImageMetadata } from '../../utils/images';
+import { cleanStoredPhoto } from '../../utils/images';
 import { storageSigningKeys } from '../../utils/signing-keys';
 import { localStorageBaseDir, resolveLocalStorageKey, storageProviderKind } from './storage-key';
 import { assertDurableStorageConfig } from './storage-config';
@@ -33,6 +33,17 @@ export interface StorageProvider {
   getObject(fileKey: string): Promise<Buffer>;
 }
 
+/** [IMAGES-E2E] A bounded read for the public store-photo door: at most `maxBytes`
+ *  of an object, null when it is missing or larger than that, honouring `signal`
+ *  (the caller's deadline). Both adapters below implement it. */
+export interface BoundedObjectReader {
+  getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null>;
+}
+
+export function canReadBounded(storage: StorageProvider): storage is StorageProvider & BoundedObjectReader {
+  return typeof (storage as Partial<BoundedObjectReader>).getObjectWithin === 'function';
+}
+
 /**
  * [S8/C4] The one place every stored byte passes through.
  *
@@ -45,11 +56,18 @@ export interface StorageProvider {
  * Non-image mime types (PDF documents, encrypted envelopes) pass through
  * untouched, as does anything that will not parse.
  */
-function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
-  return { ...input, buffer: stripImageMetadata(input.buffer, input.mimeType) };
+async function sanitizeForStorage(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }) {
+  // [Row 108 · fixes a privacy gap on main] What the bytes ARE decides how a photo is handled,
+  // sniffed ONCE: the declared type never chooses the strip or the size check, so a mislabelled
+  // photo (a renamed file, a PNG sent as image/jpeg) loses its location like any other. A photo
+  // that cannot be cleaned or read is refused, never stored as it came (fail closed).
+  // [Row 238] The same helper cleans an ID photo before it is sealed, so there is one clean-up.
+  const photo = await cleanStoredPhoto(input.buffer, input.mimeType);
+  return photo ? { ...input, ...photo } : input; // not a photo: a PDF, an encrypted envelope, a video
 }
 
 const DEFAULT_TTL_SECONDS = 300;
+const PATH_ESCAPE = 'Invalid file key: path escapes the uploads directory';
 
 /** Shared by both adapters so tests can prove the exact server-issued object
  * name contract without performing filesystem or provider I/O. Callers that
@@ -60,7 +78,7 @@ export function createOpaqueStorageName(filename: string): string {
 }
 
 /** Local-disk adapter for dev/test. Files land under UPLOAD_DIR (gitignored). */
-export class LocalStorageProvider implements StorageProvider {
+export class LocalStorageProvider implements StorageProvider, BoundedObjectReader {
   private baseDir = localStorageBaseDir();
   // [M-37] Resolved through the keyring: production never falls open to the repository default.
   private get signingSecret(): string { return storageSigningKeys().current.secret; }
@@ -73,11 +91,17 @@ export class LocalStorageProvider implements StorageProvider {
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
     assertDurableStorageConfig({ ...process.env, STORAGE_PROVIDER: 'local' });
     if (localStorageBaseDir() !== this.baseDir) throw new Error('Storage root changed; restart with a validated storage configuration');
-    const safe = sanitizeForStorage(input);
+    const safe = await sanitizeForStorage(input);
     const name = createOpaqueStorageName(safe.filename);
-    const dir = path.join(this.baseDir, safe.folder);
+    // Checked HERE, next to the writes: the folder (a server-chosen subfolder such as
+    // "verification/<id>") must resolve strictly inside the uploads folder, and so must the file.
+    const dir = path.resolve(path.join(this.baseDir, safe.folder));
+    const file = path.resolve(dir, name);
+    if (safe.folder.includes('\0') || !dir.startsWith(this.baseDir + path.sep) || !file.startsWith(dir + path.sep)) {
+      throw new Error(PATH_ESCAPE);
+    }
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, name), safe.buffer);
+    await writeFile(file, safe.buffer);
     return { url: `/uploads/${safe.folder}/${name}` };
   }
 
@@ -94,18 +118,41 @@ export class LocalStorageProvider implements StorageProvider {
 
   /** Map a stored "/uploads/..." key to a disk path, refusing any '..' escape.
    *  Defence-in-depth: keys come from the DB (nanoid names), but a poisoned key
-   *  must never let getObject/delete read or unlink outside the uploads dir. */
+   *  must never let getObject/delete read or unlink outside the uploads dir.
+   *  Every method below ALSO checks the path it touches inline, next to the fs call. */
   private resolveKey(fileKey: string): string {
-    return resolveLocalStorageKey(fileKey, this.baseDir);
+    return path.resolve(resolveLocalStorageKey(fileKey, this.baseDir));
   }
 
   async delete(fileKey: string): Promise<void> {
-    // best-effort; a bad key resolves to a throw, swallowed here.
-    await unlink(this.resolveKey(fileKey)).catch(() => undefined);
+    const abs = this.resolveKey(fileKey); // an escaping key throws (refused, as always)
+    // The uploads folder itself is never a stored file: nothing to delete.
+    if (!abs.startsWith(this.baseDir + path.sep)) return;
+    // best-effort: a missing file (or any unlink failure) is swallowed here.
+    await unlink(abs).catch(() => undefined);
   }
 
   async getObject(fileKey: string): Promise<Buffer> {
-    return readFile(this.resolveKey(fileKey));
+    const abs = this.resolveKey(fileKey);
+    // Only a file INSIDE the uploads folder is ever read (the folder itself is no object).
+    if (!abs.startsWith(this.baseDir + path.sep)) throw new Error(PATH_ESCAPE);
+    return readFile(abs);
+  }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    const abs = this.resolveKey(fileKey);
+    // Only a file INSIDE the uploads folder is ever read here (the folder itself is no photo).
+    if (!abs.startsWith(this.baseDir + path.sep)) return null;
+    try {
+      const s = await stat(abs);
+      if (!s.isFile() || s.size > maxBytes) return null;
+      const bytes = await readFile(abs, { signal });
+      return bytes.length > maxBytes ? null : bytes;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
   }
 }
 
@@ -113,7 +160,7 @@ export class LocalStorageProvider implements StorageProvider {
  * S3-compatible adapter — works for AWS S3 and Cloudflare R2 (set AWS_S3_ENDPOINT
  * + path-style for R2). Objects are private; uploads request encryption at rest.
  */
-export class S3StorageProvider implements StorageProvider {
+export class S3StorageProvider implements StorageProvider, BoundedObjectReader {
   private client: S3Client;
   private bucket = process.env['AWS_S3_BUCKET'] ?? '';
   private endpoint = process.env['AWS_S3_ENDPOINT']; // set for R2 / S3-compatible
@@ -128,7 +175,7 @@ export class S3StorageProvider implements StorageProvider {
   }
 
   async upload(input: { buffer: Buffer; filename: string; mimeType: string; folder: string }): Promise<{ url: string }> {
-    const safe = sanitizeForStorage(input);
+    const safe = await sanitizeForStorage(input);
     const key = `${safe.folder}/${createOpaqueStorageName(safe.filename)}`;
     await this.client.send(
       new PutObjectCommand({
@@ -160,6 +207,28 @@ export class S3StorageProvider implements StorageProvider {
     const bytes = await res.Body?.transformToByteArray();
     if (!bytes) throw new Error(`Empty object body for ${fileKey}`);
     return Buffer.from(bytes);
+  }
+
+  async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
+    let res;
+    try {
+      res = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: fileKey }), { abortSignal: signal });
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      if (name === 'NoSuchKey' || name === 'NotFound') return null;
+      throw err;
+    }
+    const body = res.Body as (AsyncIterable<Uint8Array> & { destroy?: () => void }) | undefined;
+    if (!body) return null;
+    if (typeof res.ContentLength === 'number' && res.ContentLength > maxBytes) { body.destroy?.(); return null; }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      total += chunk.length;
+      if (total > maxBytes) { body.destroy?.(); return null; }
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks, total);
   }
 }
 

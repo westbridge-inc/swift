@@ -1,24 +1,41 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, ClipboardList, Boxes, FileUp, Receipt, Settings, Store as StoreIcon, ChevronDown } from 'lucide-react';
+import { BarChart3, Calendar, ClipboardList, Boxes, UserRound, Store as StoreIcon, ChevronDown } from 'lucide-react';
 import { Providers } from '@/components/providers';
+import { ConsoleUnreachable, useConsoleSession } from '@/components/console-session';
+import type { ShellPerson } from '@/components/customer-shell';
 import { ConsoleShell } from '@/components/console-shell';
 import Link from 'next/link';
-import { ApiRequestError, sessionProbe, setSelectedStore } from '@/lib/auth';
+import { ApiRequestError, setSelectedStore } from '@/lib/auth';
 import { getStores, type Store } from '@/lib/vendor-api';
 import { switchStore, useStoreId } from '@/lib/store-scope';
+import { catalogueName, type CatalogueName } from '@/lib/catalogue-name';
+import { useStoreRole } from '@/lib/store-role';
+import type { VendorMemberRole } from '@/lib/vendor-hub';
+import { StoreLiveFeed } from '@/components/store-live-feed';
 
-export const NAV = [
-  { href: '/dashboard', label: 'Today', icon: LayoutDashboard, exact: true },
-  { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
-  { href: '/dashboard/inventory', label: 'Inventory', icon: Boxes, exact: true },
-  { href: '/dashboard/inventory/import', label: 'Bulk import', icon: FileUp, exact: false },
-  { href: '/dashboard/weekly-fee', label: 'Weekly fee', icon: Receipt, exact: true },
-  { href: '/dashboard/settings', label: 'Settings', icon: Settings, exact: false },
-];
+/**
+ * The business console's places: the app's four sections
+ * (apps/mobile/src/modules/vendor/VendorStack.tsx), owner ruling 11 Oct 2026.
+ * The items tab is named for the store's type (lib/catalogue-name); staff see
+ * it as "Availability" and have no Insights, exactly as in the app. A Services
+ * store's owners and managers also get Schedule after Orders (the app's R1 tab:
+ * a Services store runs its day from a booking agenda). Weekly fee, bulk import
+ * and hours are reached from the Orders home and Account.
+ */
+export const dashboardNav = (catalogue: CatalogueName, role: VendorMemberRole | undefined, vendorType?: string) => {
+  const manager = role === 'OWNER' || role === 'MANAGER';
+  return [
+    { href: '/dashboard/orders', label: 'Orders', icon: ClipboardList, exact: false },
+    ...(manager && vendorType === 'SERVICE' ? [{ href: '/dashboard/schedule', label: 'Schedule', icon: Calendar, exact: false }] : []),
+    { href: '/dashboard/inventory', label: manager ? catalogue : 'Availability', icon: Boxes, exact: false },
+    ...(manager ? [{ href: '/dashboard/insights', label: 'Insights', icon: BarChart3, exact: false }] : []),
+    // Account is the store's settings page until the app's Account screen lands (PR D).
+    { href: '/dashboard/settings', label: 'Account', icon: UserRound, exact: false },
+  ];
+};
 
 /**
  * [W-04 / W-05] The store switcher is the tenant boundary of this console.
@@ -43,7 +60,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
 
   if (isError) {
     return (
-      <p role="alert" className="rounded-lg border border-[var(--swift-red)]/30 bg-white px-3 py-2 text-xs font-semibold text-[var(--swift-red)]">
+      <p role="alert" className="rounded-lg border border-[var(--swift-red)]/30 bg-[var(--swift-card)] px-3 py-2 text-xs font-semibold text-[var(--swift-red)]">
         Couldn&apos;t load your stores. Actions are unavailable until this loads.
       </p>
     );
@@ -54,7 +71,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
     <div className="relative">
       <button
         onClick={() => (list.length > 1 || !selected) && setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-lg border border-black/10 bg-white px-3 py-2 text-left"
+        className="flex w-full items-center gap-2 rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] px-3 py-2 text-left"
       >
         <StoreIcon className="h-4 w-4 shrink-0 text-[var(--swift-red)]" />
         <span className={`min-w-0 flex-1 truncate text-sm font-semibold ${selected ? '' : 'text-[var(--swift-red)]'}`}>
@@ -63,7 +80,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
         {(list.length > 1 || !selected) && <ChevronDown className="h-4 w-4 shrink-0 text-[var(--swift-muted)]" />}
       </button>
       {open && (
-        <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-72 overflow-auto rounded-lg border border-black/10 bg-white py-1 shadow-lg">
+        <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-72 overflow-auto rounded-lg border border-[var(--swift-border)] bg-[var(--swift-card)] py-1 shadow-lg">
           {list.map((s) => (
             <button
               key={s.id}
@@ -83,7 +100,7 @@ function StoreSwitcher({ storeId, onSwitch, list, isError }: {
   );
 }
 
-function StoreShell({ children }: { children: React.ReactNode }) {
+function StoreShell({ children, person }: { children: React.ReactNode; person: ShellPerson | null }) {
   const queryClient = useQueryClient();
   // The store is React state as well as localStorage: the shell must RE-RENDER
   // (and remount its subtree) the moment it changes, which a localStorage read
@@ -129,48 +146,44 @@ function StoreShell({ children }: { children: React.ReactNode }) {
     else if (list.length === 1) onSwitch(list[0]!.id);
   }, [storeId, list, stores.data?.selectedId, onSwitch]);
 
-  return (
-    <ConsoleShell home="/dashboard" title="Business" navigation={NAV}
+  const selected = list.find((s) => s.id === storeId) ?? list.find((s) => s.id === stores.data?.selectedId);
+  const { role } = useStoreRole();
+  const navigation = useMemo(() => dashboardNav(catalogueName(selected?.vendorType), role, selected?.vendorType), [selected?.vendorType, role]);
+
+  // [PERF row 8] The store's live feed, for a store the server listed for this account.
+  const feedStore = storeId && list.some((s) => s.id === storeId) ? storeId : null;
+  return (<>
+    {feedStore && <StoreLiveFeed key={feedStore} storeId={feedStore} />}
+    <ConsoleShell person={person} home="/dashboard" title="Business" navigation={navigation}
       switcher={<StoreSwitcher storeId={storeId} onSwitch={onSwitch} list={list} isError={stores.isError && !noStoreYet} />}
       signOutBody="New orders stop showing in this browser until you sign in again. Your store, menu and orders stay with your account."
       contentKey={storeId ?? 'no-store'}>
       {noStoreYet ? (
-        <div className="rounded-2xl border border-black/5 bg-white p-6">
+        <div className="sw-card p-6">
           <p className="text-sm font-semibold">Your business isn&apos;t set up yet.</p>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">Add your store&apos;s details and location to start taking orders.</p>
-          <Link href="/signup?resume=business" className="mt-4 inline-block rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white">
+          <Link href="/signup?resume=business" className="sw-btn sw-btn-md mt-4">
             Finish setting up your business
           </Link>
         </div>
       ) : storeId ? children : (
-        <p className="rounded-2xl border border-black/5 bg-white p-6 text-sm font-semibold text-[var(--swift-muted)]">
+        <p className="sw-card p-6 text-sm font-semibold text-[var(--swift-muted)]">
           Choose a store to continue.
         </p>
       )}
     </ConsoleShell>
-  );
+  </>);
 }
 
 export function DashboardShell({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
-  const [ready, setReady] = useState(false);
-
-  // [W-01] The session is an HttpOnly cookie the page cannot read, so the gate
-  // asks the SERVER whether one exists instead of inspecting localStorage.
-  useEffect(() => {
-    let cancelled = false;
-    void sessionProbe().then((session) => {
-      if (cancelled) return;
-      if (!session.ok) router.replace('/login');
-      else setReady(true);
-    });
-    return () => { cancelled = true; };
-  }, [router]);
-
-  if (!ready) return null;
+  // [W-01 · UI-SWEEP U23] Only the server saying "no session" goes to /login;
+  // a check that could not reach Swift says so instead (components/console-session).
+  const gate = useConsoleSession();
+  if (gate.phase === 'unreachable') return <ConsoleUnreachable onRetry={gate.retry} />;
+  if (gate.phase !== 'ready') return <div className="sw-page sw-empty" role="status">Opening your business…</div>;
   return (
-    <Providers>
-      <StoreShell>{children}</StoreShell>
+    <Providers offline="fail">
+      <StoreShell person={gate.person}>{children}</StoreShell>
     </Providers>
   );
 }

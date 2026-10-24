@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
 import type { DispatchService } from './dispatch.service';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 /**
  * Supply watcher scan (availability spec §5): customers who hit "no drivers
@@ -37,10 +38,12 @@ export async function scanSupplyWatches(
   for (const w of watches) {
     const tenantId = tenantByCustomer.get(w.customerId);
     if (!tenantId) continue;
+    // [TAXI-FLOW 22 Oct 2026] The watcher's own driver profile is not
+    // "drivers are back" for them.
     const supply = await dispatch.getAvailability(w.pool === 'RIDER' ? 'RIDER' : 'DRIVER', {
       lat: w.lat,
       lng: w.lng,
-    }, 0, tenantId);
+    }, 0, tenantId, null, w.customerId);
     if (supply.level === 'NONE') continue;
 
     // Stamp FIRST (CAS on notifiedAt null) so a racing scan can't double-send.
@@ -72,8 +75,9 @@ export async function scanSupplyWatches(
 /**
  * Struggling-delivery options (availability spec §4.2 row 2): READY for
  * DELIVERY_ESCALATE_AFTER minutes with no rider bound — the customer gets the
- * options push ONCE (dedupe on the notification log): switch to pickup
- * (#242's conversion) or cancel; waiting stays possible but is not promised
+ * options push ONCE (dedupe on the notification log), pointing at the order,
+ * which shows what they can do now [row 268: it names no switch-to-pickup
+ * button, which no app has, and no cancel the server may refuse]; waiting stays possible but is not promised
  * as an active retry [REPORT-014 F-014-07: at terminal exhaustion nothing
  * auto-retries — the store's retry-dispatch or returning supply revives it;
  * a real customer "keep waiting" re-arm rides ENGINE-2].
@@ -113,14 +117,15 @@ export async function scanStrugglingDeliveries(
 
     for (const o of struggling) {
       if (prompted >= cap) break;
-      const already = await prisma.notification.findFirst({
+      // [item 20] The customer's prompt, looked up by the supply-watch job: the named capability under the owner wall.
+      const already = await ownerWallSystem('supply-watch:already-prompted', () => prisma.notification.findFirst({
         where: {
           userId: o.customerId,
           data: { path: ['orderId'], equals: o.id },
           AND: { data: { path: ['kind'], equals: 'delivery_options' } },
         },
         select: { id: true },
-      });
+      }));
       if (already) continue;
 
       await notifications
@@ -128,7 +133,10 @@ export async function scanStrugglingDeliveries(
           userId: o.customerId,
           type: 'ORDER_UPDATE',
           title: "We're having trouble finding a rider",
-          body: `Order #${o.orderNumber} is ready and still waiting for a rider. You can switch to pickup or cancel — your call.`,
+          // [row 268] Promise only what the app does: no app has a switch-to-pickup button (the conversion
+          // route is unused and flag-gated), and a cancel is the server's call (free once no mover is found).
+          // The order page shows the customer's real options and the store's contact.
+          body: `Order #${o.orderNumber} is ready and we're still looking for a rider. Open the order to see what you can do now.`,
           data: { kind: 'delivery_options', orderId: o.id },
         })
         .catch(() => {});

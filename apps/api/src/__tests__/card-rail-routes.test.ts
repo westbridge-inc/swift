@@ -23,7 +23,7 @@ import { BillingService } from '../modules/billing/billing.service';
 import { resolveConfirmationInTx, ACTIVE_CONFIRMATION_STATES, hasConfirmationInTx, readDunningClock } from '../modules/billing/dunning-clock';
 import { readFeePaymentDecision } from '../modules/billing/fee-payment-authority';
 import { confirmationReviewQueue, resolveFinanceConfirmation } from '../modules/billing/confirmation-finance';
-import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService } from '../modules/billing/card-rail.service';
+import { CARD_ON_FILE_CONSENT_VERSION, CARD_SANDBOX_TEST_LABEL, CardRailService, type CardConfirmResult } from '../modules/billing/card-rail.service';
 import { CARD_CHECKOUT_PLATFORMS_KEY, resetCardCheckoutSwitchCache } from '../modules/billing/card-pay-action';
 import {
   CARD_APP_RETURN_LINK,
@@ -40,6 +40,8 @@ import {
   type CardRailRuntime,
 } from '../modules/billing/card-rail.routes';
 import { NotificationService } from '../modules/notification/notification.service';
+import helmet from '@fastify/helmet';
+import { helmetOptions } from '../config/security-headers';
 import { REVIEW_DEMO_NO_MONEY } from '../modules/review/demo-policy';
 import { SandboxPaymentProvider } from '../providers/payment/payment-provider';
 import type { CardRailProvider } from '../providers/card/card-provider';
@@ -758,6 +760,22 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     }
   });
 
+  it('[owner #62] one week at a time: no card button once the coming week is paid, or while part of it is held (a whole week would be too much)', async () => {
+    railOverride = realProvider({ savesCards: false });
+    const paidByCard = await makeStore({ due: new Date(Date.now() + 10 * DAY) });
+    expect(await cardActionOf(paidByCard)).toEqual({ id: 'CARD', state: 'off' });
+    const part = await makeStore();
+    await app.prisma.prepaidBalance.update({ where: { subscriptionId: part.subId }, data: { balance: 600 } });
+    expect(await cardActionOf(part)).toEqual({ id: 'CARD', state: 'off' });
+    // and the door says so truthfully, never "already paid"
+    const res = await startSession(part, 'PAY_NOW');
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error).toMatchObject({ code: 'PAY_AHEAD_LIMIT' });
+    expect(res.json().error.message).toBe('Swift takes the weekly fee one week at a time. GY$600 is already paid toward weeks that have not started, so you can pay at most GY$1,500 now.');
+    // nothing held while a week runs: the coming week can be paid by card
+    expect((await cardActionOf(await makeStore()))['state']).toBe('live');
+  });
+
   it('[staging] CARD_RAIL_SIMULATOR_LIVE: the simulator shows the card choice, labelled as a test — never to the store-review demo', async () => {
     const p = await makeStore();
     expect(await cardActionOf(p)).toEqual({ id: 'CARD', state: 'off' });
@@ -854,7 +872,9 @@ describe('payActions CARD: the server alone decides, per platform, whether the P
     expect(await cardActionOf(unmapped)).toEqual({ id: 'CARD', state: 'off' });
     expect(await app.prisma.billingDunningClock.count({ where: { subscriptionId: unmapped.subId } })).toBe(0);
 
-    const p = await makeRider();
+    // [owner #62] The week is due, so the payment settles the owed week and the button can come back:
+    // one paid for the COMING week would leave nothing more to pay (one week at a time).
+    const p = await makeRider({ due: new Date(Date.now() - 60 * 60_000) });
     expect((await cardActionOf(p))['state']).toBe('live');
     const opened = (await startSession(p, 'PAY_NOW')).json().data;
     // A card page is open for this fee: no second way to pay is offered until it is settled.
@@ -946,8 +966,16 @@ describe('[review S3 · S4] the return page: two ways back, and a time limit on 
     await slowApp.register(socketPlugin);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
+    // Every late answer the return started, held so the test waits for ALL of it. Booking the week and
+    // marking the session SUCCEEDED are two separate writes, so a booked week alone is not the end of the
+    // answer: reading the session as soon as the booking showed raced the second write (CI read OPEN).
+    const late: Array<Promise<CardConfirmResult>> = [];
     const slowService = Object.create(runtime.service) as CardRailService;
-    slowService.confirm = async (id, opts) => { await gate; return runtime.service.confirm(id, opts); };
+    slowService.confirm = (id, opts) => {
+      const answer = (async () => { await gate; return runtime.service.confirm(id, opts); })();
+      late.push(answer);
+      return answer;
+    };
     slowApp.decorate(CARD_RAIL_RUNTIME_DECORATION, { ...runtime, service: slowService });
     await slowApp.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card', confirmWaitMs: 50 });
     await slowApp.ready();
@@ -960,14 +988,17 @@ describe('[review S3 · S4] the return page: two ways back, and a time limit on 
       expect(Date.now() - started).toBeLessThan(5_000);
       expect(pageState(res.body)).toBe('PENDING');
       expect((await money(p.subId)).successes).toBe(0);
+      expect(late).toHaveLength(1);
       release();
-      const sessionStatus = async () => (await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status;
-      // The week is booked, then the session row is marked: wait (bounded) for both.
-      for (let i = 0; i < 50 && ((await money(p.subId)).successes === 0 || (await sessionStatus()) !== 'SUCCEEDED'); i += 1) await new Promise((r) => setTimeout(r, 100));
+      expect((await late[0]!).status).toBe('SUCCEEDED');
       expect((await money(p.subId)).successes).toBe(1);
       expect((await app.prisma.cardSession.findUniqueOrThrow({ where: { id: session.sessionId } })).status).toBe('SUCCEEDED');
     } finally {
       release();
+      // Never close while a late answer is still writing: closing this app disconnects the one Prisma
+      // client of this process, which the rest of this file shares. A query cut off that way left the
+      // client unusable ("Engine is not yet connected") for every later test, hook and cleanup here.
+      await Promise.allSettled(late);
       await slowApp.close();
     }
   });
@@ -1244,6 +1275,87 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     await ptz.close();
   });
 
+  // [CARD embed] The website shows the card page inside its own weekly-fee page. The API's card
+  // pages may therefore be framed by Swift's OWN web origin (APP_PUBLIC_URL, https) — never by
+  // anything else, never '*'. Read through the real security headers (helmet), as production sends them.
+  describe('[CARD embed] the card pages may be framed by Swift\'s own web, and by nothing else', () => {
+    const WEB = 'https://web.example.test';
+    let framed: FastifyInstance;
+    let webBefore: string | undefined;
+    const directives = (csp: string | undefined) => Object.fromEntries(String(csp ?? '').split(/;\s*/).filter(Boolean).map((d) => [d.split(' ')[0]!, d.split(' ').slice(1).join(' ')]));
+    beforeAll(async () => {
+      webBefore = process.env['APP_PUBLIC_URL'];
+      framed = Fastify({ logger: false });
+      registerErrorHandler(framed);
+      await framed.register(helmet, helmetOptions);
+      await framed.register(prismaPlugin);
+      await framed.register(redisPlugin);
+      framed.decorate(CARD_RAIL_RUNTIME_DECORATION, (ptz as unknown as Record<string, unknown>)[CARD_RAIL_RUNTIME_DECORATION]);
+      await framed.register(cardRailPublicRoutes, { prefix: '/api/v1/billing/card' });
+      await framed.ready();
+    });
+    afterEach(() => { if (webBefore === undefined) delete process.env['APP_PUBLIC_URL']; else process.env['APP_PUBLIC_URL'] = webBefore; });
+    afterAll(async () => { await framed.close(); });
+
+    it('the hosted card page: frame-ancestors names only Swift\'s web origin, everything else unchanged; X-Frame-Options gives way to it', async () => {
+      process.env['APP_PUBLIC_URL'] = `${WEB}/`;
+      const p = await makeStore();
+      const session = (await open(p)).json().data;
+      const res = await framed.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+      expect(res.statusCode, res.body).toBe(200);
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(WEB);
+      expect({ ...csp, 'frame-ancestors': "'none'" }).toEqual(directives(HOSTED_CARD_PAGE_CSP));
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      // Its "no such page" answer carries the same policy.
+      const missing = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/pay/ptz_000000000000000000000000' });
+      expect(missing.statusCode).toBe(404);
+      expect(directives(missing.headers['content-security-policy'] as string)['frame-ancestors']).toBe(WEB);
+    });
+
+    it.each([undefined, 'http://web.example.test', 'not a url', 'https://user:pw@web.example.test'])('without an https web origin (%s) the hosted page is framed by nothing: frame-ancestors none, X-Frame-Options DENY', async (web) => {
+      if (web === undefined) delete process.env['APP_PUBLIC_URL']; else process.env['APP_PUBLIC_URL'] = web;
+      const missing = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/pay/ptz_000000000000000000000000' });
+      expect(directives(missing.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'none'");
+      expect(missing.headers['x-frame-options']).toBe('DENY');
+    });
+
+    it('the return page: framed only by itself, the card provider\'s frames and Swift\'s web; it runs no script and posts nothing', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      const res = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/return' });
+      expect(res.statusCode).toBe(200);
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(`'self' https://*.ptranz.com ${WEB}`);
+      expect(csp).toMatchObject({ 'default-src': "'none'", 'form-action': "'none'", 'base-uri': "'none'", 'object-src': "'none'", 'connect-src': "'none'" });
+      expect(csp['script-src']).toBeUndefined();
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      delete process.env['APP_PUBLIC_URL'];
+      const plain = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/return' });
+      expect(directives(plain.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'self' https://*.ptranz.com");
+    });
+
+    it('the simulator page (test servers only): framed only by itself and Swift\'s web; its buttons post only to itself', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      const res = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/simulator/sim_0000000000000000' });
+      const csp = directives(res.headers['content-security-policy'] as string);
+      expect(csp['frame-ancestors']).toBe(`'self' ${WEB}`);
+      expect(csp).toMatchObject({ 'default-src': "'none'", 'form-action': "'self'" });
+      expect(res.headers['x-frame-options']).toBeUndefined();
+      delete process.env['APP_PUBLIC_URL'];
+      const plain = await framed.inject({ method: 'GET', url: '/api/v1/billing/card/simulator/sim_0000000000000000' });
+      expect(directives(plain.headers['content-security-policy'] as string)['frame-ancestors']).toBe("'self'");
+      expect(plain.headers['x-frame-options']).toBe('SAMEORIGIN');
+    });
+
+    it('no card page ever lets just anyone frame it', async () => {
+      process.env['APP_PUBLIC_URL'] = WEB;
+      for (const url of ['/api/v1/billing/card/pay/ptz_000000000000000000000000', '/api/v1/billing/card/return', '/api/v1/billing/card/simulator/sim_0000000000000000']) {
+        const ancestors = directives((await framed.inject({ method: 'GET', url })).headers['content-security-policy'] as string)['frame-ancestors'] ?? '';
+        expect(ancestors, url).not.toMatch(/(^|\s)(\*|https:|http:|data:)(\s|$)/);
+      }
+    });
+  });
+
   it('Pay now: Swift\'s page frames the bank\'s form; the bank\'s check passes; ONE completion books the week ONCE', async () => {
     sale = preprocess; payment = approve();
     const p = await makeStore();
@@ -1255,7 +1367,11 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
     expect(session).toMatchObject({ purpose: 'PAY_NOW', status: 'OPEN', testMode: true, testModeLabel: CARD_SANDBOX_TEST_LABEL });
     expect(session.hostedUrl).toMatch(/^https:\/\/api\.example\.test\/api\/v1\/billing\/card\/pay\/ptz_[0-9a-f]{24}$/);
 
-    const pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) });
+    // [CARD embed] With no web origin to allow, the page is framed by nothing (pinned here: a local env may set one).
+    const webBefore = process.env['APP_PUBLIC_URL'];
+    delete process.env['APP_PUBLIC_URL'];
+    let pageRes: Awaited<ReturnType<typeof ptz.inject>>;
+    try { pageRes = await ptz.inject({ method: 'GET', url: pathOf(session.hostedUrl) }); } finally { if (webBefore !== undefined) process.env['APP_PUBLIC_URL'] = webBefore; }
     expect(pageRes.statusCode).toBe(200);
     expect(pageRes.headers['content-security-policy']).toBe(HOSTED_CARD_PAGE_CSP);
     // [Review S3] Scripts, styles and form posts reach only the card provider's own hosts; the frame is sandboxed.
@@ -2112,6 +2228,42 @@ describe('[PT-4] real cards through HTTP: Swift\'s hosted page, the bank\'s chec
       expect((await confirmationOf(sessionId))?.status).toBe('PROVEN_UNPAID');
       expect((await money(p.subId)).successes).toBe(0);
       expect((await call(p, 'GET', '/subscription')).json().data.payActions[1]).toMatchObject({ state: 'live' });
+    });
+
+    it('[Opus S3-3] REFUND never sends more than the card payment took: above the session amount it is refused before any claim or call', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await heldPayment(p);
+      for (const amount of [2100.01, 2101, 4200, 99_999_999]) {
+        const over = await resolve(finance, sessionId, { action: 'REFUND', providerReference: txnId, amount });
+        expect(over.statusCode, over.body).toBe(409);
+        expect(over.json().error?.code).toBe('REFUND_ABOVE_PAYMENT');
+      }
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', providerRefundState: null, resolution: null });
+      // Exactly what was taken (one refund per session, so nothing was refunded before) is sent once.
+      const whole = await resolve(finance, sessionId, { action: 'REFUND', providerReference: txnId, amount: 2100 });
+      expect(whole.json().data, whole.body).toMatchObject({ status: 'FAILED', resolution: 'REFUNDED', refund: 'succeeded' });
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toEqual([
+        { Refund: true, TransactionIdentifier: txnId, TotalAmount: 2100, CurrencyCode: '328' },
+      ]);
+    });
+
+    it('[Opus S4-f] with the card rail off (CARD_RAIL_V2 and its drain both off) finance cannot act on a card session; draining it can', async () => {
+      const finance = await makeFinance();
+      const p = await makeStore();
+      const { sessionId, txnId } = await heldPayment(p);
+      process.env['CARD_RAIL_V2'] = '0';
+      for (const action of ['BOOK', 'REFUND', 'REFUNDED_IN_PORTAL', 'NOTHING_TAKEN'] as const) {
+        const off = await resolve(finance, sessionId, { action, providerReference: txnId, amount: 2100 });
+        expect(off.statusCode, `${action} ${off.body}`).toBe(404);
+        expect(off.json().error?.code).toBe('CARD_RAIL_UNAVAILABLE');
+      }
+      expect(await rowOf(sessionId)).toMatchObject({ status: 'HELD', providerRefundState: null, resolution: null });
+      expect(sent('/api/refund').filter((b) => b['TransactionIdentifier'] === txnId)).toHaveLength(0);
+      process.env['CARD_RAIL_V2_DRAIN'] = '1';
+      const drained = await resolve(finance, sessionId, { action: 'NOTHING_TAKEN', providerReference: txnId, amount: 2100 });
+      expect(drained.json().data, drained.body).toMatchObject({ status: 'FAILED', resolution: 'NOTHING_TAKEN' });
     });
 
     it('[hypothesis: book AND refund] while a BOOK is booking, a refund or a "nothing taken" is refused; the week is booked once and nothing is refunded', async () => {

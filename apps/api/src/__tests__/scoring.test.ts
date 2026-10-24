@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { applyFairnessBand } from '../modules/dispatch/scoring';
 import { scoreCandidate, rankCandidates, dispatchWeights, type DispatchCandidate } from '../modules/dispatch/scoring';
 import { RATING_AFFECTS_DISPATCH } from '../modules/rating/rating-math';
+import * as scoring from '../modules/dispatch/scoring';
 
 const cand = (over: Partial<DispatchCandidate>): DispatchCandidate => ({
   riderId: 'r', userId: 'u', etaMinutes: 5, averageRating: 4, acceptanceRate: 80, hasActiveJob: false, ...over,
@@ -17,18 +18,37 @@ describe('dispatch scoring — per-pool weight profiles', () => {
       expect(rankCandidates([far, near], 'PROXIMITY')[0]!.etaMinutes).toBe(3);
     });
 
-    it('acceptance — not rating — reorders effectively-equidistant cars', () => {
+    // [Owner ruling 15 Oct 2026 · R25, contractor status] TRANSFORMED: declining or cancelling an offer never costs
+    // a partner anything, so an acceptance record no longer reorders cars (it used to: 'acceptance reorders
+    // effectively-equidistant cars').
+    it('declining never costs a place: equidistant cars rank the same whatever their acceptance record', () => {
       const a = cand({ etaMinutes: 4, acceptanceRate: 40 });
       const b = cand({ etaMinutes: 4, acceptanceRate: 100 });
-      expect(rankCandidates([a, b], 'PROXIMITY')[0]!.acceptanceRate).toBe(100);
+      expect(scoreCandidate(a, 'PROXIMITY')).toBe(scoreCandidate(b, 'PROXIMITY'));
+      expect(rankCandidates([a, b], 'PROXIMITY')[0]).toBe(a);
+      expect(rankCandidates([b, a], 'PROXIMITY')[0]).toBe(b);
     });
   });
 
   describe('delivery (BALANCED): unchanged — quality co-weighs with distance', () => {
-    it('at equal ETA the more-reliable courier wins — reliability is a choice, a rating is other people\'s opinion', () => {
-      const worse = cand({ etaMinutes: 3, acceptanceRate: 60 });
-      const better = cand({ etaMinutes: 3, acceptanceRate: 100 });
-      expect(scoreCandidate(better, 'BALANCED')).toBeLessThan(scoreCandidate(worse, 'BALANCED'));
+    // [Owner ruling 15 Oct 2026 · R25] TRANSFORMED: was 'at equal ETA the more-reliable courier wins'.
+    it('at equal ETA a courier who declined more is not ranked lower: declining costs nothing', () => {
+      const declinedMore = cand({ etaMinutes: 3, acceptanceRate: 60 });
+      const declinedLess = cand({ etaMinutes: 3, acceptanceRate: 100 });
+      expect(scoreCandidate(declinedMore, 'BALANCED')).toBe(scoreCandidate(declinedLess, 'BALANCED'));
+    });
+
+    it('the recorded decision is load-bearing: ACCEPTANCE_AFFECTS_DISPATCH is false, and only a new ruling flips it', () => {
+      expect((scoring as unknown as Record<string, unknown>)['ACCEPTANCE_AFFECTS_DISPATCH']).toBe(false);
+      for (const profile of ['BALANCED', 'PROXIMITY'] as const) {
+        const w = dispatchWeights(profile);
+        expect(w.acceptance).toBe(0);
+        expect(w.eta + w.rating + w.acceptance + w.load).toBeCloseTo(1, 10);
+        // both decisions on = the tuned weights exactly, so the switch is real
+        const tuned = (dispatchWeights as (p: typeof profile, r: boolean, a: boolean) => typeof w)(profile, true, true);
+        expect(tuned.acceptance).toBeGreaterThan(0);
+        expect(tuned.eta + tuned.rating + tuned.acceptance + tuned.load).toBeCloseTo(1, 10);
+      }
     });
 
     it('test_rating_does_not_move_dispatch_rank: the recorded decision is load-bearing, not decorative', () => {

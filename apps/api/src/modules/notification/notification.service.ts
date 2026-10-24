@@ -1,13 +1,21 @@
 import { enqueueFeeDemand, isFeeDemand, persistFeeDemandInbox, handOffFeeDemand, feeDemandOutstanding } from '../billing/fee-demand-delivery';
+import { ownerWallSystem } from '../../lib/owner-rls';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
+import { sendPushAfterResponse } from '../../lib/push-after-response';
 import { taxiNotificationData } from '../rides/taxi-notification';
 import { createHash } from 'node:crypto';
 import type { Notification, Prisma, PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { getChannels, type NotificationChannels } from '../../providers/notifications/channels';
-import { pushOptionsFor } from '../../providers/notifications/alert-class';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
+import { sendOnBehalfOf } from '../../providers/notifications/review-seal';
+import { alertClassOf } from '../../providers/notifications/alert-class';
+import { PUSH_DEVICE_SELECT, pushToDevices } from '../../providers/notifications/device-push';
 import { log } from '../../utils/logger';
 import { runWithoutTenant } from '../../plugins/tenant-context';
-import { notificationFailuresCounter } from '../../plugins/observability';
+import { notificationFailuresCounter, pushNoDeviceCounter } from '../../plugins/observability';
+import { ringRecipients, storeTeam } from './store-team';
+import { vendorAlertSms } from './vendor-alert-sms';
 
 /** Per-user channel switches; the vendor order alert ignores these. */
 interface NotificationPrefs {
@@ -22,9 +30,30 @@ const DEFAULT_PREFS: NotificationPrefs = { push: true, sms: true, email: false }
  *  sends stop paying for ghosts. Best-effort by design. */
 async function deactivateDeadTokens(prisma: PrismaClient, invalidTokens?: string[]): Promise<void> {
   if (!invalidTokens?.length) return;
-  await prisma.deviceToken
-    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } })
-    .catch(() => {});
+  // [item 20] Dead tokens are anyone's: the named capability under the owner wall.
+  await ownerWallSystem('push:dead-token-cleanup', () => prisma.deviceToken
+    .updateMany({ where: { token: { in: invalidTokens } }, data: { isActive: false } }))
+    .catch((err) => {
+      // [STORE-ALERT] Best-effort, never silent: the count only, never a token.
+      log().warn({ err, count: invalidTokens.length }, 'dead push token cleanup failed');
+      notificationFailuresCounter.inc({ channel: 'push', stage: 'deactivate' });
+    });
+}
+
+/** [STORE-ALERT] An urgent notification (ring_order, ring_offer, job_update)
+ *  that has no phone to go to: counted and logged by kind, never the person. */
+function recordNoPushDevice(data: Record<string, unknown> | undefined): void {
+  const kind = data?.['kind'];
+  const alertClass = alertClassOf(kind);
+  if (alertClass !== 'ring_order' && alertClass !== 'ring_offer' && alertClass !== 'job_update') return;
+  pushNoDeviceCounter.inc({ alert_class: alertClass });
+  log().warn({ event: 'push_no_device', kind: typeof kind === 'string' ? kind.slice(0, 64) : undefined, alertClass }, 'urgent notification: recipient has no active push device');
+}
+
+/** [STORE-ALERT] The store already got its backup SMS when the alert reached
+ *  no phone by push (newOrderForVendor): the ladder never texts twice. */
+function backupSmsSentAtAlert(data: unknown): boolean {
+  return !!data && typeof data === 'object' && typeof (data as Record<string, unknown>)['backupSmsAt'] === 'string';
 }
 
 type NotificationType =
@@ -78,6 +107,14 @@ export interface NotificationPayload {
  *    to be the only signal, so a staff accept or a customer cancel still
  *    sent "still waiting" pushes and then an SMS to the owner;
  *  - the alert was acknowledged (its unread row is the banner state).
+ *
+ * [Owner ruling #15 · continues #1367] The re-alert rings the team of the
+ * store as it is NOW (store-team.ts ringRecipients): a store suspended or
+ * closed down by Swift rings nobody (closing for the day does not silence the
+ * orders it already has), a member removed or deactivated since the first
+ * alert is not rung, managers and staff only while invites need acceptance,
+ * and any of those having read their alert means someone saw it, so the
+ * ladder stops for everyone. The SMS fallback stays on the owner phone only.
  */
 export async function escalateVendorAlert(
   prisma: PrismaClient,
@@ -86,59 +123,89 @@ export async function escalateVendorAlert(
   orderId: string,
   level: number,
 ): Promise<'stopped' | 'realerted' | 'sms_sent'> {
-  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true } });
+  const order = await prisma.order.findUnique({ where: { id: orderId }, select: { status: true, vendorId: true } });
   if (order?.status !== 'PENDING') return 'stopped'; // handled, cancelled or gone: nobody is waiting
+  const team = order.vendorId ? await storeTeam(prisma, order.vendorId) : null;
+  if (team && !team.ringing) return 'stopped'; // suspended or closed down: the store rings nobody
+  const ringing = team ? ringRecipients(team) : null;
 
-  const alert = await prisma.notification.findFirst({
+  // [item 20] The store team's alert rows, read by the ladder job bound to the order's tenant: the named capability under the owner wall.
+  const rows = await ownerWallSystem('vendor-alert:ladder-rows', () => prisma.notification.findMany({
     where: {
-      isRead: false,
       AND: [
         { data: { path: ['kind'], equals: 'vendor_order_alert' } },
         { data: { path: ['orderId'], equals: orderId } },
       ],
     },
     include: { user: { select: { id: true, phone: true } } },
-  });
-  if (!alert) return 'stopped'; // acknowledged (or never existed) — done
+    orderBy: { createdAt: 'asc' },
+  }));
+  const current = ringing ? rows.filter((row) => ringing.includes(row.userId)) : rows;
+  // Acknowledged by someone on the team (or never sent to anyone current): done.
+  if (current.length === 0 || current.some((row) => row.isRead)) return 'stopped';
 
-  const data = alert.data as { orderNumber?: unknown; respondBy?: unknown } | null;
+  const data = current[0]!.data as { orderNumber?: unknown; respondBy?: unknown } | null;
   const orderNumber = typeof data?.orderNumber === 'string' ? data.orderNumber : undefined;
 
   if (level === 0) {
-    io.to(`user:${alert.userId}`).emit('vendor:order_alert', {
-      notificationId: alert.id,
+    // [Q10] The payload the tap-router needs to open THIS order on the
+    // store order desk (VendorOrderDetail). It used to carry only the
+    // orderId, which the router sends to the customer Delivery screen that
+    // the vendor app never mounts. respondBy rides along so the push dies
+    // with the response window, like the first alert.
+    const payload: Record<string, unknown> = {
+      kind: 'vendor_order_alert',
       orderId,
-      orderNumber,
-      persistent: true,
-      reAlert: true,
-    });
-    const tokens = await prisma.deviceToken.findMany({
-      where: { userId: alert.userId, isActive: true },
-      select: { token: true },
-    });
-    if (tokens.length > 0) {
-      // [Q10] The payload the tap-router needs to open THIS order on the
-      // store order desk (VendorOrderDetail). It used to carry only the
-      // orderId, which the router sends to the customer Delivery screen that
-      // the vendor app never mounts. respondBy rides along so the push dies
-      // with the response window, like the first alert.
-      const payload: Record<string, unknown> = {
-        kind: 'vendor_order_alert',
+      ...(orderNumber ? { orderNumber } : {}),
+      audience: 'business',
+      ...(typeof data?.respondBy === 'string' ? { respondBy: data.respondBy } : {}),
+    };
+    for (const alert of current) {
+      io.to(`user:${alert.userId}`).emit('vendor:order_alert', {
+        notificationId: alert.id,
         orderId,
-        ...(orderNumber ? { orderNumber } : {}),
-        audience: 'business',
-        ...(typeof data?.respondBy === 'string' ? { respondBy: data.respondBy } : {}),
-      };
-      await channels.push
-        .sendPush(tokens.map((t) => t.token), 'Order still waiting!', alert.body, payload, pushOptionsFor(payload))
-        .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
-        .catch(() => {});
+        orderNumber,
+        persistent: true,
+        reAlert: true,
+      });
+      // [RINGER] Each device is told what its app can ring with: the job
+      // ring for a build that has it, today's push for builds 9-11.
+      // [item 20] The store team's devices, read for a job: the named capability under the owner wall.
+      const devices = await ownerWallSystem('push:vendor-re-alert-devices', () => prisma.deviceToken.findMany({
+        where: { userId: alert.userId, isActive: true },
+        select: PUSH_DEVICE_SELECT,
+      }));
+      if (devices.length > 0) {
+        await pushToDevices(channels.push, devices, 'Order still waiting!', alert.body, payload)
+          .then((r) => deactivateDeadTokens(prisma, r.invalidTokens))
+          .catch((err) => {
+            // [STORE-ALERT] The re-alert used to swallow this without a trace.
+            log().warn({ err, orderId }, 'vendor re-alert push failed after retries');
+            notificationFailuresCounter.inc({ channel: 'push', stage: 'escalation' });
+          });
+      } else {
+        pushNoDeviceCounter.inc({ alert_class: 'ring_order' });
+        log().warn({ event: 'push_no_device', orderId, kind: 'vendor_order_alert', rung: 're_alert' }, 'store re-alert: recipient has no active push device');
+      }
     }
     return 'realerted';
   }
 
+  // The SMS fallback is the owner phone only (owner ruling #15): with no
+  // ACTIVE owner on the team there is nobody to text.
+  const ownerAlert = team ? current.find((row) => row.userId === team.ownerUserId) : current[0];
+  if (!ownerAlert) return 'stopped';
+  // [STORE-ALERT · owner ruling 18 Oct] A store no push reached was texted at
+  // the alert itself: one SMS per order, never a second one here.
+  if (current.some((row) => backupSmsSentAtAlert(row.data))) return 'stopped';
+  const text = await vendorAlertSms(prisma, {
+    orderId,
+    orderNumber: orderNumber ?? '',
+    vendorId: order.vendorId,
+    respondBy: typeof data?.respondBy === 'string' ? data.respondBy : null,
+  });
   await channels.sms
-    .sendSms(alert.user.phone, `Swift: order ${orderNumber ?? ''} is still waiting for your response. Open your dashboard now.`)
+    .sendSms(ownerAlert.user.phone, text)
     .catch((err) => {
       // SWIFT-100: the last rung of the escalation ladder. A silent failure here
       // means the vendor was never reached and no one knows — log + count it.
@@ -390,6 +457,22 @@ export class NotificationService {
   ) {}
 
   async send(payload: NotificationPayload): Promise<string> {
+    return (await this.sendAndReport(payload, false)).id;
+  }
+
+  /**
+   * [AUD-L8b-008 · AUD-G7-003] The same send, saying whether it REACHED a
+   * phone: `pushed` is true only when the push provider accepted the push for
+   * at least one of the person's devices on THIS send. An inbox row is a
+   * record the person may read later, never proof that a person was told —
+   * no device, push turned off, a provider refusal, a dedupe hit (nothing
+   * re-sent) and a fee demand (its own handoff ledger) all read `false`.
+   */
+  async sendReach(payload: NotificationPayload): Promise<{ id: string; pushed: boolean }> {
+    return this.sendAndReport(payload, true);
+  }
+
+  private async sendAndReport(payload: NotificationPayload, requirePush: boolean): Promise<{ id: string; pushed: boolean }> {
     if (isFeeDemand(payload)) {
       // A fee demand that cannot be recorded for THIS recipient is logged and
       // counted, never thrown into the caller: an admin fan-out must still
@@ -401,9 +484,9 @@ export class NotificationService {
       } catch (err) {
         log().warn({ err, userId: payload.userId, kind: payload.data?.['kind'] }, 'fee demand not recorded for this recipient');
         notificationFailuresCounter.inc({ channel: 'db', stage: 'fee_demand' });
-        return '';
+        return { id: '', pushed: false };
       }
-      return this.deliverFeeDemand(notice.id);
+      return { id: await this.deliverFeeDemand(notice.id), pushed: false };
     }
     const data = payload.audience ? { ...(payload.data ?? {}), audience: payload.audience } : payload.data;
 
@@ -413,17 +496,16 @@ export class NotificationService {
     // must not strand later vendors because an earlier notify threw
     // [SWIFT-UG-NOTIF-02]. Persist is wrapped (returns '' on failure); fan-out is
     // wrapped separately — every failure is LOGGED, never propagated.
-    let notification: { id: string; createdAt: Date };
+    let notification: { id: string };
     try {
-      notification = await this.prisma.notification.create({
-        data: {
-          userId: payload.userId,
-          type: payload.type,
-          title: payload.title,
-          body: payload.body,
-          data: (data ?? undefined) as any,
-          dedupeKey: payload.dedupeKey ?? null,
-        },
+      // [item 20] Written for anyone (usually someone else): the one notice helper.
+      notification = await insertNoticeFor(this.prisma, {
+        userId: payload.userId,
+        type: payload.type,
+        title: payload.title,
+        body: payload.body,
+        data: (data ?? undefined) as any,
+        dedupeKey: payload.dedupeKey ?? null,
       });
     } catch (err) {
       // [REPORT-034 #30] A dedupe-key collision is the mechanism WORKING, not
@@ -437,20 +519,20 @@ export class NotificationService {
         (err as { code?: string }).code === 'P2002'
       ) {
         try {
-          const existing = await this.prisma.notification.findUnique({
-            where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey } },
+          const existing = await ownerWallSystem('notification:dedupe-hit', () => this.prisma.notification.findUnique({
+            where: { userId_dedupeKey: { userId: payload.userId, dedupeKey: payload.dedupeKey! } },
             select: { id: true },
-          });
-          if (existing) return existing.id;
+          }));
+          if (existing) return { id: existing.id, pushed: false };
         } catch { /* fall through to the failure path below */ }
       }
       log().warn({ err, userId: payload.userId, type: payload.type }, 'notification persist failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'persist' });
-      return '';
+      return { id: '', pushed: false };
     }
 
-    await this.publishPersisted(notification.id);
-    return notification.id;
+    const pushed = await this.publishPersisted(notification.id, { requirePush });
+    return { id: notification.id, pushed: requirePush && pushed };
   }
 
   async deliverFeeDemand(noticeId: string): Promise<string> {
@@ -492,10 +574,12 @@ export class NotificationService {
    * persisted. This is the post-commit half for liability-sensitive workflows:
    * socket/push failures cannot roll back the domain fact, and retrying this
    * method never inserts a duplicate inbox notification. */
-  async publishPersisted(notificationId: string): Promise<boolean> {
+  async publishPersisted(notificationId: string, options: { requirePush?: boolean } = {}): Promise<boolean> {
+    let pushSubmitted = !options.requirePush;
     let notification: Notification | null;
     try {
-      notification = await this.prisma.notification.findUnique({ where: { id: notificationId } });
+      // [item 20] The recipient's notice, fanned out from whoever's request wrote it: the named capability under the owner wall.
+      notification = await ownerWallSystem('notification:fanout', () => this.prisma.notification.findUnique({ where: { id: notificationId } }));
     } catch (err) {
       log().warn({ err, notificationId }, 'persisted notification lookup failed');
       notificationFailuresCounter.inc({ channel: 'db', stage: 'fanout_lookup' });
@@ -527,22 +611,29 @@ export class NotificationService {
       });
       const prefs = { ...DEFAULT_PREFS, ...((user?.notificationPrefs as Partial<NotificationPrefs> | null) ?? {}) };
 
+      if (!prefs.push) recordNoPushDevice(data);
       if (prefs.push) {
-        const tokens = await this.prisma.deviceToken.findMany({
+        // [item 20] The recipient's devices, read from whoever's request sends it: the named capability under the owner wall.
+        const devices = await ownerWallSystem('push:recipient-devices', () => this.prisma.deviceToken.findMany({
           where: { userId: notification.userId, isActive: true },
-          select: { token: true }, orderBy: { token: 'asc' },
-        });
-        if (tokens.length > 0) {
+          select: PUSH_DEVICE_SELECT, orderBy: { token: 'asc' },
+        }));
+        if (devices.length === 0) recordNoPushDevice(data);
+        if (devices.length > 0) {
           // Channel failures must never break the request path — but after the
           // provider-level retries (withPushRetry) a final failure is LOGGED,
           // never swallowed silently [SWIFT-UG-NOTIF-01]. [Q10] The payload's
-          // kind picks how urgently it travels (alert-class.ts).
-          const options = pushOptionsFor(data);
+          // kind picks how urgently it travels (alert-class.ts); [RINGER] each
+          // device's app picks whether a ringing push also rings with the job
+          // ring (device-push.ts), and builds 9-11 get exactly today's push.
           const handoff = feeDemandId ? <T>(part: string, effect: () => Promise<T>) => handOffFeeDemand(this.prisma, feeDemandId, 'push', part, effect) : undefined;
-          const effect = () => this.channels.push.sendPush(tokens.map((t) => t.token), notification!.title, notification!.body, data,
-            { ...options, ...(this.channels.push.supportsHandoff ? { handoff } : {}) });
-          await (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
-            .then((r) => deactivateDeadTokens(this.prisma, r?.invalidTokens))
+          const effect = () => pushToDevices(this.channels.push, devices, notification!.title, notification!.body, data,
+            this.channels.push.supportsHandoff && handoff ? { handoff } : {});
+          const send = () => (handoff && !this.channels.push.supportsHandoff ? handoff('chunk:0', effect) : effect())
+            .then(async (r) => {
+              if (r && r.sent > 0) pushSubmitted = true;
+              await deactivateDeadTokens(this.prisma, r?.invalidTokens);
+            })
             .catch((err) => {
               log().warn(
                 { err, userId: notification.userId, type: notification.type },
@@ -550,6 +641,11 @@ export class NotificationService {
               );
               notificationFailuresCounter.inc({ channel: 'push', stage: 'send' });
             });
+          // [PERF item 3] A partner's tap (lib/push-after-response) answers without waiting
+          // for the provider: same send, same retries, same failure log and counter. A send
+          // that must know it reached a phone (requirePush) and a fee demand (its handoff
+          // ledger) still wait, everywhere.
+          if (feeDemandId || options.requirePush || !sendPushAfterResponse(send)) await send();
         }
       }
     } catch (err) {
@@ -559,7 +655,25 @@ export class NotificationService {
       );
       notificationFailuresCounter.inc({ channel: 'fanout', stage: 'send' });
     }
-    return true;
+    return pushSubmitted;
+  }
+
+  /**
+   * [WEB-TAXI] A direct service text that says whether it LEFT Swift: true only
+   * when the provider accepted it (sms-outcome.ts — an allowlist refusal, the
+   * review seal or a held handoff all read false). Fail-soft like `sms`: a
+   * failure is logged (never the number or the words) and counted, never thrown.
+   * `onBehalfOfTenantId` names whose background send this is (review-seal.ts).
+   */
+  async smsReach(to: string, body: string, onBehalfOfTenantId?: string | null): Promise<boolean> {
+    try {
+      const send = () => this.channels.sms.sendSms(to, body);
+      return smsAccepted(onBehalfOfTenantId ? await sendOnBehalfOf(onBehalfOfTenantId, send) : await send());
+    } catch (err) {
+      log().warn({ err }, 'service SMS delivery failed');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'reach' });
+      return false;
+    }
   }
 
   /** Direct SMS through the interface (OTPs, vendor-alert fallbacks). */
@@ -727,34 +841,110 @@ export class NotificationService {
    * and the store copy is tagged audience business, like the re-alert.
    */
   async newOrderForVendor(vendorOwnerId: string, orderNumber: string, itemCount: number, total: number, orderId: string, respondBy?: Date | null): Promise<string> {
-    // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
-    // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
-    // must never fail the alert itself.
-    await this.prisma.alertDelivery
-      .create({ data: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: vendorOwnerId } })
-      .catch(() => {});
-    const notificationId = await this.send({
-      userId: vendorOwnerId,
-      type: 'ORDER_UPDATE',
-      title: 'New Order!',
-      body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
-      audience: 'business',
-      data: {
-        orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
-        ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
-      },
-    });
+    // [Owner ruling #15 · continues #1367] The alert rings the team of the
+    // store (owner, managers, staff), each with the same row, push and event
+    // the owner always had (store-team.ts ringRecipients).
+    let ownerNotificationId = '';
+    let firstNotificationId = '';
+    // [STORE-ALERT · owner ruling 18 Oct] Did the push reach ANY phone of the
+    // team? When none did (no active device, push off, or the provider refused
+    // or failed) the backup SMS goes now, not two minutes later.
+    let pushedToSomeone = false;
+    const alertIds: string[] = [];
+    const recipients = await this.newOrderRecipients(orderId, vendorOwnerId);
+    for (const userId of recipients) {
+      // Alert-delivery tracking (alerts spec §A4) — a row per money-critical
+      // alert; the vendor's accept/reject/ack stamps acknowledgedAt. Tracking
+      // must never fail the alert itself.
+      await this.prisma.alertDelivery
+        .create({ data: { kind: 'VENDOR_ORDER', subjectId: orderId, recipientId: userId } })
+        .catch(() => {});
+      const { id: notificationId, pushed } = await this.sendReach({
+        userId,
+        type: 'ORDER_UPDATE',
+        title: 'New Order!',
+        body: `Order ${orderNumber} — ${itemCount} item(s), $${total.toLocaleString()} GYD`,
+        audience: 'business',
+        data: {
+          orderId, orderNumber, status: 'PENDING', kind: 'vendor_order_alert',
+          ...(respondBy ? { respondBy: respondBy.toISOString() } : {}),
+        },
+      });
 
-    // Dedicated persistent-alert event for the vendor dashboard banner + ring
-    this.io.to(`user:${vendorOwnerId}`).emit('vendor:order_alert', {
-      notificationId,
-      orderId,
-      orderNumber,
-      total,
-      persistent: true,
-    });
+      // Dedicated persistent-alert event for the vendor dashboard banner + ring
+      this.io.to(`user:${userId}`).emit('vendor:order_alert', {
+        notificationId,
+        orderId,
+        orderNumber,
+        total,
+        persistent: true,
+      });
+      if (pushed) pushedToSomeone = true;
+      if (notificationId) alertIds.push(notificationId);
+      if (userId === vendorOwnerId) ownerNotificationId = notificationId;
+      if (!firstNotificationId) firstNotificationId = notificationId;
+    }
 
-    return notificationId;
+    if (recipients.length > 0 && !pushedToSomeone) {
+      await this.backupSmsAtAlert(orderId, orderNumber, vendorOwnerId, recipients, alertIds, respondBy);
+    }
+
+    return ownerNotificationId || firstNotificationId;
+  }
+
+  /** [STORE-ALERT · owner ruling 18 Oct 2026] The new-order alert reached no
+   *  phone of the store team by push: text the owner phone NOW (the same
+   *  owner-only rule as the ladder's SMS rung), then mark the alert rows so
+   *  the ladder does not text a second time. A failed text leaves the rows
+   *  unmarked: the ladder's own SMS rung tries again at its usual time. */
+  private async backupSmsAtAlert(
+    orderId: string,
+    orderNumber: string,
+    vendorOwnerId: string,
+    recipients: string[],
+    alertIds: string[],
+    respondBy?: Date | null,
+  ): Promise<void> {
+    try {
+      log().warn({ event: 'vendor_alert_no_push', orderId, recipients: recipients.length }, 'new-order alert reached no phone by push: backup SMS at the alert');
+      const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
+      const team = order?.vendorId ? await storeTeam(this.prisma, order.vendorId) : null;
+      const smsUserId = team
+        ? (team.ownerUserId && recipients.includes(team.ownerUserId) ? team.ownerUserId : null)
+        : vendorOwnerId;
+      if (!smsUserId) return;
+      const owner = await this.prisma.user.findUnique({ where: { id: smsUserId }, select: { phone: true } });
+      if (!owner?.phone) return;
+      const text = await vendorAlertSms(this.prisma, { orderId, orderNumber, vendorId: order?.vendorId ?? null, respondBy: respondBy ?? null });
+      try {
+        await this.channels.sms.sendSms(owner.phone, text);
+      } catch (err) {
+        log().warn({ err, orderId }, 'backup SMS at the alert failed: the ladder SMS rung will try again');
+        notificationFailuresCounter.inc({ channel: 'sms', stage: 'alert_backup' });
+        return;
+      }
+      const sentAt = new Date().toISOString();
+      for (const id of alertIds) {
+        // [item 20] The store team's alert rows, marked from the customer's checkout: the named capability under the owner wall.
+        const row = await ownerWallSystem('vendor-alert:backup-sms', () => this.prisma.notification.findUnique({ where: { id }, select: { data: true } }));
+        const data = row?.data && typeof row.data === 'object' && !Array.isArray(row.data) ? row.data as Record<string, unknown> : {};
+        await ownerWallSystem('vendor-alert:backup-sms', () => this.prisma.notification.update({ where: { id }, data: { data: { ...data, backupSmsAt: sentAt } as Prisma.InputJsonValue } }));
+      }
+    } catch (err) {
+      // Never into the caller: the order exists and the ladder still runs.
+      log().warn({ err, orderId }, 'backup SMS at the alert could not be prepared');
+      notificationFailuresCounter.inc({ channel: 'sms', stage: 'alert_backup' });
+    }
+  }
+
+  /** [Owner ruling #15] Who a new order rings: the team of its store as read
+   *  now (store-team.ts ringRecipients). A call naming an order with no store
+   *  row (legacy callers) rings the named owner, as it always did. */
+  private async newOrderRecipients(orderId: string, vendorOwnerId: string): Promise<string[]> {
+    const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { vendorId: true } });
+    if (!order?.vendorId) return [vendorOwnerId];
+    const team = await storeTeam(this.prisma, order.vendorId);
+    return team ? ringRecipients(team) : [];
   }
 
   async newDeliveryForRider(riderId: string, orderNumber: string, vendorName: string, deliveryFee: number, orderId: string): Promise<void> {

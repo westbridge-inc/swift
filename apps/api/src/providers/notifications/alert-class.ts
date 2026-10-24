@@ -13,9 +13,14 @@
 //   standard    everything else                          high · sound · provider default
 //   quiet       rating reminders, ad reports, nudges     normal · silent · 24 h
 //
-// Deliberately NOT here yet (they need a new app build, loud alerts 3/4):
-// Android channels, bundled ring sounds and the iOS interruption level. Old
-// builds only have the "default" channel, so no channel id is ever sent.
+// [RINGER · loud alerts 3/4] THE JOB RING (owner ruling 15 Oct, app build
+// 12). A ring_order or ring_offer push to a device whose app reported the
+// ring (DeviceToken.alertsVersion >= RINGER_ALERTS_VERSION) also names the
+// 'job_offers' Android channel, the ring tone bundled in the app and the iOS
+// time-sensitive interruption level (pushOptionsForDevice). Every other push,
+// and every push to builds 9-11 (which have only the "default" channel, no
+// bundled tone and no time-sensitive entitlement), is exactly pushOptionsFor:
+// a missing channel or sound on an old build must never cost it the alert.
 //
 // A CENSUS, NOT A GUESS. Every kind the API sends is listed below under the
 // class it was given, and alert-class-census.test.ts scans apps/api/src and
@@ -54,16 +59,36 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     // Orders, the customer side of a journey
     'substitution_pending', 'line_refunded', 'handover_review', 'delivery_options', 'delivery_cash_settlement',
     'dispatch_retrying', 'dispatch_exhausted', 'converted_to_pickup', 'mover_session_revocation',
+    // [OF-01/17] The ONE "no rider yet — you can cancel for free" notice; standard, like its dispatch peers.
+    'riderless_cutoff',
+    // [OF-33] The customer and the store, once each: the rider did not come, a new rider is being found.
+    'rider_no_show',
+    // [OF-33] The store, once: the rider is at the counter and the order is not marked ready.
+    'rider_waiting',
     // [AF-MOB-006] A custody relay handoff: the holder and the relay rider. Standard
     // (prompt, audible); promoting them to job_update is a product decision.
     'custody_handoff_code', 'custody_relay_assigned', 'custody_relay_cancelled',
+    // [L07] The customer cancelled the delivery a rider holds. It travelled as
+    // standard (by fallback) before it had a kind; it stays standard, and
+    // promoting it to job_update is a product decision, like the relay kinds.
+    'mover_job_cancelled',
+    // [OF-33] The rider holding a job, told to pick it up now or hand it back before it is
+    // released. Standard, like mover_job_cancelled; promoting it to job_update is a product decision.
+    'pickup_overdue',
     'mmg_payment_confirmed', 'mmg_claim_disputed', 'mmg_claim_resolved', 'mmg_claim_mismatch',
     'mmg_unattested_cancellation', 'supply_returned',
+    // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
+    'mmg_customer_says_paid',
+    // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
+    'vendor_customer_answered',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
+    // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
+    // (Group, while buses are hidden): told once, like a timed-out queue entry.
+    'ride_queue_unavailable',
     // Bookings and service jobs, other than the two that ring or need action now
-    'booking_confirmed', 'booking_slot_declined', 'booking_completed', 'booking_cancelled',
-    'booking_reminder', 'booking_rescheduled',
+    'booking_quoted', 'booking_confirmed', 'booking_slot_declined', 'booking_started',
+    'booking_completed', 'booking_cancelled', 'booking_reminder', 'booking_rescheduled',
     // Safety of the person receiving it (the driver confirm is a job update)
     'guardian_checkin', 'trip_share_rotated', 'trip_share_ended', 'liveness_midshift_missed', 'liveness_locked',
     'incident_interim_suspension', 'incident_interim_lifted', 'incident_shadow_restricted',
@@ -72,31 +97,41 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'billing_mmg_pending', 'billing_success', 'billing_failed', 'billing_final_warning',
     'billing_suspended', 'billing_suspended_nudge', 'billing_reminder', 'billing_banked',
     'billing_churned', 'billing_topup', 'billing_mmg_checkout', 'billing_card_action_required', 'fx_change_notice',
+    // [F2] A weekly fee change, told before it applies
+    'billing_rate_change',
     'usd_migration_notice',
     'claim', 'claim_update', 'claim_over_gate', 'rlp_suspended', 'rlp_reinstated',
     'mmg_link_change_staged', 'mmg_link_change_applied', 'mmg_link_change_cancelled',
+    // [PAYMENT-SIMPLIFY] the store's MMG NUMBER change notices, exactly like the link's (ALG-34 parity)
+    'mmg_number_change_staged', 'mmg_number_change_applied', 'mmg_number_change_cancelled',
     // Verification and trust
     'verification_approved', 'verification_rejected', 'verification_expired',
-    'verification_expiry_reminder', 'verification_forced_offline', 'verification_vehicle_lapsed',
+    'verification_expiry_reminder', 'verification_application_abandoned', 'verification_forced_offline', 'verification_vehicle_lapsed',
     'verification_l2', 'trust_l3', 'compliance_review_failed',
     // Account security: the password changed and other devices were signed out;
     // password sign-in paused after many wrong attempts
     'password_changed', 'password_sign_in_paused',
     // Store and advertiser business surfaces (an ad that needs action stays loud)
-    'low_stock', 'staff_added', 'review_response', 'rating_removed', 'category_request_resolved',
-    'category_backfill_review', 'vendor_tier_promoted', 'support_update', 'store_pin_moved',
+    'low_stock', 'staff_added', 'staff_invite', 'staff_joined', 'review_response', 'rating_removed', 'category_request_resolved',
+    'category_backfill_review', 'vendor_tier_promoted', 'vendor_needs_public_phone', 'support_update', 'store_pin_moved',
     'ad_campaign_paused', 'ad_campaign_cancelled', 'ad_campaign_killed', 'ad_campaign_auto_cancelled',
     'ad_creative_rejected', 'ad_reservation_expiring', 'ad_late_capture',
     // Operations pages (admins)
     'support_ticket', 'sos_active', 'sos_marked_safe', 'guardian_deescalation',
     'guardian_checkin_undelivered', 'incident_duplicate_intake', 'legal_hold_partial',
     'safety_escrow_review', 'not_my_driver_discrepancy', 'ops_alert_escalated', 'ops_alert_drill',
-    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old',
-    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
-    'ops_pool_saturation', 'ops_backup_stale', 'ops_reaper_stale', 'ops_reaper_failed',
+    // [R19] a child-safety (CSAE) report: an ops page, as loud as an SOS page
+    'csae_report',
+    'safety_sweep_slo', 'ops_delivery_rider_dropped', 'ops_dispatch_exhausted', 'ops_food_too_old', 'ops_rider_no_show', 'ops_rider_waiting', 'ops_rider_waiting_long',
+    'ops_taxi_driver_dropped', 'ops_custody_case', 'ops_cash_door_short', 'ops_cash_return_held', 'ops_error_spike', 'ops_collusion_affinity', 'ops_billing_failures',
+    'ops_pool_saturation', 'ops_backup_stale', 'ops_malware_scanner_down', 'ops_reaper_stale', 'ops_reaper_failed',
     'ops_image_policy_failed', 'ops_extraction_breaker_open', 'ops_dlq_non_empty', 'ops_osrm_fallback',
+    // [PLACES-LOUD] address search (Google) failing: customers cannot search a place
+    'ops_places_failing',
     'handover_claims_unmatched', 'rlp_sla_breached', 'rlp_reserve_low', 'rlp_reserve_provisioned',
     'billing_dunning_ops_task', 'billing_invariants', 'billing_manual_reconciliation',
+    // [owner legal plan R10] VAT registration threshold watch (vat-tracker.ts)
+    'vat_threshold',
     'billing_unknown_intents_sla', 'reconcile_mismatch', 'settlement_trailer_mismatch',
     'settlement_deposit_mismatch', 'earnings_missing', 'agent_cash_sla',
     'incident_new', 'incident_sla_breach', 'incident_weekly_digest', 'incident_pattern_cross_reporter',
@@ -161,4 +196,43 @@ export function pushOptionsFor(data: Record<string, unknown> | null | undefined)
     ...(policy.ttlSeconds !== undefined ? { ttlSeconds: policy.ttlSeconds } : {}),
     ...(deadlineMs !== undefined ? { deadlineMs } : {}),
   };
+}
+
+/** [RINGER] The DeviceToken.alertsVersion of the first app build that has the
+ *  job ring: it creates the 'job_offers' channel with the bundled tone and
+ *  carries the iOS time-sensitive entitlement. A device reporting less, or
+ *  nothing, is sent no part of it. */
+export const RINGER_ALERTS_VERSION = 1;
+
+/** The Android channel the job ring posts to (apps/mobile services/push.ts
+ *  creates it with the tone; Android never lets an app change a channel's
+ *  sound once created, so a different tone ships under a new id). */
+export const JOB_OFFERS_CHANNEL = 'job_offers';
+
+/** The ring tone bundled in the app (apps/mobile assets/sounds), named with
+ *  its extension as Expo's push API expects for a custom iOS sound. */
+export const JOB_RING_SOUND = 'swift_job_ring.wav';
+
+/** The classes that ring: a store must answer, or a mover's offer is running. */
+const RINGING_CLASSES: ReadonlySet<AlertClass> = new Set<AlertClass>(['ring_order', 'ring_offer']);
+
+/** A stored alertsVersion is trusted only as a whole number; anything else
+ *  reads 0, the builds that have no ring. */
+export function alertsVersionOf(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+/** True when a device reporting `alertsVersion` is sent the job ring for a
+ *  push carrying `data`. */
+export function ringsOnDevice(data: Record<string, unknown> | null | undefined, alertsVersion: unknown): boolean {
+  return RINGING_CLASSES.has(alertClassOf(data?.['kind'])) && alertsVersionOf(alertsVersion) >= RINGER_ALERTS_VERSION;
+}
+
+/** The delivery options for one push to ONE device: pushOptionsFor, plus the
+ *  job ring when the push rings and that device's app reported it has the
+ *  ring. A device that reported nothing gets exactly pushOptionsFor. */
+export function pushOptionsForDevice(data: Record<string, unknown> | null | undefined, alertsVersion: unknown): PushOptions {
+  const options = pushOptionsFor(data);
+  if (!ringsOnDevice(data, alertsVersion)) return options;
+  return { ...options, sound: JOB_RING_SOUND, channelId: JOB_OFFERS_CHANNEL, interruptionLevel: 'time-sensitive' };
 }
