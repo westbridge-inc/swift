@@ -239,7 +239,7 @@ describe('CategoryTile — exactly one label [Q3]', () => {
 describe('the store cover draws its name once [Q3]', () => {
   it('RestaurantScreen titles the cover itself, so its placeholder draws no second name', () => {
     const src = readFileSync(new URL('../modules/shop/screens/RestaurantScreen.tsx', import.meta.url), 'utf8');
-    const start = src.indexOf('uri={vendorPhoto(v)}');
+    const start = src.indexOf('uri={vendorPhoto(v, HERO_PHOTO_WIDTH)}');
     expect(start, 'the cover photo is still here').toBeGreaterThan(-1);
     const cover = src.slice(start, src.indexOf('/>', start));
     expect(cover).toMatch(/showLabel=\{false\}/);

@@ -6,13 +6,15 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { SwiftLogo } from '@/components/swift-logo';
 import { sessionProbe } from '@/lib/auth';
-import { uploadSelfie } from '@/lib/customer';
+import { uploadSelfie } from '@/lib/customer-account';
+import { safeInternalPath } from '@/lib/safe-return-path';
 import styles from './selfie.module.css';
 
 const MAX_CAPTURE_EDGE = 1280;
 
+/** [WEB-GUARDS] The one shared rule (lib/safe-return-path); anything else goes Home. */
 function safeNext(value: string | null): string {
-  return value && /^\/(?!\/)/.test(value) && !value.includes('..') && !value.includes('\\') ? value : '/';
+  return safeInternalPath(value) ?? '/';
 }
 
 function SelfieSetup() {
@@ -143,7 +145,7 @@ function SelfieSetup() {
   };
 
   return (
-    <main className={styles.page}>
+    <main id="main" tabIndex={-1} className={styles.page}>
       <section className={styles.card} aria-labelledby="selfie-title">
         <Link href={next} aria-label="Return to store" className={styles.brandHome}><SwiftLogo /></Link>
         <div>
@@ -201,7 +203,7 @@ function SelfieSetup() {
 
 export default function SelfiePage() {
   return (
-    <Suspense fallback={<main className={styles.page}><p>Loading account setup…</p></main>}>
+    <Suspense fallback={<main id="main" tabIndex={-1} className={styles.page}><p>Loading account setup…</p></main>}>
       <SelfieSetup />
     </Suspense>
   );

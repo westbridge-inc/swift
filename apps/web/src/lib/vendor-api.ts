@@ -2,6 +2,7 @@
 
 // Typed client over the EXISTING vendor endpoints — the web dashboard is
 // another client on the same backend; it never invents its own order logic.
+import type { SubstitutionStatus } from '@swift/types';
 import { apiFetch } from './auth';
 import { formatMoney, parseAmount } from './money';
 
@@ -46,7 +47,7 @@ export function toAmount(value: unknown): number | null {
  * the letters "$NaN" onto a vendor's own order total).
  *
  * A value that is not a finite number renders an em-dash. A real zero still
- * renders "GY$0".
+ * renders "$0".
  */
 export function money(value: unknown): string {
   return formatMoney(value);
@@ -64,7 +65,7 @@ export interface OrderLine {
   /** `OrderItem.substitutePrice` — `Decimal(10,2)`; coerced by the seam below. */
   substitutePrice?: number | null;
   picked?: boolean;
-  subStatus?: 'NONE' | 'PROPOSED' | 'ACCEPTED' | 'REJECTED' | 'REFUNDED' | null;
+  subStatus?: SubstitutionStatus | null;
   substituteItemId?: string | null;
   substituteName?: string | null;
 
@@ -90,8 +91,12 @@ export interface VendorOrder {
   riderId?: string | null;
   paymentMethod?: string | null;
   paymentStatus?: string | null;
+  /** [Item 10] Set while the customer and the store disagree about a direct-MMG payment (the order is paused). */
+  mmgClaimMismatchAt?: string | null;
   placedAt: string;
   appointmentSlot?: string | null;
+  /** The server's accept deadline for a PENDING order (order/response-sla.ts); null otherwise. */
+  respondBy?: string | null;
   acceptedAt?: string | null;
   preparingAt?: string | null;
   readyAt?: string | null;
@@ -99,6 +104,16 @@ export interface VendorOrder {
   totalAmount: number | null;
   /** `Order.subtotalCustomer` — `Decimal(12,2)`; coerced by the seam below. */
   subtotalCustomer: number | null;
+  /** [U25] The money card's lines — `Decimal`s, coerced by the seam below. */
+  subtotalBase?: number | null;
+  deliveryFee?: number | null;
+  tipAmount?: number | null;
+  discount?: number | null;
+  /** [U25] Straight off the order record: why and when it was cancelled. */
+  cancellationReason?: string | null;
+  cancelledAt?: string | null;
+  /** [AF-MOB-006] Detail route only: the order's recovery case (lib/vendor-order-view recoveryView). */
+  custodyRecovery?: unknown;
   deliveryAddress?: string | null;
   pickupAddress?: string | null;
   /** `Order.deliveryInstructions` — the order-level note the customer typed. */
@@ -118,6 +133,10 @@ export interface VendorOrder {
   /** Row 52: true when the caller's role at THIS order's store (owner or
    *  manager) may confirm an MMG payment. Both routes send it. */
   canConfirmPayment?: boolean;
+  /** [owner 18 Oct 2026] An accepted MMG order not marked "Paid by MMG" within 30 minutes of
+   *  acceptance cancels: when (ISO) and the server's line for it. Null on every other order. */
+  mmgPayBy?: string | null;
+  mmgPayByLine?: string | null;
 
   // ── Never sent — kept as tombstones so the lie cannot come back ──────────
   /** PHANTOM. There is no `total` column; the order total is `totalAmount`. */
@@ -152,7 +171,15 @@ export interface CatalogItem {
   imageUrl?: string | null;
   substitutionGroup?: string | null;
   category?: { id: string; name: string } | null;
+  /** [GUARDRAILS §8] Set when Swift does not allow the item, or is holding it for a
+   *  quick check (a banned word in the partner's own text). Absent on older servers. */
+  catalogueCheck?: CatalogueCheck | null;
 }
+
+/** [GUARDRAILS §8] What the server tells a partner about an item it hides. `message` is the words to show. */
+export type CatalogueCheck =
+  | { status: 'NOT_ALLOWED'; message: string; prohibitedClass: string; reason: string | null }
+  | { status: 'WAITING_FOR_CHECK'; message: string; prohibitedClass: string; field: string; term: string };
 
 // ── Normalisers: the ONLY place a wire Decimal becomes a JS number ───────────
 // Each spreads the raw row first, so every field the server sends survives
@@ -173,6 +200,10 @@ export function normalizeVendorOrder(raw: unknown): VendorOrder {
     ...(order as unknown as VendorOrder),
     totalAmount: toAmount(order['totalAmount']),
     subtotalCustomer: toAmount(order['subtotalCustomer']),
+    subtotalBase: toAmount(order['subtotalBase']),
+    deliveryFee: toAmount(order['deliveryFee']),
+    tipAmount: toAmount(order['tipAmount']),
+    discount: toAmount(order['discount']),
     // Both routes `include: { items: true }`, so this is always an array; the
     // guard only stops a malformed payload from crashing the whole board.
     items: Array.isArray(order['items']) ? order['items'].map(normalizeOrderLine) : [],
@@ -191,6 +222,17 @@ function normalizeCatalogItem(raw: unknown): CatalogItem {
 export const getStores = () =>
   apiFetch(`${V}/stores`).then((r) => r.data as { stores: Store[]; selectedId: string; myRole: string });
 export const getProfile = () => apiFetch(`${V}/profile`).then((r) => r.data);
+// [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the API scans it and redraws
+// it without camera data, then serves it to customers), or taken down. Store managers only.
+type StorePhotoRow = { id: string; logoUrl: string | null; coverImageUrl: string | null };
+export const uploadStorePhoto = (slot: 'logo' | 'cover', file: File) => {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch(`${V}/profile/${slot}`, { method: 'POST', body: form }).then((r) => r.data as StorePhotoRow);
+};
+export const removeStorePhoto = (slot: 'logo' | 'cover') =>
+  apiFetch(`${V}/profile/${slot}`, { method: 'DELETE' }).then((r) => r.data as StorePhotoRow);
+
 export const updateProfile = (body: Record<string, unknown>) =>
   apiFetch(`${V}/profile`, { method: 'PUT', body: JSON.stringify(body) });
 // NB: these two routes are registered as `/vendor/toggle-*` UNDER the
@@ -244,6 +286,9 @@ export const confirmPayment = (id: string, reference: string) =>
 export const completePickup = (id: string, code: string) =>
   apiFetch(`${V}/orders/${id}/complete-pickup`, { method: 'PUT', body: JSON.stringify({ code }) });
 export const retryDispatch = (id: string) => apiFetch(`${V}/orders/${id}/retry-dispatch`, { method: 'POST', body: '{}' });
+/** [AF-MOB-006 · U25] The store confirms returned goods are back with it (closes the return). */
+export const confirmReturnReceived = (id: string) =>
+  apiFetch(`${V}/orders/${id}/recovery/return-received`, { method: 'POST', body: '{}' });
 
 // ── Shelf picking (grocery/goods) ────────────────────────────────────────────
 export const setPicked = (orderId: string, lineId: string, picked: boolean) =>
@@ -301,11 +346,22 @@ export const automapXlsx = (file: File) => {
 };
 export const confirmImport = (csv: string) =>
   apiFetch(`${V}/items/import`, { method: 'POST', body: JSON.stringify({ csv }) }).then(
-    (r) => r.data as { imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }> },
+    (r) => r.data as {
+      imported: number; failedCount: number; failures: Array<{ row: number; errors: string[] }>;
+      /** [GUARDRAILS §8] Imported rows a banned word is holding for a quick check (absent on older servers). */
+      waitingForCheck?: Array<{ row: number; name: string }>; waitingForCheckCount?: number;
+      /** [IMAGES-E2E PR4] Imported rows whose photo address was not used (absent on older servers). */
+      notes?: Array<{ row: number; note: string }>; notesCount?: number;
+    },
   );
 
 // ── Analytics + money ────────────────────────────────────────────────────────
 export const getOverview = () => apiFetch(`${V}/analytics/overview`).then((r) => r.data);
+// The app's own reads for the board's revenue pulse and Manage tiles
+// (apps/mobile/src/services/api.ts vendorApi.analyticsRevenue / analyticsOps / qr).
+export const getRevenue = (days = 14) => apiFetch(`${V}/analytics/revenue?days=${days}`).then((r) => r.data);
+export const getOps = (days = 30) => apiFetch(`${V}/analytics/ops?days=${days}`).then((r) => r.data as { avgAcceptMinutes?: number | null } & Record<string, unknown>);
+export const getQr = () => apiFetch(`${V}/qr`).then((r) => r.data as { shortUrl?: string | null; status?: string | null } & Record<string, unknown>);
 export const getCashSettlements = () => apiFetch(`${V}/cash-settlements`).then((r) => r.data);
 // [W-26] A settlement confirmation carries the amount the confirmer says
 // changed hands. The server refuses any figure that is not the ledger's own, so

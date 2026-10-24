@@ -16,6 +16,7 @@ import {
   T,
   TonePill,
 } from '../../../kit';
+import { ProviderPortfolioCard } from '../../../components/ProviderPortfolioCard';
 import { DocumentChecklist } from '../../../components/onboarding/DocumentChecklist';
 import {
   useSaveServiceProvider,
@@ -36,6 +37,7 @@ interface ProviderProfile {
   bio?: string | null;
   isVerified: boolean;
   certified?: boolean;
+  portfolioPhotos?: string[];
 }
 
 function ProviderProfileForm({
@@ -205,6 +207,8 @@ function ProviderDashboard({
           onRetry={statusQuery.refetch}
         />
       </View>
+
+      <ProviderPortfolioCard photos={provider.portfolioPhotos ?? []} />
 
       <Card style={{ backgroundColor: color.brand[50] }}>
         <T variant="label" weight="semibold" tone="deep">

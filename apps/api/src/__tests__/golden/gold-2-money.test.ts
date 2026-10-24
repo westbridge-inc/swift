@@ -447,20 +447,29 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
 
     // The partner pays at an MMG agent: one signed notice credits the wallet,
     // and the instant re-bill spends it on the owed week and reinstates.
+    // [BILLING-REANCHOR · board row 151 · COORD 17 Oct] The time it was
+    // suspended (seconds here) is not billed; the operated grace is: the due
+    // date moves on by exactly that time.
+    const suspendedAt = (await subRow(p.subId)).suspendedAt!;
     const txn = `G2AC-${nanoid(10)}`;
     const paid = await agentPays(p.san, RATE_CARD_SMALL_VENDOR, txn);
     expect(paid.statusCode).toBe(200);
     expect(paid.json()).toEqual({ status: 'accepted' });
     const reinstated = await subRow(p.subId);
+    const reanchor = await sys(() => app.prisma.billingObligationTransition.findFirstOrThrow({ where: { subscriptionId: p.subId, kind: 'RETURN_REANCHOR' } }));
+    const suspendedFor = reanchor.effectiveAt.getTime() - suspendedAt.getTime();
+    expect(suspendedFor).toBeGreaterThan(0);
+    expect(suspendedFor).toBeLessThan(5 * 60_000);
+    const returnKey = new Date(period.getTime() + suspendedFor).toISOString().slice(0, 10);
     expect({ status: reinstated.status, failedAttempts: reinstated.failedAttempts, suspendedAt: reinstated.suspendedAt, nextBillingDate: reinstated.nextBillingDate.getTime() })
-      .toEqual({ status: 'ACTIVE', failedAttempts: 0, suspendedAt: null, nextBillingDate: period.getTime() + WEEK });
+      .toEqual({ status: 'ACTIVE', failedAttempts: 0, suspendedAt: null, nextBillingDate: period.getTime() + suspendedFor + WEEK });
     expect(await vendorRow(p.vendorId)).toEqual({ status: 'ACTIVE', acceptingOrders: true });
     expect(await wallet(p.subId)).toBe(0);
     const paidEvents = (await eventsOf(p.subId)).slice(7);
     expect(paidEvents.map((e) => [e.type, e.amount])).toEqual([
       ['PREPAID_TOPUP', RATE_CARD_SMALL_VENDOR], ['CHARGE_ATTEMPT', RATE_CARD_SMALL_VENDOR], ['CHARGE_SUCCESS', RATE_CARD_SMALL_VENDOR], ['REINSTATED', null],
     ]);
-    expect(paidEvents.slice(1, 3).map((e) => e.key)).toEqual([`charge:${p.subId}:${periodKey}:a3`, `success:${p.subId}:${periodKey}`]);
+    expect(paidEvents.slice(1, 3).map((e) => e.key)).toEqual([`charge:${p.subId}:${periodKey}:a3`, `success:${p.subId}:${returnKey}`]);
     const receipts = await sys(() => app.prisma.feeReceipt.findMany({ where: { subscriptionId: p.subId } }));
     expect(receipts).toHaveLength(1);
     expect({ amount: Number(receipts[0]!.amount), channel: receipts[0]!.channel, mmgRef: receipts[0]!.mmgRef })
@@ -474,13 +483,14 @@ describe('GOLD-2 · VEND-04 — the weekly fee and agent cash', () => {
       { account: 'WALLET_LIABILITY', debit: 0, credit: RATE_CARD_SMALL_VENDOR },
     ]);
     expect(books[1]).toEqual({
-      key: `ledger:success:${p.subId}:${periodKey}`,
+      key: `ledger:success:${p.subId}:${returnKey}`,
       entries: [
         { account: 'FEE_REVENUE', debit: 0, credit: RATE_CARD_SMALL_VENDOR },
         { account: 'WALLET_LIABILITY', debit: RATE_CARD_SMALL_VENDOR, credit: 0 },
       ],
     });
-    expect((await noticesTo(p.owner.userId)).slice(3)).toEqual(['Top-up received', 'Subscription payment received']);
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] the notice never says "top-up", "balance" or "paid ahead".
+    expect((await noticesTo(p.owner.userId)).slice(3)).toEqual(['Weekly fee received', 'Subscription payment received']);
 
     // The agent's system resends the same notice: nothing moves again.
     const replay = await agentPays(p.san, RATE_CARD_SMALL_VENDOR, txn);

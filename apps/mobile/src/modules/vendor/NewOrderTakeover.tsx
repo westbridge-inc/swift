@@ -1,23 +1,31 @@
 import React, { useEffect, useState } from 'react';
-import { Modal, ScrollView, Vibration, View } from 'react-native';
+import { Modal, ScrollView, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { Feather } from '@expo/vector-icons';
 import { color, motion, radius, space } from '@swift/ui';
 import { T, Money, PillButton } from '../../kit';
 import { haptic } from '../../lib/haptics';
-import { useVendorOrder, useOrderAction } from '../../hooks/vendorops';
+import { useVendorOrder, useOrderAction, usePickingActions } from '../../hooks/vendorops';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, lastLineStanding, lineStockWords, nothingToAccept } from './storeOrderRules';
 import { rejectReasonsFor } from './rejectReasons';
+import { orderLineOptionsText } from './orderLineOptions';
 import { acceptClockLabel, takeoverSettled } from './acceptClock';
+import { useJobRing } from '../../hooks/useJobRing';
+import { RING_PERIOD_MS } from '../../services/jobRinger';
+import { hasJobRing } from '../../services/jobRingCapability';
+import { takeoverRingCopy } from './takeoverRingCopy';
 
 /**
  * The NEW-ORDER takeover (alerts spec §A1 + design-100× Part 5 moment 2):
  * impossible to sleep through while the app is open, decidable from across a
  * kitchen. FULL-SCREEN on the paper surface — short-code in displayXl, items
  * at heading size, total in numL, one 64dp ACCEPT. The bell tile pulses in
- * time with the strong repeating buzz (every 5s until acknowledged). "View
- * later" dismisses honestly — the server's escalation ladder (re-alert → SMS)
- * still stands behind it. Multiple orders stack, worked first-in-first-out.
+ * time with the ring [RINGER]: Swift's tone (build 12) and a strong buzz,
+ * every 2 s until the order is answered, settles or its accept clock runs
+ * out. "View later" dismisses honestly — the server's escalation ladder
+ * (re-alert → SMS) still stands behind it. Multiple orders stack, worked
+ * first-in-first-out.
  */
 export function NewOrderTakeover({
   queue,
@@ -29,8 +37,9 @@ export function NewOrderTakeover({
   const current = queue[0];
   const orderId = current?.orderId;
   const [rejecting, setRejecting] = useState(false);
+  const [lastOut, setLastOut] = useState(false);
   // A fresh order in the queue starts at the decision, never mid-reject.
-  useEffect(() => setRejecting(false), [orderId]);
+  useEffect(() => { setRejecting(false); setLastOut(false); }, [orderId]);
   // [Wave 3 vs reference 22 · #941] The draining accept clock. `respondBy`
   // is the SERVER's deadline — the exact arithmetic auto-cancel was enqueued
   // with — and it is null whenever the order is not PENDING, so the clock
@@ -40,18 +49,19 @@ export function NewOrderTakeover({
   const [nowTs, setNowTs] = useState(() => Date.now());
   const order = useVendorOrder(orderId);
   const act = useOrderAction();
+  // [STORE-DASH · O-4] "Out of stock" right on the takeover: one tap asks the customer.
+  const picking = usePickingActions();
   const insets = useSafeAreaInsets();
   const pulse = useSharedValue(1);
 
-  // The buzz loop lives exactly as long as the takeover does — and the bell
-  // pulses on the same beat, so the sound has a visual twin.
+  // The bell pulses on the ring's beat, so the sound has a visual twin. The
+  // ring itself (tone + buzz) is useJobRing below.
   useEffect(() => {
     if (!orderId) return;
     const beat = () => {
-      Vibration.vibrate([0, 400, 200, 400]);
-      // [design-100x Flow-13] The VIBRATION alarm stays on its beat — a missed
-      // order is money, and a kitchen bell is functional alerting. The VISUAL
-      // pulse honours Reduce Motion (the screen stays still; the buzz carries).
+      // [design-100x Flow-13] The ring stays on its beat — a missed order is
+      // money, and a kitchen bell is functional alerting. The VISUAL pulse
+      // honours Reduce Motion (the screen stays still; the ring carries).
       pulse.value = withSequence(
         withTiming(1.12, { duration: motion.duration.fast, reduceMotion: ReduceMotion.System }),
         withTiming(1, { duration: motion.duration.base, reduceMotion: ReduceMotion.System }),
@@ -60,11 +70,8 @@ export function NewOrderTakeover({
       );
     };
     beat();
-    const timer = setInterval(beat, 5000);
-    return () => {
-      clearInterval(timer);
-      Vibration.cancel();
-    };
+    const timer = setInterval(beat, RING_PERIOD_MS);
+    return () => clearInterval(timer);
   }, [orderId, pulse]);
 
   const bellStyle = useAnimatedStyle(() => ({ transform: [{ scale: pulse.value }] }));
@@ -92,6 +99,13 @@ export function NewOrderTakeover({
     if (orderId && settled) onDismiss(orderId);
   }, [orderId, settled, onDismiss]);
 
+  // [RINGER · owner ruling 15 Oct] Ring until the order is answered (Accept,
+  // Reject, or "View later" takes it off the takeover), settles elsewhere, or
+  // its accept clock runs out; never in the background.
+  const expired = Number.isFinite(respondByMs) && respondByMs <= nowTs;
+  useJobRing(!!orderId && !settled && !expired);
+  const [canRing] = useState(hasJobRing);
+
   if (!current) return null;
   const remainSecs = clockActive ? Math.max(0, Math.ceil((respondByMs - nowTs) / 1000)) : 0;
   // [E20] A booking's deadline can be a day away: past an hour the clock reads hours and minutes.
@@ -101,7 +115,9 @@ export function NewOrderTakeover({
     : null;
   const items: any[] = o?.items ?? [];
   const customer = o?.customer ? [o.customer.firstName, o.customer.lastName].filter(Boolean).join(' ') : '';
-  const busy = act.isPending;
+  const busy = act.isPending || picking.refundLine.isPending;
+  // [O-4] Every item came off: nothing to accept, only Reject with a reason.
+  const nothingLeft = nothingToAccept(o);
 
   const decide = (action: 'accept' | 'reject', reason?: string) =>
     act.mutate(
@@ -153,12 +169,10 @@ export function NewOrderTakeover({
             <Feather name="bell" size={34} color={color.brand[500]} />
           </Animated.View>
           {/* [Wave 3 vs reference 22] The eyebrow tells the vendor what the
-              sound will DO — the buzz genuinely repeats every 5s below, so
-              "chime repeats until you answer" is a promise this screen keeps. */}
+              sound will DO, and [RINGER] only what this phone really does:
+              the chime is build 12's ring tone; builds 9-11 only buzz. */}
           <T variant="micro" tone="brand" style={{ marginTop: space.lg }}>
-            {queue.length > 1
-              ? `● ${queue.length} new orders · chime repeats — first in, first`
-              : '● New order · chime repeats until you answer'}
+            {takeoverRingCopy(queue.length, canRing)}
           </T>
           <T variant="displayXl" center style={{ marginTop: 2 }}>
             #{o?.orderNumber ?? current.orderNumber ?? '…'}
@@ -182,9 +196,17 @@ export function NewOrderTakeover({
           {items.map((i) => (
             <View key={i.id} style={{ flexDirection: 'row', alignItems: 'baseline', gap: space.md }}>
               <T variant="numM">{i.quantity}×</T>
-              <T variant="heading" style={{ flex: 1 }} numberOfLines={2}>
-                {i.name}
-              </T>
+              <View style={{ flex: 1 }}>
+                <T variant="heading" numberOfLines={2}>
+                  {i.name}
+                </T>
+                {/* [L09 · M026] What the customer chose, so the right item is made. */}
+                {orderLineOptionsText(i.options) ? (
+                  <T variant="label" weight="semibold" numberOfLines={3}>
+                    {orderLineOptionsText(i.options)}
+                  </T>
+                ) : null}
+              </View>
               {/* [Wave 3 vs reference 22] "pepper on the side" · "cold" — the
                   customer's own words, right-aligned and muted, exactly where
                   the kitchen's eye lands after the dish. The snapshot column
@@ -192,6 +214,29 @@ export function NewOrderTakeover({
               {i.specialInstructions ? (
                 <T variant="label" tone="muted" numberOfLines={2} style={{ maxWidth: '38%', textAlign: 'right' }}>
                   {i.specialInstructions}
+                </T>
+              ) : null}
+              {/* [STORE-DASH · O-4] One tap per item: the customer is asked (continue without it, or cancel). */}
+              {lastLineStanding(o, i) ? (
+                // [REVIEW-F S3-2 on #2048] The last item: Reject (out of stock), asked once below.
+                <PillButton
+                  label={OUT_OF_STOCK_WORDS.lastButton}
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onPress={() => setLastOut(true)}
+                />
+              ) : canMarkOutOfStock(o, i) ? (
+                <PillButton
+                  label={OUT_OF_STOCK_WORDS.button}
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  onPress={() => picking.refundLine.mutate({ orderId: current.orderId, lineId: i.id })}
+                />
+              ) : lineStockWords(i) ? (
+                <T variant="caption" weight="semibold" style={{ maxWidth: '38%', textAlign: 'right', color: color.warning }}>
+                  {lineStockWords(i)}
                 </T>
               ) : null}
             </View>
@@ -213,6 +258,20 @@ export function NewOrderTakeover({
           </T>
         ) : null}
         <View style={{ gap: space.md }}>
+          {lastOut ? (
+            <>
+              <T variant="label" weight="semibold" tone="error" center>
+                {OUT_OF_STOCK_WORDS.lastAsk}
+              </T>
+              <PillButton label={OUT_OF_STOCK_WORDS.lastYes} variant="outline" disabled={busy} onPress={() => { setLastOut(false); decide('reject', OUT_OF_STOCK_WORDS.lastReason); }} />
+              <PillButton label={OUT_OF_STOCK_WORDS.lastKeep} variant="soft" disabled={busy} onPress={() => setLastOut(false)} />
+            </>
+          ) : null}
+          {nothingLeft ? (
+            <T variant="label" weight="semibold" tone="error" center>
+              {OUT_OF_STOCK_WORDS.nothing}
+            </T>
+          ) : (
           <PillButton
             // [Wave 3 vs reference 22] "ACCEPT ORDER", sized to be read across
             // a kitchen — the reference sets it in caps and says the thing.
@@ -224,6 +283,7 @@ export function NewOrderTakeover({
               decide('accept');
             }}
           />
+          )}
           {/* [Wave 3 vs reference 22] "A rejection always collects a reason."
               The route records it and the customer is told why — so the button
               says what it asks, and the choice is presets, never free typing

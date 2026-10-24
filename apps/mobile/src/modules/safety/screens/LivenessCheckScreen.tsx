@@ -211,7 +211,8 @@ export function LivenessCheckScreen() {
             <View style={{ marginTop: space.xl }}>
               {photoUri ? (
                 <>
-                  <PillButton label="Use this photo" loading={check.isPending} onPress={submit} />
+                  <T variant="label" tone="muted">{check.isPending ? 'Still uploading — keep this screen open. Your photo is kept if you need to retry.' : ''}</T>
+              <PillButton label="Use this photo" loading={check.isPending} onPress={submit} />
                   <PillButton
                     label="Retake"
                     variant="outline"

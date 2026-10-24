@@ -3,8 +3,10 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { mmgDispatchBlocked } from '../modules/order/mmg-claim.service';
+import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../modules/order/mmg-claim.service';
+import { drainCheckoutOutbox, persistDispatchCommandInTransaction } from '../modules/order/checkout-outbox';
 import { readOfferItinerary } from '../modules/rides/taxi-stops-read';
+import { offerCardAddresses } from '../modules/dispatch/board-privacy';
 
 // Execute production method bodies, not copies of the algorithm. Isolating the
 // class from module wiring makes accidental provider/service boot impossible.
@@ -13,7 +15,9 @@ const source = ts.createSourceFile('dispatch.ts', sourceText, ts.ScriptTarget.La
 const klass = source.statements.find((n): n is ts.ClassDeclaration => ts.isClassDeclaration(n) && n.name?.text === 'DispatchService')!;
 const helperNames = new Set(['parseOfferValue', 'journalAuthorityWhere', 'deliveryAuthorityVersionFromAttempt', 'riderDeliveryAuthorityVersionFromAttempt', 'deliveryOfferAttemptId', 'offerValue', 'offerKey', 'moverOfferKey', 'offerPendingKey', 'offerPublishingKey', 'offerRecoveryKey', 'offerEpochKey', 'offersSentKey', 'offerOutcomeKey', 'reconciledKey',
   // [DISPATCH 1/3] the claim-refusal classifier acceptOffer runs on every refusal
-  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn']);
+  'ORDER_HELD_CLAIM_CODES', 'LOST_RACE_CLAIM_CODES', 'MOVER_INELIGIBLE_CLAIM_CODES', 'classifyClaimRefusal', 'claimRefusalMarksTheMover', 'isUniqueViolationOn',
+  // [PAYMENT-SIMPLIFY] reconcileStuckDispatch's candidate filter, now one exported function (it skips unpaid MMG orders).
+  'stuckDispatchEligibleWhere']);
 const helpers = source.statements.filter(n =>
   (ts.isFunctionDeclaration(n) && helperNames.has(n.name?.text ?? '')) ||
   (ts.isVariableStatement(n) && n.declarationList.declarations.some(d => helperNames.has(d.name.getText(source))))
@@ -37,6 +41,8 @@ const context = vm.createContext({
   rescueIncentiveGyd: async () => 0, riderFloatForOrder: () => 0,
   customerTrustSummaries: async () => new Map(), cashMathForOffer: () => null,
   estimateLoad: () => 'small',
+  // [owner #20] The enforced load gate's size read (a food order with no bulky line needs no vehicle size).
+  requiredPackageSizeForOrder: () => null, totalBulkUnits: () => 0, DEFAULT_LOAD_BANDS: { small: 4, medium: 12, large: 30 },
   dispatchSearchesCounter: { inc: noop }, dispatchTimeToAssign: { observe: noop },
   poolForOrder: (o: { orderType: string }) => o.orderType === 'TAXI' ? 'DRIVER' : 'RIDER',
   verticalForOrder: () => 'DELIVERY',
@@ -47,9 +53,13 @@ const context = vm.createContext({
   // [ORDER-SPINE S1-6] dispatchOrder's direct-MMG offer gate — the production
   // predicate itself, not a copy (these orders are CASH, so it lets them by).
   mmgDispatchBlocked,
+  // [PAYMENT-SIMPLIFY] the stuck reconciler's MMG filter — the production predicate itself (these orders are CASH).
+  mmgDispatchEligibleWhere,
   // [TAXI multi-stop 3/8] the offer card's stops — the production reader itself
   // (these rides have no stops, so it reads nothing and adds nothing).
   readOfferItinerary,
+  // [L05] which addresses a rebuilt offer card may name — the production rule itself.
+  offerCardAddresses,
   TERMINAL_ORDER_STATUSES: ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'],
 });
 
@@ -382,7 +392,7 @@ function publishingHarness() {
   Object.assign(h.order, { pickupLat: 1, pickupLng: 1, items: [], paymentMethod: 'CASH' });
   h.subject.initializeDeliveryGeneration = async () => {};
   h.subject.findCandidates = async () => [{ riderId: 'rider', userId: 'user', etaMinutes: 3 }];
-  h.subject.logLoadGateShadow = () => {}; h.subject.canReceiveOffer = async () => true;
+  h.subject.logLoadGate = () => {}; h.subject.canReceiveOffer = async () => true;
   const emitted: any[] = [], scheduled: string[] = [];
   h.subject.io = { to: () => ({ emit: (_event: string, payload: any) => { emitted.push(payload); } }) };
   h.subject.scheduleTimeout = async (_id: string, _rider: string, _delay: number, attempt: string) => { scheduled.push(attempt); };
@@ -400,7 +410,7 @@ function publishingHarness() {
 // Exercise the actual route fallback statement without importing route wiring
 // (which would boot database/provider dependencies). The factory and constructor
 // also execute from source, so their scheduler defaults cannot hide behind mocks.
-function inlineDispatch(route: 'courier' | 'driver', app: any, dispatch: any, order: any) {
+function inlineDispatch(route: 'driver', app: any, dispatch: any, order: any) {
   const file = ts.createSourceFile('route.ts', readFileSync(join(__dirname, `../modules/${route}/${route}.routes.ts`), 'utf8'), ts.ScriptTarget.Latest, true);
   const branches: ts.IfStatement[] = [];
   const visit = (n: ts.Node) => {
@@ -413,6 +423,34 @@ function inlineDispatch(route: 'courier' | 'driver', app: any, dispatch: any, or
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText, context);
   return run(app, dispatch, order, order.id);
+}
+
+// Courier creation now commits an outbox command instead of calling dispatch
+// inline. Execute both real route statements and the real writer/drainer, with
+// persistence as the test double, so queue absence still proves durable recovery.
+async function courierWithoutQueue(app: any, order: any) {
+  const file = ts.createSourceFile('courier.ts', readFileSync(join(__dirname, '../modules/courier/courier.routes.ts'), 'utf8'), ts.ScriptTarget.Latest, true);
+  const writes: ts.IfStatement[] = [], drains: ts.IfStatement[] = [];
+  const visit = (n: ts.Node) => {
+    if (ts.isIfStatement(n) && n.expression.getText(file) === '!order.holdExpiresAt'
+        && n.thenStatement.getText(file).includes('persistDispatchCommandInTransaction')) writes.push(n);
+    if (ts.isIfStatement(n) && n.expression.getText(file) === 'app.dispatchQueue'
+        && n.thenStatement.getText(file).includes('drainCheckoutOutbox')) drains.push(n);
+    ts.forEachChild(n, visit);
+  };
+  visit(file);
+  expect(writes).toHaveLength(1); expect(drains).toHaveLength(1);
+  const rows: any[] = [];
+  const tx = { orderOutbox: { createMany: async ({ data }: any) => {
+    rows.push(...data.map((row: any) => ({ ...row, attempts: 0, createdAt: new Date(), processedAt: null })));
+    return { count: data.length };
+  } } };
+  const run = vm.runInContext(ts.transpileModule(`(async (app, tx, order, committed, request, persistDispatchCommandInTransaction, drainCheckoutOutbox) => {
+    ${writes[0]!.getText(file)}
+    ${drains[0]!.getText(file)}
+  })`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, context);
+  await run(app, tx, order, { orderId: order.id }, { log: { warn: noop } }, persistDispatchCommandInTransaction, drainCheckoutOutbox);
+  return rows;
 }
 
 describe('R10 queue arming and exhaustion journal regressions', () => {
@@ -428,22 +466,41 @@ describe('R10 queue arming and exhaustion journal regressions', () => {
       h.subject.scheduleTimeout = service.scheduleTimeout;
       h.subject.scheduleRedispatch = service.scheduleRedispatch;
       h.state.set('dispatch:exhausts:order-unit', String(prior));
-      if (entry === 'courier' || entry === 'driver') await inlineDispatch(entry, app, h.subject, h.order);
-      else await h.subject.dispatchOrder(h.order.id);
+      const commands = entry === 'courier' ? await courierWithoutQueue(app, h.order) : null;
+      if (entry === 'driver') await inlineDispatch(entry, app, h.subject, h.order);
+      else if (entry !== 'courier') await h.subject.dispatchOrder(h.order.id);
       expect(h.emitted).toEqual([]);
       expect(h.state.has('dispatch:offer:order-unit')).toBe(false);
-      expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(true);
+      if (commands) {
+        expect(commands).toHaveLength(1);
+        expect(commands[0]).toMatchObject({ orderId: h.order.id, kind: 'dispatch-order', queue: 'dispatch', processedAt: null });
+      } else expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(true);
       // Expire only short pointers, then restore the queue and re-drive.
       for (const key of [...h.state.keys()]) if (/dispatch:(offer:|mover-offer:|offer-pending:|offer-publishing:)/.test(key)) h.state.delete(key);
       const jobs: any[] = [];
       app.dispatchQueue = { add: async (...args: any[]) => { jobs.push(args); return { id: 'unit-job' }; } };
-      const recovered = await context['exports'].reconcileStuckDispatch(h.subject.prisma, h.subject.redis,
-        (id: string) => app.dispatchQueue.add('dispatch-order', { orderId: id }));
-      expect(recovered).toEqual({ recovered: ['order-unit'] });
-      expect(jobs[0]).toEqual(['dispatch-order', { orderId: 'order-unit' }]);
+      // [row 266] Offer timeouts ride their own queue: same log, so the order of events stays visible.
+      const offerJobs: any[] = [];
+      app.offerQueue = { add: async (...args: any[]) => { jobs.push(args); offerJobs.push(args); return { id: 'unit-offer-job' }; } };
+      if (commands) {
+        const pending = [...commands];
+        const prisma = { $queryRaw: async () => pending.length ? [pending.shift()] : [],
+          orderOutbox: { update: async ({ data }: any) => Object.assign(commands[0], data) } };
+        expect(await drainCheckoutOutbox({ prisma: prisma as never, queues: { dispatchQueue: app.dispatchQueue }, log: { warn: noop } } as never))
+          .toEqual({ processed: 1, failed: 0 });
+        expect(commands[0].processedAt).toBeInstanceOf(Date);
+        expect(jobs[0]).toEqual(['dispatch-order', { orderId: 'order-unit', reason: 'courier-created' },
+          expect.objectContaining({ jobId: commands[0].id, priority: 5 })]);
+      } else {
+        const recovered = await context['exports'].reconcileStuckDispatch(h.subject.prisma, h.subject.redis,
+          (id: string) => app.dispatchQueue.add('dispatch-order', { orderId: id }));
+        expect(recovered).toEqual({ recovered: ['order-unit'] });
+        expect(jobs[0]).toEqual(['dispatch-order', { orderId: 'order-unit' }]);
+      }
       h.subject.scheduleTimeout = context['exports'].makeDispatchService(app).scheduleTimeout;
       expect(await h.subject.dispatchOrder(h.order.id)).toEqual({ offered: 'rider' });
       expect(jobs[1][0]).toBe('offer-timeout');
+      expect(offerJobs.map((j) => j[0])).toEqual(['offer-timeout']);
       expect(jobs[1][1]).toMatchObject({ orderId: h.order.id, riderId: 'rider', attemptId: h.emitted[0].offerAttemptId });
       expect(h.emitted).toHaveLength(1);
       expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(false);
@@ -453,7 +510,8 @@ describe('R10 queue arming and exhaustion journal regressions', () => {
   it('does not publish through the factory until a real queue acknowledgement resolves', async () => {
     const h = publishingHarness(), entered = barrier(), resume = barrier();
     const app = { prisma: h.subject.prisma, redis: h.subject.redis, io: h.subject.io,
-      dispatchQueue: { add: async () => { entered.open(); await resume.promise; return { id: 'unit-job' }; } } };
+      // [row 266] The offer timeout is acknowledged by the offer queue.
+      offerQueue: { add: async () => { entered.open(); await resume.promise; return { id: 'unit-job' }; } } };
     h.subject.scheduleTimeout = context['exports'].makeDispatchService(app).scheduleTimeout;
     const publishing = h.subject.dispatchOrder(h.order.id); await entered.promise;
     expect(h.emitted).toEqual([]); expect(h.state.has('dispatch:offer-recovery:order-unit')).toBe(true);
@@ -1080,7 +1138,7 @@ describe('R4 exact-review regressions — service-free', () => {
     Object.assign(h.order, { pickupLat: 1, pickupLng: 1, items: [], paymentMethod: 'CASH' });
     h.subject.initializeDeliveryGeneration = async () => {};
     h.subject.findCandidates = async () => [{ riderId: 'fresh-rider', userId: 'fresh-user', etaMinutes: 3 }];
-    h.subject.logLoadGateShadow = () => {};
+    h.subject.logLoadGate = () => {};
     h.subject.canReceiveOffer = async () => true;
     const emitted: any[] = [], scheduled: any[] = [];
     h.subject.io = { to: () => ({ emit: (...args: any[]) => emitted.push(args) }) };

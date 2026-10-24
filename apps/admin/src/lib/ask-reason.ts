@@ -12,18 +12,23 @@ import { REASON_MIN } from './reason-rules';
  * is a field, not an explanation, and the record it left could not be
  * reviewed, appealed or defended any more than a blank one.
  *
- * So the screen asks. A cancelled prompt cancels the action — it never falls
+ * So the screen asks. A cancelled ask cancels the action — it never falls
  * back to a default, which is the shape that produced the canned strings in
  * the first place. The length rule matches the server's, so the operator hears
  * about it here rather than as a rejected request.
+ *
+ * [UI-FIX-ADMIN] The browser-prompt `askReason` that lived here is gone: every
+ * page asks in the in-page panel (components/mc/ReasonDialog: useAskReason,
+ * useActionDialog, useActionRunner), which keeps a refusal in view with the
+ * typed reason. ask-reason.test.ts refuses a browser prompt coming back.
  */
 export { REASON_MIN };
 
 /**
  * The server's floor, for screens that collect a reason into an input they
  * already own (the advertiser-facing rejection, the claim rejection, …)
- * instead of a prompt. One constant, so the floor can never drift apart from
- * `askReason` — a 3–11 character answer passes a screen's check and 400s at
+ * instead of the panel. One constant, so the floor can never drift apart from
+ * the panel's — a 3–11 character answer passes a screen's check and 400s at
  * the gate, which is the second half of this defect.
  */
 export function reasonTooShort(reason: string): boolean {
@@ -35,27 +40,4 @@ export interface ReasonPrompt {
   action: string;
   /** Optional: who or what it happens to, to name it back to them. */
   subject?: string;
-}
-
-/**
- * Ask for a reason. Returns the trimmed reason, or null if the operator
- * cancelled — in which case the caller must do NOTHING.
- *
- * @deprecated [MISSION CONTROL · PR-1] A browser prompt. Pages move to the
- * in-page panel (components/mc/ReasonDialog): `useAskReason()` takes this same
- * argument and returns a Promise of this same `string | null`, and
- * `useActionDialog().run` also keeps the server's refusal in the panel.
- */
-export function askReason({ action, subject }: ReasonPrompt): string | null {
-  const target = subject ? ` for ${subject}` : '';
-  const answer = window.prompt(
-    `Why are you about to ${action}${target}?\n\nThis goes on the permanent record and is what an appeal or an audit will be answered with. At least ${REASON_MIN} characters.`,
-  );
-  if (answer === null) return null; // cancelled: nothing happens
-  const reason = answer.trim();
-  if (reason.length < REASON_MIN) {
-    window.alert(`Say why in at least ${REASON_MIN} characters — a word is not a reason anyone can review. Nothing was changed.`);
-    return null;
-  }
-  return reason;
 }

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { enterTenant, getTenantContext } from '../../plugins/tenant-context';
 import { searchScopeCounter } from '../../plugins/observability';
-import { ACCESS_COOKIE, REFRESH_COOKIE, parseCookies } from '../auth/browser-session';
+import { carriesOwnSessionCookie } from '../auth/browser-session';
 
 // ---------------------------------------------------------------------------
 // [R048-003] THE PUBLIC MARKET / SEARCH SCOPE.
@@ -125,7 +125,7 @@ export function requireRequestTenant(request?: Pick<FastifyRequest, 'tenantId'>)
  * 503, never an empty grid); with it unset, exactly one active tenant may
  * exist, and two means the deployment has to say which.
  */
-export async function resolvePublicMarketTenant(app: FastifyInstance): Promise<string> {
+export async function resolvePublicMarketTenant(app: Pick<FastifyInstance, 'prisma'>): Promise<string> {
   const explicit = process.env['PUBLIC_TENANT_ID'];
   if (explicit) {
     const configured = await app.prisma.tenant.findUnique({ where: { id: explicit }, select: { id: true, isActive: true, kind: true } });
@@ -178,9 +178,7 @@ export function bindPublicMarketTenant(app: FastifyInstance) {
 export function bindBrowseTenant(app: FastifyInstance) {
   const bindPublicTenant = bindPublicMarketTenant(app);
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    const cookies = parseCookies(request.headers.cookie);
-    if (request.headers.authorization !== undefined ||
-      Object.hasOwn(cookies, ACCESS_COOKIE) || Object.hasOwn(cookies, REFRESH_COOKIE)) {
+    if (request.headers.authorization !== undefined || carriesOwnSessionCookie(request)) {
       await app.authenticate(request, reply);
     } else {
       await bindPublicTenant(request);

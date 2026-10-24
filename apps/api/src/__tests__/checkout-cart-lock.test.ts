@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import type { Prisma, UserRole } from '@prisma/client';
@@ -9,6 +9,7 @@ import { socketPlugin } from '../plugins/socket';
 import { OrderService } from '../modules/order/order.service';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [L09 · M022 / M023 / row 70] What the customer reviewed is what is ordered.
@@ -287,7 +288,7 @@ describe('[reorder] a past order comes back with its choices, or names the line 
     const res = await inject('POST', '/api/v1/customer/checkout', { paymentMethod: 'CASH', fulfillmentSelections: { [vendorId]: 'PICKUP' } }, c.token);
     expect(res.statusCode).toBe(200);
     const orderId = res.json().data.orders[0].id as string;
-    await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED' } });
+    await walkOrderStatus(app.prisma, orderId, 'DELIVERED');
     return orderId;
   }
 
@@ -427,6 +428,10 @@ describe('[price lock] the order is placed at the prices the customer saw, or re
   });
 
   it('a cart with more than 200 lines can still be placed with every line price the customer saw', async () => {
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: over 200 lines is the largest load class, which only a car (or the heavy
+    // fleet) carries, so this price-lock case runs with CAR_DELIVERIES=1 (the re-enable path); with the switch off a
+    // delivery this size is refused at checkout before anything is placed (DELIVERY_TOO_BIG).
+    vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); });
     // A cart has no line cap, and the apps send every line's price, so the
     // checkout body must take as many lines as a cart can hold.
     // A small-price item keeps the order under the ID-verification threshold.

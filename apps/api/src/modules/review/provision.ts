@@ -9,7 +9,8 @@
  * salted hash (DL-6: no SMS is ever sent to any of them; each code is accepted
  * only for its own identifier, and only inside this tenant).
  * `review:rotate` mints new codes (run before every resubmission);
- * `review:expire` forces DL-9; `review:status` says what exists.
+ * `review:expire` forces DL-9; `review:extend` moves a live session's expiry
+ * later (row 349); `review:status` says what exists.
  *
  * The CONTENT PACK (Part 6: fictional vendors, catalogue, images with licence
  * provenance, NAME-DENYLIST) and the rider's and driver's partner profiles
@@ -19,9 +20,10 @@
  * INCOMPLETE or PRESENT — rather than pretending.
  *
  * Fictional identifiers: E.164 under REVIEW_PHONE_PREFIX (default
- * `+59200099`). Whether a prefix is truly undialable is a carrier fact the
- * founder confirms (founder-inputs FD-STA-6); the default is a placeholder and
- * says so in `status`.
+ * `+592000`), filled with random digits up to a full Guyana number. Whether a
+ * prefix is truly undialable is a carrier fact the founder confirms
+ * (founder-inputs FD-STA-6); the default is a placeholder and says so in
+ * `status`.
  */
 import crypto from 'node:crypto';
 import type { PrismaClient } from '@prisma/client';
@@ -30,7 +32,16 @@ import { assertTenantWall, attestationOf, readRlsFacts } from '../../lib/rls-att
 import { REVIEW_SLUG_PATTERN, reviewContentPackFacts, type ContentPackState, type ContentPackFacts } from './content-pack';
 
 export const DEFAULT_REVIEW_TTL_DAYS = 14;
-export const DEFAULT_REVIEW_PHONE_PREFIX = '+59200099';
+/**
+ * The default range: 10,000 numbers (+592 000 0000 to +592 000 9999). It was
+ * `+59200099`, 100 numbers, and every provisioning run keeps three of them.
+ * The old range lies inside this one.
+ */
+export const DEFAULT_REVIEW_PHONE_PREFIX = '+592000';
+/** A Guyana number is +592 and seven digits; the app's phone box refuses any other length. */
+const REVIEW_IDENTIFIER_LENGTH = '+592'.length + 7;
+/** How many numbers one login may draw before provisioning gives up on the range. */
+export const REVIEW_IDENTIFIER_ATTEMPTS = 20;
 export const REVIEW_ROLES = ['CUSTOMER', 'RIDER', 'DRIVER'] as const;
 export type ReviewRole = typeof REVIEW_ROLES[number];
 
@@ -70,7 +81,17 @@ export interface ProvisionResult {
 }
 
 const sixDigits = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
-const identifierFor = (prefix: string) => `${prefix}${String(crypto.randomInt(0, 100)).padStart(2, '0')}`;
+/**
+ * How many random digits follow the prefix: enough to make a full Guyana
+ * number, and never fewer than two (a longer prefix keeps its old two digits).
+ */
+export function reviewIdentifierDigits(prefix: string): number {
+  return Math.max(2, REVIEW_IDENTIFIER_LENGTH - prefix.length);
+}
+const identifierFor = (prefix: string) => {
+  const digits = reviewIdentifierDigits(prefix);
+  return `${prefix}${String(crypto.randomInt(0, 10 ** digits)).padStart(digits, '0')}`;
+};
 
 export class ReviewProvisionRefusedError extends Error {
   constructor(slug: string, kind: string) {
@@ -108,6 +129,33 @@ async function reviewTenantFor(prisma: PrismaClient, slug: string, name?: string
   throw new Error(`[STA-1] review:provision could not settle the tenant "${slug}"; nothing was provisioned`);
 }
 
+/**
+ * The synthetic account behind one login, under a number nobody holds. The
+ * look-up only skips numbers already taken: another account (a second
+ * provisioning run, say) can take the number between the look-up and the
+ * insert, and the unique phone then refuses ours (P2002). That is not a
+ * failure of the run — a new number is drawn — up to
+ * REVIEW_IDENTIFIER_ATTEMPTS draws in all, then the range is reported full.
+ */
+async function createReviewAccount(prisma: PrismaClient, prefix: string, tenantId: string, role: ReviewRole): Promise<string> {
+  const account = REVIEW_ACCOUNTS[role];
+  for (let attempt = 1; attempt <= REVIEW_IDENTIFIER_ATTEMPTS; attempt++) {
+    const identifier = identifierFor(prefix);
+    if (await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } })) continue;
+    try {
+      await prisma.user.create({ data: {
+        phone: identifier, firstName: 'Demo', lastName: account.lastName, roles: account.roles, activeRole: account.activeRole,
+        lastMoverRole: account.lastMoverRole, tenantId, isSynthetic: true, isPhoneVerified: true,
+      } });
+      return identifier;
+    } catch (err) {
+      // Taken since the look-up: draw again. Anything else is a real failure.
+      if ((err as { code?: string }).code !== 'P2002') throw err;
+    }
+  }
+  throw new Error(`[STA-1] review:provision found no free number under ${prefix} in ${REVIEW_IDENTIFIER_ATTEMPTS} draws — the range is nearly full; set a shorter REVIEW_PHONE_PREFIX`);
+}
+
 /** Idempotent on the tenant; a new session and fresh credentials each run. */
 export async function provisionReviewTenant(prisma: PrismaClient, input: ProvisionInput): Promise<ProvisionResult> {
   const now = input.now ?? new Date();
@@ -124,17 +172,10 @@ export async function provisionReviewTenant(prisma: PrismaClient, input: Provisi
   const session = await prisma.reviewSession.create({ data: { tenantId: tenant.id, expiresAt: new Date(now.getTime() + ttlDays * 86_400_000) } });
   const credentials: MintedCredential[] = [];
   for (const role of REVIEW_ROLES) {
-    let identifier = identifierFor(prefix);
-    for (let i = 0; i < 20 && await prisma.user.findUnique({ where: { phone: identifier }, select: { id: true } }); i++) identifier = identifierFor(prefix);
-    const account = REVIEW_ACCOUNTS[role];
-    const user = await prisma.user.create({ data: {
-      phone: identifier, firstName: 'Demo', lastName: account.lastName, roles: account.roles, activeRole: account.activeRole,
-      lastMoverRole: account.lastMoverRole, tenantId: tenant.id, isSynthetic: true, isPhoneVerified: true,
-    } });
+    const identifier = await createReviewAccount(prisma, prefix, tenant.id, role);
     const code = sixDigits();
     const id = `rc_${crypto.randomBytes(8).toString('hex')}`;
     await prisma.reviewCredential.create({ data: { id, tenantId: tenant.id, role, identifier, staticOtpHash: hashReviewCode(id, code) } });
-    void user;
     credentials.push({ role, identifier, code });
   }
   const pack = await reviewContentPackFacts(prisma, tenant.id);
@@ -160,6 +201,46 @@ export async function expireReviewSession(prisma: PrismaClient, sessionId: strin
   if (s.status === 'EXPIRED' || s.status === 'REVOKED') return 'ALREADY_CLOSED';
   await prisma.reviewSession.update({ where: { id: sessionId }, data: { status: 'EXPIRED' } });
   return 'EXPIRED';
+}
+
+/** [Row 349] The furthest an extension may reach, counted from now. */
+export const MAX_REVIEW_EXTENSION_DAYS = 60;
+
+export type ReviewExtendResult =
+  | { verdict: 'EXTENDED'; from: Date; to: Date }
+  | { verdict: 'NOT_FOUND' | 'ALREADY_CLOSED' | 'LAPSED' | 'NOT_LATER' | 'TOO_FAR' | 'RACED' };
+
+/**
+ * [Row 349] Moves a LIVE review session's expiry later, in place. The
+ * reviewer's login and code do not change, and nothing is minted or printed,
+ * so the store-review notes stay true (only their "valid until" date moves).
+ *
+ * Refused, and named: an unknown session; a closed one (EXPIRED / REVOKED);
+ * one whose time has already run out (the gate closes it on its next request
+ * — provision a new session instead of reviving it); a date that is not later
+ * than the current expiry (shortening is `expire`); and a date more than
+ * MAX_REVIEW_EXTENSION_DAYS from now. One compare-and-set UPDATE on the expiry
+ * that was read: a concurrent expire, revoke or extend wins, and this reports
+ * RACED.
+ */
+export async function extendReviewSession(
+  prisma: Pick<PrismaClient, 'reviewSession'>,
+  sessionId: string,
+  until: Date,
+  now = new Date(),
+): Promise<ReviewExtendResult> {
+  if (!Number.isFinite(until.getTime())) return { verdict: 'NOT_LATER' };
+  const s = await prisma.reviewSession.findUnique({ where: { id: sessionId }, select: { status: true, expiresAt: true } });
+  if (!s) return { verdict: 'NOT_FOUND' };
+  if (s.status === 'EXPIRED' || s.status === 'REVOKED') return { verdict: 'ALREADY_CLOSED' };
+  if (s.expiresAt.getTime() <= now.getTime()) return { verdict: 'LAPSED' };
+  if (until.getTime() <= s.expiresAt.getTime()) return { verdict: 'NOT_LATER' };
+  if (until.getTime() > now.getTime() + MAX_REVIEW_EXTENSION_DAYS * 86_400_000) return { verdict: 'TOO_FAR' };
+  const took = await prisma.reviewSession.updateMany({
+    where: { id: sessionId, status: { in: ['PROVISIONED', 'ANCHORED'] }, expiresAt: s.expiresAt },
+    data: { expiresAt: until },
+  });
+  return took.count === 1 ? { verdict: 'EXTENDED', from: s.expiresAt, to: until } : { verdict: 'RACED' };
 }
 
 export interface ReviewStatus {

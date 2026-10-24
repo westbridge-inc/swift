@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CATEGORY_ICON_OPTIONS } from '@swift/types';
 import {
   approveDiscoveryRequest,
   fetchDiscoveryCategories,
@@ -15,7 +16,9 @@ import {
   type DiscoveryRequest,
 } from '@/lib/api';
 import { MutationError } from '@/components/MutationError';
-import { askReason } from '@/lib/ask-reason';
+import { useActionDialog } from '@/components/mc/ReasonDialog';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // The taxonomy, and the two decisions nobody could make.
@@ -42,6 +45,11 @@ type RequestStatus = (typeof REQUEST_STATUSES)[number];
 
 // The route validates against these enums. Offering free text would mean a
 // reviewer types something reasonable and is refused at the moment they act.
+/** The icon a category row shows: its chosen app icon, else the app's own by-slug choice. */
+function iconLabel(key: string | null): string {
+  return CATEGORY_ICON_OPTIONS.find((o) => o.key === key)?.label ?? 'App default';
+}
+
 const KINDS = ['CUISINE', 'DISH', 'DIETARY', 'AISLE', 'RETAIL'] as const;
 const VERTICALS = ['FOOD', 'GROCERY', 'RETAIL'] as const;
 
@@ -50,7 +58,7 @@ export default function DiscoveryPage() {
   const [tab, setTab] = useState<Tab>('requests');
   const [status, setStatus] = useState<RequestStatus>('PENDING');
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [emoji, setEmoji] = useState('');
+  const [iconKey, setIconKey] = useState('');
   const [kind, setKind] = useState<string>(KINDS[0]);
   const [vertical, setVertical] = useState<string>(VERTICALS[0]);
   const [mapTarget, setMapTarget] = useState('');
@@ -68,11 +76,11 @@ export default function DiscoveryPage() {
   const rows: DiscoveryRequest[] = requests.data?.data ?? [];
 
   const done = () => {
-    setActiveId(null); setEmoji(''); setReason(''); setMapTarget('');
+    setActiveId(null); setIconKey(''); setReason(''); setMapTarget('');
     queryClient.invalidateQueries({ queryKey: ['discovery'] });
   };
   const approve = useMutation({
-    mutationFn: (id: string) => approveDiscoveryRequest(id, { emoji, kind, vertical }),
+    mutationFn: (id: string) => approveDiscoveryRequest(id, { iconKey, kind, vertical }),
     onSuccess: done, onError: setMutationError,
   });
   const mapTo = useMutation({
@@ -83,14 +91,31 @@ export default function DiscoveryPage() {
     mutationFn: (id: string) => rejectDiscoveryRequest(id, reason.trim()),
     onSuccess: done, onError: setMutationError,
   });
-  const toggleVisibility = useMutation({
-    mutationFn: (c: DiscoveryCategory) =>
-      updateDiscoveryCategory(c.id, { status: c.status === 'ACTIVE' ? 'HIDDEN' : 'ACTIVE' }),
-    onSuccess: done, onError: setMutationError,
-  });
-  const merge = useMutation({
-    mutationFn: ({ id, targetId, reason }: { id: string; targetId: string; reason: string }) => mergeDiscoveryCategory(id, targetId, reason),
-    onSuccess: done, onError: setMutationError,
+  // [U60] Hiding a category takes it away from every customer, and merging is
+  // permanent. The status used to BE the toggle (one click hid it, no busy
+  // guard); now the status is a label and each act is confirmed in the panel,
+  // which runs it once and keeps a refusal in view.
+  const dialog = useActionDialog();
+  const actions = useActionRunner(done);
+  const toggleVisibility = (c: DiscoveryCategory) => {
+    const hide = c.status === 'ACTIVE';
+    void actions.run({
+      title: hide ? `Hide ${c.name} from customers?` : `Show ${c.name} to customers again?`,
+      body: hide
+        ? <p>Customers stop seeing it at once. Nothing is deleted; you can show it again.</p>
+        : <p>Customers see it again at once.</p>,
+      reason: false,
+      confirmLabel: hide ? 'Hide category' : 'Show category',
+      submit: () => updateDiscoveryCategory(c.id, { status: hide ? 'HIDDEN' : 'ACTIVE' }),
+      success: () => (hide ? `${c.name} is hidden from customers.` : `${c.name} is visible to customers.`),
+    });
+  };
+  const merge = (c: DiscoveryCategory, target: DiscoveryCategory) => void actions.run({
+    title: `Merge ${c.name} into ${target.name}?`,
+    body: <p>This is permanent: {c.name} redirects to {target.name}, and its old slug keeps resolving.</p>,
+    confirmLabel: 'Merge category',
+    submit: ({ reason }) => mergeDiscoveryCategory(c.id, target.id, reason),
+    success: () => `${c.name} now redirects to ${target.name}.`,
   });
   const backfill = useMutation({
     mutationFn: runDiscoveryBackfill,
@@ -121,13 +146,21 @@ export default function DiscoveryPage() {
           <h1 className="text-2xl font-semibold">Discovery</h1>
           <p className="mt-1 max-w-2xl text-sm text-neutral-500">
             The category taxonomy customers browse by, and the queue of categories vendors have asked for.
-            {' '}{tagged} of {cats.length} categories are visible to customers.
+            {categories.isSuccess ? <>{' '}{tagged} of {cats.length} categories are visible to customers.</> : null}
           </p>
         </div>
         <div className="text-right">
           <button
             type="button"
-            onClick={() => backfill.mutate()}
+            onClick={async () => {
+              const go = await dialog.askWith({
+                title: 'Run the discovery backfill?',
+                body: <p>Existing items are matched against the taxonomy and suggested to their vendors for review. Re-running writes nothing new.</p>,
+                reason: false,
+                confirmLabel: 'Run the backfill',
+              });
+              if (go) backfill.mutate();
+            }}
             disabled={backfill.isPending}
             className="rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
           >
@@ -147,6 +180,7 @@ export default function DiscoveryPage() {
             key={t}
             type="button"
             onClick={() => { setTab(t); setActiveId(null); setMutationError(null); }}
+            aria-pressed={tab === t}
             className={`px-3 py-2 text-sm ${tab === t ? 'border-b-2 border-neutral-900 font-medium' : 'text-neutral-500'}`}
           >
             {t === 'requests' ? 'Requests' : 'Taxonomy'}
@@ -164,6 +198,7 @@ export default function DiscoveryPage() {
                 key={s}
                 type="button"
                 onClick={() => setStatus(s)}
+                aria-pressed={status === s}
                 className={`rounded px-2 py-1 text-xs ${status === s ? 'bg-neutral-900 text-white' : 'bg-neutral-100'}`}
               >
                 {s}
@@ -172,7 +207,10 @@ export default function DiscoveryPage() {
           </div>
 
           {requests.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
-          {!requests.isLoading && rows.length === 0 ? (
+          {requests.isError ? (
+            <QueryFailed error={requests.error} what="the category requests" onRetry={() => void requests.refetch()} retrying={requests.isFetching} />
+          ) : null}
+          {!requests.isLoading && !requests.isError && rows.length === 0 ? (
             <p className="text-sm text-neutral-500">Nothing in this queue.</p>
           ) : null}
 
@@ -208,11 +246,12 @@ export default function DiscoveryPage() {
                         <select
                           value={mapTarget}
                           onChange={(e) => setMapTarget(e.target.value)}
+                          aria-label="Existing category to map to"
                           className="rounded border border-neutral-300 px-2 py-1 text-sm"
                         >
                           <option value="">Choose a category…</option>
                           {cats.filter((c) => c.status === 'ACTIVE' && !c.mergedIntoId).map((c) => (
-                            <option key={c.id} value={c.slug}>{c.emoji} {c.name} ({c.slug})</option>
+                            <option key={c.id} value={c.slug}>{c.name} ({c.slug})</option>
                           ))}
                         </select>
                         <button
@@ -229,14 +268,12 @@ export default function DiscoveryPage() {
                     <div>
                       <p className="text-sm font-medium">Or create it as a new category</p>
                       <div className="mt-2 flex flex-wrap gap-2">
-                        <input
-                          value={emoji}
-                          onChange={(e) => setEmoji(e.target.value)}
-                          placeholder="Emoji"
-                          aria-label="Emoji"
-                          maxLength={8}
-                          className="w-24 rounded border border-neutral-300 px-2 py-1 text-sm"
-                        />
+                        {/* Owner 17 Oct: a category carries one of the app's icons,
+                            never an emoji. The route refuses any key not on this list. */}
+                        <select value={iconKey} onChange={(e) => setIconKey(e.target.value)} aria-label="Icon" className="rounded border border-neutral-300 px-2 py-1 text-sm">
+                          <option value="">Choose an icon…</option>
+                          {CATEGORY_ICON_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+                        </select>
                         {/* Enums, never text: the route refuses anything else. */}
                         <select value={kind} onChange={(e) => setKind(e.target.value)} aria-label="Kind" className="rounded border border-neutral-300 px-2 py-1 text-sm">
                           {KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
@@ -246,14 +283,14 @@ export default function DiscoveryPage() {
                         </select>
                         <button
                           type="button"
-                          disabled={!emoji.trim() || approve.isPending}
+                          disabled={!iconKey || approve.isPending}
                           onClick={() => approve.mutate(r.id)}
                           className="rounded bg-neutral-900 px-3 py-1 text-sm text-white disabled:opacity-40"
                         >
                           Create
                         </button>
                       </div>
-                      <p className="mt-1 text-xs text-neutral-500">An emoji is required by the route — the button stays off without one.</p>
+                      <p className="mt-1 text-xs text-neutral-500">The app draws the icon you choose. The button stays off until you choose one.</p>
                     </div>
 
                     <div>
@@ -287,17 +324,24 @@ export default function DiscoveryPage() {
       ) : (
         <section className="space-y-3">
           {categories.isLoading ? <p className="text-sm text-neutral-500">Loading…</p> : null}
+          {actions.banner}
+          {categories.isError ? (
+            <QueryFailed error={categories.error} what="the categories" onRetry={() => void categories.refetch()} retrying={categories.isFetching} />
+          ) : null}
+          {categories.isSuccess && cats.length === 0 ? <p className="text-sm text-neutral-500">No categories yet.</p> : null}
+          {categories.isSuccess && cats.length > 0 ? (
           <table className="w-full text-sm">
             <thead className="text-left text-xs uppercase text-neutral-500">
               <tr>
-                <th className="py-2">Category</th><th>Slug</th><th>Kind</th><th>Vertical</th>
+                <th className="py-2">Category</th><th>Icon</th><th>Slug</th><th>Kind</th><th>Vertical</th>
                 <th>Aliases</th><th>Visible</th><th />
               </tr>
             </thead>
             <tbody>
               {cats.map((c) => (
                 <tr key={c.id} className="border-t border-neutral-100">
-                  <td className="py-2">{c.emoji} {c.name}</td>
+                  <td className="py-2">{c.name}</td>
+                  <td className="text-neutral-500">{iconLabel(c.iconKey)}</td>
                   <td className="text-neutral-500">{c.slug}</td>
                   <td className="text-neutral-500">{c.kind}</td>
                   <td className="text-neutral-500">{c.vertical}</td>
@@ -306,13 +350,19 @@ export default function DiscoveryPage() {
                     {c.mergedIntoId ? (
                       <span className="text-xs text-neutral-500">merged</span>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={() => toggleVisibility.mutate(c)}
-                        className={`rounded px-2 py-0.5 text-xs ${c.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-neutral-100 text-neutral-600'}`}
-                      >
-                        {c.status === 'ACTIVE' ? 'Visible' : 'Hidden'}
-                      </button>
+                      <span className="inline-flex items-center gap-2">
+                        <span className={`rounded px-2 py-0.5 text-xs ${c.status === 'ACTIVE' ? 'bg-green-100 text-green-800' : 'bg-neutral-100 text-neutral-600'}`}>
+                          {c.status === 'ACTIVE' ? 'Visible' : 'Hidden'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleVisibility(c)}
+                          aria-label={c.status === 'ACTIVE' ? `Hide ${c.name} from customers` : `Show ${c.name} to customers`}
+                          className="rounded border border-neutral-300 px-2 py-0.5 text-xs"
+                        >
+                          {c.status === 'ACTIVE' ? 'Hide' : 'Show'}
+                        </button>
+                      </span>
                     )}
                   </td>
                   <td className="text-right">
@@ -324,8 +374,7 @@ export default function DiscoveryPage() {
                           const targetId = e.target.value;
                           if (!targetId) return;
                           const target = cats.find((o) => o.id === targetId);
-                          const reason = askReason({ action: 'merge this category', subject: `${c.name} into ${target?.name ?? targetId}` });
-                          if (reason) merge.mutate({ id: c.id, targetId, reason });
+                          if (target) merge(c, target);
                         }}
                         className="rounded border border-neutral-200 px-1 py-0.5 text-xs"
                       >
@@ -340,6 +389,7 @@ export default function DiscoveryPage() {
               ))}
             </tbody>
           </table>
+          ) : null}
           <p className="text-xs text-neutral-500">
             Hiding a category un-ships it without deleting anything. Merging redirects one into another and
             keeps the old slug resolving — which is why a slug is never edited in place.

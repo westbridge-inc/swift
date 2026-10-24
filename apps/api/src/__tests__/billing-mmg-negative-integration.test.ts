@@ -1,3 +1,4 @@
+import { readFeePause } from '../modules/billing/mmg-pause';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +14,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { activeOverdueMs, beginConfirmationInTx, currentDunningClock } from '../modules/billing/dunning-clock';
 import { subscriptionOperability, inoperableSubscriptionWhere } from '../modules/subscription/operate-gate';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { testPhone } from './helpers/fixture-ids';
 
 const db = new PrismaClient();
 const due = new Date('2026-09-25T12:00:00Z');
@@ -24,7 +26,7 @@ const service = new BillingService(db, notifications, getPaymentProvider());
 
 async function fixture(status: 'PENDING' | 'FAILED' | 'EXPIRED' = 'PENDING') {
   const key = randomUUID();
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(Math.random() * 9_000_000_000) + 1_000_000_000}`,
+  const user = await db.user.create({ data: { phone: testPhone(),
     firstName: 'Synthetic', lastName: 'NegativeProof', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: { ownerId: owner.id, name: 'Synthetic negative proof fixture', slug: `negative-${key}`,
@@ -73,8 +75,8 @@ describe('MMG negative identity with the real shared clock and payment transacti
         expect(clock.pausedAt).not.toBeNull(); expect(activeOverdueMs(clock, at(100))).toBe(47 * HOUR);
         const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
         expect(fresh.failedAttempts).toBe(2); expect(fresh.status).toBe('PAST_DUE');
-        expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
-        expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(at(100)) } })).toBe(0);
+        expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
+        expect(await db.subscription.count({ where: { id: sub.id, ...inoperableSubscriptionWhere(await readFeePause(db), at(100)) } })).toBe(0);
         expect(await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_FAILED' } })).toBe(0);
         expect(remote.initiate).not.toHaveBeenCalled();
       });
@@ -99,7 +101,7 @@ describe('MMG negative identity with the real shared clock and payment transacti
       expect(await db.paymentConfirmationHold.findUniqueOrThrow({ where: { paymentId: payment.id } })).toMatchObject({ status: 'ACTIVE' });
       const fresh = await db.subscription.findUniqueOrThrow({ where: { id: sub.id } });
       expect(fresh.failedAttempts).toBe(2); expect(fresh.status).toBe('PAST_DUE');
-      expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, at(100)).operable).toBe(true);
+      expect(subscriptionOperability(fresh, { missingRow: 'BLOCK' }, await readFeePause(db), at(100)).operable).toBe(true);
       expect(await db.billingEvent.count({ where: { subscriptionId: sub.id, type: 'CHARGE_FAILED' } })).toBe(0);
       expect(remote.initiate).not.toHaveBeenCalled();
     });

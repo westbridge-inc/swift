@@ -1,8 +1,10 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { requireIdentityAuthority, IdentityReviewRequiredError, lockIdentityAuthority } from '../integrity/identity-review';
 import { currentDunningClock, lockBillingAuthority } from '../billing/dunning-clock';
+import { holdFeeRiseInTx } from '../billing/fee-rise-notice';
 import { type Prisma, type PrismaClient, type Subscription, type SubscriptionType, type VendorType } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
+import { accountErasedUnderLock } from '../user/account-closure';
 import { ReviewDemoMoneyRefusedError } from '../review/demo-policy';
 import { activateMoverFeeType, lockFeeCollectionAuthority, lockMoverFeeAuthority, lockMoverSources, moverFeeTariffSubject, resolveMoverFeeAuthority } from './mover-fee-authority';
 import { CountryConfigService, partnerRateFor, type PartnerRate } from '../country/country-config.service';
@@ -110,7 +112,6 @@ export class SubscriptionService {
         owner: {
           select: {
             user: { select: { countryCode: true } },
-            _count: { select: { vendors: true } },
           },
         },
       },
@@ -121,14 +122,13 @@ export class SubscriptionService {
     const countryCode = vendor.owner.user.countryCode;
     const tiers = await this.countryConfig.getSubscriptionTiers(countryCode, db);
     // A brand-new store has no catalogue yet, so it is born on the small tier
-    // and the weekly re-tier moves it up once its listings are counted. The
-    // franchise basis IS known at signup, though: the owner's fifth store
-    // should not spend its first week at the single-store price.
+    // and the weekly re-tier moves it up once its listings are counted. Each
+    // store is its own account with its own tier: how many other stores its
+    // owner has never changes its price (owner, 13 Oct 2026).
     const priced = partnerRateFor(tiers, {
       kind: 'VENDOR',
       isService: vendor.vendorType === 'SERVICE',
       activeListings: 0,
-      ownedStores: vendor.owner._count.vendors,
     });
     return { existing: null, type: VENDOR_SUB_TYPE[vendor.vendorType], priced, currencyCode: await this.countryConfig.getCurrencyCode(countryCode, db) };
   }
@@ -169,6 +169,12 @@ export class SubscriptionService {
       // [#1393] One weekly fee per mover payer: the payer and every one of its
       // sources are locked (and ownership re-read) before the activation is read.
       const payer = 'vendorId' in entity ? null : await this.lockMoverPayer(entity, tx);
+      // [#1879 S3-3 · REVIEW-G R1] No activation write for an erased account. The person's users row is locked
+      // here (a mover's already is, by lockMoverPayer), so an erasure either commits its cut-off first and this
+      // refuses, or waits behind this transaction and its wind-down then cancels what was written.
+      if (await accountErasedUnderLock(tx, payer?.userId ?? (await this.humanFor(entity, tx)).userId)) {
+        throw new AppError(409, 'ACCOUNT_CLOSED', 'This account has been deleted. Nothing can be activated for it.');
+      }
       const activation = await this.activation(entity, tx);
       const sub = payer && !('vendorId' in entity)
         ? await this.moverRow(entity, payer, activation, tx)
@@ -232,14 +238,31 @@ export class SubscriptionService {
         const tariff = await moverFeeTariffSubject(tx, authority);
         const tiers = await this.countryConfig.getSubscriptionTiers(tariff.countryCode, tx);
         const priced = partnerRateFor(tiers, tariff.subject);
-        if (!sub.weeklyRate.equals(priced.rate)) {
-          const from = Number(sub.weeklyRate);
-          sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: priced.rate } });
+        // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A fee the
+        // mover has already paid a week at is never raised at once: a higher taxi card rate is HELD
+        // for the 14-day fee-change notice (F2, billing/fee-rise-notice.ts), told and applied only
+        // from the weekly fee it was told for. Before any paid week (a trial) the role they activate
+        // prices the first fee, in either activation order.
+        const from = Number(sub.weeklyRate);
+        const paidAtRate = priced.rate > from && !!await tx.subscriptionPayment.findFirst({
+          where: { subscriptionId: sub.id, status: 'CAPTURED', amount: { gt: 0 } }, select: { id: true } });
+        // [REVIEW-M #1844 S4-1] A paid weekly rate of 0 or less is legacy or hand-made data: never kept
+        // as the floor, nor raised at once to the taxi rate. The activation is refused (loudly: the approval
+        // outbox retries it with backoff, then dead-letters it to the admin page) until finance corrects it.
+        if (paidAtRate && !(from > 0)) {
+          throw new AppError(409, 'MOVER_FEE_FINANCE_ACTION_REQUIRED', 'This mover\'s weekly fee on record is 0 or less; finance must correct it before the taxi role is added.', { reason: 'LEGACY_RATE_NOT_POSITIVE' });
+        }
+        const nextRate = paidAtRate ? from : priced.rate;
+        if (paidAtRate) {
+          await holdFeeRiseInTx(tx, { subscriptionId: sub.id, from, to: priced.rate, currencyCode: sub.currencyCode, source: 'TAXI_ACTIVATION', now: new Date() });
+        }
+        if (nextRate !== from) {
+          sub = await tx.subscription.update({ where: { id: sub.id }, data: { weeklyRate: nextRate } });
           const seq = await tx.billingEvent.count({ where: { subscriptionId: sub.id, type: 'TIER_CHANGE' } }) + 1;
           await tx.billingEvent.create({ data: {
-            subscriptionId: sub.id, type: 'TIER_CHANGE', amount: priced.rate, currencyCode: sub.currencyCode,
-            idempotencyKey: `tier:${sub.id}:${seq}:${from}->${priced.rate}`,
-            note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${priced.rate}; issued charges and periods retained.`,
+            subscriptionId: sub.id, type: 'TIER_CHANGE', amount: nextRate, currencyCode: sub.currencyCode,
+            idempotencyKey: `tier:${sub.id}:${seq}:${from}->${nextRate}`,
+            note: `Shared mover fee: taxi activation changes the future weekly rate from ${from} to ${nextRate}; issued charges and periods retained.`,
           } });
         }
       }

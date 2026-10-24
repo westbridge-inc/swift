@@ -2,9 +2,11 @@ import type { PrismaClient, Subscription, SubscriptionStatus } from '@prisma/cli
 import { log } from '../../utils/logger';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 import { payInfo } from './agent-cash.service';
+import { payAheadAllows } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import type { CardPayAction } from './card-pay-action';
+import { FEE_CHECKOUT_PLATFORMS_KEY, platformSwitches, type PlatformSwitches } from './fee-checkout-switch';
 
 // ---------------------------------------------------------------------------
 // The ways a partner can pay the weekly fee IN THE APP, decided in one place
@@ -27,8 +29,7 @@ export type PayAction =
   | { id: 'MMG_CHECKOUT'; state: 'off' }
   | CardPayAction;
 
-/** The per-platform switch: {"ios": true, "android": true, "web": true}. */
-export const FEE_CHECKOUT_PLATFORMS_KEY = 'billing.feeCheckout.platforms';
+export { FEE_CHECKOUT_PLATFORMS_KEY };
 const SWITCH_TTL_MS = 60_000;
 /** Paying rejoins a CHURNED account; PAUSED (billing stopped) and CANCELLED do not pay. */
 const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
@@ -49,43 +50,15 @@ export function checkoutAmountGyd(fee: { weeklyFeeGyd: number; amountDueGyd: num
   return Math.ceil(Math.round(owed * 100) / 100);
 }
 
-type PlatformSwitches = Record<'ios' | 'android' | 'web', boolean>;
-const PLATFORMS = ['ios', 'android', 'web'] as const;
 let switchCache: { at: number; switches: PlatformSwitches } | null = null;
 /** Tests reset the one-minute cache of the per-platform switch. */
 export function resetFeeCheckoutSwitchCache(): void {
   switchCache = null;
 }
 
-/** The switch row as read, at most once a minute: a missing row, or a
- *  platform missing from it, is ON (owner ruling "3 b"). [DS633] Only a real
- *  boolean counts: any other value for a platform (the string "false"
- *  included) switches that platform OFF, and a row that is not an object
- *  switches every platform OFF, each with a warning, so a kill switch written
- *  with the wrong type still kills. */
-function platformSwitches(row: { value: unknown } | null): PlatformSwitches {
-  if (!row) return { ios: true, android: true, web: true };
-  const value = row.value;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY }, '[MMG checkout] the per-platform switch is not an object of true/false values; the MMG checkout is OFF on every platform until it is corrected');
-    return { ios: false, android: false, web: false };
-  }
-  const switches = { ios: true, android: true, web: true };
-  for (const platform of PLATFORMS) {
-    if (!Object.prototype.hasOwnProperty.call(value, platform)) continue;
-    const on = (value as Record<string, unknown>)[platform];
-    if (typeof on === 'boolean') {
-      switches[platform] = on;
-    } else {
-      switches[platform] = false;
-      log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY, platform }, '[MMG checkout] a per-platform switch value is not true or false; the MMG checkout is OFF on that platform until it is corrected');
-    }
-  }
-  return switches;
-}
-
 /** A missing row, or a platform missing from it, is ON (owner ruling "3 b");
- *  `false`, or any value that is not a real boolean, switches a platform off. */
+ *  `false`, or any value that is not a real boolean, switches a platform off.
+ *  The row is read at most once a minute (platformSwitches: fee-checkout-switch.ts). */
 export async function feeCheckoutPlatforms(prisma: Pick<PrismaClient, 'platformConfig'>): Promise<Record<'ios' | 'android' | 'web', boolean>> {
   const now = Date.now();
   if (!switchCache || now - switchCache.at > SWITCH_TTL_MS) {
@@ -128,8 +101,12 @@ export async function feePayActions(
   checkout?: () => MmgCheckoutProvider,
 ): Promise<PayAction[]> {
   const live = await mmgCheckoutLive(prisma, sub, platform, checkout);
-  const mmg: PayAction = live
-    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd: checkoutAmountGyd(await payInfo(prisma, sub)), currencyCode: 'GYD' }
+  const amountGyd = live ? checkoutAmountGyd(await payInfo(prisma, sub)) : 0;
+  // [owner #62 · DS1114 S3] One week at a time: once the coming week is paid the
+  // checkout could only refuse, so there is no button (the screen still says
+  // when the next fee is due).
+  const mmg: PayAction = live && await payAheadAllows(prisma, sub.id, amountGyd, new Date())
+    ? { id: 'MMG_CHECKOUT', state: 'live', amountGyd, currencyCode: 'GYD' }
     : { id: 'MMG_CHECKOUT', state: 'off' };
   return [mmg, { id: 'CARD', state: 'off' }];
 }

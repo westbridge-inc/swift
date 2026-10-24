@@ -9,6 +9,7 @@ import { LoadingBlock, Screen, T } from '../../kit';
 import { ConversationScreen } from '../chat/screens/ConversationScreen';
 import { useActiveJob, useBroadcastLocation, useMoverKind, useVerificationStatus } from '../../hooks';
 import { shouldTrackMoverLocation } from '../../lib/moverLocation';
+import { useMoverJobFeed } from '../../hooks/moverJobFeed';
 import { useMoverPreview } from '../../stores/moverPreview';
 import { useAuthStore } from '../../stores/authStore';
 import { useWentLive, WentLivePopup } from '../../components/onboarding/WentLive';
@@ -73,6 +74,9 @@ function MoverLocationSupervisor() {
     kind,
     !preview && shouldTrackMoverLocation(!!profile?.isOnline, active.data),
   );
+  // [PERF partner #1] Above every mover screen, like the GPS stream: a live
+  // job's change (passenger cancel, order ready) reaches the screen at once.
+  useMoverJobFeed(kind);
   return null;
 }
 

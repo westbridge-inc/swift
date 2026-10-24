@@ -106,7 +106,7 @@ async function addContact(actor: Actor, name: string, opts: { verify: boolean } 
   const id = added.json().data.id as string;
   if (opts.verify) {
     const sms = [...devChannelLog].reverse().find((e) => e.channel === 'sms' && e.to === phone);
-    const code = sms?.body.match(/code (\d{6})/)?.[1];
+    const code = sms?.body.match(/[Cc]ode (\d{6})/)?.[1];
     expect(code).toBeTruthy();
     const verified = await post(`/api/v1/safety/emergency-contacts/${id}/verify`, { code }, actor.token);
     expect(verified.statusCode).toBe(200);

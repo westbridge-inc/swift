@@ -10,6 +10,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { scanInferredRefunds } from '../modules/order/refund-review';
 import { refundsAwaitingReviewGauge } from '../plugins/observability';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [M-33] End to end: the allocation is written at checkout, the return
@@ -100,7 +101,7 @@ async function checkout(token: string, body: Record<string, unknown>) {
 }
 
 async function returned(orderId: string, token: string) {
-  await app.prisma.order.update({ where: { id: orderId }, data: { status: 'DELIVERED', deliveredAt: new Date() } });
+  await walkOrderStatus(app.prisma, orderId, 'DELIVERED', { deliveredAt: new Date() });
   const res = await inject('POST', `/api/v1/customer/orders/${orderId}/return`, { reason: 'Arrived damaged, all of it' }, token);
   expect(res.statusCode, res.body).toBe(201);
   return res.json().data as { refundAmount: unknown; refundSentence: string; refundBasis: string; refundInferredAmount: unknown; refundFunder: string | null; refundKind: string };
@@ -111,6 +112,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  process.env['STORE_MMG_PAY_LINK'] = '1';
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   await app.register(prismaPlugin);

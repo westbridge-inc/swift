@@ -11,6 +11,7 @@
 
 import type { PrismaClient } from '@prisma/client';
 import type { NotificationService } from '../notification/notification.service';
+import { ownerWallSystem } from '../../lib/owner-rls';
 
 export const RATINGS_FLAG = 'RATINGS_ENABLED';
 
@@ -60,14 +61,15 @@ export async function runRatingReminderSweep(
   for (const o of orders) {
     if (rated.has(o.id)) continue;
     // DB-fact dedupe: the reminder we previously wrote IS the guard.
-    const already = await prisma.notification.findFirst({
+    // [item 20] The customer's reminder, looked up by the reminder job: the named capability under the owner wall.
+    const already = await ownerWallSystem('rating-reminder:already-reminded', () => prisma.notification.findFirst({
       where: {
         userId: o.customerId,
         data: { path: ['kind'], equals: 'RATING_REMINDER' },
         AND: { data: { path: ['orderId'], equals: o.id } },
       },
       select: { id: true },
-    });
+    }));
     if (already) continue;
 
     const what =

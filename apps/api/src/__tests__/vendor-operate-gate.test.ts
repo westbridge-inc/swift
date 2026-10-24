@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { testPhone } from './helpers/fixture-ids';
 
 // A vendor may only DRIVE an order forward while ELIGIBLE to operate. The
 // doc-expiry sweep sets isVerified=false but leaves status ACTIVE, so a lapsed
@@ -36,7 +37,7 @@ beforeAll(async () => {
   await app.ready();
 
   const owner = await app.prisma.user.create({
-    data: { phone: `+59200907${String(Math.floor(Math.random() * 90) + 10)}`, firstName: 'Gate', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
+    data: { phone: testPhone(), firstName: 'Gate', lastName: 'Owner', roles: ['VENDOR_OWNER'] as UserRole[], activeRole: 'VENDOR_OWNER', isPhoneVerified: true },
   });
   userIds.push(owner.id);
   vendorToken = app.jwt.sign({ userId: owner.id, role: 'VENDOR_OWNER', jti: nanoid(8) });
@@ -50,7 +51,7 @@ beforeAll(async () => {
   const cust = await app.prisma.user.create({
     // Distinct prefix from the owner (+59200907xx) — both randoming the same 10-99
     // range collided ~1/90 of runs (a flake #483 got lucky on).
-    data: { phone: `+59200908${String(Math.floor(Math.random() * 90) + 10)}`, firstName: 'Gate', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
+    data: { phone: testPhone(), firstName: 'Gate', lastName: 'Cust', roles: ['CUSTOMER'] as UserRole[], activeRole: 'CUSTOMER', isPhoneVerified: true, customer: { create: {} } },
   });
   userIds.push(cust.id);
   customerId = cust.id;

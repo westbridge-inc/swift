@@ -11,7 +11,7 @@ import type {
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { normalizePhone } from '../../utils/phone';
 import { maskPhone } from '../auth/step-up';
-import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationCheckOf, creationZoneInUse, firstReplyNaming, type CreationCheck } from './mmg-checkout.service';
+import { CHECKOUT_CLOCK_TOLERANCE_MS, MMG_TXN_ID, creationZoneInUse, firstReplyNaming, paymentHistoryOf, paymentTimeCheckOf, type CreationCheck } from './mmg-checkout.service';
 import { getMmgCheckoutProvider, type MmgCheckoutProvider } from '../../providers/mmg/mmg-checkout';
 
 // ---------------------------------------------------------------------------
@@ -98,17 +98,18 @@ export function decodeSupportCursor(cursor: string): { createdAt: Date; id: stri
 
 /**
  * Condition 5 of the owner's automatic confirmation, as support reads it: the
- * SAME creation-time check judge() credits by (creationCheckOf) [Sol, DS663]:
- * the stamp read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), bounded
- * by the first reply naming the transaction and by the checkout's window.
- * Support shows INSIDE exactly when that check would let the payment be
- * credited. No configured zone, or an absent or unreadable stamp, is
- * UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED / CREATION_DATE_UNREADABLE).
+ * SAME check judge() credits by (paymentTimeCheckOf) [Sol, DS663 · 7 Oct], on
+ * MMG's history record of the transaction as it was written down: its time
+ * read in the configured zone (MMG_CHECKOUT_CREATION_ZONE), bounded by the
+ * first reply naming the transaction and by the checkout's window. Support
+ * shows INSIDE exactly when that check would let the payment be credited. No
+ * configured zone is UNREADABLE (judge holds CREATION_ZONE_UNVERIFIED).
  */
 export function windowCheckOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, stamp: string | null, creation: CreationCheck,
-): 'INSIDE' | 'OUTSIDE' | 'AFTER_REPLY' | 'UNREADABLE' {
-  const result = creationCheckOf(intent, stamp, creation);
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, txnId: string, creation: CreationCheck,
+): NonNullable<MmgCheckoutTimelineEntry['windowCheck']> {
+  const result = paymentTimeCheckOf(intent, txnId, creation);
+  if (result === 'REFERENCE_MISMATCH') return 'DISAGREES';
   return result === 'ZONE_UNVERIFIED' ? 'UNREADABLE' : result;
 }
 
@@ -136,15 +137,18 @@ export interface ObservationForTimeline {
 }
 
 /**
- * One reply or lookup as support may see it, read from the stored record by
- * name: a reply's ResultCode and the transaction it named (and whether it came
- * by the deadline); a lookup's transactionStatus, amount, currency, ledger
- * number and creation window. Nothing else in the record (MMG's message, its
- * HTML, the parties, any redacted field) ever reaches the answer. A value not
- * shaped like what it claims to be is dropped, never shown.
+ * One reply, lookup or history answer as support may see it, read from the
+ * stored record by name: a reply's ResultCode and the transaction it named
+ * (and whether it came by the deadline); a lookup's transactionStatus, amount,
+ * currency and ledger number; MMG's history record's transactionStatus,
+ * amount and currency, and where its time stands (condition 5). The lookup
+ * shows no window: its creationDate is the lookup's own moment (MMG, 7 Oct).
+ * Nothing else in the record (MMG's message, its HTML, the parties, any
+ * redacted field) ever reaches the answer. A value not shaped like what it
+ * claims to be is dropped, never shown.
  */
 export function timelineEntryOf(
-  intent: Pick<MmgCheckoutIntent, 'createdAt' | 'expiresAt'>, o: ObservationForTimeline, creation: CreationCheck,
+  intent: Pick<MmgCheckoutIntent, 'merchantTransactionId' | 'createdAt' | 'expiresAt' | 'amount' | 'currencyCode'>, o: ObservationForTimeline, creation: CreationCheck,
 ): MmgCheckoutTimelineEntry {
   const body = o.body && typeof o.body === 'object' && !Array.isArray(o.body) ? o.body as Record<string, unknown> : null;
   const at = o.createdAt.toISOString();
@@ -160,7 +164,24 @@ export function timelineEntryOf(
       mmgTransactionReference: answer ? mmgIdOf(answer['transactionReference']) : null,
       amount: answer ? amountOf(answer['amount']) : null,
       currency: answer ? currencyOf(answer['currency']) : null,
-      windowCheck: answer ? windowCheckOf(intent, typeof answer['creationDate'] === 'string' ? answer['creationDate'] : null, creation) : null,
+      windowCheck: null,
+      failure,
+    };
+  }
+  if (o.source === 'HISTORY') {
+    const txnId = mmgIdOf(o.detail);
+    const history = paymentHistoryOf(o);
+    const record = history.outcome === 'rows' && history.naming.length === 1 ? history.naming[0]! : null;
+    return {
+      at,
+      source: 'HISTORY',
+      resultCode: null,
+      transactionStatus: record ? wordOf(record['transactionStatus']) : null,
+      mmgTransactionId: txnId,
+      mmgTransactionReference: null,
+      amount: record ? amountOf(record['amount']) : null,
+      currency: record ? currencyOf(record['currency']) : null,
+      windowCheck: txnId ? windowCheckOf(intent, txnId, { ...creation, history }) : null,
       failure,
     };
   }
@@ -400,7 +421,7 @@ export async function mmgCheckoutSupportDetail(
   // then judge() holds every payment, so support claims no window either.
   const zone = creationZoneInUse(deps.checkout ?? (() => getMmgCheckoutProvider()));
   const creationFor = (o: ObservationForTimeline): CreationCheck => ({
-    zone, firstReplyAt: o.source === 'LOOKUP' && o.detail ? firstReplyNaming(answers, o.detail) : null,
+    zone, firstReplyAt: o.source === 'HISTORY' && o.detail ? firstReplyNaming(answers, o.detail) : null,
   });
   return {
     ...rows[0]!,

@@ -211,6 +211,11 @@ const fx = vi.hoisted(() => {
     switchRole: vi.fn(),
     toastError: vi.fn(),
     submitStore: vi.fn(),
+    /** [NO-DEAD-ENDS] One navigation object, so a door's destination can be asserted. */
+    navigation: { navigate: vi.fn(), goBack: vi.fn() },
+    /** [NO-DEAD-ENDS] The vendor order board read (['vendor','orders']); undefined = not served. */
+    orders: undefined as unknown,
+    ordersRefetch: vi.fn(async () => undefined),
   };
 });
 
@@ -243,6 +248,12 @@ vi.mock('@tanstack/react-query', () => ({
         return { data, error, isLoading: false, isFetched: true, refetch: fx.server.refetch };
       }
     }
+    if (options.queryKey[0] === 'vendor' && options.queryKey[1] === 'orders' && options.queryKey.length === 2 && enabled && fx.orders !== undefined) {
+      if (fx.orders === 'FAILED') {
+        return { data: undefined, error: new Error('Network Error'), isLoading: false, isFetched: true, isError: true, isRefetching: false, refetch: fx.ordersRefetch };
+      }
+      return { data: fx.orders, error: null, isLoading: false, isFetched: true, isError: false, isRefetching: false, refetch: fx.ordersRefetch };
+    }
     if (options.queryKey[0] === 'pricing' && enabled) {
       return { data: fx.server.pricing, error: null, isLoading: false, isPending: false, isFetched: true, isError: false, isRefetching: false, dataUpdatedAt: Date.now(), refetch: vi.fn() };
     }
@@ -259,7 +270,7 @@ vi.mock('react-native', () => ({
   Vibration: { vibrate: vi.fn(), cancel: vi.fn() },
   View: 'View',
 }));
-vi.mock('@react-navigation/native', () => ({ useNavigation: () => ({ navigate: vi.fn(), goBack: vi.fn() }) }));
+vi.mock('@react-navigation/native', () => ({ useNavigation: () => fx.navigation }));
 vi.mock('@react-navigation/native-stack', () => ({
   createNativeStackNavigator: () => ({ Navigator: 'Stack.Navigator', Group: 'Stack.Group', Screen: 'Stack.Screen' }),
 }));
@@ -345,6 +356,8 @@ vi.mock('./screens/VendorTierScreen', () => ({ VendorTierScreen: 'VendorTierScre
 import { VendorStack } from './VendorStack';
 import { BusinessSetup, VendorOnboarding } from './screens/BusinessSetup';
 import { VendorBillingSuspended } from './screens/VendorBillingSuspended';
+import { VendorStoreBlocked } from './screens/VendorStoreBlocked';
+import { HeldStoreOrders } from './screens/HeldStoreOrders';
 import { HeaderAction, TabHeader } from './shared';
 import { RoleSwitcherSheet } from '../../components/RoleSwitcherSheet';
 import { getAuthSessionSnapshot, useAuthStore } from '../../stores/authStore';
@@ -448,6 +461,7 @@ beforeEach(async () => {
   useStoreSwitcher.getState().setSelectedStore(null);
   serveProfile(null);
   fx.server.profileReads.length = 0;
+  fx.orders = undefined;
   vi.clearAllMocks();
 });
 
@@ -620,7 +634,9 @@ describe('the List-your-business form keeps what was typed', () => {
         longitude: -58.3045,
       },
       acceptAgreement: true,
-    });
+    // [Row 628] The payload is exactly the form (this API fixture serves no fee words, so no tick is sent);
+    // the second argument only re-reads the price when the server refuses a fee tick.
+    }, { onError: expect.any(Function) });
   });
 
   it('control: sign-out, another account and a later session each start from a blank form', async () => {
@@ -886,5 +902,172 @@ describe('the sample dashboard and account changes', () => {
 
     expect(only(root.output, VendorOnboarding).props.store.id).toBe('store-b');
     expect(useStoreSwitcher.getState().selectedStoreId).toBe('store-b');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [NO-DEAD-ENDS · owner, 6 Oct] "Nobody is ever stuck without a reason and a
+// next step." A store Swift suspended (source ADMIN), one closed with its
+// owner's account (WIND_DOWN) and a CLOSED store fell through to the
+// onboarding checklist — "selling unlocks the moment you're approved" — with
+// every document approved: no reason, no door. The root tested for a
+// 'MODERATION' source the server never writes. And a store on a fee hold lost
+// its whole queue, for every role, although the server lets it finish what it
+// already accepted (owner ruling, 1 Oct ~22:10).
+// ---------------------------------------------------------------------------
+describe('[NO-DEAD-ENDS] a held store is told the real reason and keeps its doors', () => {
+  const swiftSuspended = { ...liveStore, status: 'SUSPENDED', suspensionSource: 'ADMIN', subscription: { status: 'ACTIVE' } };
+  const windDown = { ...liveStore, status: 'SUSPENDED', suspensionSource: 'WIND_DOWN', subscription: { status: 'CANCELLED' } };
+  const closed = { ...liveStore, status: 'CLOSED', suspensionSource: null };
+  const unknownSource = { ...liveStore, status: 'SUSPENDED', suspensionSource: null, subscription: { status: 'ACTIVE' } };
+
+  it.each<[string, unknown, string]>([
+    ['suspended by Swift', swiftSuspended, 'SUSPENDED_BY_SWIFT'],
+    ['closed with the owner’s account', windDown, 'OWNER_ACCOUNT_CLOSED'],
+    ['closed', closed, 'CLOSED'],
+    ['suspended with no recorded source', unknownSource, 'SUSPENDED'],
+  ])('a store %s gets the held-store screen, never the onboarding checklist', async (_label, store, hold) => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(store));
+    const root = fx.mount(vendorRoot(), {});
+
+    expect(ofType(root.output, VendorOnboarding)).toHaveLength(0);
+    expect(only(root.output, VendorStoreBlocked).props.hold).toBe(hold);
+  });
+
+  it('control: a fee hold still opens the billing screen (pay, finish what was accepted)', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(pausedStore));
+    const root = fx.mount(vendorRoot(), {});
+
+    expect(ofType(root.output, VendorStoreBlocked)).toHaveLength(0);
+    only(root.output, VendorBillingSuspended);
+  });
+
+  it('the held-store screen says why, opens a ticket to a person, keeps Switch app and Log out, and lists open orders', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(swiftSuspended));
+    const root = fx.mount(vendorRoot(), {});
+    const blocked = fx.mount(VendorStoreBlocked, only(root.output, VendorStoreBlocked).props);
+
+    expect(JSON.stringify(ofType(blocked.output, 'T').map((el) => el.props.children))).toContain('Swift has suspended this store');
+    const help = ofType(blocked.output, 'PillButton').find((el) => el.props.testID === 'store-hold-get-help');
+    expect(help, 'a door to a person').toBeDefined();
+    help!.props.onPress();
+    expect(fx.navigation.navigate).toHaveBeenCalledWith('GetHelp', { category: 'VENDOR', subject: 'Why was my store suspended? (Kitty Bakes)' });
+    expect(only(blocked.output, HeldStoreOrders).props.canFinishAccepted).toBe(false);
+    // Not a one-way door: Switch app and Log out, like every business screen.
+    const header = only(blocked.output, TabHeader);
+    expect(header.props.onSwitch).toBeTypeOf('function');
+    header.props.onSwitch();
+    blocked.render();
+    expect(only(blocked.output, RoleSwitcherSheet).props).toMatchObject({ visible: true, current: 'vendor' });
+    const headerView = fx.mount(TabHeader, header.props);
+    expect(ofType(headerView.output, HeaderAction).map((el) => el.props.label)).toEqual(['Switch app', 'Log out']);
+  });
+
+  it('the fee-hold screen hands every role the accepted orders to finish', async () => {
+    await signIn('staff-a', ['CUSTOMER', 'VENDOR_STAFF']);
+    serveProfile({ myRole: 'STAFF', vendors: [pausedStore] });
+    const root = fx.mount(vendorRoot(), {});
+    const paused = fx.mount(VendorBillingSuspended, only(root.output, VendorBillingSuspended).props);
+
+    expect(only(paused.output, HeldStoreOrders).props.canFinishAccepted).toBe(true);
+  });
+
+  it('the open orders are one tap from the order screen: accepted ones to finish, new ones to decline', () => {
+    fx.orders = [
+      { id: 'o-new', orderNumber: 'N1', status: 'PENDING', items: [{}] },
+      { id: 'o-cooking', orderNumber: 'C1', status: 'PREPARING', items: [{}, {}] },
+      { id: 'o-done', orderNumber: 'D1', status: 'COMPLETED', items: [] },
+    ];
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: true, navigation: fx.navigation });
+    const rows = named(list.output, 'HeldOrderRow');
+    expect(rows.map((el) => el.props.order.id)).toEqual(['o-cooking', 'o-new']);
+
+    rows[0]!.props.onPress();
+    expect(fx.navigation.navigate).toHaveBeenCalledWith('VendorOrderDetail', { orderId: 'o-cooking', orderNumber: 'C1' });
+    expect(JSON.stringify(list.output)).toContain('Finish the orders you already accepted');
+    expect(JSON.stringify(list.output)).toContain('New orders waiting');
+  });
+});
+
+// [DS781] Review of the held-store screen: (S2) a store Swift holds cannot
+// decline an order already in progress (the board offers Reject only for new
+// orders), so the screen must not promise it; (S4) the failed-orders card
+// promised "pull down" where the pull did not reload the orders.
+describe('[NO-DEAD-ENDS · DS781] the held-store doors are the ones that exist', () => {
+  const inProgress = [{ id: 'o-cooking', orderNumber: 'C1', status: 'PREPARING', items: [{}] }];
+
+  it('under a hold only Swift lifts, in-progress orders point to a person, never to a decline the board does not offer', () => {
+    fx.orders = inProgress;
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: false, navigation: fx.navigation });
+    const said = JSON.stringify(list.output);
+    expect(said).toContain('Orders already in progress');
+    expect(said).not.toMatch(/decline it/);
+    expect(said).toContain('Ask Swift support');
+  });
+
+  it('control: new orders waiting still say they can be declined (the board offers Reject for them)', () => {
+    fx.orders = [{ id: 'o-new', orderNumber: 'N1', status: 'PENDING', items: [{}] }];
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: false, navigation: fx.navigation });
+    expect(JSON.stringify(list.output)).toContain('Open each one to decline it');
+  });
+
+  it('a failed order read is not an empty queue, and its own Try again reloads the orders', () => {
+    fx.orders = 'FAILED';
+    const list = fx.mount(HeldStoreOrders, { canFinishAccepted: true, navigation: fx.navigation });
+    expect(JSON.stringify(list.output)).toContain('This is not an empty queue');
+    const retry = ofType(list.output, 'PillButton').find((el) => el.props.testID === 'held-orders-retry');
+    expect(retry, 'a retry that exists').toBeDefined();
+    retry!.props.onPress();
+    expect(fx.ordersRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('pulling down on the fee-hold screen reloads the orders it lists', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(pausedStore));
+    const root = fx.mount(vendorRoot(), {});
+    const paused = fx.mount(VendorBillingSuspended, only(root.output, VendorBillingSuspended).props);
+    only(paused.output, 'RefreshControl').props.onRefresh();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.queryClient.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['vendor', 'orders'] });
+  });
+});
+
+// [SPEED 22 Oct · owner: "switching the tabs from Orders to Products is slow"] A store's
+// tabs mount on first visit and PAUSE drawing while hidden (as the customer tabs do,
+// navigation/CustomerStack.tsx): the Orders board no longer re-draws on every poll while
+// the owner is on Products, and a visited Products tab no longer re-draws every row on
+// each menu re-read while the owner is on Orders. New-order alerts are not inside a tab
+// (VendorLiveOrderLayer sits beside the tabs in VendorRoot), so a paused tab silences nothing.
+describe('the store tabs pause while hidden (every store type)', () => {
+  it.each(['RESTAURANT', 'STORE', 'SUPERMARKET', 'SERVICE'] as const)('%s: every tab is lazy and frozen on blur, none unmounts', (type) => {
+    useVendorPreview.getState().enterPreview(type);
+    useAuthStore.getState().setIntent('vendor');
+    const root = fx.mount(vendorRoot(), {});
+    const tabsEl = named(root.output, 'VendorTabs');
+    expect(tabsEl).toHaveLength(1);
+    const tabs = fx.mount(tabsEl[0]!.type as (props: unknown) => unknown, tabsEl[0]!.props);
+    const nav = only(tabs.output, 'Tab.Navigator');
+    expect(nav.props.screenOptions).toMatchObject({ lazy: true, freezeOnBlur: true, animation: 'none' });
+    const screens = ofType(tabs.output, 'Tab.Screen');
+    expect(screens.map((s) => s.props.name)[0]).toBe('Orders');
+    expect(screens.length).toBeGreaterThanOrEqual(3);
+    for (const screen of screens) {
+      expect(screen.props.options?.freezeOnBlur, `${screen.props.name} is not exempt from the pause`).not.toBe(false);
+      expect(screen.props.options?.unmountOnBlur, `${screen.props.name} keeps its state`).toBeUndefined();
+      expect(screen.props.options?.lazy, `${screen.props.name} mounts on first visit`).not.toBe(false);
+    }
+    // The new-order layer is a sibling of the tabs, not inside one.
+    expect(named(tabs.output, 'VendorLiveOrderLayer')).toHaveLength(0);
+  });
+
+  it('control: a live store\'s new-order layer stays beside the tabs, outside any tab', async () => {
+    await signIn('owner-a', ['CUSTOMER', 'VENDOR_OWNER']);
+    serveProfile(ownerOf(liveStore));
+    const root = fx.mount(vendorRoot(), {});
+    expect(named(root.output, 'VendorTabs')).toHaveLength(1);
+    expect(named(root.output, 'VendorLiveOrderLayer')).toHaveLength(1);
   });
 });

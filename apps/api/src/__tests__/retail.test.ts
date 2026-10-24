@@ -12,7 +12,8 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { guessColumnMapping, applyMapping, toImportCsv } from '../utils/catalogue-map';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
-import { injectWithApproval } from './helpers/admin-approval';
+import { askAndApprove, injectWithApproval, seedSecondApproval } from './helpers/admin-approval';
+import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 
 // ---------------------------------------------------------------------------
 // Retail (spec §4.5): AI/heuristic CSV column-mapping import and the
@@ -249,6 +250,69 @@ describe('[A-13] a refund is owed before it is paid', () => {
     expect(row.status).toBe('REFUND_DUE');
     expect(row.refundRef).toBeNull();
     expect(row.refundPaidAt).toBeNull();
+  });
+
+  it('two decisions past the same pre-read produce one transition and one audit', async () => {
+    const token = await admin();
+    const r = await pendingReturn();
+    const decisions = ['REFUND_DUE', 'REJECTED'] as const;
+    const resolveRequest = (status: (typeof decisions)[number], approvalId?: string) => ({
+      method: 'PUT' as const, url: `/api/v1/admin/returns/${r.id}/resolve`, payload: { status },
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, 'content-type': 'application/json', authorization: `Bearer ${token}`,
+        ...(approvalId ? { [APPROVAL_HEADER]: approvalId } : {}) },
+    });
+    // [U06] One ask per act: while the first decision's ask stands, a second
+    // decision on this return is refused at the gate...
+    const firstApproval = await askAndApprove(app, resolveRequest('REFUND_DUE'));
+    const refused = await app.inject(resolveRequest('REJECTED'));
+    expect(refused.statusCode, refused.body).toBe(409);
+    expect(refused.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...so two approved decisions can only be approvals written before that
+    // rule. They race past one pre-read exactly as before: the write guard holds.
+    const approvals = [firstApproval, await seedSecondApproval(app, firstApproval, { body: (b) => ({ ...b, status: 'REJECTED' }) })];
+    let release!: () => void;
+    let locked!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const acquired = new Promise<void>((resolve) => { locked = resolve; });
+    // Hold only this fixture row. Both requests can read REQUESTED, then both
+    // block at the write. Releasing the row tests the write guard, not luck
+    // about which HTTP request happened to start first.
+    const blocker = app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM return_requests WHERE id = ${r.id} FOR UPDATE`;
+      locked();
+      await gate;
+    }, { timeout: 20_000 });
+    await Promise.race([acquired, blocker.then(() => { throw new Error('fixture lock released before requests'); })]);
+    const requests = decisions.map((status, i) => app.inject(resolveRequest(status, approvals[i])));
+    let waiting = 0;
+    let probeError: unknown;
+    try {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const rows = await app.prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%UPDATE%return_requests%'`;
+        waiting = rows[0]!.count;
+        if (waiting >= 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } catch (error) {
+      probeError = error;
+    } finally {
+      release();
+      await blocker;
+    }
+    const responses = await Promise.all(requests);
+    if (probeError) throw probeError;
+    expect(waiting, 'both requests must reach their write before either wins').toBe(2);
+    expect(responses.map((res) => res.statusCode).sort()).toEqual([200, 409]);
+    expect(responses.find((res) => res.statusCode === 409)!.json().error.code).toBe('ALREADY_RESOLVED');
+    const winner = responses.findIndex((res) => res.statusCode === 200);
+    const row = await app.prisma.returnRequest.findUniqueOrThrow({ where: { id: r.id } });
+    expect(row.status).toBe(decisions[winner]);
+    expect(row.refundPaidAt).toBeNull();
+    expect(await app.prisma.auditLog.count({ where: { entityId: r.id } })).toBe(1);
   });
 
   it('only evidence closes it — reference and the amount actually sent', async () => {

@@ -61,7 +61,7 @@ const NAV_GROUPS: Array<{
     items: [
       { key: 'today', label: 'Today', glyph: '⌂' },
       { key: 'review', label: 'Review', glyph: '▤' },
-      { key: 'ops', label: 'Live ops', glyph: '↗' },
+      { key: 'ops', label: 'Live ops', glyph: '→' },
       { key: 'stuck', label: 'Stuck', glyph: '!' },
     ],
   },

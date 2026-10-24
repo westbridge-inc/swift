@@ -20,6 +20,9 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Nothing after checkout needs the repository token; keep it out of .git/config.
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
@@ -40,13 +43,19 @@ jobs:
             exit 1
           fi
 
+      # [AUD-1 row 303] The deploy tool is an EXACT version (never "latest" from
+      # the registry at deploy time), installed in its own step with install
+      # scripts off: no third-party install code ever runs while the deploy
+      # token is in the environment. Bump the version deliberately, in a PR.
+      - name: Install the Vercel CLI (exact version)
+        run: npm install --prefix "$RUNNER_TEMP/vercel-cli" --no-save --ignore-scripts vercel@63.1.2
+
       - name: Deploy to Vercel
-        # Token flows via env, not a CLI argument — argv is visible to every
-        # process on the runner; env vars are not.
+        # The CLI reads VERCEL_TOKEN from the environment when no token flag
+        # is given (its own lookup). The token is never an argument:
+        # argv is visible to every process on the runner; env vars are not.
         run: |
-          npx vercel --prod --token="$VERCEL_TOKEN" \
-            --scope=${{ vars.VERCEL_ORG_ID }} \
-            --yes
+          "$RUNNER_TEMP/vercel-cli/node_modules/.bin/vercel" --prod --scope="$VERCEL_ORG_ID" --yes
         working-directory: apps/web
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}

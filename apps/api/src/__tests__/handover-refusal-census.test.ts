@@ -23,6 +23,8 @@ import { HANDOVER_BLOCK_REASONS, HANDOVER_REFUSALS } from '../modules/order/hand
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
 const RIDER_ROUTES = readFileSync(path.join(REPO_ROOT, 'apps/api/src/modules/rider/rider.routes.ts'), 'utf8');
+// [continues #1582] The delivery door hands its proof to the order seam, which decides it in one place.
+const HANDOVER_DECISION = readFileSync(path.join(REPO_ROOT, 'apps/api/src/modules/handover/handover-decision.ts'), 'utf8');
 
 describe('[F-106-xx] the handover refusal table is complete and is what the route uses', () => {
   it('every block reason the door can return has rider-facing copy', () => {
@@ -53,12 +55,17 @@ describe('[F-106-xx] the handover refusal table is complete and is what the rout
   });
 
   it('the completing route answers from the table, not from a hand-rolled enumeration', () => {
-    expect(RIDER_ROUTES).toMatch(/HANDOVER_REFUSALS\[authority\.blockReason \?\? ''\]/);
-    // The two-reason enumeration this replaced must not creep back.
-    expect(
-      /if \(authority\.blockReason === /.test(RIDER_ROUTES),
-      'the route is enumerating block reasons by hand again — that is how the third one was lost',
-    ).toBe(false);
+    // [TRANSFORMED, continues #1582] The decision moved from the route into handover-decision.ts, under the order
+    // lock: the delivered door hands its proof to the seam, and the seam's decision answers from the table.
+    expect(RIDER_ROUTES).toMatch(/handover: \{ purpose: 'delivery', code: ridePin, handoverVersion \}/);
+    expect(HANDOVER_DECISION).toMatch(/HANDOVER_REFUSALS\[authority\.blockReason \?\? ''\]/);
+    // The two-reason enumeration this replaced must not creep back, in either place.
+    for (const [where, source] of [['rider.routes.ts', RIDER_ROUTES], ['handover-decision.ts', HANDOVER_DECISION]] as const) {
+      expect(
+        /if \(authority\.blockReason === /.test(source),
+        `${where} is enumerating block reasons by hand again — that is how the third one was lost`,
+      ).toBe(false);
+    }
   });
 
   it('each message names a distinct situation — a shared string would hide which one fired', () => {

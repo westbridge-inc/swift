@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client';
 import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { SosService, SOS_TRANSITIONS } from '../modules/safety/sos.service';
+import { testPhone } from './helpers/fixture-ids';
 
 // SOS engine — the life-safety state machine, proven with server-side evidence
 // (DB rows + state), per spec §14 A/B/C. Driven through the service directly
@@ -51,7 +52,7 @@ describe('SOS state machine [safety M2]', () => {
     await prisma.tenant.create({ data: { id: tenantB, name: 'SOS tenant B', slug: tenantB, isActive: true } });
     const adminB = await prisma.user.create({
       data: {
-        phone: `+59277${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Other', lastName: 'Admin',
         roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,
@@ -87,7 +88,7 @@ describe('SOS state machine [safety M2]', () => {
     await prisma.tenant.create({ data: { id: tenantB, name: 'SOS tenant B', slug: tenantB, isActive: true } });
     const victimB = await prisma.user.create({
       data: {
-        phone: `+59278${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Victim', lastName: 'B',
         roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,
@@ -95,7 +96,7 @@ describe('SOS state machine [safety M2]', () => {
     });
     const adminB = await prisma.user.create({
       data: {
-        phone: `+59279${Math.floor(Math.random() * 900000) + 100000}`,
+        phone: testPhone(),
         firstName: 'Responder', lastName: 'B',
         roles: ['ADMIN'] as never[], activeRole: 'ADMIN' as never,
         isPhoneVerified: true, status: 'ACTIVE', tenantId: tenantB,

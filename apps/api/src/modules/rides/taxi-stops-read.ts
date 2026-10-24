@@ -1,5 +1,6 @@
 import type { Prisma, PrismaClient, TaxiStopStatus } from '@prisma/client';
 import { isTaxiStopOpen } from '../order/order-status';
+import { coarseStops, type CoarseStop } from '../dispatch/board-privacy';
 
 // ---------------------------------------------------------------------------
 // [TAXI multi-stop 3/8] How the stops of a ride are READ and shown: one
@@ -116,14 +117,16 @@ export async function loadTaxiStops(
 }
 
 /** What a ride WITH stops adds to an offer, a board item or a recovered card:
- *  how many stops, and where. A ride without them adds nothing (null). */
+ *  how many stops, and roughly where. A ride without them adds nothing (null). */
 export function offerItinerary(
   order: { id: string; taxiStopCount: number | null },
   stops: ReadonlyMap<string, readonly TaxiStopRow[]>,
-): { stopCount: number; stops: TaxiStopPreview[] } | null {
+): { stopCount: number; stops: CoarseStop[] } | null {
   if (order.taxiStopCount == null) return null;
   const rows = stops.get(order.id) ?? [];
-  return { stopCount: rows.length, stops: stopPreview(rows) };
+  // [L05 · DS1301] Before acceptance a stop is only its order and a coarse
+  // point: no typed address, no exact position (the board's ~330 m grid).
+  return { stopCount: rows.length, stops: coarseStops(stopPreview(rows)) };
 }
 
 /** What a ride WITH stops adds to the passenger's or the driver's live ride:
@@ -153,7 +156,50 @@ export async function readRideItinerary(
 export async function readOfferItinerary(
   prisma: Pick<PrismaClient, 'taxiTripStop'>,
   order: { id: string; taxiStopCount: number | null },
-): Promise<{ stopCount: number; stops: TaxiStopPreview[] } | null> {
+): Promise<{ stopCount: number; stops: CoarseStop[] } | null> {
   if (order.taxiStopCount == null) return null;
   return offerItinerary(order, await loadTaxiStops(prisma, [order.id]));
+}
+
+/** [TAXI multi-stop 8/8] A stop as the operations console shows it: its
+ *  progress plus the arrival's evidence note (where the driver's own location
+ *  put the car), for a person reviewing the ride. Never on a passenger's or a
+ *  driver's surface. */
+export interface TaxiStopAdminView extends TaxiStopProgress {
+  evidenceNote: string | null;
+}
+
+/** One ride's stops for the console, in order, with the next one; null (and
+ *  no query) for a ride without stops. */
+export async function readAdminItinerary(
+  prisma: Pick<PrismaClient, 'taxiTripStop'>,
+  order: { id: string; taxiStopCount: number | null },
+): Promise<{ stops: TaxiStopAdminView[]; nextStopSequence: number | null } | null> {
+  if (order.taxiStopCount == null) return null;
+  const rows = await prisma.taxiTripStop.findMany({
+    where: { orderId: order.id },
+    select: { ...TAXI_STOP_PUBLIC_SELECT, evidenceNote: true },
+    orderBy: { sequence: 'asc' },
+  });
+  const notes = new Map(rows.map((r) => [r.sequence, r.evidenceNote]));
+  return {
+    stops: stopProgress(rows).map((s) => ({ ...s, evidenceNote: notes.get(s.sequence) ?? null })),
+    nextStopSequence: nextStopSequence(rows),
+  };
+}
+
+/** [TAXI multi-stop 8/8] What a ride's receipt names of its stops: each
+ *  address in order, and whether the driver skipped it. Null (and no query)
+ *  for a ride without stops. */
+export async function readReceiptStops(
+  prisma: Pick<PrismaClient, 'taxiTripStop'>,
+  order: { id: string; taxiStopCount: number | null },
+): Promise<Array<{ sequence: number; address: string; skipped: boolean }> | null> {
+  if (order.taxiStopCount == null) return null;
+  const rows = await prisma.taxiTripStop.findMany({
+    where: { orderId: order.id },
+    select: { sequence: true, address: true, status: true },
+    orderBy: { sequence: 'asc' },
+  });
+  return rows.map((r) => ({ sequence: r.sequence, address: r.address, skipped: r.status === 'SKIPPED' }));
 }

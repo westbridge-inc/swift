@@ -1,5 +1,5 @@
-import { screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it } from 'vitest';
 import CustodyCasesPage from './page';
 import { mockApi, renderWithQuery, requestsByMethod, type ApiRequest } from '@/test/test-utils';
 
@@ -41,16 +41,20 @@ describe('custody cases console', () => {
     expect(screen.getByText(/opened/)).toBeTruthy();
   });
 
-  it('a decision carries the operator’s reason, and a cancelled prompt sends nothing', async () => {
-    const prompt = vi.fn().mockReturnValueOnce(null).mockReturnValueOnce('  Rider cannot move, nearest rider is two minutes away  ');
-    vi.stubGlobal('prompt', prompt);
+  it('a decision carries the operator’s reason, and a cancelled panel sends nothing', async () => {
     const fetchMock = mockApi(handler);
     const { user } = renderWithQuery(<CustodyCasesPage />);
     await user.click(await screen.findByRole('button', { name: /Order SW-77/ }));
     const relayButton = await screen.findByRole('button', { name: 'Relay to another rider' });
     await user.click(relayButton);
+    let panel = await screen.findByRole('dialog');
+    await user.click(within(panel).getByRole('button', { name: 'Cancel' }));
     expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(0);
     await user.click(relayButton);
+    panel = await screen.findByRole('dialog');
+    expect(panel.textContent).toContain('Relay to another rider for order SW-77?');
+    await user.type(within(panel).getByRole('textbox', { name: 'Reason' }), '  Rider cannot move, nearest rider is two minutes away  ');
+    await user.click(within(panel).getByRole('button', { name: 'Relay to another rider' }));
     await waitFor(() => expect(requestsByMethod(fetchMock, 'POST')).toHaveLength(1));
     const [url, init] = requestsByMethod(fetchMock, 'POST')[0]!;
     expect(String(url)).toContain('/api/v1/admin/custody-cases/case-1/direct');

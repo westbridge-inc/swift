@@ -17,8 +17,11 @@ import { LAUNCH_HIDDEN_BUSES, MOVER_VEHICLES } from '@/lib/signup-roles';
 const fx = vi.hoisted(() => ({ send: vi.fn(), verify: vi.fn(), register: vi.fn(), become: vi.fn(), replace: vi.fn(), probe: vi.fn() }));
 vi.mock('next/navigation', () => ({ useRouter: () => ({ replace: fx.replace }) }));
 vi.mock('@/lib/auth', () => ({ sendOtp: fx.send, sessionProbe: fx.probe, apiFetch: vi.fn() }));
-vi.mock('@/lib/customer', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become, placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
+vi.mock('@/lib/customer-account', () => ({ verifyOtp: fx.verify, registerAccount: fx.register, becomePartner: fx.become }));
+vi.mock('@/lib/customer-places', () => ({ placesAutocomplete: vi.fn(), placeDetails: vi.fn() }));
 vi.mock('@/lib/geolocate', () => ({ currentCoords: vi.fn() }));
+// [Row 628] The weekly fee block has its own tests (weekly-fee.test.tsx); here it says what an API older than the tick says.
+vi.mock('./weekly-fee-loader', () => ({ loadWeeklyFee: () => import('@/test/weekly-fee-fixture') }));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -40,6 +43,9 @@ async function throughName(tile: RegExp) {
   await user.click(screen.getByRole('button', { name: 'Continue' }));
   fireEvent.change(await screen.findByLabelText('First name'), { target: { value: 'Test' } });
   fireEvent.change(screen.getByLabelText('Last name'), { target: { value: 'Partner' } });
+  // [Owner ruling 15 Oct 2026] the sign-up's two ticks: Terms + Privacy, and 18+.
+  await user.click(screen.getByRole('checkbox', { name: /Terms of Service/ }));
+  await user.click(screen.getByRole('checkbox', { name: /18 or older/ }));
   await user.click(screen.getByRole('button', { name: 'Create account' }));
   return user;
 }
@@ -76,20 +82,36 @@ describe('[W9] four ways to join', () => {
     const user = await throughName(/Drive a taxi with Swift/);
     expect(fx.register.mock.calls[0]![0]).toMatchObject({ role: 'MOVER' });
     expect(options()).toEqual([['CAR', 'Car'], ['WAGON_CAR', 'Wagon Car']]);
-    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
     await user.click(screen.getByRole('button', { name: 'Create driver account' }));
     expect(fx.become.mock.calls[0]![0]).toEqual({
       role: 'MOVER', acceptAgreement: true, vehicleType: 'CAR',
-      vehicle: { make: 'Toyota', model: 'Axio', year: 2018, color: 'Silver', licensePlate: 'PAA 1234' },
+      vehicle: { make: 'Toyota', model: 'Axio', year: 2018, color: 'Silver', licensePlate: 'HAA 1234' },
     });
+  });
+
+  // [Owner ruling 11 Oct 2026 — H-PLATE: KEEP] taxi plates are H-series; fixture plates above follow it.
+  it('the taxi door says taxi plates start with H, and will not take a private plate', async () => {
+    const user = await throughName(/Drive a taxi with Swift/);
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Year', '2018'], ['Colour', 'Silver']]) {
+      fireEvent.change(screen.getByLabelText(label!), { target: { value } });
+    }
+    await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));
+    const create = () => screen.getByRole('button', { name: 'Create driver account' }) as HTMLButtonElement;
+    expect(screen.getByText(/Taxi plates in Guyana start with H — e\.g\. HC 1234\./)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'PLX4821' } });
+    expect(create().disabled).toBe(true);
+    expect(screen.getByRole('alert').textContent).toMatch(/private \(P\) plate cannot be approved/);
+    fireEvent.change(screen.getByLabelText('Licence plate'), { target: { value: 'hc-1234' } });
+    expect(create().disabled).toBe(false);
   });
 
   it('the taxi door holds the vehicle year to what the server accepts (1980 to next year)', async () => {
     const user = await throughName(/Drive a taxi with Swift/);
-    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'PAA 1234']]) {
+    for (const [label, value] of [['Make', 'Toyota'], ['Model', 'Axio'], ['Colour', 'Silver'], ['Licence plate', 'HAA 1234']]) {
       fireEvent.change(screen.getByLabelText(label!), { target: { value } });
     }
     await user.click(screen.getByRole('checkbox', { name: /I agree to the Driver Partner Agreement/ }));

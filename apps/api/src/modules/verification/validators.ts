@@ -66,15 +66,11 @@ export const VALIDATOR_IMPLEMENTATIONS: Readonly<Record<string, ValidatorImpl>> 
     if (!mark || !context?.registrationMark) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
     return normMark(mark) === normMark(context.registrationMark) ? { status: 'PASS' } : { status: 'FAIL' };
   },
-  // [DOC-1 §3.7] A taxi driver's licence classes must include the hire-car class; delivery is not gated here.
-  // Which document this judges is the REGISTRY's say (the catalogue row is scoped to the licence — DOC-INV-2).
-  'validators#V_LICENCE_CLASS': ({ present, context }) => {
-    if (!context?.taxi) return NOT_APPLICABLE;
-    const classes = present.get('classes');
-    if (!classes) return { status: 'SKIP', detailCode: 'UNDETERMINABLE' };
-    const set = new Set(classes.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean));
-    return set.has('H') || set.has('HIRE') ? { status: 'PASS' } : { status: 'FAIL' };
-  },
+  // [VERIFY-DOCS · owner ruling 8, 6 Oct 2026] There is no "H class" rule on the ordinary driver's licence:
+  // the right to drive a hire car is the person's Hire Car Driver's Licence (s.80), a separate document the
+  // taxi checklist asks for. V_LICENCE_CLASS stays declared in the registry as a retired, non-blocking row
+  // with no implementation, so the results it wrote before the ruling still name a known rule.
+  // Never add a licence-class judgement back here.
   // §7.2 V_NOT_EXPIRED: a printed expiry in the past is a blocking FAIL (EXPIRED_DOCUMENT).
   'validators#V_NOT_EXPIRED': ({ declared, present }) => {
     if (!declared.some((f) => f.fieldCode === 'expiry_date')) return NOT_APPLICABLE; // the type declares no expiry: nothing to say

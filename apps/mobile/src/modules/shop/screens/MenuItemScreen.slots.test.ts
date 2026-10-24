@@ -68,7 +68,7 @@ vi.mock('../../../stores/authStore', () => ({
 vi.mock('../../../stores/bookingStore', () => ({
   useBookingStore: (select: (state: unknown) => unknown) => select({ setAppointment: vi.fn() }),
 }));
-vi.mock('../../../lib/images', () => ({ itemPhoto: () => null }));
+vi.mock('../../../lib/images', () => ({ itemPhoto: () => null, HERO_PHOTO_WIDTH: 1280 }));
 vi.mock('../../../lib/money', () => ({ money: (amount: number) => `$${amount}` }));
 vi.mock('../../../kit', () => Object.fromEntries([
   'Photo', 'Chip', 'CircleChip', 'ErrorState', 'IconChip', 'LoadingBlock', 'Money',

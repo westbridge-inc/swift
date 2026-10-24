@@ -150,6 +150,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   process.env['MMG_PAY_URL_ALLOWED_HOSTS'] = 'pay.example.com';
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  process.env['STORE_MMG_PAY_LINK'] = '1';
 
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -617,6 +619,9 @@ describe('Checkout — ID gate, multi-vendor split, fulfillment', () => {
     }, customer.token);
     expect(blocked.statusCode).toBe(403);
     expect(blocked.json().error.code).toBe('ID_VERIFICATION_REQUIRED');
+    // [Owner ruling 8 Oct 2026 — CUSTOMER ID] the ID goes on file, it is not "verified" by anyone.
+    expect(blocked.json().error.message).toMatch(/need your ID on file/);
+    expect(blocked.json().error.message).not.toMatch(/verif/i);
 
     // L2 flows through the same cart
     await app.prisma.user.update({ where: { id: customer.userId }, data: { trustLevel: 'L2' } });

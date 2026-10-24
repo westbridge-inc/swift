@@ -1,4 +1,5 @@
-# Trivy ignore list for the CI "Security Scan" job (trivy fs ... pnpm-lock.yaml).
+# Trivy ignore list for the CI "Security Scan" job (trivy fs ... pnpm-lock.yaml, and
+# apps/desktop/src-tauri/Cargo.lock for the desktop app's Rust crates).
 #
 # Rules (enforced by scripts/trivy-ignore-gate.mjs, which runs before Trivy):
 #   - one entry per advisory ID, scoped by `purls` to the exact package@version it

@@ -22,6 +22,7 @@ import type { CardRailProvider } from '../providers/card/card-provider';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [PT-1] The hosted card loop, end to end, on the real simulator and the real
@@ -33,7 +34,7 @@ import { deleteRunKeys, runKeyPrefix } from './helpers/card-sim-keys';
 
 const DAY = 24 * 60 * 60 * 1000;
 const RUN = nanoid(6).replace(/[^a-zA-Z0-9]/g, '0');
-const PHONE = `+59200742${String(Date.now()).slice(-4)}`;
+const PHONE = testPhone();
 const OTHER_TENANT = `pt1-card-${RUN.toLowerCase()}`;
 /** [AX297 F3] This run's own simulator namespace: the teardown deletes exactly it. */
 const PREFIX = runKeyPrefix(RUN);
@@ -70,6 +71,9 @@ async function partner(opts: { status?: SubscriptionStatus; due?: Date; failedAt
     },
   });
   subIds.push(sub.id);
+  // [PT-4 · review S2-1] The simulator moves no money: it books a week only for
+  // a subscription listed as a TEST subscription. Every partner here is one.
+  process.env['CARD_RAIL_TEST_SUBSCRIPTIONS'] = subIds.join(',');
   return { userId: user.id, subId: sub.id };
 }
 
@@ -134,6 +138,7 @@ afterEach(() => {
 afterAll(async () => {
   await cleanupBillingClocks(app.prisma, subIds);
   delete process.env['CARD_RAIL_V2'];
+  delete process.env['CARD_RAIL_TEST_SUBSCRIPTIONS'];
   delete process.env['MASTER_KEK'];
   resetKeyProviderForTests();
   // Purge the synthetic payers before their preserved authority sources.
@@ -1042,5 +1047,37 @@ describe('shared confirmation authority fences card PAY_NOW', () => {
     expect(await app.prisma.cardSession.findUniqueOrThrow({ where: { id: first.sessionId } }))
       .toMatchObject({ idempotencyKey, status: 'OPEN', providerSessionRef: expect.any(String) });
     expect(await app.prisma.cardSession.count({ where: { subscriptionId: p.subId } })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [OWNER #62 · 14 Oct, NO PAYING AHEAD; was four weeks, 8 Oct] A card Pay now
+// pays the next unpaid week, so a week paid by card counts toward the one-week
+// cap the same as money received for the coming week. The door refuses a
+// second week ahead in plain words; nothing is opened.
+// ---------------------------------------------------------------------------
+describe('[owner #62] a card Pay now never takes an account past one week ahead', () => {
+  it('while a week runs, the coming week can be paid; once it is paid by card, nothing more', async () => {
+    const running = await partner();
+    expect(await start(running, 'PAY_NOW')).toMatchObject({ purpose: 'PAY_NOW', amount: WEEKLY });
+    const next = await partner({ due: new Date(Date.now() + 3 * DAY + 7 * DAY) });
+    await expect(start(next, 'PAY_NOW')).rejects.toMatchObject({
+      statusCode: 409, code: 'PAY_AHEAD_LIMIT',
+      message: 'Your next weekly fee is already paid. Swift takes the weekly fee one week at a time: you can pay again once that week has started.',
+    });
+    expect(await app.prisma.cardSession.count({ where: { subscriptionId: next.subId } })).toBe(0);
+  });
+
+  it('[review S3-1] a Pay now that lands after something else filled the room is kept, and operations are paged to refund the excess', async () => {
+    const three = await partner();
+    const session = await start(three, 'PAY_NOW');
+    // Meanwhile the coming week was paid another way.
+    await app.prisma.prepaidBalance.upsert({ where: { subscriptionId: three.subId }, create: { subscriptionId: three.subId, balance: WEEKLY }, update: { balance: WEEKLY } });
+    await returnWith(await press(session.sessionId, 'APPROVE'));
+    expect(await card.confirm(session.sessionId)).toMatchObject({ status: 'SUCCEEDED', settlement: 'advanced' });
+    const pages = (await app.prisma.notification.findMany({ where: { data: { path: ['alert'], equals: 'pay-ahead-over-cap' } } }))
+      .filter((n) => (n.data as Record<string, unknown>)['subscriptionId'] === three.subId);
+    expect(pages.length).toBeGreaterThan(0);
+    await app.prisma.notification.deleteMany({ where: { id: { in: pages.map((p) => p.id) } } });
   });
 });

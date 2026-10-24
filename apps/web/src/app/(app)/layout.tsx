@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { useQuery } from '@tanstack/react-query';
 import { getSessionPrincipal, restoreSession, sessionProbe, subscribeSession } from '@/lib/auth';
 import { getMarketDepth } from '@/lib/customer';
@@ -11,11 +12,26 @@ import { customerRoute, HOME_PATH } from '@/lib/customer-routes';
 import { Providers } from '@/components/providers';
 import { CustomerSessionProvider, type CustomerSession, type NearPoint, type SessionStatus } from '@/components/customer-session';
 import { BackRow, ContentSkeleton, ShellNavProvider, SideRail, SignInDoor, SwitchAppSheet, TabBar } from '@/components/customer-shell';
-import CartSkeleton from './cart/loading';
-import OrderDetailSkeleton from './orders/[id]/loading';
 import { OrdersSkeleton } from '@/components/customer-skeletons';
 import { OfflineNotice } from '@/components/offline-notice';
+import { useGuestBasket } from '@/lib/basket-state';
+import { framesOrderingContext } from '@/lib/ordering-paths';
 import { InstallPrompt } from '@/components/install-prompt';
+import { lazyRetry } from '@/lib/chunk-retry';
+
+// [PERF #4] The cart's and an order's own loading shapes are drawn here only
+// while one of those private pages waits for the session answer on its first
+// load. They (and their page stylesheets) used to ride in every page's first
+// load, Home and the store page included; now they come with the page that
+// shows them. The server still draws them into that page's HTML, styles linked.
+const CartSkeleton = dynamic(() => import('./cart/loading'), { loading: () => <ContentSkeleton /> });
+const OrderDetailSkeleton = dynamic(() => import('./orders/[id]/loading'), { loading: () => <ContentSkeleton /> });
+
+// Upload code is needed only after sign-in with a browser basket.
+const OrderingContextBar = lazyRetry(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const GuestBasketSync = lazyRetry(() => import('@/components/guest-basket').then(module => ({ default: module.GuestBasketSync })));
+// [R26 · perf-budget] The fresh-acceptance gate is its own chunk, fetched after the page: the pages stay inside their budgets.
+const LegalAcceptanceGate = lazyRetry(() => import('@/components/legal-acceptance-gate').then(module => ({ default: module.LegalAcceptanceGate })));
 
 // The customer ordering app. Opening swiftgy.com lands here, on Home.
 //
@@ -33,6 +49,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <Providers>
       <CustomerShell>{children}</CustomerShell>
+      {/* [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick */}
+      <Suspense fallback={null}><LegalAcceptanceGate /></Suspense>
     </Providers>
   );
 }
@@ -165,7 +183,8 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
   const signedIn = status === 'signed-in';
   const cart = useQuery({ queryKey: customerCartKey(scope, epoch), queryFn: readShellCart, enabled: signedIn, staleTime: 30_000, retry: false });
   const me = useQuery({ queryKey: shellPersonKey(scope, epoch), queryFn: readShellPerson, enabled: signedIn, staleTime: 5 * 60_000, retry: false });
-  const cartCount = signedIn ? cartItemCount(cart.data) : 0;
+  const guestBasket = useGuestBasket();
+  const cartCount = signedIn ? cartItemCount(cart.data) : guestBasket.lines.reduce((n, l) => n + l.quantity, 0);
 
   // A private page opened with an expired access cookie: spend the refresh
   // cookie once before deciding this is a guest.
@@ -221,9 +240,11 @@ function CustomerShell({ children }: { children: React.ReactNode }) {
             returnPath={returnPath}
             onSwitchApp={openSwitchApp}
           />
-          <main className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
+          <main id="main" tabIndex={-1} className="min-w-0 flex-1 pb-[calc(var(--swift-dock)_+_40px)] pt-[env(safe-area-inset-top)]">
             <div className="sw-page">
+              {framesOrderingContext(pathname) ? <Suspense fallback={<div aria-hidden="true" className="py-3"><div className="min-h-11" /></div>}><OrderingContextBar /></Suspense> : null}
               <OfflineNotice />
+              {status === 'signed-in' && guestBasket.lines.length > 0 ? <Suspense fallback={null}><GuestBasketSync /></Suspense> : null}
               {showBack && backClaims === 0 ? <BackRow /> : null}
               <div key={pathname} className="swift-route-in">{content}</div>
             </div>

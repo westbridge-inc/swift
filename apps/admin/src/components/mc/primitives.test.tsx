@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
@@ -137,7 +137,8 @@ describe('[MC-PR1] <ReasonDialog> validation', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Approve Target Store?' });
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     const box = within(dialog).getByRole('textbox', { name: 'Reason' });
-    expect(document.activeElement).toBe(box);
+    // Modal moves focus in an effect, which can run just after the dialog is in the DOM.
+    await waitFor(() => expect(document.activeElement).toBe(box));
     expect(box.getAttribute('aria-describedby')).toBeTruthy();
   });
 
@@ -182,7 +183,7 @@ describe('[MC-PR1] <ReasonDialog> validation', () => {
     const dialog = await screen.findByRole('dialog');
     const amount = within(dialog).getByRole('textbox', { name: 'Amount handed back (GYD)' });
     const reference = within(dialog).getByRole('textbox', { name: 'Receipt reference' });
-    expect(document.activeElement).toBe(amount);
+    await waitFor(() => expect(document.activeElement).toBe(amount));
     await user.type(amount, 'four thousand');
     await user.type(reference, 'r1');
     await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
@@ -270,6 +271,23 @@ describe('[MC-PR1] <ReasonDialog> runs the action and keeps the refusal in the p
     expect(await done).toEqual({ tone: 'success', title: 'Suspended.' });
   });
 
+  it('a double click submits an order-review decision only once', async () => {
+    const user = mount();
+    let release: (_v: unknown) => void = () => {};
+    const submit = vi.fn(() => new Promise((r) => { release = r; }));
+    const done = api!.run({ title: 'Decide that the customer paid?', confirmLabel: 'Customer paid', submit, success: () => 'Sent.' });
+    const dialog = await screen.findByRole('dialog');
+    await user.type(within(dialog).getByRole('textbox', { name: 'Reason' }), REASON);
+    const confirm = within(dialog).getByRole('button', { name: 'Customer paid' });
+    await act(async () => {
+      confirm.click();
+      confirm.click();
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    release({});
+    expect(await done).toEqual({ tone: 'success', title: 'Sent.' });
+  });
+
   it('Tab stays inside the panel', async () => {
     const user = mount();
     void api!.run({ title: 'Feature it?', confirmLabel: 'Feature store', reason: false, submit: vi.fn() });
@@ -281,7 +299,7 @@ describe('[MC-PR1] <ReasonDialog> runs the action and keeps the refusal in the p
     expect(within(dialog).queryByRole('textbox')).toBeNull(); // a C2 confirmation asks no reason
   });
 
-  it('useAskReason is the drop-in for askReason: same argument, a Promise of the reason or null', async () => {
+  it('useAskReason asks in the panel: a Promise of the reason, and a CANCELLED panel returns nothing — never a default', async () => {
     const user = mount();
     const answer = ask!({ action: 'ban this account', subject: 'a test user' });
     const dialog = await screen.findByRole('dialog', { name: 'Why are you about to ban this account for a test user?' });

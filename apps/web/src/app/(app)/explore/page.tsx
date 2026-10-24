@@ -5,19 +5,22 @@ import Link from 'next/link';
 import { UtensilsCrossed, ShoppingCart, Store, Car, Package, Wrench, BadgePercent, Wallet, ShieldCheck } from 'lucide-react';
 import { getVendors, type Vendor } from '@/lib/customer';
 import { VendorCard, VendorGridSkeleton, VENDOR_GRID } from '@/components/order-ui';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
 
 const VERTICALS = [
   { href: '/order/browse?type=RESTAURANT', label: 'Food', desc: 'Restaurants & takeaway', Icon: UtensilsCrossed },
   { href: '/order/browse?type=SUPERMARKET', label: 'Groceries', desc: 'Markets & supermarkets', Icon: ShoppingCart },
-  { href: '/order/browse?type=STORE', label: 'Shops', desc: 'Pharmacy, hardware, goods', Icon: Store },
+  { href: '/order/browse?type=STORE', label: 'Shops', desc: 'Hardware, home and goods', Icon: Store },
   { href: '/taxi', label: 'Taxi', desc: 'Book in the Swift mobile app', Icon: Car },
   { href: '/courier', label: 'Send a package', desc: 'Point-to-point courier', Icon: Package },
   { href: '/order/browse?type=SERVICE', label: 'Services', desc: 'Electricians, cleaners & more', Icon: Wrench },
 ];
 const VALUES = [
-  { Icon: BadgePercent, title: '0% fees, no markups', body: 'Prices are the business’s own. Swift adds nothing to your order.' },
+  // [Legal research A12] the research's price promise; "0% fees" was not true next to a delivery fee.
+  { Icon: BadgePercent, title: PRICE_PROMISE_TITLE, body: PRICE_PROMISE_BODY },
   { Icon: Wallet, title: 'Pay cash or MMG', body: 'You pay the business or driver directly — Swift never holds your money.' },
-  { Icon: ShieldCheck, title: 'Verified locals', body: 'Every business and driver is document-verified before they go live.' },
+  // [R7 · GUARDRAILS §7(4)] Say what a person on our team actually did, and when.
+  { Icon: ShieldCheck, title: 'Checked before they go live', body: 'A person on our team checks every business’s and driver’s documents before they go live.' },
 ];
 
 export default function ExplorePage() {

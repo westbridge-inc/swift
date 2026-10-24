@@ -3,6 +3,8 @@ import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 import { bindBrowseTenant, requireRequestTenant } from '../search/search-scope';
 import { customerPoint } from './customer-point';
+import { legacyCategoryMark } from './legacy-category-mark';
+import { classifyCategory } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
 // Customer-facing discovery endpoints (#17 Part 8) — the rail's data source.
@@ -110,13 +112,15 @@ export async function discoveryRoutes(app: FastifyInstance) {
       .map((c) => ({
         slug: c.slug,
         name: c.name,
-        emoji: c.emoji,
+        emoji: legacyCategoryMark(c), // builds 9-11 draw it; never blank
         iconKey: c.iconKey,
         kind: c.kind,
         vertical: c.vertical,
         availableVendors: counts.get(c.id) ?? 0,
       }))
-      .filter((c) => c.availableVendors > 0); // law D: no dead taps
+      .filter((c) => c.availableVendors > 0) // law D: no dead taps
+      // [GUARDRAILS §8] No chip for a banned category.
+      .filter((c) => classifyCategory(c) === null);
 
     cache.set(key, { at: Date.now(), payload });
     if (cache.size > 200) {

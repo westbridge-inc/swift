@@ -9,6 +9,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { marketRoutes } from '../modules/market/market.routes';
 import { NEW_ITEM_WINDOW_DAYS, toItemHit } from '../modules/search/item-hit';
+import { checkItem, checkStore, classifyCategory, isHidden } from '../modules/compliance/prohibited-items';
 import { registerErrorHandler } from '../middleware/error-handler';
 
 // ---------------------------------------------------------------------------
@@ -34,17 +35,59 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // and each item ALSO sits in a differently-named vendor-scoped category.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ORDINARY FIXTURES. Every name here carries a random tag (so no two runs
+// collide), and the GUARDRAILS §8 prohibited-items judge reads every item name
+// and every category slug the feed serves. About 1 random 4-character tag in
+// 1,800 reads as banned goods ('gin1' ALCOHOL, 'jUUL' VAPES, 'Rx41' MEDICINE,
+// 'c1g5' TOBACCO, 'gAS-' LPG), and 1 slug in 3,000 does the same to the whole
+// category. The feed then hides that item, correctly, and whichever test
+// listed it went red on main at random (16 Oct: 'DIFFERENT vendors', the
+// CROSS-VENDOR taxonomy and the NEW boundary). Worse, an item a test expects
+// to be ABSENT could pass for that reason instead of the rule under test.
+//
+// So a tag is drawn again until the product's OWN judge reads the name as an
+// ordinary thing, and every fixture is checked before it is created: the only
+// reason an item may be missing from this feed is the behaviour being tested.
+// ---------------------------------------------------------------------------
+const CATEGORY_NAME = 'Hardware & tools';
+const TAG_DRAWS = 50;
+
+function ordinaryTag(size: number, ...uses: Array<(tag: string) => string>): string {
+  for (let draw = 0; draw < TAG_DRAWS; draw += 1) {
+    const tag = nanoid(size);
+    if (uses.every((use) => !isHidden(checkItem({ name: use(tag) })))) return tag;
+  }
+  throw new Error(`no tag in ${TAG_DRAWS} draws reads as an ordinary item name — the prohibited-items words changed; look at the fixture words`);
+}
+
+/** `Hammer x7Qa`: the word plus a tag the judge reads as an ordinary item. */
+function ordinary(word: string): string {
+  return `${word} ${ordinaryTag(4, (tag) => `${word} ${tag}`)}`;
+}
+
+function ordinarySlug(): string {
+  for (let draw = 0; draw < TAG_DRAWS; draw += 1) {
+    const slug = `mkt-tools-${nanoid(6)}`;
+    if (classifyCategory({ slug, name: CATEGORY_NAME }) === null) return slug;
+  }
+  throw new Error(`no category slug in ${TAG_DRAWS} draws reads as ordinary — the prohibited-items words changed`);
+}
+
 let app: FastifyInstance;
 const createdVendorIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdItemIds: string[] = [];
 const createdCategoryIds: string[] = [];
 const PHONE_PREFIX = '+59200941';
-const SLUG = `mkt-tools-${nanoid(6)}`;
+const SLUG = ordinarySlug();
+const vendorNames = new Map<string, string>();
 
 let seq = 0;
 async function makeVendor(name: string, opts: { visible?: boolean; type?: 'STORE' | 'RESTAURANT' | 'SERVICE' | 'SUPERMARKET' } = {}) {
   seq += 1;
+  // An ordinary store too: a store whose own words wait for a person hides every item it sells.
+  if (checkStore({ name }).state !== 'CLEAR') throw new Error(`fixture store "${name}" reads as prohibited — fix the fixture`);
   const user = await app.prisma.user.create({
     data: {
       phone: `${PHONE_PREFIX}${String(seq).padStart(2, '0')}`,
@@ -71,6 +114,7 @@ async function makeVendor(name: string, opts: { visible?: boolean; type?: 'STORE
     },
   });
   createdVendorIds.push(vendor.id);
+  vendorNames.set(vendor.id, name);
   return vendor;
 }
 
@@ -79,6 +123,16 @@ async function makeItem(vendorId: string, name: string, opts: {
   shelf?: string;              // the VENDOR-scoped category name
   discovery?: string | null;   // the CROSS-VENDOR category id
 } = {}) {
+  // The fixture is an ORDINARY item to the prohibited-items judge, with every
+  // word the feed's gate reads: so only the behaviour under test decides
+  // whether it is listed (see ORDINARY FIXTURES above).
+  const verdict = checkItem({
+    name,
+    sectionName: opts.shelf ?? 'Misc',
+    categories: opts.discovery ? [{ slug: SLUG, name: CATEGORY_NAME }] : [],
+    store: checkStore({ name: vendorNames.get(vendorId) ?? '' }),
+  });
+  if (isHidden(verdict)) throw new Error(`fixture "${name}" reads as prohibited goods (${verdict.state}) — the feed would hide it for that reason, not the one under test`);
   // Every item gets a vendor-scoped category too — that is the decoy.
   const shelf = await app.prisma.category.create({
     data: { vendorId, name: opts.shelf ?? 'Misc', sortOrder: 0 },
@@ -134,7 +188,7 @@ beforeAll(async () => {
   }
 
   const cat = await app.prisma.discoveryCategory.create({
-    data: { slug: SLUG, name: 'Hardware & tools', kind: 'RETAIL', vertical: 'RETAIL', emoji: '\u{1F528}', status: 'ACTIVE', sortWeight: 1 },
+    data: { slug: SLUG, name: CATEGORY_NAME, kind: 'RETAIL', vertical: 'RETAIL', emoji: '\u{1F528}', status: 'ACTIVE', sortWeight: 1 },
   });
   createdCategoryIds.push(cat.id);
   categoryId = cat.id;
@@ -156,8 +210,8 @@ describe('it lists THINGS, across stores — not shops', () => {
     // The whole point. A shop directory cannot produce this shape.
     const a = await makeVendor('Alpha Hardware');
     const b = await makeVendor('Beta Tools');
-    await makeItem(a.id, `Hammer ${nanoid(4)}`, { discovery: categoryId, shelf: 'Alpha Aisle 3' });
-    await makeItem(b.id, `Wrench ${nanoid(4)}`, { discovery: categoryId, shelf: 'Beta Bay 1' });
+    await makeItem(a.id, ordinary('Hammer'), { discovery: categoryId, shelf: 'Alpha Aisle 3' });
+    await makeItem(b.id, ordinary('Wrench'), { discovery: categoryId, shelf: 'Beta Bay 1' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
 
@@ -174,8 +228,8 @@ describe('it lists THINGS, across stores — not shops', () => {
     // shelf whose name would tempt a `categoryId` filter. Only the tagged ones
     // may come back.
     const v = await makeVendor('Gamma Supplies');
-    const tagged = await makeItem(v.id, `Chisel ${nanoid(4)}`, { discovery: categoryId, shelf: 'Gamma Shelf' });
-    const untagged = await makeItem(v.id, `Decoy ${nanoid(4)}`, { discovery: null, shelf: 'Hardware & tools' });
+    const tagged = await makeItem(v.id, ordinary('Chisel'), { discovery: categoryId, shelf: 'Gamma Shelf' });
+    const untagged = await makeItem(v.id, ordinary('Decoy'), { discovery: null, shelf: 'Hardware & tools' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     const ids = res.json().data.items.map((i: any) => i.id);
@@ -210,7 +264,7 @@ describe('the Market is GOODS — not dishes, not services', () => {
     // filter and not about which page a busy catalogue put the row on. An
     // earlier version queried the unfiltered feed at limit=50 and passed
     // vacuously — the dish was simply not on page one.
-    const dish = await makeItem(kitchen.id, `Dhal Puri ${nanoid(4)}`, { discovery: categoryId, shelf: 'Roti' });
+    const dish = await makeItem(kitchen.id, ordinary('Dhal Puri'), { discovery: categoryId, shelf: 'Roti' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
 
@@ -223,15 +277,18 @@ describe('the Market is GOODS — not dishes, not services', () => {
 
   it('a service listing never reaches it either', async () => {
     const trade = await makeVendor('Kingston Electrical', { type: 'SERVICE' });
-    const job = await makeItem(trade.id, `Rewire ${nanoid(4)}`, { discovery: categoryId, shelf: 'Jobs' });
+    const job = await makeItem(trade.id, ordinary('Rewire'), { discovery: categoryId, shelf: 'Jobs' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).not.toContain(job.id);
   });
 
   it('a supermarket aisle is not the market either', async () => {
-    const shop = await makeVendor('Bounty Super', { type: 'SUPERMARKET' });
-    const tin = await makeItem(shop.id, `Milk ${nanoid(4)}`, { discovery: categoryId, shelf: 'Dairy' });
+    // Not 'Bounty Super': Bounty is a rum, so the store-name rule (owner 14 Oct)
+    // held that store and hid its milk for THAT reason; this guard passed without
+    // ever reaching the vertical filter it is here to prove.
+    const shop = await makeVendor('Kitty Super', { type: 'SUPERMARKET' });
+    const tin = await makeItem(shop.id, ordinary('Milk'), { discovery: categoryId, shelf: 'Dairy' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).not.toContain(tin.id);
@@ -241,7 +298,7 @@ describe('the Market is GOODS — not dishes, not services', () => {
     // Without this the three assertions above pass on a feed that returns
     // nothing at all.
     const store = await makeVendor('Ogle Hardware', { type: 'STORE' });
-    const hammer = await makeItem(store.id, `Claw hammer ${nanoid(4)}`, { discovery: categoryId, shelf: 'Tools' });
+    const hammer = await makeItem(store.id, ordinary('Claw hammer'), { discovery: categoryId, shelf: 'Tools' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).toContain(hammer.id);
@@ -251,7 +308,7 @@ describe('the Market is GOODS — not dishes, not services', () => {
     // A tagged DISH must not appear under a market category either — the tag
     // says what a thing is, the vertical says whose tab it belongs on.
     const kitchen = await makeVendor('Demerara Grill House', { type: 'RESTAURANT' });
-    const dish = await makeItem(kitchen.id, `Pork Chops ${nanoid(4)}`, { discovery: categoryId, shelf: 'Grill' });
+    const dish = await makeItem(kitchen.id, ordinary('Pork Chops'), { discovery: categoryId, shelf: 'Grill' });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).not.toContain(dish.id);
@@ -286,7 +343,7 @@ describe('it inherits the platform rules rather than restating them', () => {
     // The inventory engine auto-hides at zero stock and auto-returns on
     // restock; the feed inherits that and must not defeat it.
     const v = await makeVendor('Delta Depot');
-    const gone = await makeItem(v.id, `Sold out ${nanoid(4)}`, { discovery: categoryId, available: false });
+    const gone = await makeItem(v.id, ordinary('Sold out'), { discovery: categoryId, available: false });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).not.toContain(gone.id);
@@ -296,7 +353,7 @@ describe('it inherits the platform rules rather than restating them', () => {
     // The ONE visibility predicate, imported — not a seventh copy. A suspended
     // operator's goods must not answer a browse.
     const hidden = await makeVendor('Epsilon Hidden', { visible: false });
-    const item = await makeItem(hidden.id, `Hidden ${nanoid(4)}`, { discovery: categoryId });
+    const item = await makeItem(hidden.id, ordinary('Hidden'), { discovery: categoryId });
 
     const res = await get(`/items?category=${SLUG}&limit=50`);
     expect(res.json().data.items.map((i: any) => i.id)).not.toContain(item.id);
@@ -306,8 +363,8 @@ describe('it inherits the platform rules rather than restating them', () => {
 describe('sorting and paging hold under duplicates', () => {
   it('price_asc actually sorts ascending', async () => {
     const v = await makeVendor('Zeta Prices');
-    const cheap = `Cheap ${nanoid(4)}`;
-    const dear = `Dear ${nanoid(4)}`;
+    const cheap = ordinary('Cheap');
+    const dear = ordinary('Dear');
     await makeItem(v.id, dear, { discovery: categoryId, price: 9000 });
     await makeItem(v.id, cheap, { discovery: categoryId, price: 5 });
 
@@ -321,7 +378,7 @@ describe('sorting and paging hold under duplicates', () => {
     // Without `id` as a tiebreaker, keyset paging silently drops and repeats
     // rows — the classic browse-feed corruption.
     const v = await makeVendor('Eta Ties');
-    const tag = nanoid(5);
+    const tag = ordinaryTag(5, ...Array.from({ length: 6 }, (_, i) => (t: string) => `Tie ${t} ${i}`));
     for (let i = 0; i < 6; i += 1) {
       await makeItem(v.id, `Tie ${tag} ${i}`, { discovery: categoryId, price: 100, totalOrdered: 7 });
     }
@@ -378,11 +435,11 @@ describe('`NEW` is derived, and it is the ONLY badge that is', () => {
 
   it('a listing inside the window is new; one outside it is not', async () => {
     const v = await makeVendor('Fresh Stock Co');
-    const fresh = await makeItem(v.id, `Fresh ${nanoid(4)}`, {
+    const fresh = await makeItem(v.id, ordinary('Fresh'), {
       discovery: categoryId,
       createdAt: new Date(Date.now() - 1 * DAY),
     });
-    const old = await makeItem(v.id, `Old ${nanoid(4)}`, {
+    const old = await makeItem(v.id, ordinary('Old'), {
       discovery: categoryId,
       createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS + 30) * DAY),
     });
@@ -399,11 +456,11 @@ describe('`NEW` is derived, and it is the ONLY badge that is', () => {
     // silently changes 14 to 90, `justInside` at 89 days would still pass a
     // sloppy test; this one moves with the constant.
     const v = await makeVendor('Boundary Goods');
-    const justInside = await makeItem(v.id, `Inside ${nanoid(4)}`, {
+    const justInside = await makeItem(v.id, ordinary('Inside'), {
       discovery: categoryId,
       createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS - 1) * DAY),
     });
-    const justOutside = await makeItem(v.id, `Outside ${nanoid(4)}`, {
+    const justOutside = await makeItem(v.id, ordinary('Outside'), {
       discovery: categoryId,
       createdAt: new Date(Date.now() - (NEW_ITEM_WINDOW_DAYS + 1) * DAY),
     });
@@ -431,8 +488,10 @@ describe('the response is the EXISTING item shape', () => {
     // first crack in that. A client that renders a search result renders this.
     const res = await get(`/items?category=${SLUG}&limit=1`);
     const item = res.json().data.items[0];
+    // [owner 13 Oct] `vendorIsCurrentlyOpen` joined the ONE shape (search marks a
+    // closed store's dish); the market card receives the same field, never a fork.
     expect(Object.keys(item).sort()).toEqual(
-      ['basePrice', 'categoryName', 'id', 'imageUrl', 'isNew', 'name', 'vendorId', 'vendorName'].sort(),
+      ['basePrice', 'categoryName', 'id', 'imageUrl', 'isNew', 'name', 'vendorId', 'vendorIsCurrentlyOpen', 'vendorName'].sort(),
     );
     expect(typeof item.basePrice, 'price is a number, never a Decimal string').toBe('number');
   });
@@ -445,7 +504,7 @@ describe('the response is the EXISTING item shape', () => {
     const row = {
       id: 'i1', name: 'Claw Hammer', basePrice: 2500, imageUrl: null,
       createdAt: new Date(), vendorId: 'v1',
-      vendor: { name: 'City Hardware' }, category: { name: 'Power Tools' },
+      vendor: { name: 'City Hardware', isCurrentlyOpen: true }, category: { name: 'Power Tools' },
     };
     const res = await get(`/items?category=${SLUG}&limit=1`);
     expect(Object.keys(res.json().data.items[0]).sort()).toEqual(Object.keys(toItemHit(row)).sort());

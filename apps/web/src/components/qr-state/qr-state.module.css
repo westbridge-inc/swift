@@ -6,6 +6,12 @@
   background: var(--swift-canvas);
 }
 
+.embedded {
+  display: grid;
+  place-items: center;
+  padding-block: var(--swift-space-2xl);
+}
+
 .card {
   width: min(100%, var(--swift-modal-width));
   display: grid;
