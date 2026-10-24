@@ -1,4 +1,4 @@
--- Rollback for 20261022230000_store_vat: drops the store-VAT columns and their enum types.
+-- Rollback for 20261024060000_store_vat: drops the store-VAT columns and their enum types.
 -- Lost: stores' VAT choices and approvals, items' VAT classes, and the VAT frozen on orders placed while it
 -- was live (their totals are untouched: VAT was always inside the price). Nothing else reads these columns.
 BEGIN;

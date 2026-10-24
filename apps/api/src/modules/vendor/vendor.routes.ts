@@ -7,6 +7,10 @@ import { assertHandoverRequestBudget } from '../handover/handover-request-budget
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from '../../lib/zod';
+import { VAT_CLASSES } from '../store-vat/vat-math';
+import { storeVatNumberChanged } from '../store-vat/store-vat-decisions';
+import { UPLOAD_CONSENT_TICKS, consentSubjectForRole, recordUploadConsent } from '../verification/upload-consent';
+import { consentSurfaceOf } from '../legal/consent-surface';
 import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
@@ -232,6 +236,10 @@ const createItemSchema = z.object({
   sortOrder: z.number().int().min(0).optional(),
   fulfillment: z.enum(['DELIVERY', 'PICKUP', 'APPOINTMENT']).optional(),
   bookingConfig: bookingConfigSchema.optional(),
+  // [STORE-VAT · owner O-5] The item's VAT class, the store's call (it is told it is responsible). Optional: an older
+  // app never sends it, and the item keeps its class (STANDARD for a new one). It carries VAT only for a store whose
+  // VAT a person approved.
+  vatClass: z.enum(VAT_CLASSES).optional(),
   optionGroups: z
     .array(optionGroupInputSchema.extend({ options: z.array(optionInputSchema).max(100) }))
     .max(50)
@@ -1419,6 +1427,61 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: { tier: 'UNREGISTERED', declaration: { id: doc.id, status: doc.status, docType: doc.docType }, status: await verification.getStatus(userId, vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE') } };
   });
 
+  // =========================================================================
+  // [STORE-VAT · owner O-5] The store's VAT: its answer, its certificate, and what a person decided. OWNER only
+  // (the business's tax registration is the owner's to give, like vatRegistrationNumber). Nothing a customer sees
+  // changes until a person approves the certificate (store-vat-decisions.ts).
+  // =========================================================================
+
+  /** GET /vat — the store's VAT as its owner sees it (status, mode, the approved details, the rate, the sources). */
+  app.get('/vat', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const { storeVatView } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await storeVatView(app.prisma, vendorId) };
+  });
+
+  /** PUT /vat — "Is your business VAT-registered with the GRA?" No = VAT off at once. Yes = the number (as on the
+   *  certificate) and how the prices relate to VAT; the store waits for a person. */
+  app.put('/vat', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = z.object({
+      registered: z.boolean(),
+      vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
+      mode: z.enum(['PRICES_INCLUDE_VAT', 'ADD_VAT_AT_CHECKOUT']).optional(),
+    }).strict().parse(request.body);
+    const { updateStoreVatSettings } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await updateStoreVatSettings(app.prisma, vendorId, body) };
+  });
+
+  /** POST /vat/certificate — the store's GRA VAT registration certificate (uploaded first through
+   *  /verification/upload, like every document). Filed for a PERSON's review, never sent to a document processor. */
+  app.post('/vat/certificate', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const body = z.object({
+      fileUrl: z.string().min(5).max(2048),
+      consent: z.literal(true),
+      privacyNoticeVersion: z.string().min(1).max(20),
+      consentTick: z.enum(UPLOAD_CONSENT_TICKS).optional(),
+    }).strict().parse(request.body);
+    const { storeVatEnabled, VAT_CERTIFICATE_DOC_TYPE } = await import('../store-vat/store-vat');
+    const { linkVatCertificate, STORE_VAT_OFF_CODE } = await import('../store-vat/store-vat-decisions');
+    if (!storeVatEnabled()) {
+      throw new AppError(409, STORE_VAT_OFF_CODE, 'VAT settings are not available on Swift right now. Your prices stay exactly as you typed them.');
+    }
+    const userId = request.user.userId;
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { vendorType: true, vatStatus: true } });
+    if (vendor.vatStatus === 'NONE') {
+      throw new AppError(409, 'VAT_NOT_CLAIMED', 'First say your business is VAT-registered and type its VAT number, then send the certificate.');
+    }
+    const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
+    const doc = await verification.submitDocument(userId, role, VAT_CERTIFICATE_DOC_TYPE, body.fileUrl, body.privacyNoticeVersion, request.user.role, { storeVatCertificate: true });
+    if (body.consentTick) {
+      await recordUploadConsent(app.prisma, { userId, tick: body.consentTick, subjectType: consentSubjectForRole(role), surface: consentSurfaceOf(request), ip: request.ip, docType: VAT_CERTIFICATE_DOC_TYPE });
+    }
+    reply.code(201);
+    return { success: true, data: await linkVatCertificate(app.prisma, vendorId, doc) };
+  });
+
   /**
    * [DOC-1 §3.6 · P3-2] GET /tier — the store's tier as the owner sees it: caps, today's and this
    * week's usage, whether promoted placement is open, what would promote the store, and the
@@ -1555,6 +1618,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
+      // [STORE-VAT] A new VAT number is a new claim: an approval for another number stops standing.
+      if (vatRegistrationNumber !== undefined) await storeVatNumberChanged(tx, vendorId, vatRegistrationNumber);
       const noticeId = pin && before
         ? await recordStorePinMove(tx, { vendorId, before, to: pin, actorUserId: request.user.userId, actorRole: access.role })
         : null;
@@ -2958,6 +3023,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         sortOrder,
         ...(body.fulfillment ? { fulfillment: body.fulfillment } : {}),
         ...(body.bookingConfig ? { bookingConfig: body.bookingConfig as object } : {}),
+        ...(body.vatClass !== undefined ? { vatClass: body.vatClass } : {}),
         optionGroups: body.optionGroups?.length
           ? {
               create: body.optionGroups.map((group, gi) => ({
@@ -3478,6 +3544,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.description !== undefined && { description: body.description?.trim() }),
           ...(photo === null && { imageUrl: null }),
           ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
+          ...(body.vatClass !== undefined && { vatClass: body.vatClass }),
           ...(body.sku !== undefined && { sku: body.sku }),
           ...(body.unit !== undefined && { unit: body.unit }),
           ...(body.bulk !== undefined && { bulkUnits: bulkUnitsForChoice(body.bulk) }),

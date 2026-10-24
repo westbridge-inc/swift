@@ -141,6 +141,18 @@ export const DARK_FEATURES: DarkFeature[] = [
     impact: 'money',
   },
   {
+    // [STORE-VAT · owner O-5, 24 Oct 2026] Built for launch, OFF until switched on deliberately. Even ON, nothing a
+    // customer sees changes for a store until a PERSON approves its GRA VAT certificate.
+    key: 'store_vat',
+    setting: 'STORE_VAT',
+    source: 'env',
+    enabledWhen: '1',
+    title: "A VAT-registered store's VAT (14%, inside its prices, shown on its receipts)",
+    whileOff:
+      "No store can say it is VAT-registered, send its GRA VAT certificate, or be approved for VAT; every store's prices, carts, checkouts and receipts show no VAT, exactly as before. Orders already placed with VAT keep the VAT they froze on their receipts. Swift's own fees stay \"Not a VAT invoice\" either way.",
+    impact: 'money',
+  },
+  {
     key: 'mover_push_required',
     setting: 'MOVER_PUSH_REQUIRED',
     source: 'env',

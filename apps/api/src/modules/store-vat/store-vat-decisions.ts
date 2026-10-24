@@ -128,6 +128,26 @@ export async function updateStoreVatSettings(
   return storeVatView(db, vendorId, env);
 }
 
+/**
+ * [called from the store profile save, inside its transaction] The store typed a different VAT number on its
+ * profile. An approval (or a pending claim) for another number stops standing: PENDING again, so a person looks at
+ * the new number; taking the number down entirely is a "no". The predicate already stops VAT on a mismatch; this
+ * keeps the status honest. No-op for a store that never claimed VAT.
+ */
+export async function storeVatNumberChanged(tx: Tx, vendorId: string, number: string | null): Promise<void> {
+  if (number === null) {
+    await tx.vendor.updateMany({
+      where: { id: vendorId, vatStatus: { in: ['PENDING', 'APPROVED'] } },
+      data: { vatStatus: 'NONE', vatMode: null, vatCertificateDocId: null, ...CLEARED_APPROVAL },
+    });
+    return;
+  }
+  await tx.vendor.updateMany({
+    where: { id: vendorId, vatStatus: 'APPROVED', NOT: { vatApprovedNumber: number } },
+    data: { vatStatus: 'PENDING', ...CLEARED_APPROVAL },
+  });
+}
+
 /** The certificate the store just sent becomes the one its VAT decision is about; the store is PENDING again
  *  (a new certificate is a new claim, looked at by a person). */
 export async function linkVatCertificate(db: PrismaClient, vendorId: string, doc: Pick<VerificationDocument, 'id' | 'docType' | 'userId'>, env: Record<string, string | undefined> = process.env) {

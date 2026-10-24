@@ -6178,6 +6178,64 @@ export async function adminRoutes(app: FastifyInstance) {
     return { success: true, data: { ...doc, accountTrustLevel: after?.trustLevel ?? null } };
   });
 
+  // ── [STORE-VAT · owner O-5] A store's VAT: a PERSON decides ─────────────
+  // The store's GRA VAT certificate is approved only here, by a document reviewer who types the VAT number and the
+  // registered name printed on it and its effective date (store-vat-decisions.ts). The certificate's own document
+  // decision and the store's VAT decision commit in ONE transaction, with the trail (auditIn + auditWithin).
+  const storeVatApproveSchema = z.object({
+    certificateDocId: z.string().min(1).max(64),
+    vatNumber: z.string().trim().min(1).max(40),
+    registeredName: z.string().trim().min(2).max(200),
+    effectiveFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    nameMatchesStore: z.literal(true),
+    reason: z.string().max(500).optional(),
+  });
+  const storeVatReasonSchema = z.object({ reason: z.string().trim().min(3).max(500) });
+
+  app.get('/store-vat/pending', { preHandler: [adminGuard] }, async () => {
+    const { pendingStoreVat } = await import('../store-vat/store-vat-decisions');
+    return { success: true, data: await pendingStoreVat(tenantPrisma) };
+  });
+
+  app.post('/store-vat/:vendorId/approve', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatApproveSchema.parse(request.body);
+    const { approveStoreVat } = await import('../store-vat/store-vat-decisions');
+    const data = await approveStoreVat(tenantPrisma, verification, vendorId, request.user.userId, {
+      certificateDocId: body.certificateDocId,
+      typedVatNumber: body.vatNumber,
+      registeredName: body.registeredName,
+      effectiveFrom: new Date(`${body.effectiveFrom}T00:00:00.000Z`),
+      nameMatchesStore: body.nameMatchesStore,
+    }, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'APPROVE_STORE_VAT', 'Vendor', vendorId, facts, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    });
+    return { success: true, data };
+  });
+
+  app.post('/store-vat/:vendorId/reject', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatReasonSchema.parse(request.body);
+    const { rejectStoreVat } = await import('../store-vat/store-vat-decisions');
+    const data = await rejectStoreVat(tenantPrisma, verification, vendorId, request.user.userId, body.reason, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'REJECT_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    });
+    return { success: true, data };
+  });
+
+  app.post('/store-vat/:vendorId/revoke', { preHandler: [adminGuard] }, async (request) => {
+    const { vendorId } = request.params as { vendorId: string };
+    const body = storeVatReasonSchema.parse(request.body);
+    const { revokeStoreVat, storeVatView } = await import('../store-vat/store-vat-decisions');
+    await revokeStoreVat(tenantPrisma, vendorId, request.user.userId, body.reason, async (tx, facts) => {
+      await auditIn(tx, request.user.userId, 'REVOKE_STORE_VAT', 'Vendor', vendorId, { ...facts, reason: body.reason }, request);
+      await auditWithin(tx, request as unknown as AuditRequestLike, app.prefix);
+    });
+    return { success: true, data: await storeVatView(tenantPrisma, vendorId) };
+  });
+
   // ── [DOC-1 §9.4 · P9-4] Legal holds on a person's documents ─────────────
   // Placed only here (DOC-INV-14), by a C3 actor with a stated reason (ADM-006,
   // header or body — the header wins, as everywhere). Every hold names an

@@ -9,9 +9,9 @@
  * Money is untouched: the VAT is inside the goods (vat-math.ts). An order frozen without VAT (`vatRateBps` null)
  * never gains it later, and an order frozen with VAT keeps it whatever the store or the switch does next.
  */
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { orderVat, type OrderVatResult, type VatClassName } from './vat-math';
-import { STORE_VAT_RATE_BPS } from './vat-rate';
+import { STORE_VAT_RATE_BPS, STORE_VAT_RATE_PERCENT } from './vat-rate';
 import { STORE_VAT_SELECT, storeVatEffective } from './store-vat';
 
 type Db = Prisma.TransactionClient;
@@ -52,6 +52,17 @@ function lineShares(raw: unknown): Map<string, number> | undefined {
   return shares;
 }
 
+/** The order columns the VAT amounts are written to (Decimal, like every money column). */
+export function orderVatAmountFields(result: OrderVatResult) {
+  return {
+    vatAmount: new Prisma.Decimal(result.vatAmount),
+    vatStandardGoods: new Prisma.Decimal(result.standardGoods),
+    vatZeroRatedGoods: new Prisma.Decimal(result.zeroRatedGoods),
+    vatExemptGoods: new Prisma.Decimal(result.exemptGoods),
+    vatBase: new Prisma.Decimal(result.vatBase),
+  };
+}
+
 /**
  * Write the order's VAT from its lines as they stand. A no-op (null) for an order frozen without VAT.
  * The goods discount each line carries is the share the promo redemption stored (M-33), so the VAT is on what
@@ -77,15 +88,43 @@ export async function recomputeOrderVat(db: Db, orderId: string): Promise<OrderV
     // The rate the order froze, never today's: a later rate change never reaches a placed order.
     rateBps: order.vatRateBps,
   });
-  await db.order.update({
-    where: { id: orderId },
-    data: {
-      vatAmount: result.vatAmount,
-      vatStandardGoods: result.standardGoods,
-      vatZeroRatedGoods: result.zeroRatedGoods,
-      vatExemptGoods: result.exemptGoods,
-      vatBase: result.vatBase,
-    },
-  });
+  await db.order.update({ where: { id: orderId }, data: orderVatAmountFields(result) });
   return result;
+}
+
+/** What the cart quote shows for one store: the VAT included in its goods, or null (no VAT for this store). */
+export interface CartVat {
+  included: number;
+  ratePercent: number;
+  standardGoods: number;
+  zeroRatedGoods: number;
+  exemptGoods: number;
+}
+
+/**
+ * [cart quote] The VAT inside each approved VAT store's goods, by the same function checkout freezes with
+ * (`orderVat`, the goods discount split across the lines). Stores whose VAT is not in effect get no entry.
+ */
+export async function cartVatByVendor(
+  db: Pick<Prisma.TransactionClient, 'vendor'>,
+  plans: ReadonlyArray<{ vendorId: string; goodsDiscount: number; lines: ReadonlyArray<{ id: string; amount: number; vatClass: string | null | undefined }> }>,
+  env: Record<string, string | undefined> = process.env,
+  now: Date = new Date(),
+): Promise<Map<string, CartVat>> {
+  const out = new Map<string, CartVat>();
+  if (plans.length === 0) return out;
+  const vendors = await db.vendor.findMany({ where: { id: { in: plans.map((p) => p.vendorId) } }, select: STORE_VAT_SELECT });
+  const effective = new Set(vendors.filter((v) => storeVatEffective(v, env, now)).map((v) => v.id));
+  for (const plan of plans) {
+    if (!effective.has(plan.vendorId)) continue;
+    const vat = orderVat({
+      lines: plan.lines.map((l) => ({ id: l.id, amount: l.amount, vatClass: (l.vatClass === 'ZERO_RATED' || l.vatClass === 'EXEMPT' ? l.vatClass : 'STANDARD') as VatClassName })),
+      goodsDiscount: plan.goodsDiscount,
+    });
+    out.set(plan.vendorId, {
+      included: vat.vatAmount, ratePercent: STORE_VAT_RATE_PERCENT,
+      standardGoods: vat.standardGoods, zeroRatedGoods: vat.zeroRatedGoods, exemptGoods: vat.exemptGoods,
+    });
+  }
+  return out;
 }

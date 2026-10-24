@@ -24,12 +24,12 @@ export const VAT_CERTIFICATE_DOC_TYPE = 'vat_registration_certificate';
 export const STORE_VAT_ENV = 'STORE_VAT';
 
 /**
- * The server switch. ON unless set to exactly '0': nothing changes for any store until a person approves its
- * certificate, so ON is safe by default (COORD ruling, 22 Oct). OFF: no store can start, send a certificate for,
- * or be approved for VAT, and no new order freezes VAT (orders already placed keep what they froze).
+ * The server switch. OFF unless set to exactly '1' (owner 24 Oct: built now, switched on deliberately). OFF: no
+ * store can start, send a certificate for, or be approved for VAT, and no new order freezes VAT (orders already
+ * placed keep what they froze). ON changes nothing for any store until a person approves its certificate.
  */
 export function storeVatEnabled(env: Record<string, string | undefined> = process.env): boolean {
-  return env[STORE_VAT_ENV] !== '0';
+  return env[STORE_VAT_ENV] === '1';
 }
 
 /** The vendor columns every VAT decision reads. */

@@ -10,6 +10,7 @@ import { mmgClaimLockObserver } from './mmg-claim.service';
 import { substitutionLineChange, substitutionDecideMinutes, substitutionNoAnswer, orderTotalAdjustable, isRemovalQuestion, MMG_SWAP_SETTLES_DIRECTLY, ONLY_ITEM_LEFT_COPY, PICK_ALIVE_WHERE, type AdjustableOrder } from './substitution-view';
 import { storeTeam, ringRecipients } from '../notification/store-team';
 import { hiddenAmong, unhideRestocked } from '../compliance/prohibited-gate';
+import { recomputeOrderVat } from '../store-vat/order-vat';
 
 /** [REPORT-006 F-006-02] MMG order money is immutable in-app — ANY payment
  *  status. CAPTURED is money the store already received; PENDING is only the
@@ -560,6 +561,12 @@ export class PickingService {
       if (cas.count === 0) {
         throw new AppError(409, 'NOT_PENDING', 'There is no open substitution on this line');
       }
+      // [STORE-VAT] On an order that froze VAT, the line now carries the SUBSTITUTE's VAT class (read now, at the
+      // customer's yes). A substitute with no item row keeps the line's class.
+      if (fresh.vatClass != null && fresh.substituteItemId) {
+        const subClass = await tx.item.findUnique({ where: { id: fresh.substituteItemId }, select: { vatClass: true } });
+        if (subClass) await tx.orderItem.update({ where: { id: lineId }, data: { vatClass: subClass.vatClass } });
+      }
 
       if (fresh.substituteItemId) {
         const sub = await tx.item.findUnique({
@@ -598,6 +605,8 @@ export class PickingService {
           totalAmount: { increment: delta },
         },
       });
+      // [STORE-VAT] The VAT inside the goods follows the goods (a no-op on an order without VAT).
+      await recomputeOrderVat(tx, orderId);
 
       // [REPORT-006 F-006-05] Committed float tracks the LIVE cash subtotal a
       // rider fronts. A dearer substitute must still fit the exposure cap
@@ -696,6 +705,8 @@ export class PickingService {
           totalAmount: { decrement: decTotal },
         },
       });
+      // [STORE-VAT] A removed line carries no VAT any more (a no-op on an order without VAT).
+      await recomputeOrderVat(tx, line.order.id);
       await tx.orderStatusLog.create({
         data: { orderId: line.order.id, status: ord.status as PickableStatus, changedBy, note: opts.note ?? `Line ${subStatus.toLowerCase()}: ${line.name}` },
       });

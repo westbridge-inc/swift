@@ -81,6 +81,7 @@ import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
 import { ATTESTABLE_PAYMENT_STATUSES } from '../vendor/mmg-attestation';
+import { lineVatClass, orderVatAmountFields, orderVatCreateFields, recomputeOrderVat, vatTermsForCheckout } from '../store-vat/order-vat';
 import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
 
 interface CheckoutInput {
@@ -1699,8 +1700,17 @@ export class OrderService {
             })
           : null;
 
+        // [STORE-VAT · owner O-5] The seller's approved VAT terms, read inside this transaction (null = no VAT: not an
+        // approved VAT store, or STORE_VAT off). VAT is INSIDE the goods price: no amount below changes.
+        const vatTerms = await vatTermsForCheckout(tx, plan.vendor.id);
+        const vatClassOf = vatTerms
+          ? new Map((await tx.item.findMany({ where: { id: { in: plan.orderItems.map((oi) => oi.itemId) } }, select: { id: true, vatClass: true } }))
+            .map((it) => [it.id, it.vatClass] as const))
+          : null;
+
         const order = await tx.order.create({
           data: {
+            ...orderVatCreateFields(vatTerms),
             tenantId: user.tenantId,
             orderNumber: generateOrderNumber(sequence),
             currencyCode: orderCurrency,
@@ -1778,6 +1788,7 @@ export class OrderService {
                 totalBase: oi.totalBase,
                 totalMarkup: 0,
                 totalCustomer: oi.totalBase,
+                ...(vatTerms ? { vatClass: lineVatClass(vatTerms, vatClassOf?.get(oi.itemId)) } : {}),
                 specialInstructions: oi.specialInstructions,
                 // [G2] SNAPSHOT, like name and every price above (ADR
                 // SWIFT-AUD-D5-04): itemId is a loose reference with no FK, so
@@ -1881,6 +1892,11 @@ export class OrderService {
               refundPolicy: REFUND_POLICY,
             },
           });
+        }
+        // [STORE-VAT] The VAT inside this order's goods, from its lines and their goods-discount shares just written.
+        if (vatTerms) {
+          const vat = await recomputeOrderVat(tx, order.id);
+          if (vat) Object.assign(order, orderVatAmountFields(vat));
         }
         created.push(order);
       }
