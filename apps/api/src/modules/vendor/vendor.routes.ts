@@ -2399,26 +2399,24 @@ export async function vendorRoutes(app: FastifyInstance) {
     // never a banned item, judged under the item's row lock with the write. [GUARDRAILS §8 · DS1266 S3 · DS1267 S4]
     // [MASTER-025] The adjustment record (the command's receipt) commits in the
     // same transaction too, so an error answer means nothing moved.
-    let adjustment;
-    try {
-      adjustment = await app.prisma.$transaction(async (tx) => {
-        const moved = await applyStockMovement(tx, {
-          itemId: item.id,
-          delta: body.delta,
-          reason: body.reason,
-          actorId: request.user.userId,
-          note,
-        });
-        await tx.item.updateMany({
-          where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
-          data: { isAvailable: false, autoHiddenAt: new Date() },
-        });
-        await unhideRestocked(tx, item.id);
-        return tx.stockAdjustment.create({
-          data: { itemId: item.id, delta: body.delta, reason: body.reason, note, createdBy: request.user.userId, commandKey, movementId: moved.movementId },
-        });
+    let replayed = false;
+    const adjustment = await app.prisma.$transaction(async (tx) => {
+      const moved = await applyStockMovement(tx, {
+        itemId: item.id,
+        delta: body.delta,
+        reason: body.reason,
+        actorId: request.user.userId,
+        note,
       });
-    } catch (err) {
+      await tx.item.updateMany({
+        where: { id: item.id, stockQuantity: { lte: 0 }, isAvailable: true },
+        data: { isAvailable: false, autoHiddenAt: new Date() },
+      });
+      await unhideRestocked(tx, item.id);
+      return tx.stockAdjustment.create({
+        data: { itemId: item.id, delta: body.delta, reason: body.reason, note, createdBy: request.user.userId, commandKey, movementId: moved.movementId },
+      });
+    }).catch(async (err) => {
       if (err instanceof AppError && err.code === 'INSUFFICIENT_STOCK') {
         throw new AppError(409, 'INSUFFICIENT_STOCK', 'That would take the stock below zero');
       }
@@ -2426,10 +2424,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       // rolled back whole, and answers with that command's receipt.
       if (commandKey && (err as { code?: unknown }).code === 'P2002') {
         const winner = await committedReceipt();
-        if (winner) return answer(winner, true);
+        if (winner) { replayed = true; return winner; }
       }
       throw err;
-    }
+    });
+    if (replayed) return answer(adjustment, true);
     scheduleVendorSearchSync(app, item.vendorId);
     return answer(adjustment, false);
   });
