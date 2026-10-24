@@ -1,0 +1,350 @@
+import type { FastifyInstance, HTTPMethods, InjectOptions } from 'fastify';
+import type { PrismaClient, UserRole } from '@prisma/client';
+import { createHash, randomBytes } from 'node:crypto';
+import { sessionCredentialDigest } from '../../lib/session-credential';
+
+// ---------------------------------------------------------------------------
+// [row 300 · T3] The route-table cross-tenant attack matrix.
+//
+// Every route the API mounts is fired by callers from OTHER tenants — the
+// store-review fiction (a REVIEW customer, rider and driver) and a second
+// tenant's store owner and administrator — at the REAL objects of the
+// production tenant: path ids, the store header, query and body fields all
+// name a production order, store, item, account, address, ticket, SOS,
+// chat room, document and so on. Two things must hold for every request:
+//   1. no 2xx answer carries production data (every production fixture
+//      carries a marker string; a body containing it is a leak), and
+//   2. after the whole sweep, no production row has changed (a digest of
+//      every fixture row, taken before and after).
+// The same sweep runs on the owner login and on the walled login (the
+// production CONTRACT posture), from two suites that share this harness.
+// ---------------------------------------------------------------------------
+
+export const PRODUCTION_TENANT = 'swift-default';
+
+/**
+ * The REAL app (buildApp, as server.ts builds it) and its route table, collected by its onRoute census:
+ * every plugin, prefix and hook production mounts (tenant header scope, multipart, the public, market,
+ * discovery, billing and legal families), so a newly mounted route joins the matrix with no list to keep.
+ * The suite raises RATE_LIMIT_MAX before building: the global per-user ceiling is not under test here,
+ * and at 200/min it would answer most of a 600-route sweep with 429. It also sets RUN_WORKERS=0: the
+ * in-process scheduler would page the seeded ACTIVE SOS on its own (a real system write to a production
+ * row, mid-sweep) and blur the one thing measured here, what a REQUEST can do. Queued work is the job
+ * suites' to judge; here it stays queued.
+ */
+export async function buildMatrixApp(): Promise<{ app: FastifyInstance; routes: Array<{ method: string; url: string }> }> {
+  const { buildApp } = await import('../../app');
+  const routes: Array<{ method: string; url: string }> = [];
+  const app = await buildApp({
+    onRoute: (route) => {
+      for (const m of (Array.isArray(route.method) ? route.method : [route.method]) as HTTPMethods[]) {
+        if (m !== 'HEAD' && m !== 'OPTIONS') routes.push({ method: m, url: route.url });
+      }
+    },
+  });
+  await app.ready();
+  return { app, routes };
+}
+
+export interface World {
+  run: string;
+  mark: string;
+  review: string;
+  tenantB: string;
+  victim: {
+    customer: string; owner: string; riderUser: string; driverUser: string;
+    rider: string; driver: string; vendor: string; vendorOwner: string; category: string; item: string;
+    address: string; order: string; delivered: string; taxi: string; courier: string; orderItem: string;
+    rating: string; ticket: string; sos: string; room: string; document: string; staffUser: string;
+    optionGroup: string; option: string; cart: string; cartItem: string; booking: string; subscription: string; claim: string;
+  };
+  attackers: Array<{ label: string; userId: string; role: UserRole }>;
+  cleanup: () => Promise<void>;
+}
+
+const phone = (run: string, n: number) => `+59210${String(Number.parseInt(run.slice(0, 6), 16) % 100000).padStart(5, '0')}${String(n).padStart(2, '0')}`;
+
+/** Production fixtures (every human-readable field carries `mark`) and the attackers' accounts, written by the suite's owner client. */
+export async function seedWorld(owner: PrismaClient): Promise<World> {
+  const run = randomBytes(5).toString('hex');
+  const mark = `VICTIM${run.toUpperCase()}`;
+  const review = `matrix-review-${run}`;
+  const tenantB = `matrix-b-${run}`;
+  let n = 0;
+  const user = (tenantId: string, roles: UserRole[], label: string, extra: Record<string, unknown> = {}) => owner.user.create({
+    data: {
+      phone: phone(run, ++n), firstName: label, lastName: tenantId === PRODUCTION_TENANT ? mark : 'Attacker',
+      email: tenantId === PRODUCTION_TENANT ? `${mark.toLowerCase()}.${n}@example.invalid` : undefined,
+      roles, activeRole: roles[0]!, isPhoneVerified: true, tenantId, ...extra,
+    },
+  });
+  await owner.tenant.create({ data: { id: review, name: 'Matrix review fiction', slug: review, kind: 'REVIEW', purgeProtected: true } });
+  await owner.reviewSession.create({ data: { tenantId: review, expiresAt: new Date(Date.now() + 86_400_000) } });
+  await owner.tenant.create({ data: { id: tenantB, name: 'Matrix tenant B', slug: tenantB, isActive: true } });
+
+  // ── the production tenant's real objects ───────────────────────────────
+  const customer = await user(PRODUCTION_TENANT, ['CUSTOMER'], `${mark} Customer`, { customer: { create: {} } });
+  const ownerUser = await user(PRODUCTION_TENANT, ['VENDOR_OWNER', 'CUSTOMER'], `${mark} Owner`);
+  const staffUser = await user(PRODUCTION_TENANT, ['CUSTOMER'], `${mark} Staff`); // staff = a CUSTOMER account + a VendorStaff row
+  const riderUser = await user(PRODUCTION_TENANT, ['MOVER', 'RIDER', 'CUSTOMER'], `${mark} Rider`);
+  const driverUser = await user(PRODUCTION_TENANT, ['MOVER', 'DRIVER', 'CUSTOMER'], `${mark} Driver`);
+  const vendorOwner = await owner.vendorOwner.create({ data: { userId: ownerUser.id } });
+  const vendor = await owner.vendor.create({
+    data: {
+      ownerId: vendorOwner.id, name: `${mark} Store`, slug: `matrix-${run}`, vendorType: 'RESTAURANT', phone: phone(run, 90),
+      addressLine1: `${mark} Lane`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.80, longitude: -58.15,
+      status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
+    },
+  });
+  await owner.vendorStaff.create({ data: { vendorId: vendor.id, userId: staffUser.id, invitedBy: ownerUser.id, role: 'STAFF' } });
+  const category = await owner.category.create({ data: { vendorId: vendor.id, name: `${mark} Menu` } });
+  const item = await owner.item.create({ data: { vendorId: vendor.id, categoryId: category.id, name: `${mark} Pepperpot`, description: `${mark} secret recipe`, basePrice: 1500 } });
+  const rider = await owner.rider.create({ data: { userId: riderUser.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } });
+  const driver = await owner.driver.create({ data: {
+    userId: driverUser.id, vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2019, vehicleColor: 'Silver', licensePlate: `M ${run.slice(0, 4)}`,
+    driverLicenseUrl: 'storage://matrix/licence', vehicleInsuranceUrl: 'storage://matrix/insurance',
+  } });
+  const address = await owner.address.create({ data: { userId: customer.id, label: `${mark} Home`, addressLine1: `${mark} Street`, city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.81, longitude: -58.16 } });
+  const base = {
+    customerId: customer.id, deliveryAddress: `${mark} Street`, deliveryLat: 6.81, deliveryLng: -58.16, specialInstructions: undefined,
+    deliveryInstructions: `${mark} ring twice`, subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 500, totalAmount: 2000, paymentMethod: 'CASH' as const,
+  };
+  let o = 0;
+  const order = (data: Record<string, unknown>) => owner.order.create({ data: { ...base, orderNumber: `MX-${run}-${++o}`, ...data } as never });
+  const live = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', vendorId: vendor.id, status: 'RIDER_ASSIGNED', riderId: rider.id, pickupAddress: `${mark} Lane`, pickupLat: 6.80, pickupLng: -58.15, ridePin: '135790', pickupCode: '246802' });
+  const delivered = await order({ orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY', vendorId: vendor.id, status: 'DELIVERED', riderId: rider.id, deliveredAt: new Date() });
+  const taxi = await order({ orderType: 'TAXI', fulfillment: 'DELIVERY', status: 'DRIVER_ASSIGNED', driverId: driver.id, taxiFareTotal: 2000, pickupAddress: `${mark} Taxi Stand`, pickupLat: 6.80, pickupLng: -58.15, ridePin: '135791' });
+  const courier = await order({ orderType: 'COURIER', fulfillment: 'DELIVERY', status: 'READY_FOR_PICKUP', courierRecipientName: `${mark} Recipient`, courierRecipientPhone: phone(run, 91), courierPackageDescription: `${mark} parcel`, pickupAddress: `${mark} Depot`, pickupLat: 6.80, pickupLng: -58.15 });
+  const orderItem = await owner.orderItem.create({ data: { orderId: live.id, itemId: item.id, name: `${mark} Pepperpot`, quantity: 1, basePrice: 1500, markedUpPrice: 1500, markupAmount: 0, totalBase: 1500, totalMarkup: 0, totalCustomer: 1500 } });
+  await owner.orderStatusLog.create({ data: { orderId: live.id, status: 'RIDER_ASSIGNED', note: `${mark} assigned` } });
+  const rating = await owner.rating.create({ data: { orderId: delivered.id, raterId: customer.id, type: 'CUSTOMER_TO_VENDOR', score: 5, comment: `${mark} lovely` } as never });
+  const ticket = await owner.supportTicket.create({ data: { userId: customer.id, category: 'ORDER_ISSUE', subject: `${mark} missing item`, message: `${mark} my soup was missing` } as never });
+  const sos = await owner.sosAlert.create({ data: { actorUserId: customer.id, actorRole: 'CUSTOMER', orderId: taxi.id, status: 'ACTIVE', triggerSource: 'BUTTON', triggeredAt: new Date(), triggerNote: `${mark} help`, triggerAddressText: `${mark} Street` } as never });
+  const room = await owner.chatRoom.create({ data: { orderId: live.id, participants: { create: [{ userId: customer.id, role: 'CUSTOMER' }, { userId: riderUser.id, role: 'RIDER' }] }, messages: { create: [{ senderId: customer.id, message: `${mark} gate code 4321` }] } } });
+  const document = await owner.verificationDocument.create({ data: { userId: riderUser.id, role: 'MOVER', docType: 'drivers_licence', fileUrl: `storage://matrix/${mark}`, status: 'PENDING' } as never });
+  const optionGroup = await owner.optionGroup.create({ data: { itemId: item.id, name: `${mark} Spice`, options: { create: [{ name: `${mark} Hot`, additionalPrice: 100 }] } }, include: { options: true } });
+  const cart = await owner.cart.create({ data: { customerId: customer.id, vendorId: vendor.id, items: { create: [{ itemId: item.id, quantity: 2, selectedOptions: [], specialInstructions: `${mark} no onions` }] } }, include: { items: true } });
+  const booking = await owner.booking.create({ data: { itemId: item.id, customerId: customer.id, slotStart: new Date(Date.now() + 86_400_000), slotEnd: new Date(Date.now() + 90_000_000) } });
+  const subscription = await owner.subscription.create({ data: {
+    vendorId: vendor.id, type: 'RESTAURANT', status: 'ACTIVE', weeklyRate: 2000, currentPeriodStart: new Date(),
+    currentPeriodEnd: new Date(Date.now() + 7 * 86_400_000), nextBillingDate: new Date(Date.now() + 7 * 86_400_000),
+  } });
+  const claim = await owner.reimbursementClaim.create({ data: { orderId: delivered.id, riderId: rider.id, customerId: customer.id, amount: 500, reason: `${mark} spilled soup`, gpsLat: 6.81, gpsLng: -58.16 } });
+
+  // ── the attackers: the review fiction and a second tenant ──────────────
+  const reviewCustomer = await user(review, ['CUSTOMER'], 'Review Customer', { customer: { create: {} }, isSynthetic: true });
+  const reviewRider = await user(review, ['MOVER', 'RIDER', 'CUSTOMER'], 'Review Rider', { isSynthetic: true });
+  await owner.rider.create({ data: { userId: reviewRider.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE' } }); // Rider has no tenantId: its user's tenant walls it
+  const reviewDriver = await user(review, ['MOVER', 'DRIVER', 'CUSTOMER'], 'Review Driver', { isSynthetic: true });
+  await owner.driver.create({ data: {
+    userId: reviewDriver.id, vehicleMake: 'Toyota', vehicleModel: 'Axio', vehicleYear: 2018, vehicleColor: 'Blue', licensePlate: `R ${run.slice(0, 4)}`,
+    driverLicenseUrl: 'storage://matrix/r-licence', vehicleInsuranceUrl: 'storage://matrix/r-insurance',
+  } });
+  const bOwner = await user(tenantB, ['VENDOR_OWNER', 'CUSTOMER'], 'TenantB Owner');
+  const bVendorOwner = await owner.vendorOwner.create({ data: { userId: bOwner.id } });
+  await owner.vendor.create({ data: {
+    ownerId: bVendorOwner.id, name: 'Tenant B Store', slug: `matrix-b-${run}`, vendorType: 'RESTAURANT', phone: phone(run, 92), tenantId: tenantB,
+    addressLine1: 'B Lane', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.80, longitude: -58.15, status: 'ACTIVE',
+  } as never });
+  // A tenant ADMIN, not SUPER_ADMIN: a SUPER_ADMIN is the PLATFORM responder, unscoped on purpose for SOS
+  // (TA-S0-004, safety.routes.ts isPlatformResponder), so it is no cross-tenant attacker.
+  const bAdmin = await user(tenantB, ['ADMIN'], 'TenantB Admin', { admin: { create: { permissions: ['*'] } } });
+
+  const victimUsers = [customer.id, ownerUser.id, staffUser.id, riderUser.id, driverUser.id];
+  const attackerUsers = [reviewCustomer.id, reviewRider.id, reviewDriver.id, bOwner.id, bAdmin.id];
+  return {
+    run, mark, review, tenantB,
+    victim: {
+      customer: customer.id, owner: ownerUser.id, riderUser: riderUser.id, driverUser: driverUser.id, rider: rider.id, driver: driver.id,
+      vendor: vendor.id, vendorOwner: vendorOwner.id, category: category.id, item: item.id, address: address.id, order: live.id,
+      delivered: delivered.id, taxi: taxi.id, courier: courier.id, orderItem: orderItem.id, rating: rating.id, ticket: ticket.id,
+      sos: sos.id, room: room.id, document: document.id, staffUser: staffUser.id,
+      optionGroup: optionGroup.id, option: optionGroup.options[0]!.id, cart: cart.id, cartItem: cart.items[0]!.id, booking: booking.id,
+      subscription: subscription.id, claim: claim.id,
+    },
+    attackers: [
+      { label: 'review customer', userId: reviewCustomer.id, role: 'CUSTOMER' },
+      { label: 'review rider', userId: reviewRider.id, role: 'RIDER' },
+      { label: 'review driver', userId: reviewDriver.id, role: 'DRIVER' },
+      { label: 'tenant-B store owner', userId: bOwner.id, role: 'VENDOR_OWNER' },
+      { label: 'tenant-B admin', userId: bAdmin.id, role: 'ADMIN' },
+    ],
+    cleanup: async () => {
+      const all = [...victimUsers, ...attackerUsers];
+      const swallow = () => undefined;
+      await owner.session.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.reimbursementClaim.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
+      await owner.booking.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
+      await owner.cart.deleteMany({ where: { customerId: { in: all } } }).catch(swallow);
+      await owner.subscription.deleteMany({ where: { vendor: { ownerId: { in: [vendorOwner.id, bVendorOwner.id] } } } }).catch(swallow);
+      await owner.order.deleteMany({ where: { OR: [{ customerId: { in: all } }, { vendor: { ownerId: { in: [vendorOwner.id, bVendorOwner.id] } } }] } }).catch(swallow);
+      await owner.verificationDocument.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.sosAlert.deleteMany({ where: { actorUserId: { in: all } } }).catch(swallow);
+      await owner.supportTicket.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.address.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.vendor.deleteMany({ where: { ownerId: { in: [vendorOwner.id, bVendorOwner.id] } } }).catch(swallow);
+      await owner.vendorOwner.deleteMany({ where: { id: { in: [vendorOwner.id, bVendorOwner.id] } } }).catch(swallow);
+      await owner.rider.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.driver.deleteMany({ where: { userId: { in: all } } }).catch(swallow);
+      await owner.user.deleteMany({ where: { id: { in: all } } }).catch(swallow);
+      await owner.reviewSession.deleteMany({ where: { tenantId: review } }).catch(swallow);
+      await owner.tenant.updateMany({ where: { id: review }, data: { purgeProtected: false } }).catch(swallow);
+      await owner.tenant.deleteMany({ where: { id: { in: [review, tenantB] } } }).catch(swallow);
+    },
+  };
+}
+
+/** A live session and access token for an attacker (privileged roles sign in by OTP, as their assurance requires). */
+export async function mintToken(app: FastifyInstance, owner: PrismaClient, attacker: { userId: string; role: UserRole }): Promise<string> {
+  const token = app.jwt.sign({ userId: attacker.userId, role: attacker.role, jti: randomBytes(6).toString('hex') });
+  // This raw owner client sits outside the app client's credential-digest
+  // extension, so it stores the digests itself (sessions keep digests only).
+  await owner.session.create({ data: {
+    userId: attacker.userId, token: sessionCredentialDigest(token), refreshToken: sessionCredentialDigest(randomBytes(24).toString('hex')), authMethod: 'OTP',
+    deviceId: 'matrix', deviceType: 'test', expiresAt: new Date(Date.now() + 86_400_000),
+  } });
+  return token;
+}
+
+/** Path params: the production object each segment names. */
+export function materialize(url: string, w: World): string {
+  const v = w.victim;
+  const bySegment: Record<string, string> = {
+    orders: v.order, order: v.order, deliveries: v.order, jobs: v.order, legs: v.order, offers: v.order, receipts: v.delivered,
+    rides: v.taxi, ride: v.taxi, trips: v.taxi, courier: v.courier, parcels: v.courier,
+    vendors: v.vendor, vendor: v.vendor, stores: v.vendor, store: v.vendor,
+    items: v.item, item: v.item, products: v.item, listings: v.item, categories: v.category,
+    users: v.customer, customers: v.customer, accounts: v.customer, partners: v.owner,
+    riders: v.rider, drivers: v.driver, movers: v.riderUser,
+    addresses: v.address, ratings: v.rating, reviews: v.rating, tickets: v.ticket, support: v.ticket,
+    alerts: v.sos, sos: v.sos, rooms: v.room, chat: v.room, documents: v.document, docs: v.document, submissions: v.document,
+    staff: v.staffUser, lines: v.orderItem,
+    'option-groups': v.optionGroup, options: v.option, bookings: v.booking, subscriptions: v.subscription, claims: v.claim,
+  };
+  const byName: Record<string, string> = {
+    userId: v.customer, vendorId: v.vendor, itemId: v.item, roomId: v.room, caseId: v.sos, docId: v.document, lineId: v.orderItem,
+    subscriptionId: v.subscription, sessionId: v.order, cardId: v.order, groupId: v.optionGroup, blockedUserId: v.customer,
+    slug: `matrix-${w.run}`, code: 'MATRIX', token: 'matrix-token', key: 'matrix-key', ref: 'MATRIXREF', san: '000000000', format: 'json',
+    kind: 'order', action: 'view', queue: 'order',
+  };
+  const parts = url.split('/');
+  return parts.map((part, i) => {
+    if (!part.startsWith(':')) return part;
+    const name = part.slice(1);
+    if (name !== 'id') return byName[name] ?? v.order;
+    const segment = (parts[i - 1] ?? '').toLowerCase();
+    if (segment === 'items' && parts[i - 2] === 'cart') return v.cartItem; // /cart/items/:id is a cart line, not a menu item
+    return bySegment[segment] ?? v.order;
+  }).join('/');
+}
+
+/** Query and body fields naming production objects (a route that trusts a field for authority is attacked through it). */
+export function poison(w: World): { query: string; body: Record<string, unknown> } {
+  const v = w.victim;
+  const ids = {
+    orderId: v.order, vendorId: v.vendor, storeId: v.vendor, itemId: v.item, userId: v.customer, customerId: v.customer,
+    riderId: v.rider, driverId: v.driver, addressId: v.address, ratingId: v.rating, ticketId: v.ticket, roomId: v.room,
+    chatRoomId: v.room, documentId: v.document, sosAlertId: v.sos, alertId: v.sos, categoryId: v.category, staffUserId: v.staffUser,
+    optionGroupId: v.optionGroup, optionId: v.option, cartId: v.cart, cartItemId: v.cartItem, bookingId: v.booking, subscriptionId: v.subscription,
+    claimId: v.claim,
+  };
+  return {
+    query: new URLSearchParams({ orderId: v.order, vendorId: v.vendor, userId: v.customer, customerId: v.customer, q: w.mark }).toString(),
+    body: { ...ids, id: v.order, ids: [v.order], quantity: 1, items: [{ itemId: v.item, quantity: 1 }], reason: 'matrix probe', note: 'matrix probe', message: 'matrix probe', comment: 'matrix probe', status: 'CANCELLED', score: 1 },
+  };
+}
+
+/**
+ * Routes the matrix never fires: identity/session routes (covered by the auth suites; logout would end the
+ * attacker's own session), provider webhooks, and the attacker's OWN account deletion (it acts on the caller
+ * only, and every later request would answer 401: a vacuous pass).
+ */
+export function skipped(method: string, url: string): boolean {
+  return url.startsWith('/api/v1/auth/') || /\/webhooks?\b/.test(url) || /\/logout\b/.test(url)
+    || (method === 'DELETE' && /\/account$/.test(url)) || /\/account\/(delete|deactivate)\b/.test(url);
+}
+
+export interface Finding { attacker: string; method: string; url: string; status: number; why: string }
+
+/** Fire every route at the production objects as every attacker. */
+export async function sweep(
+  app: FastifyInstance,
+  owner: PrismaClient,
+  w: World,
+  routes: Array<{ method: string; url: string }>,
+  attacker: World['attackers'][number],
+): Promise<{ findings: Finding[]; fired: number; byStatus: Record<string, number>; firstRefused: string | null; unanswered: string[] }> {
+  let token = await mintToken(app, owner, attacker);
+  // Positive control: the attacker really is signed in, as itself. A refused token would turn
+  // every authenticated route into a 401 and the whole sweep into a vacuous pass.
+  const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { authorization: `Bearer ${token}` } });
+  if (me.statusCode !== 200 || !me.body.includes(attacker.userId)) {
+    throw new Error(`${attacker.label}: the attacker's own session is refused (${me.statusCode} ${me.body.slice(0, 300)})`);
+  }
+  const { query, body } = poison(w);
+  const findings: Finding[] = [];
+  const byStatus: Record<string, number> = {};
+  let fired = 0;
+  let firstRefused: string | null = null;
+  const unanswered: string[] = [];
+  let previous = '(start)';
+  const seen = new Set<string>();
+  for (const { method, url } of routes) {
+    if (skipped(method, url) || seen.has(`${method} ${url}`)) continue;
+    seen.add(`${method} ${url}`);
+    const path = materialize(url, w);
+    const fire = (bearer: string) => {
+      const opts: InjectOptions = {
+        method: method as InjectOptions['method'],
+        url: method === 'GET' || method === 'DELETE' ? `${path}${path.includes('?') ? '&' : '?'}${query}` : path,
+        headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'x-vendor-id': w.victim.vendor, 'x-swift-reason': 'matrix probe' },
+      };
+      if (method !== 'GET' && method !== 'DELETE') opts.payload = body;
+      return app.inject(opts);
+    };
+    let res = await fire(token);
+    if (res.statusCode === 401) {
+      // The route may have ended the attacker's own session (a sign-out, a role switch): a fresh one, once.
+      token = await mintToken(app, owner, attacker);
+      res = await fire(token);
+    }
+    fired += 1;
+    if (res.statusCode === 401 && !firstRefused) firstRefused = `${method} ${url} after ${previous}: ${res.body.slice(0, 160)}`;
+    previous = `${method} ${url} ${res.statusCode}`;
+    byStatus[String(res.statusCode)] = (byStatus[String(res.statusCode)] ?? 0) + 1;
+    if (res.statusCode === 429 || res.statusCode >= 500) unanswered.push(`${res.statusCode} ${method} ${url}`);
+    if (res.statusCode >= 200 && res.statusCode < 300 && res.body.includes(w.mark)) {
+      findings.push({ attacker: attacker.label, method, url, status: res.statusCode, why: 'a 2xx answer carries production data' });
+    }
+  }
+  return { findings, fired, byStatus, firstRefused, unanswered };
+}
+
+/** Every production fixture row, as it stands. */
+export async function digestProduction(owner: PrismaClient, w: World): Promise<Record<string, string>> {
+  const v = w.victim;
+  const rows: Record<string, unknown> = {
+    users: await owner.user.findMany({ where: { id: { in: [v.customer, v.owner, v.staffUser, v.riderUser, v.driverUser] } }, orderBy: { id: 'asc' } }),
+    vendor: await owner.vendor.findUnique({ where: { id: v.vendor } }),
+    staff: await owner.vendorStaff.findMany({ where: { vendorId: v.vendor }, orderBy: { id: 'asc' } }),
+    category: await owner.category.findUnique({ where: { id: v.category } }),
+    items: await owner.item.findMany({ where: { vendorId: v.vendor }, orderBy: { id: 'asc' } }),
+    rider: await owner.rider.findUnique({ where: { id: v.rider } }),
+    driver: await owner.driver.findUnique({ where: { id: v.driver } }),
+    addresses: await owner.address.findMany({ where: { userId: v.customer }, orderBy: { id: 'asc' } }),
+    orders: await owner.order.findMany({ where: { id: { in: [v.order, v.delivered, v.taxi, v.courier] } }, orderBy: { id: 'asc' } }),
+    orderItems: await owner.orderItem.findMany({ where: { orderId: v.order }, orderBy: { id: 'asc' } }),
+    logs: await owner.orderStatusLog.findMany({ where: { orderId: { in: [v.order, v.delivered, v.taxi, v.courier] } }, orderBy: { id: 'asc' } }),
+    ratings: await owner.rating.findMany({ where: { orderId: v.delivered }, orderBy: { id: 'asc' } }),
+    tickets: await owner.supportTicket.findMany({ where: { userId: v.customer }, orderBy: { id: 'asc' } }),
+    sos: await owner.sosAlert.findMany({ where: { actorUserId: v.customer }, orderBy: { id: 'asc' } }),
+    chat: await owner.chatRoom.findUnique({ where: { id: v.room }, include: { participants: { orderBy: { id: 'asc' } }, messages: { orderBy: { id: 'asc' } } } }),
+    documents: await owner.verificationDocument.findMany({ where: { userId: v.riderUser }, orderBy: { id: 'asc' } }),
+    carts: await owner.cart.findMany({ where: { customerId: v.customer }, include: { items: { orderBy: { id: 'asc' } } }, orderBy: { id: 'asc' } }),
+    optionGroups: await owner.optionGroup.findMany({ where: { itemId: v.item }, include: { options: { orderBy: { id: 'asc' } } }, orderBy: { id: 'asc' } }),
+    bookings: await owner.booking.findMany({ where: { customerId: v.customer }, orderBy: { id: 'asc' } }),
+    subscription: await owner.subscription.findUnique({ where: { id: v.subscription } }),
+    claims: await owner.reimbursementClaim.findMany({ where: { customerId: v.customer }, orderBy: { id: 'asc' } }),
+  };
+  return Object.fromEntries(Object.entries(rows).map(([k, value]) => [k, createHash('sha256').update(JSON.stringify(value, (_key, val) => (typeof val === 'bigint' ? String(val) : val))).digest('hex')]));
+}
