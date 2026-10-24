@@ -293,6 +293,11 @@ export function destinationFor(data: Record<string, unknown> | null | undefined,
   if (kind === 'password_changed') {
     return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my password' } };
   }
+  // [L04 #1550] "Your email address was changed": the same door, filed as an
+  // account problem, if it wasn't the owner.
+  if (kind === 'email_changed') {
+    return { screen: 'GetHelp', params: { category: 'ACCOUNT', subject: 'I did not change my email address' } };
+  }
   // [L04 · MASTER-056] Password sign-in paused after many wrong attempts: the
   // owner can still sign in with a code; help is the door if it wasn't them.
   if (kind === 'password_sign_in_paused') {
