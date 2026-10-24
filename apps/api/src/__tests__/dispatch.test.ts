@@ -1158,13 +1158,17 @@ describe('The offer cascade', () => {
       expect(await retrying()).toBe(1); // main: a second "still looking" push
 
       // A genuine next cycle is a DIFFERENT job: the counter accumulates, and
-      // it gets its own re-arm and its own notice.
+      // it gets its own re-arm. [OF-01 · COORD ruling 19 Oct 2026: one notice
+      // per state change, ever] It is the SAME order state (still ACCEPTED, no
+      // rider), so the customer, already told, is not told again: its push
+      // collapses into the first. (Before: a second "still looking" per cycle —
+      // 219 notices on one staging order.)
       await app.redis.del(`dispatch:exhaust-lock:${order.id}`);
       await replay.dispatchOrder(order.id, order.tenantId ?? undefined, '42');
       expect(await app.redis.get(exhaustsKey)).toBe('2');
       expect(await queue.getDelayedCount()).toBe(2);
       expect(await queue.getJob(redispatchJobId(order.id, tag2))).toBeTruthy();
-      expect(await retrying()).toBe(2);
+      expect(await retrying()).toBe(1);
 
       // Durable order state untouched: still unassigned and waiting on the vendor.
       const final = await app.prisma.order.findUniqueOrThrow({
@@ -1187,11 +1191,13 @@ describe('The offer cascade', () => {
     }
   });
 
-  it('[E36] a manual retry that restarts the counter still arms and still tells the customer', async () => {
-    // Keyed by attempt count, the second cycle's re-arm id and push key would
-    // equal the first cycle's: BullMQ keeps a completed job's id (removeOnComplete
-    // 100) and the (user, dedupeKey) unique collapses the push — a legitimate
-    // re-sweep and its notice silently dropped. Keyed by the run, they differ.
+  it('[E36] a manual retry that restarts the counter still arms; [OF-01] the customer, told once in this state, is not told again', async () => {
+    // Keyed by attempt count, the second cycle's re-arm id would equal the
+    // first cycle's: BullMQ keeps a completed job's id (removeOnComplete 100)
+    // — a legitimate re-sweep silently dropped. Keyed by the run, they differ.
+    // [OF-01 · COORD ruling 19 Oct 2026] The PUSH is keyed by the order's
+    // state instead (status + assignment versions): a retry of the same state
+    // re-searches, but the customer was already told "still looking".
     await riderPool.empty({ isOnline: false });
     const order = await makeDeliveryOrder();
     const exhaustsKey = `dispatch:exhausts:${order.id}`;
@@ -1212,7 +1218,7 @@ describe('The offer cascade', () => {
       expect(new Set(armedIds).size).toBe(2);
       expect(await app.prisma.notification.count({
         where: { userId: customerId, dedupeKey: { startsWith: `dispatch-retrying:${order.id}:` } },
-      })).toBe(2);
+      })).toBe(1);
     } finally {
       await app.redis.del(
         exhaustsKey,

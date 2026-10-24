@@ -47,7 +47,7 @@ describe('[UI-SWEEP U73] job statuses read in words for riders and drivers', () 
     expect(statuses.length).toBeGreaterThan(15);
     for (const s of statuses) {
       const out = moverStatusLabel(s);
-      expect(out, s).not.toBe('In progress');
+      expect(out, s).not.toBe('Status unavailable');
       expect(out, s).not.toContain('_');
       expect(out, s).not.toBe(s);
     }
@@ -55,9 +55,12 @@ describe('[UI-SWEEP U73] job statuses read in words for riders and drivers', () 
     expect(moverStatusLabel('RIDE_IN_PROGRESS')).toBe('Trip in progress');
   });
 
-  it('a status the phone has not been taught reads "In progress"', () => {
-    expect(moverStatusLabel('SOMETHING_NEW')).toBe('In progress');
-    expect(moverStatusLabel(null)).toBe('In progress');
+  // [REVIEW-F #1954 S4-1] "In progress" is untrue for a status that ended (a new terminal one);
+  // an untaught status says so, the same words the store screens use.
+  it('a status the phone has not been taught reads "Status unavailable", never a guess', () => {
+    expect(moverStatusLabel('SOMETHING_NEW')).toBe('Status unavailable');
+    expect(moverStatusLabel(null)).toBe('Status unavailable');
+    expect(moverStatusLabel('')).toBe('Status unavailable');
   });
 
   it('the job history pill uses those words, never the code with spaces', () => {
@@ -65,7 +68,7 @@ describe('[UI-SWEEP U73] job statuses read in words for riders and drivers', () 
       expect(String((JobStatusPill({ status: s }) as any).props.label), s).toBe(moverStatusLabel(s));
     }
     expect((JobStatusPill({ status: 'RIDER_ARRIVED_PICKUP' }) as any).props.label).toBe('At the pickup');
-    expect((JobStatusPill({ status: 'SOMETHING_NEW' }) as any).props.label).toBe('In progress');
+    expect((JobStatusPill({ status: 'SOMETHING_NEW' }) as any).props.label).toBe('Status unavailable');
   });
 });
 

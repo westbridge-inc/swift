@@ -354,9 +354,14 @@ export function ProfileScreen() {
           {/* THE CHIP MARKS A DESTINATION, NOT A LABEL. Every row here used
               to carry the same pale square, which made the chip wallpaper and
               flattened the whole list. Now: a row that takes you SOMEWHERE
-              keeps its chip; a row that is a fact you read (your rating), a
-              consent you flip in place, or a legal document you open gets no
-              chip at all. Fewer chips, so a chip means something. */}
+              keeps its chip; a consent you flip in place or a legal document
+              you open gets no chip at all. Fewer chips, so a chip means
+              something.
+              [UI-SWEEP U-P1, owner 22 Oct] But ONE LIST, ONE ROW SHAPE: a bare
+              "Your rating" under five tiled rows read as broken (no tile, its
+              text at the left edge instead of the text column). Every row in a
+              list is the same SettingsRow, all tiled or all plain
+              (ProfileScreen.rows.test.ts). */}
 
           {/* YOUR ACCOUNT */}
           <T variant="micro" tone="muted" style={{ marginTop: space['2xl'], marginBottom: space.sm }}>YOUR ACCOUNT</T>
@@ -402,8 +407,8 @@ export function ProfileScreen() {
             />
             <SettingsRow
               icon="star"
-              // A fact about you, not a place — the value IS the row.
-              plain
+              // A fact about you; it opens what the rating means. Tiled like
+              // every row above it [UI-SWEEP U-P1].
               label="Your rating"
               sub={myRatingWords(myRating, ' · ')}
               onPress={() => setRatingInfo(true)}

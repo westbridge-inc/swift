@@ -5,6 +5,7 @@ import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { cancellationReasonWords } from '@swift/types';
 import { Card, Chip, CodeInput, IconChip, InfoRow, LoadingBlock, ErrorState, PillButton, PopupCard, PopupTitle, Screen, T } from '../../../kit';
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineQuestion, nothingToAccept } from '../storeOrderRules';
 import { orderLineOptionsText } from '../orderLineOptions';
 import { rejectReasonsFor } from '../rejectReasons';
 import { orderPaymentLine } from '../storeWords';
@@ -129,6 +130,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
   const fulfillmentMode = useSetOrderFulfillmentMode();
   const [confirmReject, setConfirmReject] = useState(false);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
   // [MOB-050] The counter hand-over is a ceremony, not a button: the vendor
   // TYPES what the customer reads out. The screen used to print the code and
   // send nothing, so the server (which requires it) refused every attempt and
@@ -243,6 +246,14 @@ function VendorOrderDetailBody({ navigation, route }: any) {
         </View>
         {/* [NO-DEAD-ENDS · S1-6] A disputed MMG order is paused: say so and what happens next. */}
         <MmgDisputeNotice order={order} />
+        {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+        {customerDeciding(order) || nothingToAccept(order) ? (
+          <View style={{ borderRadius: radius.lg, backgroundColor: color.soft.warning, padding: space.md, marginBottom: space.md }}>
+            <T variant="label" weight="semibold">
+              {customerDeciding(order) ? OUT_OF_STOCK_WORDS.deciding : OUT_OF_STOCK_WORDS.nothing}
+            </T>
+          </View>
+        ) : null}
 
         {/* [AF-MOB-006] A delivery that went wrong after pickup: the store sees
             the case, and confirms when returned goods are back with it. */}
@@ -372,7 +383,8 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                     ) : null}
                     {pending ? (
                       <T variant="caption" weight="semibold" tone="brand" style={{ marginTop: 2 }}>
-                        Waiting on the customer: {it.substituteName}
+                        {/* [STORE-DASH · O-4] A removal question proposes nothing: say what was asked. */}
+                        {lineQuestion(it) === 'removal' ? OUT_OF_STOCK_WORDS.removalAsked : `Waiting on the customer: ${it.substituteName}`}
                       </T>
                     ) : null}
                     {pending && storeSwapWaitText(it.substituteDecideBy, order.paymentMethod) ? (
@@ -390,6 +402,40 @@ function VendorOrderDetailBody({ navigation, route }: any) {
                     {money(it.totalBase)}
                   </T>
                 </View>
+                {/* [STORE-DASH · O-4] A waiting order, every store type: one tap per item asks the customer. */}
+                {lastLineStanding(order, it) ? (
+                  <View style={{ marginLeft: 64, marginTop: space.xs, gap: space.xs }}>
+                    {lastOut ? (
+                      <>
+                        <T variant="caption" weight="semibold" tone="error">{OUT_OF_STOCK_WORDS.lastAsk}</T>
+                        <View style={{ flexDirection: 'row', gap: space.sm }}>
+                          <PillButton
+                            label={OUT_OF_STOCK_WORDS.lastYes}
+                            variant="primary"
+                            size="sm"
+                            disabled={busy}
+                            onPress={() => { setLastOut(false); orderAction.mutate({ id: order.id, action: 'reject', reason: OUT_OF_STOCK_WORDS.lastReason }); }}
+                          />
+                          <PillButton label={OUT_OF_STOCK_WORDS.lastKeep} variant="soft" size="sm" disabled={busy} onPress={() => setLastOut(false)} />
+                        </View>
+                      </>
+                    ) : (
+                      <View style={{ alignSelf: 'flex-start' }}>
+                        <PillButton label={OUT_OF_STOCK_WORDS.lastButton} variant="outline" size="sm" disabled={busy} onPress={() => setLastOut(true)} />
+                      </View>
+                    )}
+                  </View>
+                ) : canMarkOutOfStock(order, it) ? (
+                  <View style={{ marginLeft: 64, marginTop: space.xs, alignSelf: 'flex-start' }}>
+                    <PillButton
+                      label={OUT_OF_STOCK_WORDS.button}
+                      variant="outline"
+                      size="sm"
+                      disabled={picking.refundLine.isPending || busy}
+                      onPress={() => picking.refundLine.mutate({ orderId: order.id, lineId: it.id })}
+                    />
+                  </View>
+                ) : null}
                 {pickable && !closed && !pending && !it.picked ? (
                   <View style={{ marginLeft: 64 }}>
                     {subFor === it.id ? (
