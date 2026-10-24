@@ -39,7 +39,7 @@ function refusal(fn: () => unknown): AppError {
   throw new Error('expected a refusal, got none');
 }
 
-function zodPath(fn: () => unknown): (string | number)[] {
+function zodPath(fn: () => unknown): PropertyKey[] {
   try {
     fn();
   } catch (err) {

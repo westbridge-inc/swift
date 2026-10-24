@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import {
   buildDriverStatement,
