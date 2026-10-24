@@ -165,6 +165,46 @@ jobs:
           # [R048-001] The tests' own Redis database, never 0; the global setup refuses anything else.
           REDIS_URL: redis://localhost:6379/15
           JWT_SECRET: ci-test-jwt-secret-not-for-production
+      # Reuse shard 1's migrated, seeded and already-exercised database: the
+      # complete golden folder runs twice more on it. Each run keeps its normal
+      # fixture hooks; there is no database reset, truncate, reseed or Redis
+      # flush between invocations, so a journey that leaks or deletes another
+      # run's rows fails here.
+      - name: Repeat complete golden folder twice on the same database
+        id: golden-repeats
+        if: matrix.shard == 1
+        shell: bash
+        env:
+          NODE_ENV: test
+          DATABASE_URL: postgresql://swift:swift@localhost:5432/swift_test
+          REDIS_URL: redis://localhost:6379/15
+          JWT_SECRET: ci-test-jwt-secret-not-for-production
+        run: |
+          mkdir -p golden-repeat-results
+          failed=0
+          for repeat in 1 2; do
+            echo "Golden folder repeat $repeat (same database, no reset)"
+            set +e
+            pnpm --filter @swift/api exec vitest run src/__tests__/golden/ 2>&1 | tee "golden-repeat-results/run-$repeat.log"
+            statuses=("${PIPESTATUS[@]}")
+            set -e
+            result="Golden repeat $repeat: test exit=${statuses[0]}, log exit=${statuses[1]}"
+            echo "$result" | tee -a golden-repeat-results/exits.txt
+            echo "- $result" >> "$GITHUB_STEP_SUMMARY"
+            if (( statuses[0] != 0 || statuses[1] != 0 )); then
+              failed=1
+            fi
+          done
+          exit "$failed"
+      - name: Keep golden repeat logs and exit results
+        if: always() && matrix.shard == 1 && steps.golden-repeats.outcome != 'skipped'
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-golden-repeat-results
+          path: golden-repeat-results/
+          if-no-files-found: error
+          retention-days: 5
+          overwrite: true
 
       # Step 15: an untested backup does not exist. Dump the post-suite
       # database and prove it restores into a scratch DB with sane contents.

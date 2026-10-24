@@ -29,6 +29,8 @@ const userIds: string[] = [];
 const subIds: string[] = [];
 const vendorIds: string[] = [];
 let otherTenantId: string;
+let ownTenantId: string;
+let peerSweepTenantId: string;
 let seq = 0;
 const io = { to: () => ({ emit: () => {} }) } as never;
 
@@ -70,43 +72,49 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.ready();
   prisma = app.prisma;
-  // A second operator. Inactive: the public tenant resolver requires exactly one active tenant.
+  // Both operators are private to this run. The public resolver still sees
+  // exactly one active tenant while the migration exercises real tenant scope.
+  const own = await prisma.tenant.create({ data: { name: `Own Operator ${nanoid(4)}`, slug: `own-${nanoid(8).toLowerCase()}`, isActive: false } });
+  ownTenantId = own.id;
   const other = await prisma.tenant.create({ data: { name: `Other Operator ${nanoid(4)}`, slug: `other-${nanoid(8).toLowerCase()}`, isActive: false } });
   otherTenantId = other.id;
+  const peerSweep = await prisma.tenant.create({ data: { name: `Peer Sweep ${nanoid(4)}`, slug: `peer-sweep-${nanoid(8).toLowerCase()}`, isActive: false } });
+  peerSweepTenantId = peerSweep.id;
 });
 
 afterEach(() => vi.restoreAllMocks());
 
 afterAll(async () => {
-  await prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdMigrationMode: null, usdSunsetAt: null } }).catch(() => {});
-  await prisma.tenantBillingCurrency.deleteMany({ where: { tenantId: otherTenantId } }).catch(() => {});
+  await prisma.tenantBillingCurrency.deleteMany({ where: { tenantId: { in: [ownTenantId, otherTenantId, peerSweepTenantId] } } });
   await prisma.billingEvent.deleteMany({ where: { subscriptionId: { in: subIds } } });
   await prisma.subscription.deleteMany({ where: { id: { in: subIds } } });
   await prisma.vendor.deleteMany({ where: { id: { in: vendorIds } } });
   await prisma.vendorOwner.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
   await prisma.user.deleteMany({ where: { id: { in: userIds } } });
-  await prisma.tenant.delete({ where: { id: otherTenantId } }).catch(() => {});
+  await prisma.tenant.deleteMany({ where: { id: { in: [ownTenantId, otherTenantId, peerSweepTenantId] } } });
   await app.close();
 });
 
 describe('[M-15] one tenant’s migration, with delivery proof and a hard flip gate', () => {
-  it('the register’s red test: two tenants, Mode B only in the default one, a failed notification — the other tenant and the unnotified payer stay pinned', async () => {
-    const told = await makeVendorSub('swift-default');
-    const untold = await makeVendorSub('swift-default');
+  it('scopes Mode B to this run’s tenant; a failed notification holds one payer while peer tenants stay unchanged', async () => {
+    const told = await makeVendorSub(ownTenantId);
+    const untold = await makeVendorSub(ownTenantId);
     const other = await makeVendorSub(otherTenantId);
+    const peerDefault = await makeVendorSub('swift-default');
+    const peerSweep = await makeVendorSub(peerSweepTenantId);
     // The other operator's payer carries a genuine local override of its own —
     // exactly what a cross-tenant sweep would mistake for a grandfathered rate.
     await prisma.subscription.update({ where: { id: other.subId }, data: { customRate: 18000 } });
-    // enableModeB freezes every unfrozen payer OF THE TENANT — in a shared run
-    // that includes other suites' rows. Snapshot who was frozen before so the
-    // finally thaws exactly what this test froze.
-    const frozenBefore = new Set((await prisma.subscription.findMany({ where: { customRate: { not: null } }, select: { id: true } })).map((x) => x.id));
     const sunset = new Date(Date.now() + 31 * DAY);
     try {
-      const enabled = await enableModeB(prisma, sunset, 'swift-default');
-      expect(enabled).toMatchObject({ tenantId: 'swift-default' });
-      expect(enabled.grandfathered).toBeGreaterThanOrEqual(2);
+      await enableModeB(prisma, sunset, peerSweepTenantId);
+      expect(await rate(peerSweep.subId)).toBe(20000);
+      const enabled = await enableModeB(prisma, sunset, ownTenantId);
+      expect(enabled).toMatchObject({ tenantId: ownTenantId });
+      expect(enabled.grandfathered).toBe(2);
+      expect(await rate(peerDefault.subId)).toBeNull();
+      expect(await eventsOf(peerDefault.subId)).toEqual([]);
       expect(await rate(told.subId)).toBe(20000);
       expect(await rate(untold.subId)).toBe(20000);
       expect(await rate(other.subId)).toBe(18000); // the other operator is not in Mode B
@@ -120,9 +128,10 @@ describe('[M-15] one tenant’s migration, with delivery proof and a hard flip g
         if (failFor.has(input.userId)) throw new Error('notification unavailable');
         return undefined as never;
       });
-      const t20 = await sweepModeB(prisma, io, new Date(sunset.getTime() - 20 * DAY), { tenantIds: ['swift-default'] });
+      const t20 = await sweepModeB(prisma, io, new Date(sunset.getTime() - 20 * DAY), { tenantIds: [ownTenantId] });
       expect(t20.undelivered).toBeGreaterThanOrEqual(1);
-      const t3 = await sweepModeB(prisma, io, new Date(sunset.getTime() - 3 * DAY), { tenantIds: ['swift-default'] });
+      expect((await eventsOf(peerSweep.subId)).map((e) => e.idempotencyKey)).toEqual([modeBKey(peerSweep.subId, 'freeze')]);
+      const t3 = await sweepModeB(prisma, io, new Date(sunset.getTime() - 3 * DAY), { tenantIds: [ownTenantId] });
       expect(t3.undelivered).toBeGreaterThanOrEqual(1);
       const toldEvents = await eventsOf(told.subId);
       expect(toldEvents.filter((e) => e.type === 'REMINDER').map((e) => !!e.deliveredAt)).toEqual([true, true]);
@@ -131,11 +140,11 @@ describe('[M-15] one tenant’s migration, with delivery proof and a hard flip g
       expect(await eventsOf(other.subId)).toEqual([]);
 
       // Past sunset — but the told payer's T−7 was delivered only 3 days ago.
-      const early = await sweepModeB(prisma, io, new Date(sunset.getTime() + 3_600_000), { tenantIds: ['swift-default'] });
+      const early = await sweepModeB(prisma, io, new Date(sunset.getTime() + 3_600_000), { tenantIds: [ownTenantId] });
       expect(early.flipped).toBe(0);
       expect(await rate(told.subId)).toBe(20000);
       // A week after the T−7 delivery: the told payer flips with a snapshot; the untold payer is HELD; the other tenant is untouched.
-      const late = await sweepModeB(prisma, io, new Date(sunset.getTime() + 5 * DAY), { tenantIds: ['swift-default'] });
+      const late = await sweepModeB(prisma, io, new Date(sunset.getTime() + 5 * DAY), { tenantIds: [ownTenantId] });
       expect(late.flipped).toBeGreaterThanOrEqual(1);
       expect(late.held).toBeGreaterThanOrEqual(1);
       expect(late.alerts).toBeGreaterThanOrEqual(1);
@@ -143,31 +152,33 @@ describe('[M-15] one tenant’s migration, with delivery proof and a hard flip g
       expect((await eventsOf(told.subId)).find((e) => e.idempotencyKey === modeBKey(told.subId, 'flip'))?.amount?.toString()).toBe('20000');
       expect(await rate(untold.subId)).toBe(20000); // pinned at the promised price
       expect(await rate(other.subId)).toBe(18000);
+      expect(await rate(peerDefault.subId)).toBeNull();
+      expect(await eventsOf(peerDefault.subId)).toEqual([]);
+      expect(await rate(peerSweep.subId)).toBe(20000);
+      expect((await eventsOf(peerSweep.subId)).map((e) => e.idempotencyKey)).toEqual([modeBKey(peerSweep.subId, 'freeze')]);
       expect(await eventsOf(other.subId)).toEqual([]);
 
       // The notices get through at last: still no flip until the T−7 proof is a week old.
       vi.restoreAllMocks();
-      const delivered = await sweepModeB(prisma, io, new Date(sunset.getTime() + 5 * DAY), { tenantIds: ['swift-default'] });
+      const delivered = await sweepModeB(prisma, io, new Date(sunset.getTime() + 5 * DAY), { tenantIds: [ownTenantId] });
       expect(delivered.delivered).toBeGreaterThanOrEqual(2);
       expect(await rate(untold.subId)).toBe(20000);
-      const week = await sweepModeB(prisma, io, new Date(sunset.getTime() + 13 * DAY), { tenantIds: ['swift-default'] });
+      const week = await sweepModeB(prisma, io, new Date(sunset.getTime() + 13 * DAY), { tenantIds: [ownTenantId] });
       expect(week.held).toBe(0);
       expect(await rate(untold.subId)).toBeNull();
 
       // Rollback: a pointer back to each payer's snapshot, this tenant only.
-      const rolled = await rollbackModeB(prisma, 'swift-default');
-      expect(rolled.restored).toBeGreaterThanOrEqual(2);
+      const rolled = await rollbackModeB(prisma, ownTenantId);
+      expect(rolled.restored).toBe(2);
       expect(await rate(told.subId)).toBe(20000);
       expect(await rate(untold.subId)).toBe(20000);
       expect((await eventsOf(told.subId)).some((e) => e.idempotencyKey.startsWith(`usdmigB:${told.subId}:rollback:`))).toBe(true);
       expect(await rate(other.subId)).toBe(18000);
-      expect((await prisma.tenantBillingCurrency.findUniqueOrThrow({ where: { tenantId: 'swift-default' } })).usdMigrationMode).toBeNull();
+      expect((await prisma.tenantBillingCurrency.findUniqueOrThrow({ where: { tenantId: ownTenantId } })).usdMigrationMode).toBeNull();
     } finally {
       vi.restoreAllMocks();
-      await prisma.tenantBillingCurrency.update({ where: { tenantId: 'swift-default' }, data: { usdMigrationMode: null, usdSunsetAt: null } }).catch(() => {});
-      const frozenNow = await prisma.subscription.findMany({ where: { customRate: { not: null } }, select: { id: true } });
-      const thaw = frozenNow.map((x) => x.id).filter((id) => !frozenBefore.has(id));
-      if (thaw.length) await prisma.subscription.updateMany({ where: { id: { in: thaw } }, data: { customRate: null } });
+      await prisma.tenantBillingCurrency.update({ where: { tenantId: ownTenantId }, data: { usdMigrationMode: null, usdSunsetAt: null } }).catch(() => {});
+      await prisma.subscription.updateMany({ where: { id: { in: [told.subId, untold.subId] } }, data: { customRate: null } });
     }
   });
 });
