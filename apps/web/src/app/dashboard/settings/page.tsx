@@ -275,6 +275,12 @@ export default function SettingsPage() {
             {p.city ? ` · ${p.city}` : ''} · {storeCheckLabel(p)}
           </p>
           {p.description && <p className="mt-2 text-sm">{p.description}</p>}
+          {/* [DOCS-1] A store's documents are its owner's (the checklist is read for the signed-in owner). */}
+          {isOwner && (
+            <p className="mt-3 text-sm">
+              <Link href="/dashboard/documents" className="font-semibold underline">Documents — where each stands, and a new copy of one that was turned down</Link>
+            </p>
+          )}
           <p className="mt-3 text-xs text-[var(--swift-muted)]">
             Name, description, address and MMG details are edited in the Swift app (they go through review).
           </p>
