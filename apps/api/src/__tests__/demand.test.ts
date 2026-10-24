@@ -9,6 +9,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { riderRoutes } from '../modules/rider/rider.routes';
 import { driverRoutes } from '../modules/driver/driver.routes';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Earner demand reads (dashboard plan Phase A): REAL waiting work, privacy
@@ -29,12 +30,12 @@ let driverId: string;
 let riderId: string;
 let ownerId: string;
 let customerId: string;
-const marker = nanoid(6).toLowerCase();
+const marker = wordFreeTag(8);
 
 async function makeUser(roles: string[], activeRole: string) {
   const u = await app.prisma.user.create({
     data: {
-      phone: `+59261${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'De', lastName: 'Mand',
       roles: roles as never[], activeRole: activeRole as never,
       isPhoneVerified: true,

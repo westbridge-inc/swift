@@ -49,3 +49,20 @@ export function isProduction(env: Record<string, string | undefined> = process.e
 export function isDevelopment(env: Record<string, string | undefined> = process.env): boolean {
   return runtimeMode(env) === 'development';
 }
+
+/** Whether this process fans Socket.IO emits out through Redis (the Redis adapter).
+ *  - production: always; boot fails without it (unchanged).
+ *  - loadtest (staging, what the store reviewers use) and development: on. Without
+ *    it an emit from the worker process (order:new when a held order is released,
+ *    dispatch offers) never reaches a socket held by the API process.
+ *  - test: off, the in-memory adapter (unchanged).
+ *  Inside a vitest worker a file may flip NODE_ENV to development; it stays on the
+ *  in-memory adapter so per-file socket servers never cross-talk through one Redis
+ *  channel, unless the file opts in with SOCKET_REDIS_ADAPTER_UNDER_VITEST=1. A
+ *  deployed process never runs under vitest, so it has no switch to turn this off. */
+export function usesSocketRedisAdapter(env: Record<string, string | undefined> = process.env): boolean {
+  const mode = runtimeMode(env);
+  if (mode === 'production') return true;
+  if (mode === 'test') return false;
+  return env['VITEST'] !== 'true' || env['SOCKET_REDIS_ADAPTER_UNDER_VITEST'] === '1';
+}

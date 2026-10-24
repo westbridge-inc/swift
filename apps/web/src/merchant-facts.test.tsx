@@ -70,9 +70,13 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     const services = screen.getByRole('region', { name: 'What Swift does' });
     const words = services.textContent ?? '';
     for (const who of ['Customers', 'Businesses', 'Delivery riders', 'Taxi drivers']) expect(words, who).toContain(who);
-    expect(words).toMatch(/weekly fee/i);
-    // The published Terms name Swift's other charge: advertising a business can choose to buy.
-    expect(words).toMatch(/advertising/i);
+    // What Swift charges at launch, and nothing else: partners pay the flat weekly fee, there is no
+    // commission, and nothing is added to a customer's bill. Ads are off and not sold (GUARDRAILS §4),
+    // so the page offers no advertising. A new charge is named here before it is made.
+    expect(words).toMatch(/flat weekly fee/i);
+    expect(words).toMatch(/no commission on any sale, fare or tip/i);
+    expect(words).toMatch(/nothing is added to a\s+customer.s bill/i);
+    expect(words).not.toMatch(/advertis/i);
     expect(words).not.toMatch(/only charge/i);
     expect(within(services).getByRole('link', { name: /pricing/i }).getAttribute('href')).toBe('/pricing');
   });
@@ -82,6 +86,19 @@ describe('[Q36] the minimum website information the card bank requires', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Refunds and cancellations' })).toBeTruthy();
     expect(screen.getByRole('heading', { name: /cancelling an order/i })).toBeTruthy();
     expect(screen.getByRole('heading', { name: /weekly partner fee/i })).toBeTruthy();
+  });
+
+  it('3b · the cancellation words promise no in-app cancel the app refuses, and no fee [owner #46/#50/#52 · Opus review 14 Oct]', async () => {
+    await renderRoute('/legal/refunds');
+    const words = (document.body.textContent ?? '').replace(/\s+/g, ' ');
+    expect(words).toContain('never charges a cancellation fee');
+    // An MMG order whose payment the business confirmed is refused at every stage, so "before acceptance" is not enough.
+    expect(words).toContain('unless you paid by MMG and the business has already confirmed your payment');
+    expect(words).toContain('Paid by MMG, but the business has not confirmed your payment yet: you can cancel in the app.');
+    expect(words).not.toMatch(/has not accepted the order yet: you can cancel in the app/);
+    // The app offers a customer Cancel on a service job only while it is a request.
+    expect(words).toContain('Once it is booked, contact the provider to change or cancel it.');
+    expect(words).not.toMatch(/late-cancellation fee|cancellation fee may apply/i);
   });
 
   it('4 · customer service contact: e-mail address and telephone number', async () => {

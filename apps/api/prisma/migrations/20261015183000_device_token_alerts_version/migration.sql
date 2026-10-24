@@ -1,0 +1,36 @@
+-- [RINGER · loud alerts 3/4; continues the unmerged #1367 (loud alerts 2/4)]
+-- DeviceToken.alertsVersion: which job-alert features the app installed on
+-- this device has, reported by the app when it registers its push token (a
+-- registration without it reads 0).
+--
+-- Why a column and not a guess: the job ring names an Android channel
+-- ('job_offers'), a sound file bundled in the app and an iOS interruption
+-- level. Builds 9-11 have none of them, so the ring may be sent only to a
+-- device whose app says it has them. 0 = builds 9-11, sent exactly what they
+-- get now; 1 = the build with the job ring.
+--
+-- FORWARD: one NOT NULL column with a constant default plus a CHECK. On
+-- PostgreSQL 11+ the constant default is catalogue-only (no table rewrite);
+-- the CHECK validates the existing rows, all of which read 0, under a brief
+-- ACCESS EXCLUSIVE lock on "device_tokens" (one row per installed app).
+-- Existing rows read 0; only POST /customer/notifications/devices writes it.
+-- BACKUP CHECKPOINT: the standard full pre-deploy backup (pg_dump -Fc), named
+-- "pre-20261015183000" in the release record.
+-- ROLLBACK: the exact inverse below restores the prior schema and deletes
+-- this migration's _prisma_migrations row, so a later `prisma migrate deploy`
+-- re-applies it. Precondition: roll the application back first (the previous
+-- application never reads the column). Nothing else is lost: a device that
+-- reported 1 simply reports it again at its next registration.
+--   BEGIN;
+--   SET LOCAL lock_timeout = '10s';
+--   ALTER TABLE "device_tokens" DROP CONSTRAINT "device_tokens_alertsVersion_check";
+--   ALTER TABLE "device_tokens" DROP COLUMN "alertsVersion";
+--   DO $$ DECLARE n integer; BEGIN
+--     DELETE FROM "_prisma_migrations" WHERE "migration_name" = '20261015183000_device_token_alerts_version';
+--     GET DIAGNOSTICS n = ROW_COUNT;
+--     IF n <> 1 THEN RAISE EXCEPTION 'expected exactly one _prisma_migrations row, deleted %', n; END IF;
+--   END $$;
+--   COMMIT;
+SET lock_timeout = '10s';
+ALTER TABLE "device_tokens" ADD COLUMN "alertsVersion" INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE "device_tokens" ADD CONSTRAINT "device_tokens_alertsVersion_check" CHECK ("alertsVersion" >= 0);

@@ -4,6 +4,9 @@
  * smuggle scripts/PDFs into publicly served folders.
  */
 
+import sharp from 'sharp';
+import { AppError } from './errors';
+
 export const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 
 /** Cheap magic-byte sniff so a spoofed Content-Type cannot smuggle non-images. */
@@ -14,6 +17,107 @@ export function looksLikeImage(buffer: Buffer): boolean {
   const webp =
     buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
   return jpeg || png || webp;
+}
+
+// ---------------------------------------------------------------------------
+// [Row 108] EVERY STORED PHOTO IS READ BY A REAL DECODER, AND REFUSED UNLESS IT PASSES.
+//
+// A 5 MB upload can declare a huge canvas (a decompression bomb, a 100 MP camera
+// mode), hide one format inside another, or carry a header nothing can read. The
+// photo is read with sharp (libvips), the decoder the website's resizer uses, never
+// with a separate lightweight header parser a crafted file could disagree with,
+// and it FAILS CLOSED:
+//   - unreadable, or no width/height → 400 IMAGE_UNREADABLE;
+//   - what the decoder finds is not the declared type → 400 IMAGE_TYPE_MISMATCH;
+//   - more than about 40 megapixels → 413 IMAGE_TOO_LARGE;
+//   - far more bytes than its size could need (small dimensions over a huge
+//     payload) → 400 IMAGE_UNREADABLE.
+// Non-image types (PDFs, encrypted envelopes) are not photos and pass.
+// ---------------------------------------------------------------------------
+
+/** What the bytes ARE (magic number), never what the upload claims. Null for anything else. */
+export function sniffImageType(buffer: Buffer): 'image/jpeg' | 'image/png' | 'image/webp' | null {
+  if (buffer.length < 12) return null;
+  if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg';
+  if (buffer.readUInt32BE(0) === 0x89504e47 && buffer.readUInt32BE(4) === 0x0d0a1a0a) return 'image/png';
+  if (buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return null;
+}
+
+/**
+ * The metadata strip, FAILING CLOSED: null when the photo cannot be parsed (where
+ * stripImageMetadata hands back the original bytes, location and all). For the
+ * storage seam, which refuses rather than store a photo it could not clean.
+ */
+export function stripImageMetadataStrict(buffer: Buffer, sniffedType: 'image/jpeg' | 'image/png' | 'image/webp'): Buffer | null {
+  try {
+    const stripped = sniffedType === 'image/jpeg' ? stripJpeg(buffer) : sniffedType === 'image/png' ? stripPng(buffer) : stripWebp(buffer);
+    return stripped && stripped.length <= buffer.length ? stripped : null;
+  } catch {
+    return null;
+  }
+}
+
+export const MAX_IMAGE_PIXELS = 40_000_000;
+
+const DECLARED_FORMAT: Record<string, 'jpeg' | 'png' | 'webp'> = { 'image/jpeg': 'jpeg', 'image/jpg': 'jpeg', 'image/png': 'png', 'image/webp': 'webp' };
+
+/** The most bytes a photo of this size could need: 8 a pixel (16-bit RGBA, incompressible) plus 64 KiB of headers. */
+function plausibleBytes(width: number, height: number): number {
+  return width * height * 8 + 64 * 1024;
+}
+
+const unreadable = () => new AppError(400, 'IMAGE_UNREADABLE', 'This photo could not be read. Take it again or choose another photo.');
+
+/**
+ * Reads a photo with the real decoder and refuses it unless it is exactly what it
+ * claims to be, within the size cap. Returns the decoder's format and size, or
+ * null for a non-image type.
+ */
+export async function inspectImage(buffer: Buffer, declaredMimeType: string): Promise<{ format: string; width: number; height: number } | null> {
+  if (!declaredMimeType.startsWith('image/')) return null;
+  const expected = DECLARED_FORMAT[declaredMimeType];
+  if (!expected) throw new AppError(400, 'IMAGE_TYPE_MISMATCH', 'Upload a JPEG, PNG or WebP photo.');
+  let meta: Awaited<ReturnType<ReturnType<typeof sharp>['metadata']>>;
+  try {
+    meta = await sharp(buffer, { limitInputPixels: MAX_IMAGE_PIXELS, failOn: 'error' }).metadata();
+  } catch (error) {
+    if (/pixel limit/i.test(String((error as Error)?.message))) throw tooLarge();
+    throw unreadable();
+  }
+  if (meta.format !== expected) throw new AppError(400, 'IMAGE_TYPE_MISMATCH', 'This file is not the kind of photo it says it is.');
+  const { width, height } = meta;
+  if (!width || !height) throw unreadable();
+  if (width * height > MAX_IMAGE_PIXELS) throw tooLarge();
+  if (buffer.length > plausibleBytes(width, height)) throw unreadable();
+  return { format: meta.format, width, height };
+}
+
+function tooLarge() {
+  return new AppError(413, 'IMAGE_TOO_LARGE', 'This photo is larger than 40 megapixels. Take it again or choose a smaller photo.');
+}
+
+/**
+ * [Row 238 · M044] THE one clean-up for every photo Swift stores: the storage seam (plaintext
+ * uploads) and the document envelope (an ID photo is encrypted before the seam can see it), so
+ * no path keeps a camera's location and no second stripper is ever written.
+ *
+ * What the bytes ARE decides it, sniffed once (a declared type never picks the strip). The
+ * metadata is removed FAILING CLOSED, then the bytes that will be stored are read by the real
+ * decoder (type, size cap, plausible size). Returns null for bytes that are not a photo (a PDF,
+ * an encrypted envelope); a declared photo that is not one, or one that cannot be cleaned, is
+ * refused with IMAGE_UNREADABLE, never stored as it came.
+ */
+export async function cleanStoredPhoto(buffer: Buffer, declaredMimeType: string): Promise<{ buffer: Buffer; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' } | null> {
+  const sniffed = sniffImageType(buffer);
+  if (!sniffed) {
+    if (declaredMimeType.startsWith('image/')) throw unreadable();
+    return null;
+  }
+  const clean = stripImageMetadataStrict(buffer, sniffed);
+  if (!clean) throw unreadable();
+  await inspectImage(clean, sniffed);
+  return { buffer: clean, mimeType: sniffed };
 }
 
 /**
@@ -56,8 +160,9 @@ export function looksLikeDocument(buffer: Buffer, mimeType: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** JPEG APPn segments that carry no rendering information.
- *  KEPT: APP0 (JFIF density), APP2 (ICC colour profile), APP14 (Adobe colour
- *  transform — dropping it renders CMYK/YCCK JPEGs with inverted colour). */
+ *  KEPT: APP0 (JFIF density), APP2 when it is the ICC colour profile (MPF / FlashPix APP2
+ *  blocks are capture metadata and go), APP14 (Adobe colour transform — dropping it renders
+ *  CMYK/YCCK JPEGs with inverted colour). */
 const JPEG_DROP_MARKERS = new Set([
   0xe1, // APP1  — EXIF and XMP. The GPS lives here.
   0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, // APP3–APP11 — maker notes
@@ -67,8 +172,21 @@ const JPEG_DROP_MARKERS = new Set([
   0xfe, // COM   — free-text comment
 ]);
 
-/** PNG ancillary chunks carrying text or capture metadata. */
-const PNG_DROP_CHUNKS = new Set(['tEXt', 'zTXt', 'iTXt', 'eXIf', 'tIME']);
+const ICC_PROFILE_TAG = Buffer.from('ICC_PROFILE\0', 'latin1');
+
+function keepJpegSegment(marker: number, payload: Buffer): boolean {
+  if (JPEG_DROP_MARKERS.has(marker)) return false;
+  if (marker === 0xe2) return payload.subarray(0, ICC_PROFILE_TAG.length).equals(ICC_PROFILE_TAG);
+  return true;
+}
+
+/** PNG ancillary chunks that change how the pixels look. Every OTHER ancillary chunk (text,
+ *  eXIf, tIME, a camera's or an editor's private chunk) is metadata and goes; critical chunks
+ *  (upper-case first letter: IHDR, PLTE, IDAT, IEND) always stay. */
+const PNG_KEEP_ANCILLARY = new Set(['tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'pHYs', 'bKGD', 'cICP', 'mDCV', 'cLLI', 'mDCv', 'cLLi']);
+
+/** WebP chunks a decoder renders from; EXIF, XMP and anything unknown go. */
+const WEBP_KEEP_CHUNKS = new Set(['VP8X', 'VP8 ', 'VP8L', 'ALPH', 'ANIM', 'ANMF', 'ICCP']);
 
 function stripJpeg(buf: Buffer): Buffer | null {
   if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
@@ -87,17 +205,37 @@ function stripJpeg(buf: Buffer): Buffer | null {
       i = m + 1;
       continue;
     }
-    if (marker === 0xd9) { out.push(buf.subarray(i)); return Buffer.concat(out); } // EOI
-    if (marker === 0xda) { out.push(buf.subarray(i)); return Buffer.concat(out); } // SOS → entropy data to the end
+    // EOI ends the image. Anything after it is not this image ([Row 108] a polyglot's appended
+    // part, a secondary MPF picture with its own EXIF) and is dropped.
+    if (marker === 0xd9) { out.push(buf.subarray(i, m + 1)); return Buffer.concat(out); }
+    if (marker === 0x00 || marker === 0xd8) return null; // a stuffed byte or a second SOI is no segment
     if (m + 2 >= buf.length) return null;
     const len = buf.readUInt16BE(m + 1);
     if (len < 2) return null;
     const end = m + 1 + len;
     if (end > buf.length) return null;
-    if (!JPEG_DROP_MARKERS.has(marker)) out.push(buf.subarray(i, end));
+    if (keepJpegSegment(marker, buf.subarray(m + 3, end))) out.push(buf.subarray(i, end));
     i = end;
+    if (marker === 0xda) {
+      // SOS: entropy-coded data follows, up to the next marker that is neither a stuffed byte
+      // (FF 00) nor a restart (RSTn). A progressive photo has many scans, and an APPn or COM
+      // segment may sit between ANY two of them ([Row 238]): walking on from scan to scan, never
+      // copying everything up to the end marker, is what removes the metadata hidden there.
+      const start = i;
+      while (i < buf.length) {
+        if (buf[i] !== 0xff) { const ff = buf.indexOf(0xff, i); i = ff < 0 ? buf.length : ff; continue; } // native scan, not a JS loop per byte
+        let n = i + 1;
+        while (n < buf.length && buf[n] === 0xff) n += 1;
+        if (n >= buf.length) return null;
+        const next = buf[n]!;
+        if (next === 0x00 || (next >= 0xd0 && next <= 0xd7)) { i = n + 1; continue; }
+        break;
+      }
+      if (i >= buf.length) return null; // no end marker: a truncated photo
+      out.push(buf.subarray(start, i));
+    }
   }
-  return Buffer.concat(out);
+  return null; // ran out before the end marker: a truncated photo cannot be shown to be clean
 }
 
 function stripPng(buf: Buffer): Buffer | null {
@@ -110,7 +248,8 @@ function stripPng(buf: Buffer): Buffer | null {
     const type = buf.toString('ascii', i + 4, i + 8);
     const end = i + 12 + len; // length + type + data + crc
     if (len > buf.length || end > buf.length) return null;
-    if (!PNG_DROP_CHUNKS.has(type)) out.push(buf.subarray(i, end));
+    const critical = (buf[i + 4]! & 0x20) === 0;
+    if (critical || PNG_KEEP_ANCILLARY.has(type)) out.push(buf.subarray(i, end));
     i = end;
     if (type === 'IEND') break;
   }
@@ -130,7 +269,7 @@ function stripWebp(buf: Buffer): Buffer | null {
     const padded = size + (size % 2); // RIFF chunks pad to an even length
     const end = i + 8 + padded;
     if (end > limit) return null;
-    if (fourcc === 'EXIF' || fourcc === 'XMP ') { i = end; continue; }
+    if (!WEBP_KEEP_CHUNKS.has(fourcc)) { i = end; continue; } // EXIF, XMP, anything unknown
     if (fourcc === 'VP8X' && size >= 1) {
       // VP8X advertises which optional chunks follow. Leave those flags set
       // after removing the chunks and a strict decoder looks for bytes that

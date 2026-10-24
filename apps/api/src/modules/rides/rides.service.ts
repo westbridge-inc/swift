@@ -1,3 +1,4 @@
+import { assertRoadTripInMarket } from './road-trip-market';
 import type { FastifyInstance } from 'fastify';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { RideClass } from '@prisma/client';
@@ -5,11 +6,13 @@ import { FareService, type ItineraryEstimate, type TieredEstimate } from './fare
 import { newRidePin } from './ride-pin';
 import type { TaxiStopPlan } from './taxi-itinerary';
 import { stopPreview, type TaxiStopPreview } from './taxi-stops-read';
+import { taxiWaitingEnabled, waitingDisclosure, waitingTermsCreate, type TaxiWaitingDisclosure } from './taxi-waiting';
 import type { DispatchService } from '../dispatch/dispatch.service';
 import { orderingRestriction } from '../cash/cash-rules.service';
 import { persistCheckoutReceiptInTransaction } from '../order/checkout-outbox';
 import { generateOrderNumber } from '../../utils/markup';
 import { AppError } from '../../utils/errors';
+import { assertHirePassengers } from './hire-passengers';
 import { log } from '../../utils/logger';
 import { lockActiveOrderCustomer } from '../order/order-creation-authority';
 import { ReviewDemoOrderRefusedError, REVIEW_DEMO_NO_BOOKINGS_MESSAGE } from '../review/demo-policy';
@@ -41,7 +44,7 @@ const rideInProgress = () => new AppError(
 // for the gates and the creation path — the route and the 2-min queue scan
 // both call this. Error PRECEDENCE is preserved exactly as the route has
 // always thrown it (active → banned → availability(flag) → restricted →
-// selfie → fare → capacity → L2) and is pinned by
+// fare → capacity → L2; the customer photo gate is gone, owner 16 Oct) and is pinned by
 // taxi-characterization.test.ts.
 // ---------------------------------------------------------------------------
 
@@ -68,6 +71,11 @@ export interface RideRequestBody {
    *  this itinerary and tier (whole units). Required with stops, compared with
    *  the server's own fare and never used as the price. Ignored without stops. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms the passenger was
+   *  shown beside the fare, echoed back by the app or the website (web now,
+   *  the phone from build 13). Compared with the market's terms now; never
+   *  used as the terms. */
+  waitingEcho?: { chargePerBlock: number; blockMinutes: number };
 }
 
 /**
@@ -114,6 +122,9 @@ export interface RideRequestAnswer {
     dropoffAddress: string;
     stopCount?: number;
     stops?: TaxiStopPreview[];
+    /** [TAXI waiting charge] The waiting terms frozen on this ride at booking
+     *  (CONTRACT §8.2); only for a ride booked while TAXI_WAITING_CHARGE is on. */
+    waiting?: TaxiWaitingDisclosure;
   };
   message: string;
 }
@@ -141,6 +152,7 @@ export function shapeRideRequestAnswer(facts: RideAnswerFacts, ridePin: string |
       pickupAddress: facts.pickupAddress,
       dropoffAddress: facts.dropoffAddress,
       ...(stops.length > 0 ? { stopCount: stops.length, stops: stopPreview(stops) } : {}),
+      ...(facts.waiting ? { waiting: facts.waiting } : {}),
     },
     message: 'Looking for a driver near you…',
   };
@@ -168,10 +180,36 @@ export class RideRequestOutcomeUnknownError extends AppError {
 
 /** The server's fare for this itinerary and tier is not the one the passenger
  *  was shown: nothing is booked, and the answer names the fare now. */
-function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
+export function fareChanged(expectedFare: number | undefined, fare: number, rideClass: RideClass, currencyCode: string): AppError {
   return new AppError(409, 'FARE_CHANGED',
     'The fare for this trip has changed. Check the new fare, then book again.',
     { expectedFare: expectedFare ?? null, fare, rideClass, currencyCode });
+}
+
+/** [TAXI waiting charge · quote proof] The waiting terms changed between the
+ *  quote the passenger saw and the booking: shown again before anything is
+ *  written, as a changed fare is. */
+function waitingTermsChanged(
+  echo: { chargePerBlock: number; blockMinutes: number },
+  terms: { chargePerBlock: number; blockMinutes: number },
+  currencyCode: string,
+): AppError {
+  return new AppError(409, 'WAITING_TERMS_CHANGED',
+    'The waiting charge for this trip has changed. Check the new terms, then book again.',
+    { expected: echo, waiting: { chargePerBlock: terms.chargePerBlock, blockMinutes: terms.blockMinutes, currencyCode } });
+}
+
+/**
+ * [TAXI waiting charge · quote proof, COORD ruling 21 Oct (#1996 C4)] Did this
+ * booking come from a screen that showed the waiting terms? Only then may the
+ * terms be frozen on the ride (and the passenger ever charged for waiting).
+ *  - an explicit echo of the terms (the website; the phone from build 13), or
+ *  - the quoted fare (expectedFare): builds 11 and 12 and the website send it
+ *    from the quote screen, which shows the terms beside the fare.
+ * Builds 9 and 10 send neither and never showed the terms: never charged.
+ */
+export function bookingSawWaitingTerms(body: Pick<RideRequestBody, 'expectedFare' | 'waitingEcho'>): boolean {
+  return body.waitingEcho !== undefined || body.expectedFare !== undefined;
 }
 
 type GatedUser = {
@@ -179,7 +217,6 @@ type GatedUser = {
   tenantId: string;
   countryCode: string;
   trustLevel: string;
-  selfieCapturedAt: Date | null;
 };
 
 /**
@@ -191,11 +228,17 @@ type GatedUser = {
 export async function assertRideGates(
   app: RideRequestApp,
   userId: string,
-  opts: { dispatch?: DispatchService; pickup?: { lat: number; lng: number } } = {},
+  opts: {
+    dispatch?: DispatchService;
+    pickup?: { lat: number; lng: number };
+    /** [REVIEW-G #2022 S4-3] What the requested ride needs of a car (class,
+     *  party, stops): the pre-check counts only cars dispatch could offer it to. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean };
+  } = {},
 ): Promise<GatedUser> {
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
-    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, selfieCapturedAt: true, tenant: { select: { kind: true } } },
+    select: { id: true, tenantId: true, countryCode: true, trustLevel: true, tenant: { select: { kind: true } } },
   });
 
   // [REVIEW-PARTNER · DL-5] The store-review fiction books no rides: its taxi
@@ -225,7 +268,7 @@ export async function assertRideGates(
   // drivers come online mid-search).
   if (opts.dispatch && opts.pickup
     && process.env['DISPATCH_AVAILABILITY'] === '1' && process.env['TAXI_ALLOW_REQUEST_ON_NONE'] === '0') {
-    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId);
+    const supply = await opts.dispatch.getAvailability('DRIVER', opts.pickup, 0, user.tenantId, null, user.id, opts.ride ?? null);
     if (supply.level === 'NONE') {
       throw new AppError(
         409,
@@ -235,15 +278,13 @@ export async function assertRideGates(
     }
   }
   if (restriction === 'restricted') {
-    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides require ID verification. Verify your identity to continue.');
+    throw new AppError(403, 'STRIKE_RESTRICTED', 'After repeated failed payments, rides need your ID on file. Add your ID in the app — a person will look at it before rides unlock.');
   }
 
-  // Universal signup selfie (master plan §3): the driver sees who they are
-  // picking up, so a live profile photo is required before booking rides.
-  if (!user.selfieCapturedAt) {
-    throw new AppError(403, 'SELFIE_REQUIRED', 'Add your profile photo before booking rides — your driver sees it when they accept.');
-  }
-
+  // [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer is never asked for a
+  // photo, taxi included: a ride needs only the ID on file (assertL2, after this). Partners keep
+  // their selfie rules (go-online). Builds 9-11 show their photo door only on SELFIE_REQUIRED,
+  // which this path no longer sends, so they simply stop asking.
   return user;
 }
 
@@ -252,11 +293,14 @@ export async function assertRideGates(
  * getting into a stranger's car is the highest-trust action on Swift.
  * This supersedes the old fare-threshold gate (every ride now needs L2).
  * (Kept separate because the route has always thrown it AFTER fare/capacity.)
+ * [Owner ruling 8 Oct 2026 — CUSTOMER ID] L2 now comes the moment a customer's ID goes on file
+ * (no admin approval unless an automatic check holds it), so the words say "on file", not
+ * "verified" — nobody may be told Swift verified an ID a person never looked at.
  */
 export function assertL2(user: GatedUser): void {
   if (user.trustLevel === 'L1') {
     throw new AppError(403, 'ID_VERIFICATION_REQUIRED',
-      'Rides need a one-time ID verification first — it takes a minute in the app and covers every future ride.',
+      'Rides need your ID on file first — add it once in the app (it takes a minute) and it covers every future ride.',
       { reason: 'first_ride_l2' });
   }
 }
@@ -291,8 +335,11 @@ export async function createRideRequest(
   // [TAXI multi-stop] Validated and numbered by the caller (planTaxiStops);
   // none for a ride without stops, which takes exactly the path it always has.
   const stops = body.stops ?? [];
+  if (stops.length === 0) assertRoadTripInMarket(body);
   const user = await assertRideGates(app, userId,
-    availabilityPreCheck ? { dispatch, pickup: body.pickup } : {});
+    availabilityPreCheck
+      ? { dispatch, pickup: body.pickup, ride: { rideClass: body.rideClass, passengerCount: body.passengerCount, taxiStops: stops.length > 0 } }
+      : {});
   if (expectedTenantId && user.tenantId !== expectedTenantId) {
     throw new AppError(
       409,
@@ -312,6 +359,7 @@ export async function createRideRequest(
     : await fareService.estimateItineraryTiers(body.pickup, stops, body.dropoff, user.countryCode, orderTenantId);
   const tiered: TieredEstimate = itineraryEstimate
     ?? await fareService.estimateTiers(body.pickup, body.dropoff, user.countryCode, orderTenantId);
+  assertHirePassengers(body.passengerCount);
   const tier = tiered.tiers.find((t) => t.rideClass === body.rideClass);
   if (!tier) {
     throw new AppError(400, 'INVALID_RIDE_CLASS', 'That ride tier is not available.');
@@ -324,13 +372,15 @@ export async function createRideRequest(
       { capacity: tier.capacity, passengerCount: body.passengerCount });
   }
 
-  // [TAXI multi-stop] The passenger books the route fare they were shown, or
-  // nothing: a fare that moved since the quote (rates, the road, the tier) is
-  // shown to them again before anything is written. The order always stores
-  // the SERVER's fare; the passenger's number is only ever compared. A caller
-  // that sent no quoted fare at all (the route refuses that first, 400
-  // EXPECTED_FARE_REQUIRED) is refused here too: nothing is booked unseen.
-  if (stops.length > 0 && body.expectedFare !== tier.fare) {
+  // [TAXI multi-stop · PRICE-LOCK] The passenger books the fare they were
+  // shown, or nothing: a fare that moved since the quote (rates, the zone
+  // table, the road, the tier) is shown to them again before anything is
+  // written. The order always stores the SERVER's fare; the passenger's number
+  // is only ever compared. A ride with stops must carry it (the route refuses
+  // a missing one first, 400 EXPECTED_FARE_REQUIRED); a ride without stops is
+  // compared whenever the app sent it, and an app from before the lock (no
+  // fare) books at the server fare as it always did.
+  if ((stops.length > 0 || body.expectedFare !== undefined) && body.expectedFare !== tier.fare) {
     throw fareChanged(body.expectedFare, tier.fare, body.rideClass, tiered.currencyCode);
   }
 
@@ -345,6 +395,22 @@ export async function createRideRequest(
   };
   // The leg that ENDS at each stop, as priced: frozen on the stop row.
   const legs = itineraryEstimate?.legs ?? [];
+  // [TAXI waiting charge] While the switch is on, the market's waiting terms are
+  // frozen on the ride with it (the passenger pays what the estimate showed),
+  // in the fare's currency. Off: nothing is read or written, today's ride.
+  // [quote proof] Only for a booking that shows the passenger saw the terms
+  // (bookingSawWaitingTerms); any other booking carries no terms and is never
+  // charged for waiting. An echo that no longer matches is shown again (409).
+  const waitingTerms = taxiWaitingEnabled() && bookingSawWaitingTerms(body)
+    ? await fareService.waitingTerms(user.countryCode)
+    : null;
+  if (waitingTerms && body.waitingEcho
+    && (body.waitingEcho.chargePerBlock !== waitingTerms.chargePerBlock || body.waitingEcho.blockMinutes !== waitingTerms.blockMinutes)) {
+    throw waitingTermsChanged(body.waitingEcho, waitingTerms, estimate.currencyCode);
+  }
+  const waiting = waitingTerms
+    ? { terms: { chargePerBlock: waitingTerms.chargePerBlock, blockMinutes: waitingTerms.blockMinutes, currencyCode: estimate.currencyCode }, version: waitingTerms.version }
+    : null;
 
   assertL2(user);
 
@@ -428,6 +494,8 @@ export async function createRideRequest(
             })),
           },
         } : {}),
+        // [TAXI waiting charge] The terms the passenger was shown, frozen with the ride.
+        ...(waiting ? { taxiRideWaiting: { create: waitingTermsCreate(orderTenantId, waiting.terms, waiting.version) } } : {}),
         statusHistory: {
           create: {
             status: 'PENDING',
@@ -453,6 +521,7 @@ export async function createRideRequest(
       pickupAddress: body.pickupAddress,
       dropoffAddress: body.dropoffAddress,
       ...(stops.length > 0 ? { stops: stopPreview(stops) } : {}),
+      ...(waiting ? { waiting: waitingDisclosure(waiting.terms) } : {}),
     };
     // [TAXI multi-stop · CHECKOUT-IDEM] The command's one answer commits WITH
     // the ride: a same-key retry is answered from here even if Redis forgot,

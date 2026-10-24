@@ -91,3 +91,11 @@ export function weekStartInstant(weekStart: Date, offsetMinutes = -240): Date {
   const utcMidnight = Date.UTC(weekStart.getUTCFullYear(), weekStart.getUTCMonth(), weekStart.getUTCDate());
   return new Date(utcMidnight - offsetMinutes * 60_000);
 }
+
+/** Whole tenant-local days of a stored week that have elapsed at `now`
+ *  (0..7), counted from the week's real start (weekStartInstant), never from
+ *  UTC midnight: Sunday evening in Guyana is still the week's seventh day. */
+export function elapsedWeekDays(weekStart: Date, now: Date, offsetMinutes = -240): number {
+  const elapsed = now.getTime() - weekStartInstant(weekStart, offsetMinutes).getTime();
+  return Math.min(7, Math.max(0, Math.floor(elapsed / DAY_MS)));
+}

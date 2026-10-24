@@ -6,6 +6,7 @@ import { currentDunningClock, activeOverdueMs, resolveConfirmationInTx } from '.
 import { confirmationReviewQueue } from '../modules/billing/confirmation-finance';
 import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { testPhone } from './helpers/fixture-ids';
 
 const db = new PrismaClient();
 const DAY = 86_400_000;
@@ -17,7 +18,7 @@ const billing = new BillingService(db, notifications as never, getPaymentProvide
 
 async function fixture(paid = true) {
   const key = randomUUID();
-  const user = await db.user.create({ data: { phone: `+592${Math.floor(1e10 + Math.random() * 9e10)}`, firstName: 'Resume', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
+  const user = await db.user.create({ data: { phone: testPhone(), firstName: 'Resume', lastName: 'Fixture', roles: ['VENDOR_OWNER'], activeRole: 'VENDOR_OWNER' } });
   users.push(user.id);
   const owner = await db.vendorOwner.create({ data: { userId: user.id } });
   const vendor = await db.vendor.create({ data: { ownerId: owner.id, name: 'Resume fixture', slug: `resume-${key}`, vendorType: 'RESTAURANT',
@@ -179,11 +180,11 @@ describe('paid coverage alone permits a new obligation after voluntary pause', (
     await billing.setBillingRail(f.sub.id, 'CASH');
     const transition = await db.billingObligationTransition.findFirstOrThrow({ where: { clockId: f.clock.id, kind: 'VOLUNTARY_RESUME' } });
     expect(await db.billingObligationTransition.count({ where: { clockId: f.clock.id } })).toBe(2);
-    await expect(db.subscriptionPayment.update({ where: { id: transition.paymentId }, data: { amount: 1 } })).rejects.toThrow();
-    await expect(db.billingEvent.update({ where: { id: transition.successEventId }, data: { paymentRef: 'wrong' } })).rejects.toThrow();
+    await expect(db.subscriptionPayment.update({ where: { id: transition.paymentId! }, data: { amount: 1 } })).rejects.toThrow();
+    await expect(db.billingEvent.update({ where: { id: transition.successEventId! }, data: { paymentRef: 'wrong' } })).rejects.toThrow();
     await expect(db.billingObligationTransition.update({ where: { id: transition.id }, data: { toEpoch: 99 } })).rejects.toThrow();
     await expect(db.billingDunningClock.delete({ where: { id: f.clock.id } })).rejects.toThrow();
-    await expect(db.subscriptionPayment.delete({ where: { id: transition.paymentId } })).rejects.toThrow();
+    await expect(db.subscriptionPayment.delete({ where: { id: transition.paymentId! } })).rejects.toThrow();
     const counts = await db.$transaction(async (tx) => {
       await tx.$executeRawUnsafe('SET LOCAL ROLE swift_app');
       await tx.$executeRaw`SELECT set_config('app.current_tenant', ${f.clock.tenantId}, true)`;

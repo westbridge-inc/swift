@@ -5,7 +5,10 @@
  * (undeterminable) when the field was not read — a SKIP is never a PASS, so the document
  * goes to a human. At approval: a passenger-vehicle mover's insurance is approved only
  * with the reviewer's confirmed HIRE class; PRIVATE, unconfirmed, or no check at all is
- * refused with INSURANCE_SCOPE_INSUFFICIENT. Cargo movers (motorcycle) are not gated.
+ * refused with INSURANCE_SCOPE_INSUFFICIENT.
+ * [R13 · owner 15 Oct 2026, research D6] The same human decision for EVERY motor vehicle:
+ * a delivery motorbike's policy must permit use for hire or reward (commercial use) too,
+ * and a rider whose policy is rejected is told why.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -20,6 +23,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { VALIDATOR_IMPLEMENTATIONS } from '../modules/verification/validators';
 import { VALIDATOR_CATALOGUE } from '../modules/verification/doc-registry';
+import { resolveSubject } from '../modules/verification/subjects';
 
 const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
 const NUM = String(Date.now()).slice(-5);
@@ -45,7 +49,22 @@ async function mover(n: number, vehicleType: 'CAR' | 'MOTORCYCLE') {
   }
   return u.id;
 }
-const pending = (userId: string) => system(() => app.prisma.verificationDocument.create({ data: { userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING' } }));
+const pending = (userId: string) => system(async () => {
+  // Real taxi intake binds evidence to its stored registration before review.
+  // Keep the insurance checks below exercising that independent approval gate.
+  const driver = await app.prisma.driver.findUnique({ where: { userId } });
+  const subject = driver ? await resolveSubject(app.prisma, {
+    userId, countryCode: 'GY', tenantId: 'swift-default', docType: 'vehicle_insurance', vehicleProfile: { ...driver, kind: 'DRIVER' },
+  }) : null;
+  return app.prisma.verificationDocument.create({ data: {
+    userId, subjectId: subject?.subjectId ?? null, role: 'MOVER', docType: 'vehicle_insurance',
+    fileUrl: `/uploads/verification/${RUN}/${nanoid(5)}.enc`, status: 'PENDING',
+  } });
+});
+const reject = (docId: string) => adminApp.inject({
+  method: 'PUT', url: `/api/v1/admin/verification/${docId}/reject`, payload: { reason: 'Private use only', reasonCode: 'INSURANCE_NOT_HIRE' },
+  headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
+});
 const approve = (docId: string, insurance?: Record<string, unknown>) => adminApp.inject({
   method: 'PUT', url: `/api/v1/admin/verification/${docId}/approve`, payload: { expiresAt: new Date(Date.now() + 100 * DAY).toISOString(), ...(insurance ? { insurance } : {}) },
   headers: { authorization: `Bearer ${adminToken}`, 'content-type': 'application/json', 'x-swift-reason': REASON },
@@ -64,7 +83,7 @@ beforeAll(async () => {
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
   const a = await runWithTenant('swift-default', () => app.prisma.user.create({ data: {
-    phone: `+59271${NUM}0`, firstName: 'Ins', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } },
+    phone: `+59271${NUM}0`, firstName: 'Ins', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } }, // [VERIFY-DOCS V3] opens/decides documents: explicit reviewer grant
   } }));
   adminId = a.id; users.push(adminId);
   adminToken = app.jwt.sign({ userId: a.id, role: 'SUPER_ADMIN', jti: nanoid(8) });
@@ -73,7 +92,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await system(async () => {
+    const docs = (await app.prisma.verificationDocument.findMany({ where: { userId: { in: users } }, select: { id: true } })).map((d) => d.id);
+    await app.prisma.reviewDecision.deleteMany({ where: { case: { submissionId: { in: docs } } } });
+    await app.prisma.reviewCase.deleteMany({ where: { submissionId: { in: docs } } });
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: users } } });
+    await app.prisma.subject.deleteMany({ where: { createdById: { in: users } } });
     await app.prisma.driver.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.rider.deleteMany({ where: { userId: { in: users } } });
     await app.prisma.notification.deleteMany({ where: { userId: { in: users } } });
@@ -115,9 +138,31 @@ describe('[DOC-1 P2-2] covers_hire_and_reward is blocking at approval', () => {
     expect(ok.statusCode).toBe(200);
     expect(ok.json().data).toMatchObject({ status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true });
   });
-  it('a cargo mover (motorcycle) is not gated on hire cover', async () => {
+  it('[R13] a delivery motorbike is gated too: no check, PRIVATE, or unconfirmed is refused; confirmed hire-or-reward cover approves', async () => {
     const bike = await mover(2, 'MOTORCYCLE');
     const d = await pending(bike);
-    expect((await approve(d.id)).statusCode).toBe(200);
+    for (const insurance of [undefined, { ...HIRE, coverageClass: 'PRIVATE', hireClassConfirmed: false }, { ...HIRE, coverageClass: 'PRIVATE', hireClassConfirmed: true }, { ...HIRE, hireClassConfirmed: false }]) {
+      const refused = await approve(d.id, insurance);
+      expect(refused.statusCode, JSON.stringify(insurance)).toBe(400);
+      expect(refused.json().error.code).toBe('INSURANCE_SCOPE_INSUFFICIENT');
+      expect(refused.json().error.message).toMatch(/hire or reward \(commercial use\)/);
+    }
+    expect((await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } }))).status).toBe('PENDING');
+    const ok = await approve(d.id, HIRE);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().data).toMatchObject({ status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true });
+  });
+
+  it('[R13] a rider whose policy is rejected as INSURANCE_NOT_HIRE is told why, in words about hire or reward', async () => {
+    const bike = await mover(3, 'MOTORCYCLE');
+    const d = await pending(bike);
+    const res = await reject(d.id);
+    expect(res.statusCode, res.body).toBe(200);
+    const doc = await system(() => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } }));
+    expect(doc.status).toBe('REJECTED');
+    expect(doc.reviewNote).toMatch(/does not permit use for hire or reward/);
+    expect(doc.reviewNote).toMatch(/deliveries need cover for commercial use/);
+    const told = await system(() => app.prisma.notification.findMany({ where: { userId: bike } }));
+    expect(told.some((n) => /hire or reward/.test(n.body))).toBe(true);
   });
 });

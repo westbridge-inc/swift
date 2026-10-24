@@ -1,3 +1,4 @@
+import { publicVendorReviewId } from '../../modules/rating/vendor-review-visibility';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { nanoid } from 'nanoid';
 import { createGolden } from './gold-7-helpers';
@@ -39,7 +40,8 @@ describe('GOLD-7 · CUST-04 — rate, report and tip refusal', () => {
     expect(premature.json().error.code).toBe('ORDER_NOT_COMPLETE');
     // LIFECYCLE_V2's hold is a separate journey, as in GOLD-6 CUST-05.
     await h.sys(() => h.app.prisma.order.update({ where: { id }, data: { holdExpiresAt: null } }));
-    for (const [step, status] of [['accept', 'ACCEPTED'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
+    // [O-3] Accept starts preparation; an older build's "Start preparing" tap is a 200 no-op.
+    for (const [step, status] of [['accept', 'PREPARING'], ['preparing', 'PREPARING'], ['ready', 'READY_FOR_PICKUP']]) {
       const next = await h.call('PUT', `/api/v1/vendor/orders/${id}/${step}`, owner.token, undefined, { 'x-vendor-id': store.vendorId });
       expect(next.statusCode, next.json().error?.code).toBe(200);
       expect(next.json().data.status).toBe(status);
@@ -70,13 +72,19 @@ describe('GOLD-7 · CUST-04 — rate, report and tip refusal', () => {
     expect(repeatRating.json().error.code).toBe('ALREADY_RATED');
     const unchangedRatings = await h.sys(() => h.app.prisma.rating.findMany({ where: { orderId: id } }));
     expect(unchangedRatings.map((r) => [r.id, r.score])).toEqual([[rating.id, 5]]);
+    const publicId = publicVendorReviewId(rating.id);
     const report = await h.call('POST', `/api/v1/customer/ratings/${rating.id}/report`, reporter.token,
       { reason: 'FALSE_CLAIM', note: 'Please review this claim' });
     expect(report.statusCode, report.json().error?.code).toBe(200);
-    expect(report.json().data).toMatchObject({ ratingId: rating.id, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
-    const reportAgain = await h.call('POST', `/api/v1/customer/ratings/${rating.id}/report`, reporter.token, { reason: 'FALSE_CLAIM' });
+    expect(report.json().data).toMatchObject({ ratingId: publicId, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
+    expect(report.body).not.toContain(rating.id);
+    const reportAgain = await h.call('POST', `/api/v1/customer/ratings/${publicId}/report`, reporter.token, { reason: 'FALSE_CLAIM' });
     expect(reportAgain.statusCode).toBe(200);
     expect(reportAgain.json().data.id).toBe(report.json().data.id);
+    expect(reportAgain.json().data.ratingId).toBe(publicId);
+    expect(reportAgain.body).not.toContain(rating.id);
+    expect(await h.sys(() => h.app.prisma.ratingReport.findUniqueOrThrow({ where: { id: report.json().data.id } })))
+      .toMatchObject({ ratingId: rating.id, reporterId: reporter.userId, status: 'PENDING', reason: 'FALSE_CLAIM' });
     expect(await h.sys(() => h.app.prisma.ratingReport.count({ where: { ratingId: rating.id } }))).toBe(1);
     const before = await h.sys(() => h.app.prisma.order.findUniqueOrThrow({ where: { id } }));
     const earningsBefore = await h.sys(() => h.app.prisma.earning.findMany({ where: { orderId: id }, select: { id: true, type: true, amount: true } }));

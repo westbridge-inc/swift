@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient, type MutateOptions, type QueryClient } from '@tanstack/react-query';
 import { track } from '../lib/analytics';
 import { checkoutAttempt } from '../lib/checkoutAttemptStore';
 import { checkoutFailureOutcome, recordCheckoutOutcome, settleUnresolvedIntent, stableBodyHash, type CheckoutObservation, type CheckoutPrincipal, type ReceiptProbe } from '../lib/checkoutAttempt';
@@ -442,9 +442,14 @@ export function useOrdersInfinite() {
  */
 const LIVE_ORDERS_LIMIT = 50;
 
-export function useLiveOrders() {
+/** [row 5] `poll` (the activity screen passes POLL.customerLiveOrders while it
+ *  is on screen and the app is in front): re-ask on that cadence, but only
+ *  while something is in progress — an empty live list has nothing to follow,
+ *  and a new order arrives through the cart's own invalidation. */
+export function useLiveOrders(poll?: () => number) {
   return useQuery({
     queryKey: [...customerKeys.orders, 'live'],
+    refetchInterval: poll ? (query) => ((query.state.data?.items.length ?? 0) > 0 ? poll() : false) : false,
     queryFn: async () => {
       const res = await customerApi.getOrders(1, { live: true, limit: LIVE_ORDERS_LIMIT });
       const body = res?.data ?? {};
@@ -463,6 +468,20 @@ export function useOrder<T = OrderProjection>(id: string, refetchInterval?: numb
     enabled: !!id,
     refetchInterval,
   });
+}
+
+/** [row 5 · ANDROID-QA] One fresh read of an order for a decision the customer
+ *  is about to make (cancel). It goes straight to the server instead of through
+ *  the screen's shared query: there, any background refresh (a socket reconnect,
+ *  a status event, the hold timer) cancels a read already in flight and the
+ *  tap waits for that newer read instead, which on a slow line can time out:
+ *  the first cancel tap failed although its own read answered. The fresh
+ *  answer is then written into the cache so the screen shows it too. Throws
+ *  when the read fails. */
+export async function readOrderFresh<T = OrderProjection>(qc: QueryClient, id: string): Promise<T> {
+  const data = await unwrap<T>(customerApi.getOrder(id));
+  qc.setQueryData(customerKeys.order(id), data);
+  return data;
 }
 
 export type RatingTagSets = Record<string, { positive: Array<{ slug: string; label: string }>; negative: Array<{ slug: string; label: string }> }>;
@@ -932,12 +951,27 @@ export function useTipOrder(orderId: string) {
 }
 
 /** Approve/reject the store's out-of-stock substitution, live (§5.3). */
-export function useDecideSubstitution(orderId: string) {
+type SubstitutionDecision = { orderId: string; lineId: string; approve: boolean };
+
+export function useDecideSubstitution() {
   const qc = useQueryClient();
+  // [review of #1565 S2] The order is part of the decision, never the render's
+  // closure: a screen React Navigation reuses for another order (opened from a
+  // notification while the request is in flight) must refresh the order the
+  // decision was for, not the one now on screen. Same rule as useClaimMmgPayment.
   return useMutation({
-    mutationFn: ({ lineId, approve }: { lineId: string; approve: boolean }) =>
+    // A 409 means the swap moved on (the store withdrew it, or another device
+    // decided first): show the line as it is now instead of a stale card.
+    onError: (error: { response?: { status?: number } } | null | undefined, { orderId }: SubstitutionDecision) => {
+      if (error?.response?.status === 409) return qc.invalidateQueries({ queryKey: customerKeys.order(orderId) });
+      return undefined;
+    },
+    mutationFn: ({ orderId, lineId, approve }: SubstitutionDecision) =>
       customerApi.decideSubstitution(orderId, lineId, approve),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['order', orderId] }),
+    // [L09 · M028] The order screen reads customerKeys.order(id); refreshing
+    // any other key left it showing the old proposal after a decision. The
+    // order is the decision's own (#1707), never the render's.
+    onSuccess: (_data: unknown, { orderId }: SubstitutionDecision) => qc.invalidateQueries({ queryKey: customerKeys.order(orderId) }),
   });
 }
 

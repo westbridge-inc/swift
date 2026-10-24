@@ -12,7 +12,8 @@ import {
   fetchCustodyCases,
 } from '@/lib/api';
 import { StatusPill } from '@/components/detail';
-import { askReason } from '@/lib/ask-reason';
+import { useActionRunner } from '@/components/mc/useActionRunner';
+import { QueryFailed } from '@/components/mc/QueryFailed';
 
 // ---------------------------------------------------------------------------
 // [AF-MOB-006] CUSTODY CASES — deliveries that went wrong AFTER pickup.
@@ -38,7 +39,7 @@ const gyd = (n: number) => `GY$${Math.round(n).toLocaleString('en-US')}`;
 
 function CaseDetail({ id }: { id: string }) {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
+  const caseQ = useQuery({ queryKey: ['custody-case', id], queryFn: () => fetchCustodyCase(id) });
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['custody-case', id] });
     void qc.invalidateQueries({ queryKey: ['custody-cases'] });
@@ -46,19 +47,17 @@ function CaseDetail({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
   const onError = (e: unknown) => setError(e instanceof Error ? e.message : 'The action failed.');
   const claim = useMutation({ mutationFn: () => claimCustodyCase(id), onSuccess: refresh, onError });
-  const direct = useMutation({
-    mutationFn: ({ outcome, reason }: { outcome: Outcome; reason: string }) => directCustodyCase(id, outcome, reason),
-    onSuccess: refresh, onError,
-  });
-  const relay = useMutation({
-    mutationFn: ({ riderId, reason }: { riderId: string; reason: string }) => assignCustodyRelay(id, riderId, reason),
-    onSuccess: refresh, onError,
-  });
-  const back = useMutation({ mutationFn: (reason: string) => confirmCustodyReturn(id, reason), onSuccess: refresh, onError });
-  const busy = claim.isPending || direct.isPending || relay.isPending || back.isPending;
+  // Directing a case, naming a relay rider and confirming a return move goods
+  // that belong to someone else: each is asked in the in-page panel (no browser
+  // prompt), run once, and its refusal stays in view.
+  const actions = useActionRunner(() => refresh());
+  const busy = claim.isPending;
 
-  if (isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
-  const k = data?.data;
+  if (caseQ.isLoading) return <div className="h-24 rounded-xl bg-[var(--panel)] animate-pulse" />;
+  if (caseQ.isError) {
+    return <QueryFailed error={caseQ.error} what="this custody case" onRetry={() => void caseQ.refetch()} retrying={caseQ.isFetching} className="mt-4" />;
+  }
+  const k = caseQ.data?.data;
   if (!k) return null;
   // The server's own marker: a case is open exactly while it has no resolvedAt.
   const open = k.resolvedAt == null;
@@ -82,12 +81,13 @@ function CaseDetail({ id }: { id: string }) {
         <p className="text-sm text-amber-400">MMG-paid: if this order is returned, the store refunds the customer directly — Swift never holds order money.</p>
       ) : null}
 
-      {error ? <p className="text-sm text-red-400">{error}</p> : null}
+      {error ? <p role="alert" className="text-sm text-red-400">{error}</p> : null}
+      {actions.banner}
 
       {open ? (
         <div className="flex flex-wrap gap-2">
           {!k.ownerUserId ? (
-            <button onClick={() => claim.mutate()} disabled={busy} className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50">
+            <button type="button" onClick={() => claim.mutate()} disabled={busy} className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50">
               Take this case
             </button>
           ) : null}
@@ -95,10 +95,13 @@ function CaseDetail({ id }: { id: string }) {
             <button
               key={o}
               disabled={busy}
-              onClick={() => {
-                const reason = askReason({ action: OUTCOME_LABEL[o].toLowerCase(), subject: `order ${k.order?.orderNumber}` });
-                if (reason) direct.mutate({ outcome: o, reason });
-              }}
+              type="button"
+              onClick={() => void actions.run({
+                title: `${OUTCOME_LABEL[o]} for order ${k.order?.orderNumber}?`,
+                confirmLabel: OUTCOME_LABEL[o],
+                submit: ({ reason }) => directCustodyCase(id, o, reason),
+                success: () => `Order ${k.order?.orderNumber}: ${OUTCOME_LABEL[o].toLowerCase()}.`,
+              })}
               className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
             >
               {OUTCOME_LABEL[o]}
@@ -107,12 +110,15 @@ function CaseDetail({ id }: { id: string }) {
           {k.state === 'RELAY_REQUIRED' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                const riderId = window.prompt('Rider id of the relay rider (from Riders):')?.trim();
-                if (!riderId) return;
-                const reason = askReason({ action: 'name this relay rider', subject: `order ${k.order?.orderNumber}` });
-                if (reason) relay.mutate({ riderId, reason });
-              }}
+              type="button"
+              onClick={() => void actions.run({
+                title: `Name the relay rider for order ${k.order?.orderNumber}?`,
+                body: <p>The rider collects the goods from whoever holds them now.</p>,
+                confirmLabel: 'Name the relay rider',
+                fields: [{ kind: 'text', name: 'riderId', label: 'Rider id (from Riders)', required: true, maxLength: 64 }],
+                submit: ({ reason, values }) => assignCustodyRelay(id, String(values['riderId']), reason),
+                success: () => 'Relay rider named.',
+              })}
               className="px-4 py-2 rounded-lg text-sm bg-[var(--accent)] disabled:opacity-50"
             >
               Name the relay rider
@@ -121,11 +127,14 @@ function CaseDetail({ id }: { id: string }) {
           {k.state === 'RETURN_REQUIRED' && k.order?.status === 'RETURNING' ? (
             <button
               disabled={busy}
-              onClick={() => {
-                if (!window.confirm('Record that the goods are back where they came from? Do this only when the store (or sender) cannot confirm it themselves.')) return;
-                const reason = askReason({ action: 'confirm this return', subject: `order ${k.order?.orderNumber}` });
-                if (reason) back.mutate(reason);
-              }}
+              type="button"
+              onClick={() => void actions.run({
+                title: `Record that the goods for order ${k.order?.orderNumber} are back where they came from?`,
+                body: <p>Do this only when the store (or sender) cannot confirm it themselves.</p>,
+                confirmLabel: 'Confirm the goods are back',
+                submit: ({ reason }) => confirmCustodyReturn(id, reason),
+                success: () => 'Return confirmed.',
+              })}
               className="px-4 py-2 rounded-lg text-sm border border-[var(--border)] hover:bg-white/10 disabled:opacity-50"
             >
               Confirm the goods are back
@@ -153,7 +162,7 @@ function CaseDetail({ id }: { id: string }) {
 export default function CustodyCasesPage() {
   const [showOpen, setShowOpen] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
-  const { data, isLoading } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['custody-cases', showOpen], queryFn: () => fetchCustodyCases(showOpen), refetchInterval: 30_000 });
   const rows: any[] = data?.data ?? [];
 
   return (
@@ -179,6 +188,8 @@ export default function CustodyCasesPage() {
       <div className="space-y-3">
         {isLoading ? (
           <div className="h-24 rounded-xl bg-[var(--panel)] border border-[var(--border)] animate-pulse" />
+        ) : isError ? (
+          <QueryFailed error={error} what="the custody cases" onRetry={() => void refetch()} retrying={isFetching} />
         ) : rows.length === 0 ? (
           <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-8 text-center text-[var(--muted)]">
             {showOpen ? 'No open custody cases.' : 'No custody cases.'}

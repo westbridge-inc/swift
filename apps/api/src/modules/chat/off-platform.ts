@@ -1,11 +1,11 @@
 /**
  * Off-platform contact detection (marketplace-mechanics spec §2).
  *
- * Detection, NOT censorship: a message carrying a phone number or a
- * take-it-to-WhatsApp overture still DELIVERS — the sender just gets a soft
- * nudge ("keep it in the app so you're covered"), and the message is flagged
- * so risk scoring can count repeat signals later. Hard-blocking frustrates
- * legitimate use ("the gate code is 4321") and teaches people to obfuscate.
+ * This detector supplies a soft nudge and risk signal for allowed content.
+ * The separate launch content filter (content-filter.ts) refuses prohibited
+ * contact details and language before storage once its launch switch
+ * (CHAT_CONTENT_FILTER) is on; until then a message carrying a phone number
+ * still delivers with the nudge. An overture alone can still get the nudge.
  */
 
 // 7+ digits in a row, tolerating spaces/dashes/dots between groups, guarded

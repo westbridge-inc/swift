@@ -3,7 +3,7 @@ import { grantStepUp } from './helpers/step-up';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import type { UserRole } from '@prisma/client';
+import type { OrderStatus, UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -17,6 +17,7 @@ import { verdictFor, refusalMessage, BLOCKER_MESSAGE, PARTNER_BLOCKERS, windDown
 import { restoreBillingAccess } from '../modules/billing/billing-access';
 import { currentDunningClock } from '../modules/billing/dunning-clock';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [Apple 5.1.1(v)] A mover or vendor closes their own account.
@@ -63,14 +64,15 @@ async function makePartner(roles: UserRole[], opts: { committedFloat?: number; s
 
 /** A settlement hangs off a real order and vendor; borrow whatever the seeded
  *  database already has rather than inventing a storefront for a fixture. */
-async function makeCashOrder(riderId: string) {
+/** [row 264] Born in `status`: the database refuses moving an order back across the machine. */
+async function makeCashOrder(riderId: string, status: OrderStatus = 'DELIVERED') {
   const vendor = await app.prisma.vendor.findFirstOrThrow({ select: { id: true } });
   const customer = await app.prisma.user.findFirstOrThrow({ where: { customer: { isNot: null } }, select: { id: true } });
   const order = await app.prisma.order.create({
     data: {
       orderNumber: `PD-${nanoid(10).toUpperCase()}`,
       customerId: customer.id, vendorId: vendor.id, riderId,
-      orderType: 'FOOD_DELIVERY', status: 'DELIVERED', deliveryAddress: '1 Test St',
+      orderType: 'FOOD_DELIVERY', status, deliveryAddress: '1 Test St',
       deliveryLat: 6.8055, deliveryLng: -58.1553,
       subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500,
       deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH',
@@ -136,7 +138,7 @@ describe('[5.1.1v] the verdict, without a database', () => {
     // Told one at a time, a person clears a blocker, tries again, and is
     // refused for a different reason they were never shown. That is the
     // "contact Support" dead end with extra steps.
-    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1 });
+    const all = verdictFor({ committedFloat: 500, unsettledCashCount: 2, partialCashReturnCount: 1, earningsOwed: 250, openClaimCount: 1, pendingFeePaymentCount: 1, feeCreditCount: 1, feeRefundPendingCount: 1 });
     expect(all.blockers).toHaveLength(PARTNER_BLOCKERS.length);
     for (const b of PARTNER_BLOCKERS) expect(refusalMessage(all.blockers)).toContain(BLOCKER_MESSAGE[b]);
   });
@@ -190,11 +192,11 @@ describe('[5.1.1v] a partner deletes their own account', () => {
 
   it.each(['RIDER', 'DRIVER'] as const)('blocks active work assigned to a %s even in customer mode', async (role) => {
     const p = await makePartner(['CUSTOMER', role]);
-    const order = await makeCashOrder(p.riderId);
+    const order = await makeCashOrder(p.riderId, 'PICKED_UP');
     if (role === 'DRIVER') {
       const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: nanoid(8), driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
-      await app.prisma.order.update({ where: { id: order.orderId }, data: { riderId: null, driverId: driver.id, status: 'PICKED_UP' } });
-    } else await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'PICKED_UP' } });
+      await app.prisma.order.update({ where: { id: order.orderId }, data: { riderId: null, driverId: driver.id } });
+    }
     const res = await del(p.token);
     expect(res.statusCode, res.payload).toBe(409);
     expect(res.json().error.code).toBe('ACTIVE_ORDERS');
@@ -212,11 +214,11 @@ describe('[5.1.1v] a partner deletes their own account', () => {
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true,
     } });
     vendorIds.push(vendor.id);
-    const order = await makeCashOrder(p.riderId);
-    await app.prisma.order.update({ where: { id: order.orderId }, data: { vendorId: vendor.id, riderId: null, status: 'PREPARING' } });
+    const order = await makeCashOrder(p.riderId, 'PREPARING');
+    await app.prisma.order.update({ where: { id: order.orderId }, data: { vendorId: vendor.id, riderId: null } });
     await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'ACTIVE_ORDERS' });
     expect(await app.prisma.vendor.findUnique({ where: { id: vendor.id } })).toMatchObject({ status: 'ACTIVE', acceptingOrders: true });
-    await app.prisma.order.update({ where: { id: order.orderId }, data: { status: 'DELIVERED' } });
+    await walkOrderStatus(app.prisma, order.orderId, 'DELIVERED');
     const settlement = await app.prisma.deliveryCashSettlement.create({ data: { orderId: order.orderId, riderId: p.riderId, vendorId: vendor.id, amount: 1500, status: 'OWED' } });
     await expect(new AccountService(app).deleteAccount(p.userId)).rejects.toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
     await app.prisma.deliveryCashSettlement.update({ where: { id: settlement.id }, data: { status: 'SETTLED' } });
@@ -227,13 +229,14 @@ describe('[5.1.1v] a partner deletes their own account', () => {
   // A store already on a billing hold when its owner closes the account must
   // stay closed: a later fee payment, or the nightly billing heal, reopens only
   // a store whose suspension billing itself recorded.
-  async function billingHeldStore() {
+  async function billingHeldStore(extra: Record<string, unknown> = {}) {
     const p = await makePartner(['CUSTOMER', 'VENDOR_OWNER']);
     const owner = await app.prisma.vendorOwner.create({ data: { userId: p.userId } });
     const vendor = await app.prisma.vendor.create({ data: {
       ownerId: owner.id, name: 'Synthetic billing-held store', slug: `held-${nanoid(12)}`, vendorType: 'RESTAURANT',
       phone: 'synthetic', addressLine1: 'Synthetic', city: 'Synthetic', region: 'Synthetic', latitude: 0, longitude: 0,
       status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false, isCurrentlyOpen: false, isVerified: true,
+      ...extra,
     } });
     vendorIds.push(vendor.id);
     return { p, vendorId: vendor.id };
@@ -246,6 +249,94 @@ describe('[5.1.1v] a partner deletes their own account', () => {
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'WIND_DOWN' });
     expect(await billingReopens(vendorId)).toBe(false);
     expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } })).toMatchObject({ status: 'SUSPENDED', acceptingOrders: false });
+  });
+
+  // [PAYMENT-SIMPLIFY · REVIEW-G S3-1 · COORD 18 Oct] The store's MMG payee details are personal payment
+  // destinations: closing the account clears them (the driver's link already is). Each order keeps its own
+  // committed number (orders.mmgNumberSnapshot) under the order retention rule — it is that order's payee.
+  const MMG_DESTINATION = {
+    mmgNumber: '+5926000001', mmgNumberPending: '+5926000002', mmgNumberPendingAt: new Date(), mmgNumberApplyAt: new Date(Date.now() + 86_400_000),
+    mmgPayUrl: 'https://pay.example.com/pay/synthetic', mmgPayUrlPending: 'https://pay.example.com/pay/synthetic-2', mmgPayUrlPendingAt: new Date(), mmgPayUrlApplyAt: new Date(Date.now() + 86_400_000),
+  };
+  const MMG_CLEARED = {
+    mmgNumber: null, mmgNumberPending: null, mmgNumberPendingAt: null, mmgNumberApplyAt: null,
+    mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null,
+  };
+  const mmgDestination = (vendorId: string) => app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: Object.fromEntries(Object.keys(MMG_CLEARED).map((k) => [k, true])) });
+
+  it("winding a store down clears its MMG number, staged number and pay link", async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await windDownPartner(app.prisma, p.userId);
+    expect(await mmgDestination(vendorId)).toEqual(MMG_CLEARED);
+  });
+
+  // [#1848 follow-up · REVIEW-M S4] A change staged before the account closed would stay DECIDED forever (the
+  // executor never applies it once the field is cleared) and count as a pending change: it closes with the account.
+  const stageCommands = async (vendorId: string, userId: string) => {
+    for (const [generation, kind] of [[1, 'MMG_NUMBER_STAGE'], [2, 'MMG_LINK_STAGE']] as const) {
+      await app.prisma.moneySurfaceCommand.create({ data: { actor: 'VENDOR', entityId: vendorId, userId, kind, state: 'DECIDED', generation, oldDigest: 'old', newDigest: 'new' } });
+    }
+  };
+  const stageStates = async (vendorId: string) => (await app.prisma.moneySurfaceCommand.findMany({ where: { entityId: vendorId }, orderBy: { generation: 'asc' }, select: { kind: true, state: true } }));
+  const SUPERSEDED = [{ kind: 'MMG_NUMBER_STAGE', state: 'SUPERSEDED' }, { kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED' }];
+
+  it('winding a store down closes its staged MMG number and link changes', async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await stageCommands(vendorId, p.userId);
+    try {
+      await windDownPartner(app.prisma, p.userId);
+      expect(await stageStates(vendorId)).toEqual(SUPERSEDED);
+    } finally { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: vendorId } }); }
+  });
+
+  // [#1875 · REVIEW-G S4-1] The driver's staged pay-link change closes at wind-down too.
+  it("winding a driver down closes the driver's staged MMG link change", async () => {
+    const p = await makePartner(['CUSTOMER', 'DRIVER']);
+    const driver = await app.prisma.driver.create({ data: { userId: p.userId, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: `PT${nanoid(5)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    await app.prisma.moneySurfaceCommand.create({ data: { actor: 'DRIVER', entityId: driver.id, userId: p.userId, kind: 'MMG_LINK_STAGE', state: 'DECIDED', generation: 1, oldDigest: 'old', newDigest: 'new' } });
+    try {
+      await windDownPartner(app.prisma, p.userId);
+      expect(await stageStates(driver.id)).toEqual([{ kind: 'MMG_LINK_STAGE', state: 'SUPERSEDED' }]);
+    } finally {
+      await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: driver.id } });
+      await app.prisma.driver.delete({ where: { id: driver.id } }).catch(() => undefined);
+    }
+  });
+
+  it('the deletion cutoff itself closes the staged MMG changes', async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    await stageCommands(vendorId, p.userId);
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let atCutoff: unknown;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      const result = await realTransaction(work, options);
+      if (atCutoff === undefined) atCutoff = await stageStates(vendorId);
+      return result;
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    } finally {
+      spy.mockRestore();
+    }
+    try {
+      expect(atCutoff).toEqual(SUPERSEDED);
+    } finally { await app.prisma.moneySurfaceCommand.deleteMany({ where: { entityId: vendorId } }); }
+  });
+
+  it("the deletion cutoff itself clears the store's MMG payee details", async () => {
+    const { p, vendorId } = await billingHeldStore(MMG_DESTINATION);
+    const realTransaction = app.prisma.$transaction.bind(app.prisma) as (...args: unknown[]) => Promise<unknown>;
+    let atCutoff: unknown;
+    const spy = vi.spyOn(app.prisma, '$transaction').mockImplementation((async (work: unknown, options?: unknown) => {
+      const result = await realTransaction(work, options);
+      if (atCutoff === undefined) atCutoff = await mmgDestination(vendorId);
+      return result;
+    }) as never);
+    try {
+      await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+    } finally { spy.mockRestore(); }
+    expect(atCutoff).toEqual(MMG_CLEARED);
+    expect(await mmgDestination(vendorId)).toEqual(MMG_CLEARED);
   });
 
   it('the deletion cutoff itself marks owned stores wound down, before any later cleanup can fail', async () => {
@@ -421,7 +512,7 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
       checkoutUrlSealed: Buffer.alloc(40), checkoutUrlDek: Buffer.alloc(60), expiresAt: new Date(Date.now() + 600_000), ...data,
     } });
   }
-  const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT') => {
+  const refused = async (userId: string, blocker: 'FEE_PAYMENT_PENDING' | 'FEE_CREDIT' | 'FEE_REFUND_PENDING') => {
     const error = await new AccountService(app).deleteAccount(userId).then(() => null, (e: unknown) => e);
     expect(error, 'deletion must be refused while fee money is unsettled').toMatchObject({ code: 'PARTNER_OBLIGATIONS' });
     // The fixed words after any amount the person's message fills in.
@@ -545,9 +636,34 @@ describe('[5.1.1v] weekly-fee money blocks deletion until it settles', () => {
     await refused(p.userId, 'FEE_CREDIT');
     // [Owner ruling 2026-10-07] The person is told the amount and that it is refunded.
     const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
-    expect(error?.message).toContain('You have GY$1,500 of unused weekly-fee credit. Open Get help and we\u2019ll refund it, then your account can be deleted.');
+    // [OWNER RULING 8 Oct, NO "WALLET"; owner #62] named as money paid for weekly fees that have not started.
+    expect(error?.message).toContain('You have GY$1,500 paid for weekly fees that have not started. Open Get help and we\u2019ll refund it, then your account can be deleted.');
     await untouched(p.userId);
     await app.prisma.prepaidBalance.update({ where: { subscriptionId: sub.id }, data: { balance: 0 } });
     await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('[Owner ruling 2026-10-07] credit set aside for a refund blocks deletion until the payout is recorded: the person must still be reachable to be paid', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    // Set aside: the wallet is empty, the money is owed back (REFUND_PAYABLE).
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 0 } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RESERVED', amount: 1500, idempotencyKey: `credit-refund-reserve:test-${sub.id}` } });
+    await refused(p.userId, 'FEE_REFUND_PENDING');
+    await untouched(p.userId);
+    // Paid back and recorded: nothing is owed any more.
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND', amount: 1500, paymentRef: `REF${sub.id}`.toUpperCase(), idempotencyKey: `credit-refund-paid:test-${sub.id}` } });
+    await expect(new AccountService(app).deleteAccount(p.userId)).resolves.toMatchObject({ deleted: true });
+  });
+
+  it('a released set-aside is credit again, and blocks as credit', async () => {
+    const p = await makePartner(['CUSTOMER', 'MOVER']);
+    const sub = await feeSubscription(p.riderId);
+    await app.prisma.prepaidBalance.create({ data: { subscriptionId: sub.id, balance: 1500 } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RESERVED', amount: 1500, idempotencyKey: `credit-refund-reserve:test-${sub.id}` } });
+    await app.prisma.billingEvent.create({ data: { subscriptionId: sub.id, type: 'PREPAID_REFUND_RELEASED', amount: 1500, idempotencyKey: `credit-refund-release:test-${sub.id}` } });
+    const error = await new AccountService(app).deleteAccount(p.userId).then(() => null, (e: unknown) => e as Error);
+    expect(error?.message).toContain('paid for weekly fees that have not started. Open Get help');
+    expect(error?.message).not.toContain('Swift is paying back');
   });
 });

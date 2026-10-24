@@ -29,6 +29,7 @@ import { invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { AppError } from '../utils/errors';
 import { recordDispatchQueue } from './helpers/dispatch-queue';
 import { dispatchWithdrawnCardsKey } from '../modules/dispatch/dispatch-generation-keys';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [DISPATCH 1/3] EXACTLY ONE WINNER — proven by racing it.
@@ -118,7 +119,7 @@ async function makeDriver(at = SPOT): Promise<DriverActor> {
     data: {
       userId: u.userId,
       vehicleMake: 'Toyota', vehicleModel: 'Allion', vehicleYear: 2020, vehicleColor: 'Silver',
-      licensePlate: `RACE-${seq}`, driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
+      licensePlate: `HRACE-${seq}`, /* [owner 11 Oct] a taxi plate is H-series */ driverLicenseUrl: 'storage://race/dl.jpg', vehicleInsuranceUrl: 'storage://race/ins.jpg',
       documentsVerified: true,
       isOnline: true, isAvailable: true, locationSessionId: u.sessionId,
       currentLat: at.lat, currentLng: at.lng, lastLocationUpdate: new Date(),
@@ -161,7 +162,7 @@ function makeTaxi(customer: Actor, at = SPOT) {
 }
 
 /** A cash food order ready at the kitchen, waiting for a rider. */
-function makeDelivery(customer: Actor, dropOffset = 0) {
+function makeDelivery(customer: Actor, dropOffset = 0, over: { promisedAt?: Date; status?: 'PREPARING' } = {}) {
   return sys(() => app.prisma.order.create({
     data: {
       orderNumber: `RACE-D-${nanoid(10)}`, orderType: 'FOOD_DELIVERY', fulfillment: 'DELIVERY',
@@ -170,9 +171,15 @@ function makeDelivery(customer: Actor, dropOffset = 0) {
       deliveryAddress: 'Lethem homes', deliveryLat: SPOT.lat + 0.004 + dropOffset, deliveryLng: SPOT.lng + 0.004,
       subtotalBase: 2000, subtotalMarkup: 0, subtotalCustomer: 2000, deliveryFee: 500, totalAmount: 2500,
       serviceFee: 0, taxAmount: 0, tipAmount: 0, discount: 0, paymentMethod: 'CASH',
+      ...over,
     },
   }));
 }
+
+/** [owner #46/#52, 13–14 Oct] A store order the store accepted is the
+ *  customer's to cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its
+ *  promised time — so the customer-cancel cases below run on one. */
+const PAST_PROMISE = () => ({ promisedAt: new Date(Date.now() - 61 * 60_000) });
 
 /** A sender's parcel waiting at the pickup for a courier rider. */
 function makeCourier(sender: Actor) {
@@ -460,12 +467,12 @@ describe('[DISPATCH 1/3] the database itself refuses a second winner', () => {
     const driver = await makeDriver(near(5000));
     const [c1, c2, c3, c4] = [await makeCustomer(), await makeCustomer(), await makeCustomer(), await makeCustomer()];
     const first = await makeTaxi(c1);
-    await sys(() => app.prisma.order.update({ where: { id: first.id }, data: { driverId: driver.driverId, status: 'DRIVER_EN_ROUTE' } }));
+    await sys(() => walkOrderStatus(app.prisma, first.id, 'DRIVER_EN_ROUTE', { driverId: driver.driverId }));
     const second = await makeTaxi(c2);
     await expect(sys(() => app.prisma.order.update({ where: { id: second.id }, data: { driverId: driver.driverId, status: 'DRIVER_ASSIGNED' } })))
       .rejects.toThrow(/Unique constraint failed on the fields: \(`driverId`\)/);
     // A finished ride is history, not custody: the driver may take the next one.
-    await sys(() => app.prisma.order.update({ where: { id: first.id }, data: { status: 'COMPLETED' } }));
+    await sys(() => walkOrderStatus(app.prisma, first.id, 'COMPLETED'));
     await sys(() => app.prisma.order.update({ where: { id: second.id }, data: { driverId: driver.driverId, status: 'DRIVER_ASSIGNED' } }));
     // Unassigned requests carry no driver and never meet in the index.
     await makeTaxi(c3);
@@ -842,7 +849,7 @@ describe('[DISPATCH 1/3] accept against the clock and against the customer', () 
   it('[B4] delivery: a customer order cancel withdraws the live card the same way', async () => {
     const customer = await makeCustomer();
     const carded = await makeRider(SPOT);
-    const order = await makeDelivery(customer);
+    const order = await makeDelivery(customer, 0, PAST_PROMISE()); // [owner #46/#52, 13–14 Oct]
     const card = await offer(order.id, (await dispatch.dispatchOrder(order.id)).offered!);
     expect(card.moverId).toBe(carded.riderId);
 
@@ -886,8 +893,8 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the card — through
     const carded = await makeRider(SPOT);
     // Dispatched on accept, still in the kitchen: moving to READY keeps the job
     // open, so the rider card must survive it.
-    const cooking = await makeDelivery(await makeCustomer());
-    await sys(() => app.prisma.order.update({ where: { id: cooking.id }, data: { status: 'PREPARING' } }));
+    // [row 264] Born in the kitchen: a READY order never goes back to PREPARING (the database refuses it).
+    const cooking = await makeDelivery(await makeCustomer(), 0, { status: 'PREPARING' });
     const card = await offer(cooking.id, (await dispatch.dispatchOrder(cooking.id)).offered!);
     await sys(() => seam.transitionOrderAtomically({
       orderId: cooking.id, target: 'READY_FOR_PICKUP', allowedFrom: ['PREPARING'], changedBy: 'race-kitchen', note: 'Ready',
@@ -917,7 +924,7 @@ describe('[DISPATCH 1/3 · B4] every cancellation withdraws the card — through
       where: { id: cold.id },
       select: {
         id: true, orderNumber: true, customerId: true, tenantId: true, orderType: true, status: true, paymentMethod: true,
-        paymentStatus: true, fulfillmentModeVersion: true, readyAt: true, vendor: { select: { name: true, owner: { select: { userId: true } } } },
+        paymentStatus: true, fulfillmentModeVersion: true, riderAssignmentVersion: true, readyAt: true, vendor: { select: { name: true, owner: { select: { userId: true } } } },
       },
     }));
     const retired = await sys(() => retireTooOldOrder(
@@ -971,7 +978,7 @@ describe('[DISPATCH 1/3 · AX299 F2] a withdrawn card leaves the screen, and nev
     const rideCard = await offer(ride.id, (await dispatch.dispatchOrder(ride.id)).offered!);
     const shopper = await makeCustomer();
     const rider = await makeRider(SPOT);
-    const order = await makeDelivery(shopper);
+    const order = await makeDelivery(shopper, 0, PAST_PROMISE()); // [owner #46/#52, 13–14 Oct]
     const orderCard = await offer(order.id, (await dispatch.dispatchOrder(order.id)).offered!);
     expect([rideCard.moverId, orderCard.moverId]).toEqual([driver.driverId, rider.riderId]);
 
@@ -1361,6 +1368,7 @@ describe('[DISPATCH 1/3] after the race: retries, give-backs and the words mover
       [new AppError(409, 'FLOAT_EXCEEDED', 'x'), 'mover-ineligible', true],
       [new AppError(409, 'STACK_INELIGIBLE', 'x'), 'mover-ineligible', true],
       [new AppError(409, 'SELF_OWN_ORDER', 'x'), 'mover-ineligible', true],
+      [new AppError(409, 'APP_UPDATE_REQUIRED', 'x'), 'mover-ineligible', true],
       // A database fault or a new code: never charged to a mover.
       [new Error('connection reset'), 'unknown', false],
       [new AppError(500, 'SOMETHING_NEW', 'x'), 'unknown', false],

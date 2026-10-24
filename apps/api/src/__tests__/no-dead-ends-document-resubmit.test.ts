@@ -16,6 +16,8 @@ import { ownedVerificationFixture, signupSelfieFixture } from './helpers/verific
 import { injectWithApproval } from './helpers/admin-approval';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { previousDecisions } from '../modules/verification/previous-decision';
+import { reviewerTyped } from './helpers/reviewer-typed';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [NO-DEAD-ENDS · owner, 6 Oct] "Remember the issue for them to be able to
@@ -37,6 +39,7 @@ const REJECT_REASON = 'Photo is blurry: retake it in daylight with all four corn
 
 let app: FastifyInstance;
 let adminToken = '';
+let reviewerUserId = '';
 let ownerToken = '';
 let ownerUserId = '';
 let vendorId = '';
@@ -123,11 +126,28 @@ beforeAll(async () => {
   const profile = await get('/api/v1/vendor/profile', ownerToken);
   vendorId = profile.json().data.vendors[0].id;
 
-  adminToken = (await loginWithOtp(app, '+5926001000')).json().data.tokens.accessToken;
+  // The reviewer is a private fixture. A super-admin role alone cannot review documents.
+  const reviewerPhone = testPhone();
+  const reviewer = await app.prisma.user.create({ data: {
+    phone: reviewerPhone, firstName: 'Synthetic', lastName: 'Reviewer', roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',
+    status: 'ACTIVE', isPhoneVerified: true, syntheticRunId: 'document-resubmit-reviewer', admin: { create: { permissions: ['*'] } },
+  } });
+  reviewerUserId = reviewer.id;
+  const login = await loginWithOtp(app, reviewerPhone);
+  expect(login.statusCode, login.body).toBe(200);
+  adminToken = login.json().data.tokens.accessToken;
+  const grant = await admin('PUT', `/api/v1/admin/staff/${reviewerUserId}/document-reviewer`, { grant: true });
+  expect(grant.statusCode, grant.body).toBe(200);
 });
 
 afterAll(async () => {
   await cleanup();
+  if (reviewerUserId) {
+    // Audit rows are append-only and intentionally survive synthetic actor cleanup.
+    await app.prisma.session.deleteMany({ where: { userId: reviewerUserId } });
+    await app.prisma.admin.deleteMany({ where: { userId: reviewerUserId } });
+    await app.prisma.user.deleteMany({ where: { id: reviewerUserId } });
+  }
   await app.close();
 });
 
@@ -148,7 +168,7 @@ describe('a store owner re-submits one rejected document without restarting the 
         expect(rejected.statusCode, rejected.body).toBe(200);
         expect(rejected.json().data.status).toBe('REJECTED');
       } else {
-        const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, {});
+        const approved = await admin('PUT', `/api/v1/admin/verification/${doc.id}/approve`, reviewerTyped(docType, doc.id));
         expect(approved.statusCode, approved.body).toBe(200);
       }
     }
@@ -203,7 +223,17 @@ describe('a store owner re-submits one rejected document without restarting the 
   });
 
   it('approving it completes the checklist and the store goes live — the same store, no restart', async () => {
-    const approved = await admin('PUT', `/api/v1/admin/verification/${resubmittedDocId}/approve`, {});
+    // [owner #51, 14 Oct] A first go-live also needs a published contact phone: the owner adds it on the
+    // waiting store's screen (it changes nothing else while the checklist is still open).
+    const phoneSaved = await app.inject({
+      method: 'PUT', url: '/api/v1/vendor/profile', payload: { publicPhone: '+592 600 9876' },
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ownerToken}`, 'x-vendor-id': vendorId },
+    });
+    expect(phoneSaved.statusCode, phoneSaved.body).toBe(200);
+    expect(phoneSaved.json().data).toMatchObject({ status: 'PENDING_APPROVAL' });
+    // [VERIFY-DOCS · reviewer-typed fields — a DELIBERATE change] the reviewer types what the type needs (an
+    // owner's national ID: its number), exactly as the console's approve panel asks.
+    const approved = await admin('PUT', `/api/v1/admin/verification/${resubmittedDocId}/approve`, reviewerTyped(rejectedDocType, resubmittedDocId));
     expect(approved.statusCode, approved.body).toBe(200);
     expect((await status()).roleVerified).toBe(true);
     const profile = await get('/api/v1/vendor/profile', ownerToken);
@@ -214,23 +244,31 @@ describe('a store owner re-submits one rejected document without restarting the 
 describe('previousDecisions (pure)', () => {
   const at = (iso: string) => new Date(iso);
   const queued = [
-    { id: 'new-id', userId: 'u1', docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
-    { id: 'first', userId: 'u2', docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
+    { id: 'new-id', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
+    { id: 'first', userId: 'u2', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: at('2026-10-06T12:00:00Z') },
   ];
   it('picks the newest earlier decision of the same applicant and type, and names a rejection a re-submission', () => {
     const found = previousDecisions(queued, [
-      { id: 'old-reject', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'old', reviewedAt: at('2026-10-01T00:00:00Z'), createdAt: at('2026-10-01T00:00:00Z') },
-      { id: 'last-reject', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: at('2026-10-05T00:00:00Z'), createdAt: at('2026-10-05T00:00:00Z') },
-      { id: 'other-type', userId: 'u1', docType: 'tin_certificate', status: 'REJECTED', reviewNote: 'x', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
-      { id: 'other-person', userId: 'u3', docType: 'national_id', status: 'REJECTED', reviewNote: 'y', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
-      { id: 'later', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'z', reviewedAt: null, createdAt: at('2026-10-07T00:00:00Z') },
+      { id: 'old-reject', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'old', reviewedAt: at('2026-10-01T00:00:00Z'), createdAt: at('2026-10-01T00:00:00Z') },
+      { id: 'last-reject', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: at('2026-10-05T00:00:00Z'), createdAt: at('2026-10-05T00:00:00Z') },
+      { id: 'other-type', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'tin_certificate', status: 'REJECTED', reviewNote: 'x', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
+      { id: 'other-person', userId: 'u3', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'y', reviewedAt: null, createdAt: at('2026-10-05T06:00:00Z') },
+      { id: 'later', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'z', reviewedAt: null, createdAt: at('2026-10-07T00:00:00Z') },
     ]);
     expect(found.get('new-id')).toMatchObject({ documentId: 'last-reject', kind: 'RESUBMITTED_AFTER_REJECTION', reviewNote: 'blurry' });
     expect(found.has('first'), 'a first upload has no previous decision').toBe(false);
   });
+  it.each([
+    { role: 'MOVER', subjectId: null },
+    { role: 'CUSTOMER', subjectId: 'another-subject' },
+  ] as const)('does not attach evidence from another role or subject: %j', (other) => {
+    const matching = { ...queued[0]!, id: 'matching', status: 'REJECTED', reviewNote: 'matching decision', reviewedAt: null, createdAt: at('2026-10-01T00:00:00Z') };
+    const wrong = { ...matching, ...other, id: 'wrong', createdAt: at('2026-10-05T00:00:00Z') };
+    expect(previousDecisions([queued[0]!], [matching, wrong]).get('new-id')?.documentId).toBe('matching');
+  });
   it('an earlier approved or expired document makes it a renewal', () => {
     const found = previousDecisions([queued[0]!], [
-      { id: 'expired', userId: 'u1', docType: 'national_id', status: 'EXPIRED', reviewNote: null, reviewedAt: null, createdAt: at('2025-10-01T00:00:00Z') },
+      { id: 'expired', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'EXPIRED', reviewNote: null, reviewedAt: null, createdAt: at('2025-10-01T00:00:00Z') },
     ]);
     expect(found.get('new-id')).toMatchObject({ kind: 'RENEWAL', status: 'EXPIRED' });
   });
@@ -239,7 +277,7 @@ describe('previousDecisions (pure)', () => {
 describe('[DS778 S4] the queue never fails because the earlier-verdict lookup failed', () => {
   it('a failing lookup degrades every row to previousDecision: null and reports the failure', async () => {
     const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
-    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z'), note: 'kept' }];
+    const docs = [{ id: 'd1', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z'), note: 'kept' }];
     const failures: unknown[] = [];
     const rows = await withPreviousDecisions(docs, async () => { throw new Error('connection reset'); }, (error) => failures.push(error));
     expect(rows).toEqual([{ ...docs[0], previousDecision: null }]);
@@ -247,9 +285,9 @@ describe('[DS778 S4] the queue never fails because the earlier-verdict lookup fa
   });
   it('a working lookup attaches the decision, and an empty page reads nothing', async () => {
     const { withPreviousDecisions } = await import('../modules/verification/previous-decision');
-    const docs = [{ id: 'd1', userId: 'u1', docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z') }];
+    const docs = [{ id: 'd1', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', createdAt: new Date('2026-10-06T12:00:00Z') }];
     const rows = await withPreviousDecisions(docs, async () => [
-      { id: 'old', userId: 'u1', docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: null, createdAt: new Date('2026-10-01T00:00:00Z') },
+      { id: 'old', userId: 'u1', role: 'CUSTOMER' as const, subjectId: null, docType: 'national_id', status: 'REJECTED', reviewNote: 'blurry', reviewedAt: null, createdAt: new Date('2026-10-01T00:00:00Z') },
     ], () => {});
     expect(rows[0]!.previousDecision).toMatchObject({ documentId: 'old', kind: 'RESUBMITTED_AFTER_REJECTION', reviewNote: 'blurry' });
     let read = false;

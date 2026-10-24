@@ -13,6 +13,7 @@ import { auditWithin, wroteAuditInline, type AuditLogWriter, type AuditRequestLi
 import { adminAuditCounter } from '../plugins/observability';
 import { injectWithApproval, cleanupSecondApprovers } from './helpers/admin-approval';
 import { refusalName, refuseAuditWhere, dropAuditRefusal } from './helpers/audit-refusal';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-002] THE AUDIT ROW IS WRITTEN AFTER COMMIT AND MAY FAIL SILENTLY.
@@ -69,7 +70,7 @@ beforeAll(async () => {
   await app.register(socketPlugin);
   await app.register(adminRoutes, { prefix: '/api/v1/admin' });
   await app.ready();
-  const phone = `+59272${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Txn', lastName: `Admin${RUN}`, roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN',
@@ -248,6 +249,18 @@ describe('[ADM-002] swift_admin_audit_total says which writer produced the row',
     return out;
   };
 
+  /** The counter moves in the admin onResponse hook, AFTER inject() resolves:
+   *  wait (bounded) for it to move instead of sleeping a fixed time. */
+  const movedFrom = async (before: Record<string, number>, writer: string) => {
+    const deadline = Date.now() + 10_000;
+    let after = await byWriter();
+    while ((after[writer] ?? 0) - (before[writer] ?? 0) <= 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+      after = await byWriter();
+    }
+    return after;
+  };
+
   // A counter that is declared, imported and never incremented reads exactly
   // like one that works. These two tests are the difference — the same shape
   // that left 19 of 21 config fields dead and looking wired.
@@ -257,8 +270,7 @@ describe('[ADM-002] swift_admin_audit_total says which writer produced the row',
     const before = await byWriter();
     const res = await call('PUT', `/api/v1/admin/config/${key}`, { value: { n: 2 }, reason: REASON });
     expect(res.statusCode, res.body).toBe(200);
-    await new Promise((r) => setTimeout(r, 300));
-    const after = await byWriter();
+    const after = await movedFrom(before, 'inline');
     expect((after['inline'] ?? 0) - (before['inline'] ?? 0),
       'a route that audits inside its transaction must count as inline').toBeGreaterThan(0);
   });
@@ -279,8 +291,7 @@ describe('[ADM-002] swift_admin_audit_total says which writer produced the row',
     // payload would leave the counter assertion passing on some other
     // request's increment — green, and measuring nothing.
     expect(res.statusCode, `the promo write must succeed for this to mean anything: ${res.body}`).toBe(200);
-    await new Promise((r) => setTimeout(r, 400));
-    const after = await byWriter();
+    const after = await movedFrom(before, 'backstop');
     expect((after['backstop'] ?? 0) - (before['backstop'] ?? 0),
       'a route still on the hook must count as backstop').toBeGreaterThan(0);
   });

@@ -10,9 +10,10 @@ import { verificationRoutes } from '../modules/verification/verification.routes'
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
-import { purgeAuditLogs, purgeSensitiveReadLogs } from '../lib/audit-immutability';
+import { purgeFixtureAuditTrail } from './helpers/audit-fixture-purge';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [DOC-1 §10.5] test_characterization_legacy_upload_paths
@@ -79,10 +80,11 @@ beforeAll(async () => {
   await adminApp.register(adminRoutes, { prefix: '/api/v1/admin' });
   await adminApp.ready();
   const admin = await app.prisma.user.create({ data: {
-    phone: `+59268${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Admin${RUN}`,
-    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*'] } } } });
+    phone: testPhone(), firstName: 'Doc', lastName: `Admin${RUN}`,
+    // [VERIFY-DOCS V3] This admin opens and decides documents, so it holds the explicit document reviewer grant.
+    roles: ['SUPER_ADMIN', 'CUSTOMER'], activeRole: 'SUPER_ADMIN', status: 'ACTIVE', isPhoneVerified: true, admin: { create: { permissions: ['*', 'documents.review'] } } } });
   const mover = await app.prisma.user.create({ data: {
-    phone: `+59267${String(Math.floor(Math.random() * 90000) + 10000)}`, firstName: 'Doc', lastName: `Mover${RUN}`,
+    phone: testPhone(), firstName: 'Doc', lastName: `Mover${RUN}`,
     roles: ['RIDER'], activeRole: 'RIDER', status: 'ACTIVE', isPhoneVerified: true, selfieCapturedAt: new Date() } });
   userIds.push(admin.id, mover.id);
   for (const [u, dev] of [[admin, 'doc-admin'], [mover, 'doc-mover']] as const) {
@@ -99,8 +101,7 @@ afterAll(async () => {
     await app.prisma.encryptedObject.deleteMany({ where: { createdBy: { in: userIds } } }).catch(() => {});
     await app.prisma.verificationDocument.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.rider.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
-    await purgeSensitiveReadLogs(app.prisma, { actorUserId: { in: userIds } }, 'doc1').catch(() => 0);
-    await purgeAuditLogs(app.prisma, { userId: { in: userIds } }, 'doc1').catch(() => 0);
+    await purgeFixtureAuditTrail(app.prisma, userIds, 'document-intake-characterization');
     await app.prisma.session.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.admin.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
     await app.prisma.customer.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
@@ -150,7 +151,7 @@ describe('test_characterization_legacy_upload_paths', () => {
         const doc = await app.prisma.verificationDocument.create({ data: {
           userId: userIds[1]!, role: 'RIDER', docType: 'national_id', fileUrl: url, status: 'PENDING', consentAt: new Date(), privacyNoticeVersion: 'test-1' } });
         docIds.push(doc.id);
-        const { path } = mintRenderPath(doc.id, 60);
+        const { path } = mintRenderPath(doc.id, userIds[0]!, 60);
         const res = await app.inject({ method: 'GET', url: path });
         expect(res.statusCode, res.body.slice(0, 120)).toBe(200);
         expect(res.headers['cache-control']).toContain('no-store');
@@ -162,21 +163,26 @@ describe('test_characterization_legacy_upload_paths', () => {
   });
 
   describe('4. [A-19] the approval expiry rule', () => {
+    // [VERIFY-DOCS] The example type was the police clearance; its re-check date now comes from the
+    // ISSUE date the reviewer types (reviewer-typed-fields.test.ts), so a type with a PRINTED expiry
+    // carries this rule's characterization instead. [R15] The food handler's permit is now approved by
+    // its certificate YEAR (service-trades-launch tests), and [owner 16 Oct] so is the GRA restaurant
+    // licence, so the Hire Car Driver's Licence (a printed date, up to three years) carries it.
     it('an expiring type refuses approval without a printed date (EXPIRY_REQUIRED)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('hire_car_driver_licence');
       const res = await approve(d.id, {});
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_REQUIRED');
       expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } })).status).toBe('PENDING');
     });
     it('a date already passed is refused (EXPIRY_IN_PAST)', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('hire_car_driver_licence');
       const res = await approve(d.id, { expiresAt: new Date(Date.now() - 86_400_000).toISOString() });
       expect(res.statusCode, res.body).toBe(400);
       expect(res.json().error?.code ?? res.json().code).toBe('EXPIRY_IN_PAST');
     });
     it('a future printed date is stored with the approval', async () => {
-      const d = await pendingDoc('police_clearance');
+      const d = await pendingDoc('hire_car_driver_licence');
       const future = new Date(Date.now() + 300 * 86_400_000);
       const res = await approve(d.id, { expiresAt: future.toISOString() });
       expect(res.statusCode, res.body).toBe(200);
@@ -187,7 +193,8 @@ describe('test_characterization_legacy_upload_paths', () => {
     });
     it('a non-expiring type approves without a date and stores none', async () => {
       const d = await pendingDoc('business_registration');
-      const res = await approve(d.id, {});
+      // [R16] a company's certificate of incorporation: its kind is the only thing typed
+      const res = await approve(d.id, { registrationKind: 'COMPANY' });
       expect(res.statusCode, res.body).toBe(200);
       const fresh = await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: d.id } });
       expect(fresh.status).toBe('APPROVED');

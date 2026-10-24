@@ -18,7 +18,7 @@ import { site, launch } from '@/site.config';
  * countries Swift serves is data, not code). Approved by the owner, 1 Oct 2026.
  */
 
-const UPDATED = '1 October 2026';
+const UPDATED = '16 October 2026';
 
 export const metadata = policyMetadata(
   'Delivery policy',
@@ -55,8 +55,8 @@ export default function DeliveryPage() {
       <h2>What delivery costs</h2>
       <ul>
         <li>
-          The delivery fee depends on distance: a base fee covers the first part of the trip, and a per-kilometre rate
-          applies beyond it. You see the exact fee in your cart and at checkout, before you place the order.
+          The delivery fee depends on distance: GYD 500 for the first 3 km, then GYD 100 per km; express is 1.5 times
+          the standard fee. You see the exact fee in your cart and at checkout, before you place the order.
         </li>
         <li>Express delivery, where offered, costs one and a half times the standard delivery fee.</li>
         <li>{site.tradeName} takes no part of the delivery fee and adds nothing to the store&apos;s prices.</li>

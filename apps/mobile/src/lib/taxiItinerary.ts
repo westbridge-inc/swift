@@ -261,6 +261,8 @@ export function stopRefusalCopy(code: string | undefined, details: unknown): str
       return typeof d['fare'] === 'number'
         ? `The fare for this trip is now ${money(d['fare'])}. Check it, then tap Request again.`
         : 'The fare for this trip has changed. Check it, then tap Request again.';
+    case 'WAITING_TERMS_CHANGED':
+      return 'The waiting charge for this trip has changed. Check it, then tap Request again.';
     case 'EXPECTED_FARE_REQUIRED':
       return 'We couldn’t confirm the fare for this trip. Wait for it to load, then tap Request again.';
     case 'MULTI_STOP_QUEUE_UNSUPPORTED':

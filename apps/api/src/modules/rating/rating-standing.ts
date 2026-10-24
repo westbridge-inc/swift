@@ -13,6 +13,7 @@ import type { PrismaClient } from '@prisma/client';
 import { TYPES_FOR_ROLE, type SubjectRef } from './rating-stats.service';
 import { surfaceOf, NEW_ACTOR_SURFACE, type RatingSurface } from './rating-surface';
 import { getTenantId } from '../../plugins/tenant-context';
+import { RATING_GROUP_SIZE, groupRatings, shownRating, type PersonRatingRole } from './rating-groups';
 
 type Role = SubjectRef['role'];
 
@@ -56,8 +57,11 @@ export interface StandingView extends RatingSurface {
   /** The fold boundary the whole view honours (RAT-G). */
   foldedAt: string;
   folded: { count: number; average: number | null };
-  /** 13 weekly buckets ending at the fold — the 90-day sparkline. */
+  /** 13 weekly buckets ending at the fold — the 90-day sparkline. For a PERSON (not a store): the last 13
+   *  whole groups of 5 ratings instead (weekStart = the day the group's first rating was given). */
   trend: Array<{ weekStart: string; average: number | null; count: number }>;
+  /** Set for a person: every figure here is over whole groups of this many ratings (rating-groups.ts). */
+  groupSize?: number;
   topPositive: Array<{ tag: string; label: string; count: number }>;
   topNegative: Array<{ tag: string; label: string; count: number }>;
   coaching: Array<{ tag: string; label: string; line: string }>;
@@ -69,8 +73,63 @@ function startOfUtcDay(d: Date): Date {
 
 const WEEK_MS = 7 * 24 * 3600_000;
 
+/**
+ * [COORD 18 Oct, option S] A PERSON's Standing (rider, driver, provider, customer): every figure is built from
+ * the one partition, whole groups of 5 final ratings (rating-groups.ts), so it moves only when a whole new group
+ * lands and no rating can be matched to one trip. Stores keep the daily-folded view below (their reviews page
+ * lists each review anyway).
+ */
+async function personStandingView(prisma: PrismaClient, role: PersonRatingRole, userId: string): Promise<StandingView> {
+  const rows = await prisma.rating.findMany({
+    where: { rateeId: userId, type: { in: TYPES_FOR_ROLE[role] as never }, state: 'ACTIVE' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    select: { score: true, tags: true, createdAt: true, editableUntil: true },
+  });
+  const grouped = groupRatings(rows);
+  const shown = shownRating(grouped, role);
+  const { topPositive, topNegative } = await rankedTags(prisma, role, grouped.rows);
+  const last = grouped.groups[grouped.groups.length - 1];
+  return {
+    standing: shown.standing,
+    displayRating: shown.displayRating, ratingBucket: shown.ratingBucket, ratingCount: shown.ratingCount, topRated: shown.topRated,
+    foldedAt: (last?.to ?? startOfUtcDay(new Date())).toISOString(),
+    folded: { count: grouped.count, average: grouped.average },
+    trend: grouped.groups.slice(-13).map((g) => ({ weekStart: g.from.toISOString().slice(0, 10), average: g.average, count: g.count })),
+    topPositive,
+    topNegative,
+    coaching: coachingFor(role, shown.standing, topNegative),
+    groupSize: RATING_GROUP_SIZE,
+  };
+}
+
+/** Tag counts over the given rows, labelled + split by the seeded taxonomy. */
+async function rankedTags(prisma: PrismaClient, role: Role, rows: ReadonlyArray<{ tags: string[] }>) {
+  const defs = await prisma.ratingTagDef.findMany({ where: { role } });
+  const bySlug = new Map(defs.map((d) => [d.slug, d]));
+  const counts = new Map<string, number>();
+  for (const r of rows) for (const t of r.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+  const ranked = [...counts.entries()]
+    .map(([tag, count]) => ({ tag, count, def: bySlug.get(tag) }))
+    .filter((e) => e.def)
+    .sort((a, b) => b.count - a.count);
+  const topPositive = ranked.filter((e) => e.def!.sentiment === 'POSITIVE').slice(0, 5)
+    .map((e) => ({ tag: e.tag, label: e.def!.label, count: e.count }));
+  const topNegative = ranked.filter((e) => e.def!.sentiment === 'NEGATIVE').slice(0, 5)
+    .map((e) => ({ tag: e.tag, label: e.def!.label, count: e.count }));
+  return { topPositive, topNegative };
+}
+
+function coachingFor(role: Role, standing: string, topNegative: Array<{ tag: string; label: string }>) {
+  return standing === 'ATTENTION' || standing === 'AT_RISK'
+    ? topNegative.slice(0, 3)
+        .map((t) => ({ tag: t.tag, label: t.label, line: COACHING[role][t.tag] }))
+        .filter((c): c is { tag: string; label: string; line: string } => !!c.line)
+    : [];
+}
+
 /** The one Standing computation — every role dashboard reads this. */
 export async function actorStandingView(prisma: PrismaClient, role: Role, subjectId: string): Promise<StandingView> {
+  if (role !== 'VENDOR') return personStandingView(prisma, role, subjectId);
   // [E17 / danger #23] The stat row is tenant-composite: hardcoding
   // 'swift-default' silently degraded every non-default-tenant actor to the
   // new-actor fallback surface. Authenticated dashboards carry their tenant
@@ -110,25 +169,10 @@ export async function actorStandingView(prisma: PrismaClient, role: Role, subjec
   }
 
   // Folded tag counts, labelled + split by the seeded taxonomy.
-  const defs = await prisma.ratingTagDef.findMany({ where: { role } });
-  const bySlug = new Map(defs.map((d) => [d.slug, d]));
-  const counts = new Map<string, number>();
-  for (const r of rows) for (const t of r.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
-  const ranked = [...counts.entries()]
-    .map(([tag, count]) => ({ tag, count, def: bySlug.get(tag) }))
-    .filter((e) => e.def)
-    .sort((a, b) => b.count - a.count);
-  const topPositive = ranked.filter((e) => e.def!.sentiment === 'POSITIVE').slice(0, 5)
-    .map((e) => ({ tag: e.tag, label: e.def!.label, count: e.count }));
-  const topNegative = ranked.filter((e) => e.def!.sentiment === 'NEGATIVE').slice(0, 5)
-    .map((e) => ({ tag: e.tag, label: e.def!.label, count: e.count }));
+  const { topPositive, topNegative } = await rankedTags(prisma, role, rows);
 
   const standing = stat?.standing ?? 'NEW';
-  const coaching = standing === 'ATTENTION' || standing === 'AT_RISK'
-    ? topNegative.slice(0, 3)
-        .map((t) => ({ tag: t.tag, label: t.label, line: COACHING[role][t.tag] }))
-        .filter((c): c is { tag: string; label: string; line: string } => !!c.line)
-    : [];
+  const coaching = coachingFor(role, standing, topNegative);
 
   return {
     standing,

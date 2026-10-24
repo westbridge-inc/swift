@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { MmgCheckoutIntent, Prisma, PrismaClient, Subscription, SubscriptionStatus } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { runAsSystem } from '../../plugins/tenant-context';
@@ -19,6 +19,7 @@ import { MmgCheckoutService, type CheckoutStatus, type CheckoutView, type Return
 import { clientPlatform, feePayActions, mmgCheckoutLive, mmgReopenSwitchedOn, type ClientPlatform, type PayAction } from './fee-pay-actions';
 import { readReopenableMmgCheckout, type ReopenableMmgCheckout } from './mmg-checkout-reopen';
 import { partnerReceiptIds } from './mmg-checkout-receipt';
+import { FEE_SELLER } from './fee-seller';
 import { readFeePaymentDecision } from './fee-payment-authority';
 import { subscriptionPayer } from '../subscription/mover-fee-authority';
 import {
@@ -141,6 +142,8 @@ function checkoutView(row: MmgCheckoutIntent, subscriptionStatus: SubscriptionSt
     subscriptionStatus,
     // [MMG support lookup] The partner's receipt: our reference always, MMG's once CONFIRMED.
     ...partnerReceiptIds(row),
+    // [Owner 15 Oct 2026 · ruling #63] and who sold the weekly fee: Swift's operator.
+    seller: FEE_SELLER,
   };
 }
 

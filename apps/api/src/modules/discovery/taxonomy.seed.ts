@@ -13,43 +13,45 @@ export interface SeedCategory {
   name: string;
   kind: DiscoveryCategoryKind;
   vertical: DiscoveryCategoryVertical;
+  /** Always '' since 17 Oct (owner): the app draws each category with its own
+   *  icon set, mapped by slug (apps/mobile/src/lib/categoryIcon.ts), never an emoji. */
   emoji: string;
   aliases: string[];
   sortWeight: number;
 }
 
 const FOOD: Array<[string, string, DiscoveryCategoryKind, string, string[]]> = [
-  ['local-creole', 'Local & Creole', 'CUISINE', '🍲', ['creole', 'guyanese', 'cook-up', 'cookup rice', 'pepperpot', 'metemgee', 'garlic pork', 'fried rice and chicken', 'bake and saltfish']],
-  ['roti-curry', 'Roti & Curry', 'CUISINE', '🫓', ['roti', 'dhalpuri', 'dhal puri', 'puri', 'curry', 'dhal', 'aloo', 'channa', 'duck curry']],
-  ['snackette', 'Snackette', 'DISH', '🥟', ['egg ball', 'pholourie', 'plantain chips', 'cheese roll', 'pine tart', 'patties', 'black pudding', 'chicken foot']],
-  ['chinese', 'Chinese', 'CUISINE', '🥡', ['chowmein', 'chow mein', 'lo mein', 'fried rice', 'wonton', 'char siu']],
-  ['fried-chicken', 'Fried Chicken', 'DISH', '🍗', ['broasted', 'crispy chicken', 'chicken and chips']],
-  ['bbq-grill', 'BBQ & Grill', 'CUISINE', '🍖', ['bbq', 'barbecue', 'jerk', 'grilled']],
-  ['seafood', 'Seafood', 'CUISINE', '🦐', ['fish', 'shrimp', 'prawns', 'bangamary', 'gilbaka', 'trout']],
-  ['fast-food', 'Fast Food', 'CUISINE', '🍟', ['combo', 'value meal']],
-  ['burgers', 'Burgers', 'DISH', '🍔', ['cheeseburger', 'smash burger']],
-  ['pizza', 'Pizza', 'DISH', '🍕', ['slice', 'pepperoni']],
-  ['wings', 'Wings', 'DISH', '🍗', ['buffalo wings', 'bbq wings']],
-  ['breakfast', 'Breakfast', 'DISH', '🍳', ['bake', 'saltfish', 'plantain', 'porridge']],
-  ['bakery-pastries', 'Bakery & Pastries', 'CUISINE', '🥐', ['bread', 'tennis roll', 'salara', 'cake', 'pastry', 'buns']],
-  ['ice-cream-desserts', 'Ice Cream & Desserts', 'DISH', '🍦', ['dessert', 'sundae', 'cheesecake', 'fudge']],
-  ['juices-smoothies', 'Juices & Smoothies', 'DISH', '🥤', ['juice', 'smoothie', 'fruit punch', 'mauby', 'sorrel', 'peanut punch', 'coconut water']],
-  ['indian', 'Indian', 'CUISINE', '🍛', ['biryani', 'tandoori', 'naan']],
-  ['vegan-vegetarian', 'Vegan & Vegetarian', 'DIETARY', '🥗', ['vegan', 'vegetarian', 'plant based', 'meatless', 'tofu']],
+  ['local-creole', 'Local & Creole', 'CUISINE', '', ['creole', 'guyanese', 'cook-up', 'cookup rice', 'pepperpot', 'metemgee', 'garlic pork', 'fried rice and chicken', 'bake and saltfish']],
+  ['roti-curry', 'Roti & Curry', 'CUISINE', '', ['roti', 'dhalpuri', 'dhal puri', 'puri', 'curry', 'dhal', 'aloo', 'channa', 'duck curry']],
+  ['snackette', 'Snackette', 'DISH', '', ['egg ball', 'pholourie', 'plantain chips', 'cheese roll', 'pine tart', 'patties', 'black pudding', 'chicken foot']],
+  ['chinese', 'Chinese', 'CUISINE', '', ['chowmein', 'chow mein', 'lo mein', 'fried rice', 'wonton', 'char siu']],
+  ['fried-chicken', 'Fried Chicken', 'DISH', '', ['broasted', 'crispy chicken', 'chicken and chips']],
+  ['bbq-grill', 'BBQ & Grill', 'CUISINE', '', ['bbq', 'barbecue', 'jerk', 'grilled']],
+  ['seafood', 'Seafood', 'CUISINE', '', ['fish', 'shrimp', 'prawns', 'bangamary', 'gilbaka', 'trout']],
+  ['fast-food', 'Fast Food', 'CUISINE', '', ['combo', 'value meal']],
+  ['burgers', 'Burgers', 'DISH', '', ['cheeseburger', 'smash burger']],
+  ['pizza', 'Pizza', 'DISH', '', ['slice', 'pepperoni']],
+  ['wings', 'Wings', 'DISH', '', ['buffalo wings', 'bbq wings']],
+  ['breakfast', 'Breakfast', 'DISH', '', ['bake', 'saltfish', 'plantain', 'porridge']],
+  ['bakery-pastries', 'Bakery & Pastries', 'CUISINE', '', ['bread', 'tennis roll', 'salara', 'cake', 'pastry', 'buns']],
+  ['ice-cream-desserts', 'Ice Cream & Desserts', 'DISH', '', ['dessert', 'sundae', 'cheesecake', 'fudge']],
+  ['juices-smoothies', 'Juices & Smoothies', 'DISH', '', ['juice', 'smoothie', 'fruit punch', 'mauby', 'sorrel', 'peanut punch', 'coconut water']],
+  ['indian', 'Indian', 'CUISINE', '', ['biryani', 'tandoori', 'naan']],
+  ['vegan-vegetarian', 'Vegan & Vegetarian', 'DIETARY', '', ['vegan', 'vegetarian', 'plant based', 'meatless', 'tofu']],
 ];
 
 const GROCERY: Array<[string, string, string, string[]]> = [
-  ['produce', 'Fresh Produce', '🥭', ['fruits', 'vegetables', 'ground provisions', 'plantain', 'cassava', 'eddoes', 'bora']],
-  ['meat-poultry', 'Meat & Poultry', '🥩', ['beef', 'chicken', 'mutton', 'pork']],
-  ['seafood-market', 'Fresh Seafood', '🐟', []],
-  ['rice-grains', 'Rice & Grains', '🌾', ['rice', 'flour', 'split peas', 'oats']],
-  ['beverages', 'Beverages', '🧃', ['drinks', 'soda', 'malta', 'water']],
-  ['snacks', 'Snacks', '🍪', ['biscuits', 'chips', 'confectionery']],
-  ['dairy-eggs', 'Dairy & Eggs', '🥚', []],
-  ['frozen', 'Frozen', '🧊', []],
-  ['household', 'Household & Cleaning', '🧼', ['detergent', 'bleach', 'soap powder']],
-  ['personal-care', 'Personal Care', '🧴', []],
-  ['baby-kids', 'Baby & Kids', '🍼', ['diapers', 'formula']],
+  ['produce', 'Fresh Produce', '', ['fruits', 'vegetables', 'ground provisions', 'plantain', 'cassava', 'eddoes', 'bora']],
+  ['meat-poultry', 'Meat & Poultry', '', ['beef', 'chicken', 'mutton', 'pork']],
+  ['seafood-market', 'Fresh Seafood', '', []],
+  ['rice-grains', 'Rice & Grains', '', ['rice', 'flour', 'split peas', 'oats']],
+  ['beverages', 'Beverages', '', ['drinks', 'soda', 'malta', 'water']],
+  ['snacks', 'Snacks', '', ['biscuits', 'chips', 'confectionery']],
+  ['dairy-eggs', 'Dairy & Eggs', '', []],
+  ['frozen', 'Frozen', '', []],
+  ['household', 'Household & Cleaning', '', ['detergent', 'bleach', 'soap powder']],
+  ['personal-care', 'Personal Care', '', []],
+  ['baby-kids', 'Baby & Kids', '', ['diapers', 'formula']],
 ];
 
 // THE ALIASES ARE THE MOAT, AND REAL STOCK IS WHAT TEACHES THEM.
@@ -77,21 +79,24 @@ const GROCERY: Array<[string, string, string, string[]]> = [
 //   · `tape`    — sellotape, and a measuring tape (the PHRASE is safe, so the
 //                 phrase is what appears below)
 // Aliases UNION on re-seed, so an operator's own additions are never trampled.
+//
+// [GUARDRAILS §8, owner 13 Oct 2026] No `pharmacy` category: Swift never sells
+// medicines, over-the-counter included. A tenant seeded before this keeps its
+// row (seeds never delete); the prohibited-items rule hides it and refuses it.
 const RETAIL: Array<[string, string, string, string[]]> = [
-  ['electronics', 'Electronics', '📱', ['phone', 'laptop', 'tv', 'speaker', 'charger', 'radio', 'headphones', 'monitor', 'printer', 'tablet', 'camera', 'powerbank']],
-  ['phone-accessories', 'Phone Accessories', '🔌', ['case', 'screen protector', 'earbuds', 'cable', 'sim', 'pouch', 'phone holder', 'otg']],
-  ['fashion', 'Fashion & Clothing', '👕', ['clothes', 'dress', 'jeans', 'shirt', 't-shirt', 'blouse', 'skirt', 'trousers', 'shorts', 'jersey', 'socks', 'cap', 'belt', 'uniform', 'underwear']],
-  ['shoes', 'Shoes', '👟', ['sneakers', 'slippers', 'sandals', 'shoes', 'boots', 'heels', 'crocs', 'slides']],
-  ['beauty', 'Beauty & Cosmetics', '💄', ['makeup', 'skincare', 'wig', 'lashes', 'lipstick', 'foundation', 'perfume', 'lotion', 'shampoo', 'conditioner', 'nail polish', 'weave', 'braids']],
-  ['pharmacy', 'Pharmacy & Health', '💊', ['medicine', 'otc', 'vitamins', 'first aid', 'syrup', 'bandage', 'plaster', 'paracetamol', 'thermometer', 'face mask']],
-  ['flowers-gifts', 'Flowers & Gifts', '💐', ['bouquet', 'roses', 'gift basket', 'teddy', 'flowers', 'balloon', 'hamper', 'greeting card']],
-  ['home-kitchen', 'Home & Kitchen', '🍳', ['cookware', 'appliances', 'bedding', 'pot', 'pan', 'plate', 'bowl', 'cup', 'mug', 'kettle', 'blender', 'microwave', 'toaster', 'cutlery', 'towel', 'pillow']],
-  ['hardware-tools', 'Hardware & Tools', '🔧', ['tools', 'paint', 'plumbing', 'electrical', 'hammer', 'screwdriver', 'wrench', 'spanner', 'drill', 'saw', 'pliers', 'nails', 'screws', 'bolt', 'hinge', 'padlock', 'sandpaper', 'trowel', 'chisel', 'cement', 'plywood', 'lumber', 'pipe', 'bulb', 'led', 'wire', 'socket', 'ladder', 'hose', 'measuring tape', 'tape measure', 'extension cord']],
-  ['auto-parts', 'Auto Parts', '🚗', ['tyres', 'battery', 'oil', 'brake', 'tyre', 'wiper', 'spark plug', 'radiator', 'clutch', 'bumper', 'headlight']],
-  ['stationery-books', 'Stationery & Books', '📚', ['school supplies', 'exercise book', 'pens', 'pen', 'pencil', 'notebook', 'ruler', 'eraser', 'stapler', 'folder', 'book', 'calculator', 'marker', 'glue']],
-  ['toys-games', 'Toys & Games', '🧸', ['toy', 'doll', 'puzzle', 'board game', 'figurine']],
-  ['sports', 'Sports & Fitness', '⚽', ['ball', 'football', 'cricket bat', 'dumbbell', 'yoga mat', 'bicycle', 'racket']],
-  ['pets', 'Pet Supplies', '🐾', ['dog food', 'cat food', 'leash', 'aquarium', 'pet litter']],
+  ['electronics', 'Electronics', '', ['phone', 'laptop', 'tv', 'speaker', 'charger', 'radio', 'headphones', 'monitor', 'printer', 'tablet', 'camera', 'powerbank']],
+  ['phone-accessories', 'Phone Accessories', '', ['case', 'screen protector', 'earbuds', 'cable', 'sim', 'pouch', 'phone holder', 'otg']],
+  ['fashion', 'Fashion & Clothing', '', ['clothes', 'dress', 'jeans', 'shirt', 't-shirt', 'blouse', 'skirt', 'trousers', 'shorts', 'jersey', 'socks', 'cap', 'belt', 'uniform', 'underwear']],
+  ['shoes', 'Shoes', '', ['sneakers', 'slippers', 'sandals', 'shoes', 'boots', 'heels', 'crocs', 'slides']],
+  ['beauty', 'Beauty & Cosmetics', '', ['makeup', 'skincare', 'wig', 'lashes', 'lipstick', 'foundation', 'perfume', 'lotion', 'shampoo', 'conditioner', 'nail polish', 'weave', 'braids']],
+  ['flowers-gifts', 'Flowers & Gifts', '', ['bouquet', 'roses', 'gift basket', 'teddy', 'flowers', 'balloon', 'hamper', 'greeting card']],
+  ['home-kitchen', 'Home & Kitchen', '', ['cookware', 'appliances', 'bedding', 'pot', 'pan', 'plate', 'bowl', 'cup', 'mug', 'kettle', 'blender', 'microwave', 'toaster', 'cutlery', 'towel', 'pillow']],
+  ['hardware-tools', 'Hardware & Tools', '', ['tools', 'paint', 'plumbing', 'electrical', 'hammer', 'screwdriver', 'wrench', 'spanner', 'drill', 'saw', 'pliers', 'nails', 'screws', 'bolt', 'hinge', 'padlock', 'sandpaper', 'trowel', 'chisel', 'cement', 'plywood', 'lumber', 'pipe', 'bulb', 'led', 'wire', 'socket', 'ladder', 'hose', 'measuring tape', 'tape measure', 'extension cord']],
+  ['auto-parts', 'Auto Parts', '', ['tyres', 'battery', 'oil', 'brake', 'tyre', 'wiper', 'spark plug', 'radiator', 'clutch', 'bumper', 'headlight']],
+  ['stationery-books', 'Stationery & Books', '', ['school supplies', 'exercise book', 'pens', 'pen', 'pencil', 'notebook', 'ruler', 'eraser', 'stapler', 'folder', 'book', 'calculator', 'marker', 'glue']],
+  ['toys-games', 'Toys & Games', '', ['toy', 'doll', 'puzzle', 'board game', 'figurine']],
+  ['sports', 'Sports & Fitness', '', ['ball', 'football', 'cricket bat', 'dumbbell', 'yoga mat', 'bicycle', 'racket']],
+  ['pets', 'Pet Supplies', '', ['dog food', 'cat food', 'leash', 'aquarium', 'pet litter']],
 ];
 
 export const SEED_TAXONOMY: SeedCategory[] = [

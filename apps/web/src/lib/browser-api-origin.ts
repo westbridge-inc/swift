@@ -122,8 +122,15 @@ export function resolveBrowserApiOrigin(
 export function buildBrowserContentSecurityPolicy(
   mode: BrowserApiMode,
   channel: ReleaseChannel = 'production',
+  options: { cardFrame?: boolean } = {},
 ): string {
   const releaseOrigin = RELEASE_CHANNEL_ORIGIN[channel];
+  // [CARD embed] Only when the build turns the embedded card page on: the weekly-fee page
+  // may frame ONE origin besides itself, the API's (the card page is Swift's own API page,
+  // which frames the bank's form under its own policy). Off, the policy is unchanged.
+  const frameSources = options.cardFrame
+    ? [`frame-src 'self' ${mode === 'production' ? releaseOrigin : DEVELOPMENT_BROWSER_API_ORIGIN}`]
+    : [];
   const connectSources = mode === 'production'
     ? ["'self'", releaseOrigin, releaseOrigin.replace('https://', 'wss://')]
     : ["'self'", DEVELOPMENT_BROWSER_API_ORIGIN, 'ws://localhost:3000', 'ws://localhost:3002'];
@@ -143,6 +150,7 @@ export function buildBrowserContentSecurityPolicy(
     "img-src 'self' data: blob: https:",
     "font-src 'self' data:",
     `connect-src ${connectSources.join(' ')}`,
+    ...frameSources,
     "frame-ancestors 'none'",
     "base-uri 'self'",
     "form-action 'self'",

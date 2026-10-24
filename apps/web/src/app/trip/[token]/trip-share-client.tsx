@@ -110,7 +110,7 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
   const freshnessLabel = age.kind === 'none' ? null : serverTimed ? age.label : age.label.replace('Updated', 'Received');
 
   return (
-    <main className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
+    <main id="main" tabIndex={-1} className="min-h-screen bg-[var(--swift-canvas)] text-[var(--swift-ink)]">
       <header className="border-b border-[var(--swift-border)] bg-[var(--swift-card)] px-6 pb-4 pt-[calc(16px_+_env(safe-area-inset-top))]">
         <div className="mx-auto max-w-md">
         <SwiftLogo />
@@ -185,7 +185,7 @@ export function TripShareClient({ token, imageOrigin = API_URL }: { token: strin
                     only a ~1 km square and carry the site's origin, never this link's
                     token. The old embedded map was a frame, which the site's security
                     policy blocks, so it never drew. */}
-                <TileMap point={coarsen(point)} label="Trip location, approximate" linkHref={mapLinkUrl(point)} linkLabel="Open approximate map ↗" />
+                <TileMap point={coarsen(point)} label="Trip location, approximate" linkHref={mapLinkUrl(point)} linkLabel="Open approximate map" />
               </div>
             ) : view.ended ? (
               <div className="mt-3 sw-card p-4 text-sm text-[var(--swift-muted)]">

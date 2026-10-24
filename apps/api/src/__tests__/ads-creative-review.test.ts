@@ -4,6 +4,7 @@ import type { Server } from 'socket.io';
 import { nanoid } from 'nanoid';
 import { CreativeService } from '../modules/ads/creative.service';
 import { AdsLifecycleService } from '../modules/ads/lifecycle.service';
+import { REAL_PNG } from './helpers/real-image';
 
 // Ads Phase 3 — creative review + the campaign lifecycle machine (spec
 // §6.1/§9/§10). "Done = an approved creative auto-goes LIVE at week start":
@@ -21,7 +22,8 @@ const campaignIds: string[] = [];
 const userIds: string[] = [];
 const MON = new Date('2026-08-03T00:00:00Z');
 // A minimal valid PNG (magic bytes + filler) under 500 KB.
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(128, 1)]);
+// [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+const PNG = REAL_PNG;
 // A minimal "MP4" (ftyp box at offset 4).
 const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0]), Buffer.from('ftypisom', 'ascii'), Buffer.alloc(64, 1)]);
 
@@ -44,7 +46,7 @@ async function scaffold(opts: { placementMediaKind?: 'IMAGE' | 'VIDEO'; placemen
   userIds.push(ownerUser.id);
   const a = await prisma.advertiser.create({ data: { companyName: `Co ${nanoid(6)}`, industry: 'RETAIL', contactName: 'C', contactEmail: 'c@x.gy', contactPhone: '+5926000000', createdByUserId: ownerUser.id, status: 'APPROVED' } });
   advertiserIds.push(a.id);
-  await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUser.id, role: 'OWNER' } });
+  await prisma.advertiserMember.create({ data: { advertiserId: a.id, userId: ownerUser.id, role: 'OWNER', acceptedAt: new Date() } });
   const p = await prisma.adPlacement.create({ data: { key: `k-${nanoid(6)}`, name: 'P', tier: opts.placementTier ?? 3, mediaKind: opts.placementMediaKind ?? 'IMAGE', weeklyPrice: 5000, slotsPerWeek: 6 } });
   placementIds.push(p.id);
   const c = await prisma.adCampaign.create({ data: { advertiserId: a.id, placementId: p.id, name: 'C', cities: ['*'], startWeek: MON, endWeek: MON, status: (opts.campaignStatus ?? 'PENDING_REVIEW') as never } });

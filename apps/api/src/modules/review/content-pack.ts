@@ -344,10 +344,11 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
         latitude: LAUNCH_CITY.lat + store.offset.lat, longitude: LAUNCH_CITY.lng + store.offset.lng,
         cuisineTypes: store.cuisineTypes, tags: store.tags,
       };
-      // Live inside the fiction, and only there; no MMG link, no public phone.
+      // Live inside the fiction, and only there; no MMG link, no MMG number, no public phone.
       const live = {
         status: 'ACTIVE' as const, isVerified: true, acceptingOrders: true, isCurrentlyOpen: true,
         mmgPayUrl: null, mmgPayUrlPending: null, mmgPayUrlPendingAt: null, mmgPayUrlApplyAt: null, publicPhone: null,
+        mmgNumber: null, mmgNumberPending: null, mmgNumberPendingAt: null, mmgNumberApplyAt: null,
       };
       await prisma.vendor.upsert({
         where: { id, tenantId },
@@ -368,7 +369,8 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
       await prisma.category.upsert({
         where: { id: c.id, tenantId },
         create: { id: c.id, tenantId, vendorId: c.vendorId, name: c.category.name, sortOrder: c.sortOrder, isActive: true },
-        update: { name: c.category.name, sortOrder: c.sortOrder, isActive: true },
+        // [Item 62] A pack category a tester deleted (archived) comes back.
+        update: { name: c.category.name, sortOrder: c.sortOrder, isActive: true, archivedAt: null },
       });
     }
 
@@ -393,7 +395,10 @@ export async function seedReviewContentPack(prisma: PrismaClient, input: { slug:
       await prisma.item.upsert({
         where: { id: it.id, tenantId },
         create: { id: it.id, tenantId, vendorId: it.vendorId, categoryId: it.categoryId, dietaryTags: [], allergens: [], ...fields },
-        update: fields,
+        // [Item 62] A pack listing a tester deleted is archived; the heal brings
+        // it back (unarchived and available together, or the
+        // items_archived_unavailable check refuses the write).
+        update: { ...fields, archivedAt: null, autoHiddenAt: null },
       });
     }
 

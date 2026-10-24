@@ -3,22 +3,28 @@ import { describe, expect, it, vi } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import * as api from '@/lib/customer';
+import * as ordersApi from '@/lib/customer-orders';
+import * as searchApi from '@/lib/customer-search';
+import * as marketApi from '@/lib/customer-market';
+import * as auth from '@/lib/auth';
 import { CustomerHome } from './customer-home';
 import SearchPage from '@/app/(app)/order/search/page';
-import MenuPage from '@/app/(app)/order/vendor/[id]/page';
+import { StoreSkeleton } from './storefront/store-skeleton';
+import { StorefrontExperience } from './storefront/storefront-experience';
+import storeStyles from './storefront/storefront.module.css';
 import { MarketScreen as MarketPage } from '@/app/(app)/market/market-screen';
 import OrdersPage from '@/app/(app)/orders/page';
 import CartPage from '@/app/(app)/cart/page';
 import OrderPage from '@/app/(app)/orders/[id]/page';
 
-const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0 }));
+const person = vi.hoisted(() => ({ scope: 'guest', epoch: 0, status: 'guest' }));
 
 vi.mock('next/navigation', () => ({
   useParams: () => ({ id: 'v1' }), useSearchParams: () => new URLSearchParams(),
   useRouter: () => ({ push: vi.fn() }),
 }));
-vi.mock('./customer-session', () => ({ useCustomerSession: () => ({
-  status: 'guest', ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
+vi.mock('./customer-session', () => ({ useOptionalCustomerSession: () => null, useCustomerSession: () => ({
+  ...person, nearPoint: null, setNearPoint: vi.fn(), ensureSignedIn: vi.fn(),
 }) }));
 
 function pending<T>() {
@@ -46,27 +52,32 @@ describe('loading surfaces become content in the reserved layout', () => {
     expect(screen.queryByLabelText('Loading home feed')).toBeNull();
   });
 
-  it('the store keeps its cover, heading and menu row sizing as the menu arrives', async () => {
-    const response = pending<api.VendorDetail>();
-    vi.spyOn(api, 'getVendor').mockReturnValue(response.promise);
-    const view = mount(<MenuPage />);
+  it('the store keeps its cover, heading, chips and menu card sizing as the page arrives', () => {
+    // [W6] The store's placeholder is drawn with the page's own classes, so
+    // the store lands in the space its placeholder held.
+    const shape = [storeStyles.cover, storeStyles.titleRow, storeStyles.facts, storeStyles.categoryNav, storeStyles.layout, storeStyles.rows, storeStyles.menuRow, storeStyles.itemCopy, storeStyles.itemFoot, storeStyles.itemImage];
+    const loading = mount(<StoreSkeleton />);
     const region = screen.getByLabelText('Loading this store');
-    // [WEB-REDESIGN] The design's photo band: 300 px on phones, 340 from 760 px.
-    expect(region.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
-    expect(region.querySelector('.swift-menu-heading')).toBeTruthy();
-    expect(region.querySelector('.swift-menu-item')).toBeTruthy();
-    await response.finish(vendor);
-    expect(await screen.findByRole('button', { name: /Lunch box/ })).toBeTruthy();
-    expect(view.container.querySelector('[class*="h-[300px]"]')?.className).toContain('wide:h-[340px]');
-    expect(view.container.querySelector('.swift-menu-heading')).toBeTruthy();
-    expect(view.container.querySelector('.swift-menu-item')).toBeTruthy();
+    for (const part of shape) expect(region.querySelector(`.${part}`), part).toBeTruthy();
+    loading.unmount();
+    const store = { ...vendor, slug: 'local-store', vendorType: 'RESTAURANT', logoUrl: null, coverImageUrl: null, city: 'Georgetown', region: 'Demerara',
+      cuisineTypes: [], tags: [], ratingBucket: 'NEW', ratingCount: 0, topRated: false, acceptingOrders: true, minOrderAmount: 0, isFeatured: false,
+      addressLine1: 'Market Road', operatingHours: [], description: null,
+      categories: [{ id: 'c1', name: 'Lunch', items: [{ id: 'i1', name: 'Lunch box', description: null, basePrice: 500, imageUrl: null, unit: null, isPopular: false, fulfillment: 'DELIVERY' }] }],
+    } as unknown as Parameters<typeof StorefrontExperience>[0]['store'];
+    vi.spyOn(api, 'getPublicStorefront').mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(api, 'getPublicVendor').mockReturnValue(new Promise(() => undefined));
+    vi.spyOn(auth, 'sessionProbe').mockResolvedValue({ ok: false });
+    const page = mount(<StorefrontExperience store={store} returnPath="/store/local-store" />);
+    expect(screen.getByRole('heading', { name: 'Lunch box' })).toBeTruthy();
+    for (const part of shape) expect(page.container.querySelector(`.${part}`), part).toBeTruthy();
   });
 
   it('Market reserves its title, category strip and item image heights', async () => {
     vi.spyOn(api, 'getMarketDepth').mockResolvedValue({ visible: true, items: 400, vendors: 9 });
-    vi.spyOn(api, 'getMarketCategories').mockResolvedValue([]);
-    const response = pending<Awaited<ReturnType<typeof api.getMarketItems>>>();
-    vi.spyOn(api, 'getMarketItems').mockReturnValue(response.promise);
+    vi.spyOn(marketApi, 'getMarketCategories').mockResolvedValue([]);
+    const response = pending<Awaited<ReturnType<typeof marketApi.getMarketItems>>>();
+    vi.spyOn(marketApi, 'getMarketItems').mockReturnValue(response.promise);
     const view = mount(<MarketPage />);
     const region = screen.getByLabelText('Loading market items');
     // [WEB-REDESIGN] Square item photos, as in the design.
@@ -79,17 +90,20 @@ describe('loading surfaces become content in the reserved layout', () => {
   });
 
   it('orders use the same row size before and after the list arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof api.getOrders>>>();
-    vi.spyOn(api, 'getOrders').mockReturnValue(response.promise);
+    // [UI-SWEEP U13] Two reads: live orders, and a page of history.
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrderHistoryPage>>>();
+    vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValue({ items: [], total: 0 });
+    vi.spyOn(ordersApi, 'getOrderHistoryPage').mockReturnValue(response.promise);
     const view = mount(<OrdersPage />);
     expect(screen.getByLabelText('Loading your orders').querySelector('.swift-order-row')).toBeTruthy();
-    await response.finish([{ id: 'o1', vendorName: 'Local store', status: 'PENDING', totalAmount: 500 }]);
-    // The row (its name first); the in-progress band's Track link names it too.
+    await response.finish({ items: [{ id: 'o1', vendorName: 'Local store', status: 'DELIVERED', totalAmount: 500 }], page: 1, totalPages: 1, total: 1 });
+    // The history row, its name first.
     expect(await screen.findByRole('link', { name: /^Local store/ })).toBeTruthy();
     expect(view.container.querySelector('.swift-order-row')).toBeTruthy();
   });
 
-  it('the cart retains its actual two-column CSS layout when data arrives', async () => {
+  it('the signed-in cart retains its actual two-column CSS layout when data arrives', async () => {
+    person.status = 'signed-in';
     const response = pending<api.Cart>();
     vi.spyOn(api, 'getCart').mockReturnValue(response.promise);
     vi.spyOn(api, 'getAddresses').mockResolvedValue([]);
@@ -100,11 +114,12 @@ describe('loading surfaces become content in the reserved layout', () => {
     await response.finish({ items: [{ id: 'l1', itemId: 'i1', name: 'Lunch box', quantity: 1, customerPrice: 500, isAvailable: true }], vendor: { id: 'v1', name: 'Local store' }, subtotalCustomer: 500 } as api.Cart);
     expect(await screen.findByText('Lunch box')).toBeTruthy();
     expect(view.container.firstElementChild?.className).toBe(layout);
+    person.status = 'guest';
   });
 
   it('tracking retains its page, hero and progress CSS layout when the order arrives', async () => {
-    const response = pending<Awaited<ReturnType<typeof api.getOrder>>>();
-    vi.spyOn(api, 'getOrder').mockReturnValue(response.promise);
+    const response = pending<Awaited<ReturnType<typeof ordersApi.getOrder>>>();
+    vi.spyOn(ordersApi, 'getOrder').mockReturnValue(response.promise);
     const view = mount(<OrderPage />);
     const region = screen.getByLabelText('Loading order tracking');
     const shape = [region.className, region.children[0]!.className, region.children[1]!.className];
@@ -116,27 +131,33 @@ describe('loading surfaces become content in the reserved layout', () => {
 });
 
 it('search shows store-shaped placeholders during debounce and ignores a late answer after clearing', async () => {
-  const response = pending<api.Vendor[]>();
-  vi.spyOn(api, 'searchVendors').mockReturnValue(response.promise);
+  // [SEARCH 13 Oct] the page asks the search engine (stores and dishes), not the store list
+  const response = pending<searchApi.CatalogueResults>();
+  vi.spyOn(searchApi, 'searchCatalogue').mockReturnValue(response.promise);
   mount(<SearchPage />);
   fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Lunch' } });
   expect(screen.getByLabelText('Searching').querySelector('[data-store-part="copy"]')).toBeTruthy();
   expect(screen.getByRole('status').textContent).toBe('Searching…');
   await new Promise((resolve) => setTimeout(resolve, 320));
-  expect(api.searchVendors).toHaveBeenCalledWith('Lunch');
+  expect(searchApi.searchCatalogue).toHaveBeenCalledWith('Lunch');
   fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
-  await response.finish([vendor]);
+  await response.finish({ stores: [vendor as unknown as searchApi.SearchStore], items: [] });
   expect(screen.queryByLabelText('Searching')).toBeNull();
   expect(screen.queryByText('Local store')).toBeNull();
 });
 
 it('orders cached for one person never appear while a different person’s list is loading', async () => {
-  vi.spyOn(api, 'getOrders').mockResolvedValueOnce([{ id: 'o1', vendorName: 'First order', status: 'PENDING' }])
+  // [UI-SWEEP U13] Both reads, live and history, are the person's own.
+  vi.spyOn(ordersApi, 'getLiveOrders').mockResolvedValueOnce({ items: [{ id: 'o1', vendorName: 'First order', status: 'PENDING' }], total: 1 })
+    .mockReturnValueOnce(new Promise(() => undefined));
+  vi.spyOn(ordersApi, 'getOrderHistoryPage').mockResolvedValueOnce({ items: [{ id: 'o2', vendorName: 'First history', status: 'DELIVERED' }], page: 1, totalPages: 1, total: 1 })
     .mockReturnValueOnce(new Promise(() => undefined));
   const view = mount(<OrdersPage />);
-  await screen.findByText('First order');
+  await screen.findByText('First history');
+  expect(screen.getAllByText(/First order/).length).toBeGreaterThan(0);
   person.scope = 'another-person'; person.epoch += 1;
   view.rerender(<OrdersPage />);
-  expect(screen.queryByText('First order')).toBeNull();
+  expect(screen.queryByText(/First order/)).toBeNull();
+  expect(screen.queryByText('First history')).toBeNull();
   expect(screen.getByLabelText('Loading your orders')).toBeTruthy();
 });

@@ -54,7 +54,10 @@ services:
   #
   # Set it explicitly. The dangerous value is the one that is missing.
   photon:
-    image: rtuszik/photon-docker:latest
+    # Pinned (it was :latest): production starts it when PLACES_PROVIDER=osm,
+    # and pilot-up deploys an exact revision. 2.4.0 is what :latest named on
+    # 12 Oct 2026; the digest holds it to that exact image.
+    image: rtuszik/photon-docker:2.4.0@sha256:21549c60f9e6488fff3217e40429a652c4b445f374800333fe32859e47cec293
     container_name: swift-photon
     profiles: ["geocoding"]
     environment:

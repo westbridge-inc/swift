@@ -46,11 +46,12 @@ export function holdRingWindow(
  *  free" may be FALSE — the customer might have already sent the money. The
  *  ring copy says the true thing and points at the party holding it. */
 export function holdRingCaption(mmgAmbiguous: boolean): string {
-  // [REPORT-011 F-02] The CASH copy no longer promises "free" from a client
+  // [REPORT-011 F-02] The CASH copy never promises anything from a client
   // clock (INV-7: the server owns timers — a skewed device can keep a stale
   // ring alive past the server hold). It states what stays true regardless of
-  // clock skew and defers the cost to confirmation, which the server computes.
+  // clock skew. [owner #46/#50] There is no cancellation cost to defer any
+  // more: a cancel the server allows never costs anything.
   return mmgAmbiguous
     ? 'Changed your mind? You can still cancel — if you already sent the MMG payment, the store refunds you directly.'
-    : 'Changed your mind? Cancel while the store hasn’t started — the app shows any cost before you confirm.';
+    : 'Changed your mind? You can cancel until the store accepts your order. Swift never charges for cancelling.';
 }

@@ -10,11 +10,44 @@
 #   ./deploy/deploy.sh down      # stop (KEEPS data volumes)
 #   ./deploy/deploy.sh nuke      # stop AND delete data volumes (destructive)
 #
-# Safe by design: staging/self-host only. It never touches the gated
-# production cutover path. Requires Docker with the compose plugin.
+# Staging/self-host only: on a production host (deploy/.env or the shell says
+# PILOT_ENV or NODE_ENV=production) every command except logs and health is
+# refused before Docker is called. Requires Docker with the compose plugin.
 # ===========================================================================
 set -euo pipefail
 cd "$(dirname "$0")"
+
+# [PROD-PATH · #1448 review] Never on the production host. These commands build
+# whatever is checked out, with no pinned SHA and none of pilot-up.sh's
+# production refusals, stop the stack, or delete the data volumes. A host whose
+# deploy/.env sets PILOT_ENV or NODE_ENV to production, in ANY line and any
+# spelling Compose reads (export, quotes, indentation, `:`, a byte-order mark,
+# a later duplicate, any case), or whose shell exports either as production
+# (Compose uses this shell first), deploys only through pilot-up.sh. Only the
+# read-only logs and health still answer. Refused before any docker call.
+production_posture() {
+  local name
+  for name in PILOT_ENV NODE_ENV; do
+    [ "$(printf '%s' "${!name:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')" != production ] || return 0
+  done
+  [[ -f .env ]] || return 1
+  tr -d '\357\273\277\r' < .env |
+    grep -qiE "^[[:space:]]*(export[[:space:]]+)?(PILOT_ENV|NODE_ENV)[[:space:]]*[=:][[:space:]]*[\"']?production([\"'[:space:]#]|\$)"
+}
+case "${1:-up}" in
+  logs | health) ;;
+  *)
+    # Compose would also read settings from the files this names, which the
+    # check below never sees (DS960): refused, as pilot-up.sh refuses it.
+    if [[ -n "${COMPOSE_ENV_FILES+set}" ]]; then
+      echo "error: COMPOSE_ENV_FILES is set in this shell, and Compose would read settings from it that deploy.sh never checks; unset it (deploy.sh reads deploy/.env only)." >&2
+      exit 1
+    fi
+    if production_posture; then
+      echo "error: deploy.sh ${1:-up} is refused on the production host (deploy/.env or this shell names a production posture). Deploy with ./deploy/pilot-up.sh <approved full SHA> (or --data-only / --no-public <SHA>); see deploy/PILOT-RUNBOOK.md section 12." >&2
+      exit 1
+    fi ;;
+esac
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "error: Docker with the 'compose' plugin is required (install Docker Desktop or docker-compose-plugin)." >&2
@@ -91,6 +124,9 @@ case "${1:-up}" in
     docker network inspect swift-pilot-private >/dev/null 2>&1 || docker network create swift-pilot-private >/dev/null
     echo "▸ Rebuilding the app image, migrating, restarting API + worker…"
     docker compose build api
+    # [Row 312] The upload malware scanner first (signatures loaded), so the
+    # restarted API and worker never scan against nothing.
+    docker compose up -d --wait clamd
     docker compose stop api worker
     docker compose up -d --force-recreate migrate
     MIGRATE_ID="$(docker compose ps -a -q migrate)"

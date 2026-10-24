@@ -1,6 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
 import { billingEffectsReady } from './billing-cutover';
-import { ACTIVE_CONFIRMATION_STATES, confirmationSources } from './dunning-clock';
+import { ACTIVE_CONFIRMATION_STATES, confirmationSources, feeReversalOpenInTx, lateCardApprovalHeldInTx } from './dunning-clock';
 import { unresolvedConfirmationSources } from './fee-payment-authority';
 import { readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
@@ -37,6 +37,9 @@ export async function readReopenableMmgCheckout(
       // Card payment rows may precede discovery of their session/hold.
       tx.subscriptionPayment.count({ where: { subscriptionId: { in: sourceIds }, paymentMethod: 'CARD', status: { in: ['PENDING', 'UNKNOWN'] } } }),
     ]);
+    // The new-payment rule's other pauses refuse a reopen too: a late card
+    // approval held for a person, or an MMG payment being returned.
+    if (await lateCardApprovalHeldInTx(tx, sourceIds) || await feeReversalOpenInTx(tx, sourceIds)) return null;
     const own = holds[0];
     if (holds.length !== 1 || !own || own.status !== 'ACTIVE' || own.checkoutId !== latest.id
       || own.subscriptionId !== subscriptionId || own.clockId !== clock.id || own.sourceEpoch !== clock.epoch

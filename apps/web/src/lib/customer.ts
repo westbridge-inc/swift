@@ -3,77 +3,16 @@
 // Customer ordering client for the web app — talks to the SAME backend the
 // mobile app uses (/api/v1/customer/*, /api/v1/rides/*). Auth + refresh + the
 // authed fetch are shared with the partner flow via apiFetch (auth.ts).
-import { BROWSER_CLIENT, adoptSession, apiFetch, getSessionPrincipal, sendOtp } from './auth';
+import { apiFetch, getSessionPrincipal, sendOtp } from './auth';
 import { formatAmount, parseAmount } from './money';
 import type { StorefrontDetail } from './api';
-import { retailCategories } from './browse-keys';
 import { BROWSER_API_ORIGIN as API_URL } from '@/lib/browser-api-origin';
 
 export { sendOtp };
 
 // ── Auth (customer) ────────────────────────────────────────────────────────
-/** OTP login that accepts a CUSTOMER account (partner login rejects them). */
-export async function verifyCustomerLogin(phone: string, code: string): Promise<{ user: any }> {
-  const res = await fetch(`${API_URL}/api/v1/auth/verify-otp`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
-    body: JSON.stringify({ phone, code }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
-  const data = json.data;
-  // [W-01] A browser client is answered with HttpOnly cookies and NO tokens,
-  // so the user the server names is the signal a session exists.
-  if (data.isNewUser || !data.user?.id) {
-    throw new Error('No Swift account is registered to that number yet. Create your account on this page to continue.');
-  }
-  adoptSession(data.user.id);
-  return { user: data.user };
-}
-
-const API_BASE = API_URL;
-
-/** Verify the OTP without deciding a role — returns whether the number is new. */
-export async function verifyOtp(phone: string, code: string): Promise<{ isNewUser: boolean; user?: any; signedIn: boolean }> {
-  const res = await fetch(`${API_BASE}/api/v1/auth/verify-otp`, {
-    method: 'POST', credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
-    body: JSON.stringify({ phone, code }),
-  });
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok || !json.success) throw new Error(json?.error?.message || 'That code is not valid.');
-  const d = json.data;
-  if (!d.isNewUser && d.user?.id) { adoptSession(d.user.id); return { isNewUser: false, user: d.user, signedIn: true }; }
-  return { isNewUser: true, signedIn: false };
-}
-
-/** Register a brand-new account with the chosen role (after OTP verify). */
-export async function registerAccount(body: { phone: string; firstName: string; lastName: string; role: 'CUSTOMER' | 'VENDOR' | 'MOVER'; countryCode?: string; acceptTerms?: boolean }): Promise<{ user: any; roles: string[] }> {
-  const res = await fetch(`${API_BASE}/api/v1/auth/register`, {
-    method: 'POST', credentials: 'include',
-    headers: { 'Content-Type': 'application/json', 'X-Swift-Client': BROWSER_CLIENT },
-    body: JSON.stringify({ countryCode: 'GY', ...body }),
-  });
-  const json = await res.json().catch(() => ({}));
-  const registered = json?.data?.user;
-  if (!res.ok || !registered?.id) throw new Error(json?.error?.message || 'Could not create your account.');
-  adoptSession(registered.id);
-  return { user: json.data.user, roles: json.data.user?.roles ?? [] };
-}
-
-/** Mandatory transact-gate photo. The API validates the actual image bytes and
- * is the only writer of avatar/selfieCapturedAt. */
-export async function uploadSelfie(file: File): Promise<{ user: any }> {
-  const form = new FormData();
-  form.append('file', file, file.name || 'swift-profile-photo.jpg');
-  return (await apiFetch('/api/v1/auth/selfie', { method: 'POST', body: form })).data as { user: any };
-}
-
-/** Partner onboarding — turn a fresh account into a vendor or a mover. */
-export async function becomePartner(body: any) {
-  return (await apiFetch('/api/v1/partner/become', { method: 'POST', body: JSON.stringify(body) })).data;
-}
+// The customer sign-in code check lives in ./customer-login, so the sign-in
+// page loads it without this whole client.
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface Vendor {
@@ -108,9 +47,10 @@ export function savePendingAppointment(a: Appointment) {
 export function clearPendingAppointments() { localStorage.removeItem(APPT_KEY); }
 export interface VendorDetail extends Vendor {
   description?: string;
-  categories: Array<{ id: string; name: string; items: MenuItem[] }>;
+  /** [IMAGES-E2E PR5] imageUrl: the section's own photo (a kept one; absent from an older API). */
+  categories: Array<{ id: string; name: string; imageUrl?: string | null; items: MenuItem[] }>;
 }
-export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptionNames?: string[]; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
+export interface CartLine { id: string; itemId: string; name: string; quantity: number; customerPrice: number; lineTotal?: number; selectedOptions?: Record<string, string | string[]> | null; selectedOptionNames?: string[]; specialInstructions?: string | null; isAvailable?: boolean; fulfillment?: string; imageUrl?: string | null; vendorId?: string; vendorName?: string; }
 export interface Cart {
   items: CartLine[];
   subtotal?: number;
@@ -133,11 +73,15 @@ export interface Cart {
   };
   meetsMinimum?: boolean;
   minimumOrderAmount?: number;
+  /** [E01] One row per future order: each store's fulfilment, fee and total, as checkout writes it. */
+  vendors?: Array<{ vendorId: string; name: string; fulfillment: string; subtotal?: number; deliveryFee: number; totalAmount?: number; meetsMinimum?: boolean }>;
   paymentCapabilities?: {
     /** Changes when the vendor set or the validated MMG destination changes. */
     scope?: string;
     cash?: { available: boolean; fundsFlow: 'DIRECT_AT_HANDOVER' };
     mmg?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; unavailableReason?: string | null };
+    /** [PAYMENT-SIMPLIFY] MMG to the store's number (shown on the order once the store accepts). */
+    mmgStoreNumber?: { available: boolean; provider?: 'MMG'; fundsFlow?: 'DIRECT_TO_VENDOR'; payTo?: 'STORE_NUMBER'; shownWhen?: 'STORE_ACCEPTS'; unavailableReason?: string | null };
   };
 }
 
@@ -201,10 +145,6 @@ export async function getPublicStorefront(slug: string): Promise<StorefrontDetai
   }
   return json.data as StorefrontDetail;
 }
-export async function searchVendors(q: string): Promise<Vendor[]> {
-  return (await apiFetch(`/api/v1/customer/vendors?search=${encodeURIComponent(q)}`)).data as Vendor[];
-}
-
 // ── Market (goods across stores — the phone app's Market tab) ──────────────
 /** The server's launch-depth verdict; the tab shows only when it says so. */
 export interface MarketDepth { visible: boolean; items: number; vendors: number }
@@ -212,12 +152,15 @@ export interface MarketDepth { visible: boolean; items: number; vendors: number 
 export interface MarketItem {
   id: string; name: string; basePrice: number; imageUrl: string | null;
   vendorId: string; vendorName: string; categoryName: string | null; isNew: boolean;
+  /** Is the item's store open now? Search shows closed stores' dishes too, marked
+   *  (owner, 13 Oct). Absent from an older server: read as open, as before. */
+  vendorIsCurrentlyOpen?: boolean;
 }
 export interface MarketCategory { slug: string; name: string; vertical: string }
 
 /** Public reads with no session attached: nothing on them is personal, and a
  *  stale cookie must never turn browsing into a sign-in redirect. */
-async function publicGet<T>(path: string): Promise<T> {
+export async function publicGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, { cache: 'no-store' });
   const json = await response.json().catch(() => ({}));
   if (!response.ok || json?.success === false) {
@@ -230,16 +173,6 @@ async function publicGet<T>(path: string): Promise<T> {
 
 export function getMarketDepth(): Promise<MarketDepth> {
   return publicGet<MarketDepth>('/api/v1/market/depth');
-}
-export function getMarketItems(params: { category?: string; cursor?: string }): Promise<{ items: MarketItem[]; nextCursor: string | null }> {
-  const qs = new URLSearchParams({ sort: 'popular' });
-  if (params.category) qs.set('category', params.category);
-  if (params.cursor) qs.set('cursor', params.cursor);
-  return publicGet(`/api/v1/market/items?${qs}`);
-}
-/** The goods categories the Market chips offer — only ones with a live store. */
-export async function getMarketCategories(): Promise<MarketCategory[]> {
-  return retailCategories(await publicGet<unknown>('/api/v1/discovery/categories?vertical=RETAIL'));
 }
 
 // ── Cart ──────────────────────────────────────────────────────────────────
@@ -395,11 +328,16 @@ export function clearCheckoutAttempt(): void {
 export async function getAddresses(options?: { redirectOnExpired?: boolean }): Promise<any[]> {
   return (await apiFetch('/api/v1/customer/addresses', undefined, options)).data as any[];
 }
-export async function addAddress(body: { label: string; addressLine1: string; city: string; region: string; latitude: number; longitude: number; isDefault?: boolean }) {
+/** POST /customer/addresses — the server's own fields (region is optional there, and the phone never sends it). */
+export async function addAddress(body: { label: string; addressLine1: string; addressLine2?: string; city: string; region?: string; latitude: number; longitude: number; instructions?: string; isDefault?: boolean }) {
   return (await apiFetch('/api/v1/customer/addresses', { method: 'POST', body: JSON.stringify(body) })).data;
 }
 
 // ── Checkout & orders ─────────────────────────────────────────────────────
+// Orders, rides, courier and place search live in their own modules
+// (customer-orders, customer-rides, customer-courier, customer-places), as do
+// sign-up (customer-account), search (customer-search) and the Market goods
+// (customer-market): only the pages that use them load them. [PERF]
 export async function checkout(body: CheckoutBody, idempotencyKey: string) {
   return (await apiFetch('/api/v1/customer/checkout', {
     method: 'POST',
@@ -407,43 +345,6 @@ export async function checkout(body: CheckoutBody, idempotencyKey: string) {
     body: JSON.stringify(body),
   })).data;
 }
-export async function getOrders(): Promise<any[]> { return (await apiFetch('/api/v1/customer/orders')).data as any[]; }
-export async function getOrder(id: string): Promise<any> { return (await apiFetch(`/api/v1/customer/orders/${id}`)).data; }
-export async function cancelOrder(id: string, reason: string) {
-  return apiFetch(`/api/v1/customer/orders/${id}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
-}
-
-// ── Taxi ──────────────────────────────────────────────────────────────────
-export async function rideAvailability(lat: number, lng: number): Promise<{ level: 'GOOD' | 'LOW' | 'NONE'; nearestEtaMinutes?: number | null; gate?: boolean }> {
-  return (await apiFetch(`/api/v1/rides/availability?lat=${lat}&lng=${lng}`)).data;
-}
-export async function rideEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number } }) {
-  return (await apiFetch('/api/v1/rides/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-export async function activeRide(): Promise<any> { return (await apiFetch('/api/v1/rides/active')).data; }
-export async function getRide(id: string): Promise<any> { return (await apiFetch(`/api/v1/rides/${encodeURIComponent(id)}`)).data; }
-export async function watchRide(body: { lat: number; lng: number }) {
-  return apiFetch('/api/v1/rides/availability/watch', { method: 'POST', body: JSON.stringify(body) });
-}
-
-// ── Courier ────────────────────────────────────────────────────────────────
-export async function courierEstimate(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; packageSize: string }) {
-  return (await apiFetch('/api/v1/courier/estimate', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-export async function requestCourier(body: { pickup: { lat: number; lng: number }; dropoff: { lat: number; lng: number }; pickupAddress: string; dropoffAddress: string; packageSize: string; recipientName?: string; recipientPhone?: string; notes?: string }) {
-  return (await apiFetch('/api/v1/courier/order', { method: 'POST', body: JSON.stringify(body) })).data;
-}
-
-// ── Places (taxi pickup/dropoff search) ─────────────────────────────────────
-export interface Place { placeId: string; primary: string; secondary?: string; label?: string; lat?: number; lng?: number; }
-export async function placesAutocomplete(q: string, near?: { lat: number; lng: number }): Promise<Place[]> {
-  const qs = new URLSearchParams({ q, ...(near ? { lat: String(near.lat), lng: String(near.lng) } : {}) });
-  return (await apiFetch(`/api/v1/places/autocomplete?${qs}`)).data as Place[];
-}
-export async function placeDetails(placeId: string): Promise<{ lat: number; lng: number; label: string }> {
-  return (await apiFetch(`/api/v1/places/details?placeId=${encodeURIComponent(placeId)}`)).data;
-}
-
 // [W-13] `Math.round(n ?? 0)` printed "GY$0" for a price the server never sent
 // and "GY$NaN" for a broken one. Free and unknown are different facts, and a
 // customer must never be shown either as the other.
@@ -451,7 +352,7 @@ export async function placeDetails(placeId: string): Promise<{ lat: number; lng:
  * [WEB-REDESIGN] Customer prices read the way the phone app writes them
  * (apps/mobile/src/lib/money.ts): `$2,500`. Every price on Swift is in Guyana
  * dollars, which the footer states on every page ("Prices in GYD"); the
- * partner consoles keep their `GY$` (lib/money.ts formatMoney). Unparseable
+ * partner consoles print the same `$` (lib/money.ts formatMoney). Unparseable
  * money is still the em-dash, never a zero.
  */
 export const money = (n: unknown) => formatAmount(n, '$');

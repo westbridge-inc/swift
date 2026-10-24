@@ -131,3 +131,34 @@ export function mmgPayUrlErrorMessage(reason: MmgPayUrlRejection): string {
   }
   return 'Use an approved public HTTPS MMG pay link without credentials, a fragment, or a local/private address.';
 }
+
+// ---------------------------------------------------------------------------
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The taxi driver's MMG pay link is OFF.
+// Passengers pay the driver directly at drop-off, in cash or by MMG, the way
+// cash already works: the app shows the fare and Swift never touches the money.
+// DRIVER_MMG_PAY_LINK turns the old link back on only when it is exactly '1';
+// unset (every environment today) means OFF. While OFF, no passenger surface
+// carries a driver's link, the driver's profile hides it, and a new link is
+// refused. A stored link is never deleted by the switch: it stays dormant.
+// ---------------------------------------------------------------------------
+export const DRIVER_MMG_PAY_LINK_ENV = 'DRIVER_MMG_PAY_LINK';
+
+export function driverMmgPayLinkEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env[DRIVER_MMG_PAY_LINK_ENV] === '1';
+}
+
+/** The ONE read every surface uses for a driver's link: null while the switch is off. */
+export function offeredDriverMmgPayUrl(rawUrl: string | null | undefined, env: Record<string, string | undefined> = process.env): string | null {
+  return driverMmgPayLinkEnabled(env) ? safeMmgPayUrl(rawUrl) : null;
+}
+
+export const DRIVER_MMG_PAY_LINK_OFF_CODE = 'MMG_PAY_LINK_OFF';
+export const DRIVER_MMG_PAY_LINK_OFF_MESSAGE =
+  'Passengers pay you directly at drop-off, in cash or by MMG. Swift does not use an MMG pay link, so there is nothing to set up here.';
+
+/** A NEW driver link while the switch is off is refused; clearing one (empty) is always allowed. */
+export function assertDriverMmgPayLinkWritable(rawUrl: string | null | undefined, env: Record<string, string | undefined> = process.env): void {
+  if (driverMmgPayLinkEnabled(env)) return;
+  if (!rawUrl?.trim()) return;
+  throw new AppError(409, DRIVER_MMG_PAY_LINK_OFF_CODE, DRIVER_MMG_PAY_LINK_OFF_MESSAGE);
+}

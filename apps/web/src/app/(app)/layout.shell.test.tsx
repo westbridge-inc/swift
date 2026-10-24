@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import AppLayout from './layout';
 import { CustomerHome } from '@/components/customer-home';
+import { axeViolations } from '@/test/axe';
 
 const state = vi.hoisted(() => ({
   pathname: '/',
@@ -76,15 +77,16 @@ describe('[Q7b] the shell stays put while pages change', () => {
     const view = render(<AppLayout><p>Home page</p></AppLayout>);
     expect(screen.getByText('Home page')).toBeTruthy();
 
-    go(view, '/cart', 'Cart page');
-    expect(screen.queryByText('Cart page')).toBeNull();
+    go(view, '/cart', 'Guest basket page');
+    expect(screen.getByText('Guest basket page')).toBeTruthy();
+    go(view, '/orders', 'Orders page');
+    expect(screen.queryByText('Orders page')).toBeNull();
     expect(screen.getByLabelText('Opening this page')).toBeTruthy();
     expect(screen.getByRole('banner')).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Swift tabs' })).toBeTruthy();
     expect(screen.queryByText(/Loading…/)).toBeNull();
-
     await act(async () => { answer({ ok: true }); });
-    expect(screen.getByText('Cart page')).toBeTruthy();
+    expect(screen.getByText('Orders page')).toBeTruthy();
   });
 });
 
@@ -153,7 +155,8 @@ describe('[Q7b] the marketing site is one tap away', () => {
 
 describe('[Q7b] in-app back buttons — an installed web app has no browser back', () => {
   it.each([
-    ['a store', '/order/vendor/v1', '/'],
+    ['a store', '/store/shanta-kitchen', '/'],
+    ['a store at its old address', '/order/vendor/v1', '/'],
     ['the cart and checkout', '/cart', '/'],
     ['order tracking', '/orders/o1', '/orders'],
   ])('%s opened directly goes back to its parent page', async (_name, pathname, parent) => {
@@ -181,5 +184,14 @@ describe('[Q7b] in-app back buttons — an installed web app has no browser back
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
     go(view, '/account', 'Profile page');
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
+  });
+});
+
+// [Row 111 · W8] The customer app's frame, as a page: a main landmark, one h1, named controls.
+describe('[W8] the app shell is accessible', () => {
+  it('has no accessibility violations axe can find', async () => {
+    render(<AppLayout><h1>Home page</h1></AppLayout>);
+    await screen.findByText('Home page');
+    expect(await axeViolations(document.body, { page: true })).toEqual([]);
   });
 });

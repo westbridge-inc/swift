@@ -1,3 +1,4 @@
+import { currentTaxiSplitDocuments } from './helpers/current-mover-documents';
 import { cleanupPayerBillingClocks } from './helpers/billing-clock-cleanup';
 import { activeOverdueMs, currentDunningClock, projectDunningClock } from '../modules/billing/dunning-clock';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -20,6 +21,7 @@ import { getPaymentProvider } from '../providers/payment/payment-provider';
 import { lockMoverFeeAuthority, resolveMoverFeeAuthority } from '../modules/subscription/mover-fee-authority';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
 import { purgeAuditLogs } from '../lib/audit-immutability';
+import { feeRiseKey, readHeldFeeRise } from '../modules/billing/fee-rise-notice';
 import { platformStats } from '../modules/admin/platform-stats';
 import { runFxChangeNotices } from '../modules/billing/fx-notices';
 import { grantStepUp } from './helpers/step-up';
@@ -31,6 +33,11 @@ const tenantIds: string[] = [];
 const rateIds: string[] = [];
 const orphanSubscriptionIds: string[] = [];
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test-mover-fee-authority');
+/** [F2] The rise a path held for the 14-day notice (billing/fee-rise-notice.ts), or null. */
+const heldRiseOf = async (subscriptionId: string) => {
+  const row = await app.prisma.platformConfig.findUnique({ where: { key: feeRiseKey(subscriptionId) } });
+  return row ? readHeldFeeRise(row.value) : null;
+};
 let app: FastifyInstance;
 let billing: BillingService;
 let subscriptions: SubscriptionService;
@@ -57,8 +64,9 @@ async function dual(tenantId = 'swift-default') {
   return sys(async () => {
     const rider = await app.prisma.rider.create({ data: { userId: who.userId, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: true } });
     const driver = await app.prisma.driver.create({ data: { userId: who.userId, vehicleType: 'CAR', documentsVerified: true,
-      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `FEE-${run}-${ids.length}`, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
+      vehicleMake: 'Test', vehicleModel: 'Fixture', vehicleYear: 2020, vehicleColor: 'White', licensePlate: `HFEE-${run}-${ids.length}` /* [owner 11 Oct] H-series taxi plate */, driverLicenseUrl: 'storage://test/dl', vehicleInsuranceUrl: 'storage://test/insurance' } });
     await app.prisma.verificationDocument.create({ data: { userId: who.userId, role: 'MOVER', docType: 'vehicle_insurance', fileUrl: 'storage://test/insurance', status: 'APPROVED', coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true, consentAt: new Date(), privacyNoticeVersion: 'v1' } });
+    await currentTaxiSplitDocuments(app.prisma, who.userId);
     return { ...who, riderId: rider.id, driverId: driver.id, tenantId };
   });
 }
@@ -124,6 +132,8 @@ afterAll(async () => {
     ] }, select: { id: true } });
     orphanSubscriptionIds.push(...originals.map((s) => s.id));
     await cleanupPayerBillingClocks(app.prisma, ids);
+    await app.prisma.platformConfig.deleteMany({ where: { key: { in: orphanSubscriptionIds.map(feeRiseKey) } } });
+    await purgeAuditLogs(app.prisma, { entity: 'Subscription', entityId: { in: orphanSubscriptionIds }, action: { startsWith: 'BILLING_FEE_RISE_' } }, 'test-mover-fee-authority-cleanup');
     await app.prisma.user.deleteMany({ where: { id: { in: ids } } });
     await app.prisma.subscription.deleteMany({ where: { id: { in: orphanSubscriptionIds } } });
     await app.prisma.privilegedApproval.deleteMany({ where: { requestedBy: { in: ids } } });
@@ -163,6 +173,58 @@ describe('one mover fee across actual role surfaces', () => {
     const resumed = await call(f.token, 'PUT', 'rider/subscription/billing-method', { method: 'CASH' });
     expect(resumed.statusCode, resumed.body).toBe(200);
     expect((await call(f.token, 'GET', 'driver/subscription')).json().data.autoRenew).toBe(true);
+  });
+
+  // [REVIEW-G #1844 S3-1 · COORD 17 Oct 23:41Z] A taxi activation never raises, at once, a fee the mover
+  // has already paid a week at: the higher taxi card rate waits for the 14-day fee-change notice (F2).
+  // Before any paid week (a trial) the role they activate prices the first fee, in either order (above).
+  it('a mover who has paid a week at their rate is not raised at once by a taxi activation', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const rider = await subscriptions.startTrialForRider(f.riderId);
+      const riderRate = Number(rider.weeklyRate);
+      expect(riderRate).toBeLessThan(8000); // the taxi card rate
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: riderRate, paymentMethod: 'CASH', status: 'CAPTURED',
+        paidAt: new Date(), periodStart: rider.currentPeriodStart, periodEnd: rider.currentPeriodEnd } });
+      const after = await subscriptions.startTrialForDriver(f.driverId);
+      expect(after.id).toBe(rider.id);
+      expect(Number(after.weeklyRate)).toBe(riderRate);
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: rider.id } })).weeklyRate)).toBe(riderRate);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } })).toBe(0);
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.feeType).toBe('TAXI_DRIVER');
+      // [F2] Held for the 14-day notice, not dropped: the payer is told 8,000 and its date before it applies.
+      expect(await heldRiseOf(rider.id)).toMatchObject({ from: riderRate, to: 8000, source: 'TAXI_ACTIVATION', noticeAt: null, appliesFrom: null });
+    });
+  });
+
+  it('a paid mover whose legacy weekly rate is 0 is refused the taxi activation: never kept at 0, never raised at once', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const rider = await subscriptions.startTrialForRider(f.riderId);
+      // [REVIEW-M #1844 S4-1] Legacy or hand-made data only: no writer sets 0 and the card never prices it.
+      await app.prisma.subscription.update({ where: { id: rider.id }, data: { weeklyRate: 0 } });
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: 5000, paymentMethod: 'CASH', status: 'CAPTURED',
+        paidAt: new Date(), periodStart: rider.currentPeriodStart, periodEnd: rider.currentPeriodEnd } });
+      await expect(subscriptions.startTrialForDriver(f.driverId)).rejects.toMatchObject({
+        statusCode: 409, code: 'MOVER_FEE_FINANCE_ACTION_REQUIRED', details: { reason: 'LEGACY_RATE_NOT_POSITIVE' } });
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: rider.id } })).weeklyRate)).toBe(0);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } })).toBe(0);
+      expect(await heldRiseOf(rider.id)).toBeNull();
+    });
+  });
+
+  it('a mover who has paid a week above the taxi card rate gets the cut at once on a taxi activation', async () => {
+    const f = await dual();
+    await sys(async () => {
+      const rider = await app.prisma.subscription.update({ where: { id: (await subscriptions.startTrialForRider(f.riderId)).id }, data: { weeklyRate: 9000 } });
+      await app.prisma.subscriptionPayment.create({ data: { subscriptionId: rider.id, amount: 9000, paymentMethod: 'CASH', status: 'CAPTURED',
+        paidAt: new Date(), periodStart: rider.currentPeriodStart, periodEnd: rider.currentPeriodEnd } });
+      const after = await subscriptions.startTrialForDriver(f.driverId);
+      expect(Number(after.weeklyRate)).toBe(8000);
+      const change = await app.prisma.billingEvent.findMany({ where: { subscriptionId: rider.id, type: 'TIER_CHANGE' } });
+      expect(change.map((e) => [Number(e.amount), e.idempotencyKey.endsWith(':9000->8000')])).toEqual([[8000, true]]);
+      expect(await heldRiseOf(rider.id)).toBeNull(); // a cut needs no notice: nothing is held
+    });
   });
 
   it('a held pair exposes both sources and prevents all new weekly debits and settings resume', async () => {
@@ -273,13 +335,14 @@ describe('bounded finance decision with original money retained', () => {
     await sys(async () => {
       await subscriptions.startTrialForDriver(f.driverId);
       await subscriptions.convertExpiredTrials();
-      await billing.recordTopUp(f.driver.id, 20_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
+      // [owner #62] The week now due plus the coming one: the most a partner may pay (fee GY$8,000).
+      await billing.recordTopUp(f.driver.id, 16_000, finance.userId, 'test-canonical-credit', `fee-convert-${run}-${f.driver.id}`);
       expect(await billing.billSubscription(await ready(f.driver))).toBe('succeeded');
       const captures = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, status: 'CAPTURED' } });
       expect(captures).toHaveLength(1);
       expect(Number(captures[0]!.amount)).toBe(8000);
       expect(captures[0]!.subscriptionId).toBe(f.driver.id);
-      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(12000);
+      expect(Number((await app.prisma.prepaidBalance.findUniqueOrThrow({ where: { subscriptionId: f.driver.id } })).balance)).toBe(8000);
       const stats = await platformStats(app.prisma, { tenantId: f.tenantId, today: new Date(), subscriptionScope: { id: { in: f.authority.sourceSubscriptionIds } } });
       expect(stats.activeSubscriptions).toHaveLength(1);
       expect(stats.activeSubscriptions[0]).toMatchObject({ id: f.driver.id, type: 'TAXI_DRIVER' });
@@ -362,7 +425,10 @@ describe('bounded finance decision with original money retained', () => {
       expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('ACTIVE');
       expect(await billing.billSubscription(await ready(alias))).toBe('skipped');
       expect(await app.prisma.billingEvent.count({ where: { subscriptionId: alias.id, type: 'CHARGE_ATTEMPT' } })).toBe(0);
-      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: canonical.id } })).weeklyRate)).toBe(8000);
+      // [COORD 17 Oct 23:41Z] A cut applies at once (taxi source 9,000 -> card 8,000); a rise never does
+      // (delivery source 6,000 -> 8,000 waits for a 14-day notice; until one exists the old rate stands).
+      const futureRate = choice === 'taxi-source' ? 8000 : 6000;
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: canonical.id } })).weeklyRate)).toBe(futureRate);
       expect((await resolveMoverFeeAuthority(app.prisma, f))?.canonicalSubscriptionId).toBe(canonical.id);
       const clock = await app.prisma.billingDunningClock.findUniqueOrThrow({ where: { moverPayerUserId: f.userId } });
       expect(clock.id).toBe(beforeClock.id); expect(clock.epoch).toBe(beforeClock.epoch);
@@ -374,10 +440,79 @@ describe('bounded finance decision with original money retained', () => {
       expect(original.type).toBe('DELIVERY_RIDER');
       const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } });
       expect(audit.userId).toBe(finance.userId);
-      expect(audit.changes).toMatchObject({ approvalId: action.approvalId, futureRate: { before: Number(canonical.weeklyRate), after: 8000 }, aliasEvidence: { [alias.id]: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      expect(audit.changes).toMatchObject({ approvalId: action.approvalId, futureRate: { before: Number(canonical.weeklyRate), after: futureRate }, aliasEvidence: { [alias.id]: expect.stringMatching(/^[a-f0-9]{64}$/) },
         sourceEvidence: { [f.rider.id]: expect.stringMatching(/^[a-f0-9]{64}$/), [f.driver.id]: expect.stringMatching(/^[a-f0-9]{64}$/) } });
       // Refused by the append-only trigger. Raw SQL, as audit-append-only.test.ts does: only the purge helper names an audit write.
       await expect(app.prisma.$executeRaw`UPDATE audit_logs SET action = 'changed' WHERE id = ${audit.id}`).rejects.toThrow(/append-only/);
+    });
+  });
+
+  // [COORD 17 Oct 23:41Z · GUARDRAILS §7 standing rule 2] A finance resolution never raises a weekly fee at
+  // once: a higher card rate needs at least 14 days' in-app notice first (the F2 fee-change notice). Until
+  // that notice exists the source keeps the rate it was paying; nothing is re-priced and nothing is billed higher.
+  it('a resolution onto a source paying less than the card rate keeps the old rate: no rise without a 14-day notice', async () => {
+    const f = await legacy('paid', 'swift-default', 8); // the week paid ended a day ago: the next bill is due now
+    expect(Number(f.rider.weeklyRate)).toBe(6000); // the delivery source pays 6,000; the shared (taxi) card rate is 8,000
+    const action = await approvedDecision(f, { ...decisionBody(f), canonicalSubscriptionId: f.rider.id });
+    const response = await action.apply();
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data).toMatchObject({ state: 'ACTIVE', canonicalSubscriptionId: f.rider.id });
+    await sys(async () => {
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } })).weeklyRate)).toBe(6000);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, type: 'TIER_CHANGE' } })).toBe(0);
+      const audit = await app.prisma.auditLog.findFirstOrThrow({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } });
+      expect(audit.changes).toMatchObject({ futureRate: { before: 6000, after: 6000, heldRise: 8000, heldUntil: 'FEE_CHANGE_NOTICE_14_DAYS' } });
+      // [F2] The held rise has its reader: recorded for the 14-day notice, untold, applying to nothing yet.
+      expect(await heldRiseOf(f.rider.id)).toMatchObject({ from: 6000, to: 8000, source: 'MOVER_FEE_RESOLVED', noticeAt: null, appliesFrom: null });
+      expect(await app.prisma.auditLog.count({ where: { entity: 'Subscription', entityId: f.rider.id, action: 'BILLING_FEE_RISE_HELD' } })).toBe(1);
+    });
+    for (const role of ['rider', 'driver']) {
+      const screen = await call(f.token, 'GET', `${role}/subscription`);
+      expect(screen.statusCode, screen.body).toBe(200);
+      expect(screen.json().data).toMatchObject({ id: f.rider.id, moverFee: { state: 'ACTIVE', canonicalSubscriptionId: f.rider.id } });
+      expect(Number(screen.json().data.weeklyRate)).toBe(6000);
+    }
+    await sys(async () => {
+      // Two weeks at the old rate: the most a partner may hold (owner #62).
+      await billing.recordTopUp(f.rider.id, 12_000, finance.userId, 'test-held-rise-credit', `fee-held-rise-${run}-${f.rider.id}`);
+      expect(await billing.billSubscription(await ready(f.rider))).toBe('succeeded');
+      const charged = await app.prisma.subscriptionPayment.findMany({ where: { subscriptionId: f.rider.id, status: 'CAPTURED', paidAt: { gt: f.rider.currentPeriodEnd } } });
+      expect(charged.map((p) => Number(p.amount))).toEqual([6000]);
+      expect(await billing.billSubscription(await ready(f.driver))).toBe('skipped');
+    });
+  });
+
+  it('a resolution onto a source whose legacy weekly rate is 0 is refused: never kept as the floor, never healed to the card rate', async () => {
+    const f = await legacy('paid', 'swift-default', 8);
+    // [REVIEW-M #1844 S4-1] Legacy or hand-made data only: no writer sets 0 and the card never prices it.
+    await sys(() => app.prisma.subscription.update({ where: { id: f.rider.id }, data: { weeklyRate: 0 } }));
+    const action = await approvedDecision(f, { ...decisionBody(f), canonicalSubscriptionId: f.rider.id });
+    const response = await action.apply();
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json().error).toMatchObject({ code: 'MOVER_FEE_FINANCE_ACTION_REQUIRED', details: { reason: 'LEGACY_RATE_NOT_POSITIVE' } });
+    await sys(async () => {
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } })).weeklyRate)).toBe(0);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, type: 'TIER_CHANGE' } })).toBe(0);
+      expect(await app.prisma.auditLog.count({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } })).toBe(0);
+      expect((await resolveMoverFeeAuthority(app.prisma, f))?.state).toBe('FINANCE_HOLD');
+      expect(await heldRiseOf(f.rider.id)).toBeNull();
+    });
+  });
+
+  it.each([['negotiated', { customRate: 5000 }], ['waived', { feeWaived: true }]] as const)('a %s source is refused before any rate logic: no rate moves and no rise is held or recorded', async (_kind, restriction) => {
+    // [REVIEW-M #1844 S4-2] The weekly rate does not price a negotiated or waived fee; both resolution paths
+    // (empty trials, paid history) refuse such a source first, so the rate logic never records a held rise for it.
+    const f = await legacy('paid', 'swift-default', 8);
+    await sys(() => app.prisma.subscription.update({ where: { id: f.rider.id }, data: restriction }));
+    const action = await approvedDecision(f, { ...decisionBody(f), canonicalSubscriptionId: f.rider.id });
+    const response = await action.apply();
+    expect(response.statusCode, response.body).toBe(409);
+    expect(response.json().error).toMatchObject({ code: 'MOVER_FEE_FINANCE_ACTION_REQUIRED', details: { reason: 'SOURCE_RESTRICTIONS_REQUIRE_REVIEW' } });
+    await sys(async () => {
+      expect(Number((await app.prisma.subscription.findUniqueOrThrow({ where: { id: f.rider.id } })).weeklyRate)).toBe(6000);
+      expect(await app.prisma.billingEvent.count({ where: { subscriptionId: { in: f.authority.sourceSubscriptionIds }, type: 'TIER_CHANGE' } })).toBe(0);
+      expect(await app.prisma.auditLog.count({ where: { entity: 'MoverFeeAuthority', entityId: f.userId, action: 'MOVER_FEE_RESOLVED' } })).toBe(0);
+      expect(await heldRiseOf(f.rider.id)).toBeNull();
     });
   });
 

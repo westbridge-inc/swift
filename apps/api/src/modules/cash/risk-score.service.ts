@@ -42,7 +42,9 @@ export async function riskScoreFor(prisma: PrismaClient, userId: string): Promis
     prisma.reimbursementClaim.count({ where: { customerId: userId, createdAt: { gte: d90 } } }),
     // Only cancels AFTER the free window count (the doc above always said so;
     // until lateCancelFeeDue existed the query couldn't tell them apart and
-    // punished free cancels too). Marker recorded since 2026-07-21.
+    // punished free cancels too). Marker recorded 2026-07-21 until owner
+    // decisions 46/50 (Oct 2026): every customer cancel is now free or refused,
+    // so no new marker is written and this signal reads only older rows.
     prisma.order.count({
       where: { customerId: userId, status: 'CANCELLED', cancelledBy: userId, lateCancelFeeDue: { gt: 0 }, updatedAt: { gte: d30 } },
     }),

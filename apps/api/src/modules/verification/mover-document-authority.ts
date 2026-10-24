@@ -1,10 +1,11 @@
 import { Prisma, type VehicleType } from '@prisma/client';
 import { CountryConfigService } from '../country/country-config.service';
 import { isPassengerVehicle } from '../../config/vehicle-classes';
+import { needsHirePlate } from './hire-plate';
 import { AppError } from '../../utils/errors';
 import { approvedEvidenceFor, anyChecklistEvidenceFor, type EvidenceDb, type EvidenceRow } from './evidence';
 import { BUCKET_OF, VEHICLE_INSURANCE_DOC_TYPE } from './doc-registry';
-import { normalizeRegistrationMark, rootSubjectId } from './subjects';
+import { normalizeRegistrationMark, plateClassOf, rootSubjectId } from './subjects';
 
 export type DocumentMoverKind = 'RIDER' | 'DRIVER';
 export interface MoverDocumentVerdict {
@@ -55,9 +56,16 @@ export async function evaluateMoverDocuments(
   if (!user) return denied('docs');
   const required = await new CountryConfigService(db as never).getMoverChecklist(user.countryCode, opts.vehicleType, db);
   const hire = opts.kind === 'DRIVER' && isPassengerVehicle(opts.vehicleType);
+  // [Owner ruling 11 Oct 2026 · Opus 12 Oct] A taxi (car or wagon car; buses keep their own path) works
+  // only on an H-series plate, whatever papers were approved before: the gate says so too, as documents.
+  if (opts.kind === 'DRIVER' && needsHirePlate(opts.vehicleType)) {
+    const profile = await db.driver.findUnique({ where: { userId }, select: { licensePlate: true } });
+    if (profile && plateClassOf(profile.licensePlate ?? '') !== 'H') return denied('docs');
+  }
   const types = [...new Set([...required, ...(hire ? [VEHICLE_INSURANCE_DOC_TYPE] : [])])];
   const vehicleTypes = types.filter((type) => BUCKET_OF[type] === 'VEHICLE');
   const target = vehicleTypes.length ? await currentVehicle(db, userId, user.countryCode, opts.kind) : null;
+  if (target?.subjectId && await db.subjectLink.count({ where: { accountId: userId, subjectId: target.subjectId, relation: 'ASSIGNED_DRIVER', validTo: null, approvedAt: null } }) > 0) return denied('docs');
   const now = new Date();
   const rows = await approvedEvidenceFor(db, userId, types, now);
   const links = vehicleTypes.length ? await db.subjectLink.findMany({
