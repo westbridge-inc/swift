@@ -156,7 +156,7 @@ export type EnumName = keyof typeof ENUM_LABELS;
 /** "SOMETHING_NEW" → "Something new". The floor for a value this map has not
  *  been taught yet: never the raw enum (labels.test.ts keeps it unreachable
  *  for the enums above). */
-function humanise(value: string): string {
+export function humanise(value: string): string {
   const words = value.toLowerCase().replaceAll('_', ' ').trim();
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : '—';
 }

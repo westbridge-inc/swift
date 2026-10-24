@@ -477,3 +477,46 @@ select.mc-input { padding-right: .4rem; }
 .mc-grid-2 { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); }
 .mc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .75rem; overflow-wrap: anywhere; }
 .mc-text-info { color: var(--mc-info); }
+/* A full-bleed workspace (the live map): no page padding, exactly the height of <main>. */
+.mc-page.mc-page-flush { padding: 0; height: calc(100% + 2rem); min-height: 0; }
+@media (min-width: 768px) { .mc-page.mc-page-flush { padding: 0; height: calc(100% + 3rem); } }
+
+/* [ADMIN-UI] The old dark sheet's tokens, re-pointed at Mission Control inside
+   every light surface. Anything a page still paints with var(--panel),
+   var(--border), var(--muted) or var(--accent) — the Review Center, the shared
+   dialog, a leftover on a converted page — reads as the light design, never as
+   a dark panel inside a light page. */
+.mc-page, .review-center, .admin-modal {
+  --ink: var(--mc-surface);
+  --panel: var(--mc-card);
+  --panel-2: var(--mc-surface);
+  --border: var(--mc-line);
+  --text: var(--mc-ink);
+  --muted: var(--mc-muted);
+  --accent: var(--mc-accent);
+  --accent-deep: var(--mc-accent);
+  --accent-soft: var(--mc-accent-soft);
+  --good: var(--mc-good);
+  --warn: var(--mc-warn);
+  --bad: var(--mc-bad);
+}
+.admin-modal { background: var(--mc-card); color: var(--mc-ink); font-family: var(--mc-font-body); }
+.admin-modal-overlay { background: rgb(33 26 26 / 45%); }
+.admin-modal button, .review-center button { background: var(--mc-card); color: var(--mc-muted-strong); border-color: var(--mc-line-strong); font-family: var(--mc-font-body); font-weight: 600; }
+.admin-modal button:hover:not(:disabled), .review-center button:hover:not(:disabled) { color: var(--mc-accent); border-color: var(--mc-accent); }
+.admin-modal .rc-primary, .review-center .rc-primary, .admin-modal .rc-primary:hover:not(:disabled), .review-center .rc-primary:hover:not(:disabled) { background: var(--mc-accent); border-color: var(--mc-accent); color: #fff; }
+.admin-modal input, .admin-modal select, .admin-modal textarea, .review-center input:not([type=checkbox]), .review-center select { background: var(--mc-card); border-color: var(--mc-line-strong); }
+.review-center { color: var(--mc-ink); font-family: var(--mc-font-body); }
+.review-center .rc-tabs button[aria-pressed=true] { color: var(--mc-accent); }
+.review-center .rc-chip-pending, .review-center .rc-chip-resubmitted { background: var(--mc-warn-soft); color: var(--mc-warn); border-color: transparent; }
+.review-center .rc-chip-approved { background: var(--mc-good-soft); color: var(--mc-good); border-color: transparent; }
+.review-center .rc-chip-rejected, .review-center .rc-chip-expired { background: var(--mc-bad-soft); color: var(--mc-bad); border-color: transparent; }
+.review-center .rc-chip-renewal { background: var(--mc-info-soft); color: var(--mc-info); border-color: transparent; }
+.review-center .rc-previous { border-color: transparent; background: var(--mc-warn-soft); }
+.review-center .rc-error { color: var(--mc-bad); }
+.review-center .rc-fields small { color: var(--mc-warn); }
+.review-center .rc-queue-table th { font-weight: 700; letter-spacing: .07em; text-transform: uppercase; font-size: .6875rem; }
+.mc-input-number { width: 8rem; text-align: right; }
+.review-center .rc-page-heading { margin-bottom: 1rem; }
+.review-center .rc-empty > span:first-child { display: block; font-weight: 700; color: var(--mc-ink); margin-bottom: .25rem; }
+.review-center .rc-evidence-viewport { background: var(--mc-surface); }
