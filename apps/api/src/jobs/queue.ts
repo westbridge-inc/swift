@@ -1422,6 +1422,14 @@ export async function createWorkers(ctx: JobContext, queues: SwiftQueues) {
         ctx.log.info({ ...result }, 'backup freshness checked');
         return;
       }
+      if (job.name === 'erasure-ledger-watch') {
+        // [Off-site erasure ledger] An erasure not shipped off-site within 10 minutes pages the platform.
+        const { pageErasureLedgerShipping } = await import('../modules/ops/erasure-ledger-watch');
+        const { NotificationService } = await import('../modules/notification/notification.service');
+        const { result } = await pageErasureLedgerShipping({ prisma: ctx.prisma, redis: ctx.redis, notifications: new NotificationService(ctx.prisma, ctx.io) });
+        ctx.log.info({ stale: result.stale, unshipped: result.unshipped, oldestMinutes: result.oldestMinutes }, 'erasure ledger shipping checked');
+        return;
+      }
 
       // [DCR-1 CW] Commencement Watch: scan the Gazette/parliament sources,
       // dedupe alerts, notify the founder channels. Observes and alerts ONLY.
@@ -2875,6 +2883,14 @@ export async function scheduleRecurringJobs(queues: ReturnType<typeof createQueu
   // or are staying on the machine they protect.
   await queues.verificationQueue.add('backup-freshness', {}, {
     repeat: { pattern: '30 5 * * *' },
+    removeOnComplete: 10,
+    removeOnFail: 10,
+  });
+
+  // [Off-site erasure ledger] Every five minutes: an erasure the host unit has not shipped off-site
+  // within 10 minutes pages the platform responders.
+  await queues.verificationQueue.add('erasure-ledger-watch', {}, {
+    repeat: { every: 5 * 60_000 },
     removeOnComplete: 10,
     removeOnFail: 10,
   });
