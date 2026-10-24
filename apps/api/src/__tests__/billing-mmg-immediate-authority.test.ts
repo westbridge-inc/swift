@@ -360,6 +360,10 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       }),
     },
     ledgerAccount: { upsert: vi.fn(), findMany: vi.fn(async () => []) },
+    // [R12 #1963] A wallet debit records which receipts its money came from (fee-receipt-allocation.ts). This
+    // harness mocks issueReceipt, so no tracked receipt exists: the money is untracked and nothing is recorded.
+    feeReceipt: { findMany: vi.fn(async () => []) },
+    feeReceiptAllocation: { findMany: vi.fn(async () => []), create: vi.fn() },
     ledgerTransaction: { create: vi.fn() },
     ledgerEntry: { createMany: vi.fn() },
     vendor: {

@@ -24,7 +24,8 @@ const HOW_PAGE = page('how-it-works', 'page.tsx');
 const RULES: Array<{ rule: string; terms: RegExp; answer: RegExp }> = [
   { rule: 'a store order is free until the business accepts it', terms: /cancel an Order free while the Business has not yet accepted it/, answer: /free, while the business has not accepted your order/ },
   { rule: 'after acceptance: no in-app cancel, contact the business', terms: /can no longer be cancelled in the app: contact the Business/, answer: /can no longer be cancelled in the app or here: contact the business/ },
-  { rule: 'rides, parcels, bookings: 5 minutes after acceptance', terms: /five minutes after a driver, rider or provider accepts it/, answer: /for 5 minutes after a driver, rider or provider accepts/ },
+  // [owner 22 Oct 2026] one minute (was five), as the server's FREE_CANCEL_WINDOW_MIN enforces it.
+  { rule: 'rides, parcels, bookings: 1 minute after acceptance', terms: /for one minute after a driver, rider or provider accepts it/, answer: /for 1 minute after a driver, rider or provider accepts/ },
   { rule: 'a service job: free until booked', terms: /free in the app until the job is booked/, answer: /service job can be cancelled free until it is booked/ },
   { rule: 'still free when nobody was found or it runs very late', terms: /no driver or rider was found for your Order, or when it is running very late/, answer: /no driver or rider was found, or if it is running very late/ },
   { rule: 'never once on its way', terms: /Once your Order is on its way/, answer: /Once it is on its way, it can no longer be cancelled/ },
@@ -63,6 +64,15 @@ describe('the site says what Terms §7 says about cancelling', () => {
   it('[review S3-1 on #1732] the /welcome card says the rule from the copy module', () => {
     expect(CANCEL_FREE_SHORT).toBe('Cancel free until the store accepts your order. Swift never charges a cancellation fee.');
     expect(WELCOME_PAGE).toMatch(/body: CANCEL_FREE_SHORT,/);
+  });
+
+  // [owner 22 Oct 2026] The public Refunds page (outside LEGAL_VERSION) names the same one-minute window as Terms §7
+  // and the server (FREE_CANCEL_WINDOW_MIN): never the old five minutes.
+  it('the Refunds page names the one-minute window the Terms name', () => {
+    const refunds = readFileSync(join(process.cwd(), 'src', 'app', 'legal', 'refunds', 'page.tsx'), 'utf8').replace(/\s+/g, ' ');
+    expect(TERMS_S7).toMatch(/for one minute after a driver, rider or provider accepts it/);
+    expect(refunds).toContain('can be cancelled free at any time while nobody has accepted them, and for 1 minute after a driver, rider or provider accepts them.');
+    expect(refunds).not.toMatch(/(5|five) minutes after a driver/i);
   });
 
   it('both pages show these words, not copies of their own', () => {

@@ -6,6 +6,7 @@ import { Feather } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
 import { useCategorySuggestions, useResolveCategorySuggestion } from '../../../hooks/vendorops';
 import { Card, EmptyState, ErrorState, LoadingBlock, PhotoPlaceholder, Screen, T } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { toast } from '../../../kit/toast';
 import { haptic } from '../../../lib/haptics';
 
@@ -61,7 +62,9 @@ export function VendorCategoryReviewScreen() {
   return (
     <Screen>
       <View style={{ paddingHorizontal: space['2xl'], paddingTop: space.lg, paddingBottom: space.md }}>
-        <Pressable onPress={() => navigation.goBack()} accessibilityRole="button" accessibilityLabel="Back" hitSlop={8}>
+        {/* [UI-SWEEP U-P2 census] Back keeps to the left (it stretched across the
+            column, so the whole row was Back) and is 44pt on its own. */}
+        <Pressable onPress={() => navigation.goBack()} accessibilityRole="button" accessibilityLabel="Back" hitSlop={8} style={{ ...touchTarget(24), alignSelf: 'flex-start' }}>
           <Feather name="chevron-left" size={24} color={color.text.primary} />
         </Pressable>
         <T variant="title" style={{ marginTop: space.md }}>
