@@ -1,4 +1,4 @@
-import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX } from '../verification/doc-registry';
+import { isNeverAcceptedDocType, OPTIONAL_LIST_SUFFIX, TRADE_LICENCE_DOC_TYPES } from '../verification/doc-registry';
 import { DEFAULT_DOCUMENT_CHECKLISTS, SERVICE_TRADE_LAUNCH_FLOOR } from '../ops/platform-config';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Prisma, type PrismaClient } from '@prisma/client';
@@ -207,13 +207,8 @@ export async function isProviderVerified(
   return checklist.every((docType) => have.has(docType));
 }
 
-/**
- * [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The documents a trade may require that are LICENCES issued for the trade:
- * the GEI electrical licence (electrician, solar / generator / inverter installer) and the Pesticides and Toxic
- * Chemicals Control Board's operator licence (pest control). An ID, a police clearance, a food handler's certificate or
- * a premises registration is never called a licence.
- */
-export const TRADE_LICENCE_DOC_TYPES: ReadonlySet<string> = new Set(['gei_electrical_licence', 'pest_control_operator_licence']);
+/** [ROLE-DOCS · PR 3] The trade licences (a registry fact, DOC-INV-2: verification/doc-registry). */
+export { TRADE_LICENCE_DOC_TYPES };
 
 /** The licences among a checklist, in checklist order. */
 export function tradeLicencesOf(checklist: readonly string[]): string[] {
