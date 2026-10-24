@@ -256,9 +256,13 @@ describe('Services — provider verification + qualification badge', () => {
     expect(res.json().data.isVerified).toBe(true);
   });
 
-  it('never turns an applicant-supplied GEI-shaped reference into a verified badge', async () => {
+  it('[ROLE-DOCS] refuses a GEI licence as a qualification (it is the electrician\'s required document) and never verifies a supplied reference', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    const gei = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-44821' }, p.token);
+    expect(gei.statusCode).toBe(400);
+    expect(gei.json().error.code).toBe('QUALIFICATION_RETIRED');
+    expect(await app.prisma.serviceQualification.count({ where: { provider: { userId: p.userId }, type: 'GEI_LICENCE' } })).toBe(0);
+    const qual = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-44821' }, p.token);
     expect(qual.statusCode).toBe(200);
     expect(qual.json().data.status).toBe('PENDING');
     expect(qual.json().data.trade).toBe('electrician');
@@ -269,14 +273,14 @@ describe('Services — provider verification + qualification badge', () => {
     expect(me.json().data.selfSkilled).toBe(true);
   });
 
-  it('binds credentials to the canonical current trade and rejects a mismatched GEI claim', async () => {
+  it('binds credentials to the canonical current trade and refuses a GEI claim from any trade', async () => {
     const plumber = await makeVerifiedProvider('plumber');
     const mismatch = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'GEI_LICENCE',
       referenceNumber: 'GEI-PLUMBER-1',
     }, plumber.token);
     expect(mismatch.statusCode).toBe(400);
-    expect(mismatch.json().error.code).toBe('QUALIFICATION_TRADE_MISMATCH');
+    expect(mismatch.json().error.code).toBe('QUALIFICATION_RETIRED');
 
     const pending = await inject('POST', '/api/v1/services/providers/qualifications', {
       type: 'CVQ',
@@ -499,7 +503,8 @@ describe('Services — risk-tiered browse', () => {
 
   it('marks high-risk trades, says only what a person checked, and dates the licence check', async () => {
     const p = await makeVerifiedProvider('electrician');
-    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'GEI_LICENCE', referenceNumber: 'GEI-90011' }, p.token);
+    // [ROLE-DOCS] a CVQ: a GEI licence is the electrician's required document, never a qualification
+    const submitted = await inject('POST', '/api/v1/services/providers/qualifications', { type: 'CVQ', referenceNumber: 'CVQ-90011' }, p.token);
     const checkedAt = new Date('2026-10-12T15:30:00.000Z');
     await app.prisma.serviceQualification.update({
       where: { id: submitted.json().data.id },

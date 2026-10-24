@@ -315,8 +315,10 @@ export function profileOffersDroneWork(bio: string | null | undefined): boolean 
 }
 
 /** A credential can only badge the exact trade selected when it was submitted.
- * GEI is specifically an electrician credential; generic qualifications still
- * require a trusted reviewer and remain bound to their submitted trade. */
-export function qualificationTypeMatchesTrade(type: QualificationType, trade: ServiceTradeId): boolean {
-  return type !== 'GEI_LICENCE' || trade === 'electrician';
+ * Generic qualifications still require a trusted reviewer and remain bound to
+ * their submitted trade. [ROLE-DOCS · owner 21 Oct 2026] A GEI_LICENCE
+ * qualification badges nothing, for any trade: the electrician's GEI licence is
+ * the required checklist document, never a second, optional copy. */
+export function qualificationTypeMatchesTrade(type: QualificationType, _trade: ServiceTradeId): boolean {
+  return type !== 'GEI_LICENCE';
 }
