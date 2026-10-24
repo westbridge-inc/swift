@@ -1,5 +1,6 @@
 import type { PrismaClient, Prisma, Advertiser, AdvertiserStatus, AdvertiserMemberRole } from '@prisma/client';
-import { refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import type Redis from 'ioredis';
 import type { Server } from 'socket.io';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
@@ -29,8 +30,9 @@ function assertRoleHolds(role: AdvertiserMemberRole | null | undefined, capabili
 }
 
 /** [MASTER-064] The money operations' second check, INSIDE their own
- *  transaction: the member row is read with FOR SHARE, so a removal or a
- *  downgrade that committed after the route's check is obeyed here, and one
+ *  transaction: the member row is read with FOR SHARE, so a removal, a
+ *  downgrade or a return to an open invitation (acceptedAt NULL, #1995) that
+ *  committed after the route's check is obeyed here, and one
  *  that arrives while this transaction runs waits for it to finish (the
  *  action is decided on the role it locked, never on a stale read). */
 export async function assertCapabilityWithin(
@@ -42,6 +44,7 @@ export async function assertCapabilityWithin(
   const rows = await tx.$queryRaw<Array<{ role: AdvertiserMemberRole }>>`
     SELECT "role" FROM "advertiser_members"
      WHERE "advertiserId" = ${advertiserId} AND "userId" = ${userId}
+       AND "acceptedAt" IS NOT NULL
      FOR SHARE`;
   if (rows.length === 0) throw new AppError(403, 'ADVERTISER_ROLE_FORBIDDEN', 'You are no longer a member of this advertiser account.');
   assertRoleHolds(rows[0]!.role, capability);
@@ -60,6 +63,14 @@ export async function assertCapabilityWithin(
 // No documents in v1 — advertisers are paying customers, not custodial actors;
 // the founder approves on the company being real. Every admin action is
 // audited to AdsAuditLog with a reason and pages the applicant with due copy.
+
+/** [ads security] Team invitations an advertiser may send in one UTC day. Every attempt counts,
+ *  whether or not the number has an account, so the cap says nothing about who exists. */
+export const ADS_TEAM_INVITES_PER_DAY = 10;
+/** [ads security · #1995 REVIEW-F S4-1] An invitation not accepted within this many days is gone: it is
+ *  not listed, cannot be accepted, and the lifecycle tick deletes it (it holds the person's id). */
+export const ADS_TEAM_INVITE_DAYS = 14;
+const inviteCutoff = (now = Date.now()) => new Date(now - ADS_TEAM_INVITE_DAYS * 86_400_000);
 
 const INDUSTRIES = ['Retail', 'Food & Beverage', 'Entertainment', 'Telecom', 'Financial', 'Automotive', 'Real Estate', 'Services', 'Other'] as const;
 
@@ -110,7 +121,7 @@ export class AdvertiserService {
           createdByUserId: userId,
         },
       });
-      await tx.advertiserMember.create({ data: { advertiserId: a.id, userId, role: 'OWNER' } });
+      await tx.advertiserMember.create({ data: { advertiserId: a.id, userId, role: 'OWNER', acceptedAt: new Date() } });
       return a;
     });
 
@@ -124,10 +135,10 @@ export class AdvertiserService {
     return advertiser;
   }
 
-  /** Every advertiser this user is a member of, with their role. */
+  /** Every advertiser this user is a member of (accepted), with their role. */
   async listForUser(userId: string) {
     const members = await this.prisma.advertiserMember.findMany({
-      where: { userId },
+      where: { userId, acceptedAt: { not: null } },
       include: { advertiser: true },
       orderBy: { createdAt: 'desc' },
     });
@@ -136,16 +147,102 @@ export class AdvertiserService {
 
   /** [MASTER-064] Assert the user is a member of THIS advertiser whose role
    *  holds the named capability (see ADVERTISER_ROLE_MATRIX). Every caller
-   *  names its capability — there is no permissive default. A non-member gets
-   *  the same 404 as a missing account; a member whose role lacks the
+   *  names its capability — there is no permissive default. A non-member, and
+   *  an open invitation (#1995), get the same 404 as a missing account; a member whose role lacks the
    *  capability gets 403 ADVERTISER_ROLE_FORBIDDEN. */
   async assertCapability(advertiserId: string, userId: string, capability: AdvertiserCapability) {
     const member = await this.prisma.advertiserMember.findUnique({
       where: { advertiserId_userId: { advertiserId, userId } },
     });
-    if (!member) throw new NotFoundError('Advertiser', advertiserId);
+    // [ads security] An open invitation is not a membership: it opens nothing.
+    if (!member || member.acceptedAt === null) throw new NotFoundError('Advertiser', advertiserId);
     assertRoleHolds(member.role, capability);
     return member;
+  }
+
+  // ── [ads security] The team grows by invitation and acceptance ───────────────
+  // An OWNER invites by phone; the reply never says whether the number has an account. The
+  // invitation grants nothing (assertCapability refuses it) until the person accepts it. The team list
+  // names accepted members only.
+
+  /** OWNER only. Silent for an unknown number or a demo account; never changes an existing row. */
+  async inviteToTeam(
+    deps: { redis: Redis; notifications: NotificationService },
+    advertiserId: string, ownerUserId: string, phone: string, role: 'MANAGER' | 'ANALYST',
+  ): Promise<void> {
+    await this.assertCapability(advertiserId, ownerUserId, 'team');
+    // [REVIEW-PARTNER] No membership is granted by a demo account (about the caller alone).
+    await refuseReviewAccountRoleGrant(this.prisma, ownerUserId);
+    // Every attempt counts against the day, known number or not.
+    const key = `ads:team-invites:${advertiserId}:${new Date().toISOString().slice(0, 10)}`;
+    const sent = await deps.redis.incr(key);
+    if (sent === 1) await deps.redis.expire(key, 2 * 86_400);
+    if (sent > ADS_TEAM_INVITES_PER_DAY) {
+      throw new AppError(429, 'TEAM_INVITE_LIMIT', `An advertiser can send ${ADS_TEAM_INVITES_PER_DAY} team invitations a day. Try again tomorrow.`);
+    }
+    const invited = await this.prisma.user.findUnique({ where: { phone }, select: { id: true } });
+    if (!invited || await isReviewAccount(this.prisma, invited.id)) return;
+    // An expired invitation is gone: a new one starts afresh.
+    await this.prisma.advertiserMember.deleteMany({ where: { advertiserId, userId: invited.id, acceptedAt: null, createdAt: { lt: inviteCutoff() } } });
+    // An accepted member is never changed by an invitation, and an open one stays as it was.
+    const row = await this.prisma.advertiserMember.upsert({
+      where: { advertiserId_userId: { advertiserId, userId: invited.id } },
+      create: { advertiserId, userId: invited.id, role, acceptedAt: null },
+      update: {},
+    });
+    if (row.acceptedAt !== null) return;
+    const advertiser = await this.prisma.advertiser.findUnique({ where: { id: advertiserId }, select: { companyName: true } });
+    await deps.notifications.send({
+      userId: invited.id,
+      type: 'SYSTEM_ANNOUNCEMENT',
+      title: 'An advertiser team invitation',
+      body: `${advertiser?.companyName ?? 'An advertiser'} invited you to join their advertiser team as ${role === 'MANAGER' ? 'a manager' : 'an analyst'}. Nothing changes unless you accept.`,
+      data: { kind: 'ad_team_invite', advertiserId },
+    }).catch(() => {});
+  }
+
+  /** The invited person accepts their own open invitation. */
+  async acceptTeamInvite(advertiserId: string, userId: string): Promise<void> {
+    const r = await this.prisma.advertiserMember.updateMany({ where: { advertiserId, userId, acceptedAt: null, createdAt: { gte: inviteCutoff() } }, data: { acceptedAt: new Date() } });
+    if (r.count === 0) throw new NotFoundError('Invitation', advertiserId);
+  }
+
+  /** The invited person declines: the invitation is gone. */
+  async declineTeamInvite(advertiserId: string, userId: string): Promise<void> {
+    const r = await this.prisma.advertiserMember.deleteMany({ where: { advertiserId, userId, acceptedAt: null } });
+    if (r.count === 0) throw new NotFoundError('Invitation', advertiserId);
+  }
+
+  /** The caller's own open invitations. */
+  async listTeamInvites(userId: string) {
+    const rows = await this.prisma.advertiserMember.findMany({
+      where: { userId, acceptedAt: null, createdAt: { gte: inviteCutoff() } }, include: { advertiser: { select: { companyName: true } } }, orderBy: { createdAt: 'desc' },
+    });
+    return rows.map((r) => ({ advertiserId: r.advertiserId, companyName: r.advertiser.companyName, role: r.role, invitedAt: r.createdAt }));
+  }
+
+  /** The team, for a member: accepted members by name and phone; an open invitation by role only. */
+  async teamList(advertiserId: string, viewerUserId: string) {
+    await this.assertCapability(advertiserId, viewerUserId, 'read');
+    const members = await this.prisma.advertiserMember.findMany({
+      where: { advertiserId, OR: [{ acceptedAt: { not: null } }, { createdAt: { gte: inviteCutoff() } }] }, orderBy: { createdAt: 'asc' },
+    });
+    const accepted = members.filter((m) => m.acceptedAt !== null);
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: accepted.map((m) => m.userId) } }, select: { id: true, firstName: true, lastName: true, phone: true },
+    });
+    const userById = new Map(users.map((u) => [u.id, u]));
+    return members.map((m) => {
+      if (m.acceptedAt === null) return { role: m.role, status: 'PENDING' as const };
+      const u = userById.get(m.userId);
+      return { userId: m.userId, role: m.role, status: 'ACCEPTED' as const, name: u ? `${u.firstName} ${u.lastName}`.trim() : null, phone: u?.phone ?? null };
+    });
+  }
+
+  /** The lifecycle tick: delete every invitation past its days (each holds a person's id). */
+  async purgeExpiredTeamInvites(): Promise<number> {
+    const r = await this.prisma.advertiserMember.deleteMany({ where: { acceptedAt: null, createdAt: { lt: inviteCutoff() } } });
+    return r.count;
   }
 
   // ── Admin queue actions (§4.3) — all audited, all page the applicant ──────

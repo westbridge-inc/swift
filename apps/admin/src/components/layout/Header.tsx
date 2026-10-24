@@ -49,7 +49,8 @@ export function Header({ onOpenNavigation }: { onOpenNavigation?: () => void }) 
         <Menu size={18} aria-hidden="true" />
       </button>
       <div className="min-w-0 flex-1">
-        <p className="mc-header-title mc-truncate">{here?.label ?? 'Swift Mission Control'}</p>
+        {/* [ADMIN-UI] The screen's ONE title: pages carry no heading of their own that repeats it. */}
+        <h1 className="mc-header-title mc-truncate">{here?.label ?? 'Swift Mission Control'}</h1>
         {here ? <p className="mc-header-blurb mc-truncate">{here.blurb}</p> : null}
       </div>
       <SearchLauncher />

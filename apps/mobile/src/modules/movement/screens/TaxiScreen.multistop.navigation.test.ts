@@ -523,6 +523,16 @@ describe('the waiting charge at booking (Rev 2 §8.2)', () => {
     snap('rider-booking-waiting-terms');
   });
 
+  it('[quote proof] the booking echoes the terms it showed, with the fare', async () => {
+    fx.routes['post /rides/estimate'] = () => ok({ ...ESTIMATE_WITHOUT_STOPS.data, waiting: WAITING_TERMS });
+    await mount();
+    await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);
+    await click(requestButton() ?? null);
+    const [request] = sent('post /rides/request');
+    expect(Object.keys(bodyOf(request))).toEqual(['pickup', 'dropoff', 'pickupAddress', 'dropoffAddress', 'passengerCount', 'rideClass', 'expectedFare', 'waiting']);
+    expect(bodyOf(request).waiting).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
+  });
+
   it('says nothing when the server sends no terms', async () => {
     await mount();
     await pickFromSearch(byLabel('Where to?. Choose your destination'), LAMAHA);

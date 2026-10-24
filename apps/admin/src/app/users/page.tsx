@@ -61,7 +61,6 @@ export default function UsersPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>People</h1>
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
       <ListToolbar
         state={state}

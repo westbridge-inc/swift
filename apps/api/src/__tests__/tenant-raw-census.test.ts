@@ -60,6 +60,9 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   'modules/dispatch/dispatch.service.ts': { sites: 4, role: 'SHARED' },
   'modules/mover-authority-cutover-preparation.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/mover-revocation-outbox.ts': { sites: 4, role: 'JOB_PENDING' },
+  // [Off-site erasure ledger, #1984] The platform watch: counts and ages of unshipped ledger entries only
+  // (erasure_ledger_entry / erasure_ledger_shipment are not tenant tables; swift_app may only SELECT them).
+  'modules/ops/erasure-ledger-watch.ts': { sites: 1, role: 'INFRA' },
   'modules/ops/purge-plan.ts': { sites: 2, role: 'INFRA' },
   'modules/order/checkout-outbox.ts': { sites: 1, role: 'JOB_PENDING' },
   'modules/order/order.service.ts': { sites: 3, role: 'REQUEST' },

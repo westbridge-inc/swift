@@ -33,6 +33,8 @@ export interface WebRideRequest {
   rideClass: string;
   /** The fare the customer was shown: the server books only at it (409 FARE_CHANGED otherwise). */
   expectedFare: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside the fare, when there were any. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** One booking intent, one key: a retry under the same key is answered with the first answer and never books twice. */
 export async function requestRide(body: WebRideRequest, idempotencyKey: string): Promise<any> {

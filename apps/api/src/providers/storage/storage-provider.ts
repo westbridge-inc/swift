@@ -67,6 +67,7 @@ async function sanitizeForStorage(input: { buffer: Buffer; filename: string; mim
 }
 
 const DEFAULT_TTL_SECONDS = 300;
+const PATH_ESCAPE = 'Invalid file key: path escapes the uploads directory';
 
 /** Shared by both adapters so tests can prove the exact server-issued object
  * name contract without performing filesystem or provider I/O. Callers that
@@ -92,9 +93,15 @@ export class LocalStorageProvider implements StorageProvider, BoundedObjectReade
     if (localStorageBaseDir() !== this.baseDir) throw new Error('Storage root changed; restart with a validated storage configuration');
     const safe = await sanitizeForStorage(input);
     const name = createOpaqueStorageName(safe.filename);
-    const dir = path.join(this.baseDir, safe.folder);
+    // Checked HERE, next to the writes: the folder (a server-chosen subfolder such as
+    // "verification/<id>") must resolve strictly inside the uploads folder, and so must the file.
+    const dir = path.resolve(path.join(this.baseDir, safe.folder));
+    const file = path.resolve(dir, name);
+    if (safe.folder.includes('\0') || !dir.startsWith(this.baseDir + path.sep) || !file.startsWith(dir + path.sep)) {
+      throw new Error(PATH_ESCAPE);
+    }
     await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, name), safe.buffer);
+    await writeFile(file, safe.buffer);
     return { url: `/uploads/${safe.folder}/${name}` };
   }
 
@@ -111,18 +118,25 @@ export class LocalStorageProvider implements StorageProvider, BoundedObjectReade
 
   /** Map a stored "/uploads/..." key to a disk path, refusing any '..' escape.
    *  Defence-in-depth: keys come from the DB (nanoid names), but a poisoned key
-   *  must never let getObject/delete read or unlink outside the uploads dir. */
+   *  must never let getObject/delete read or unlink outside the uploads dir.
+   *  Every method below ALSO checks the path it touches inline, next to the fs call. */
   private resolveKey(fileKey: string): string {
-    return resolveLocalStorageKey(fileKey, this.baseDir);
+    return path.resolve(resolveLocalStorageKey(fileKey, this.baseDir));
   }
 
   async delete(fileKey: string): Promise<void> {
-    // best-effort; a bad key resolves to a throw, swallowed here.
-    await unlink(this.resolveKey(fileKey)).catch(() => undefined);
+    const abs = this.resolveKey(fileKey); // an escaping key throws (refused, as always)
+    // The uploads folder itself is never a stored file: nothing to delete.
+    if (!abs.startsWith(this.baseDir + path.sep)) return;
+    // best-effort: a missing file (or any unlink failure) is swallowed here.
+    await unlink(abs).catch(() => undefined);
   }
 
   async getObject(fileKey: string): Promise<Buffer> {
-    return readFile(this.resolveKey(fileKey));
+    const abs = this.resolveKey(fileKey);
+    // Only a file INSIDE the uploads folder is ever read (the folder itself is no object).
+    if (!abs.startsWith(this.baseDir + path.sep)) throw new Error(PATH_ESCAPE);
+    return readFile(abs);
   }
 
   async getObjectWithin(fileKey: string, maxBytes: number, signal: AbortSignal): Promise<Buffer | null> {
