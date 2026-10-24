@@ -50,6 +50,10 @@ describe('[ROLE-DOCS · PR 3] each trade asks exactly what the law requires', ()
     const category = publicServiceCatalog().categories.find((entry) => entry.id === SOLAR)!;
     expect(category.riskTier).toBe('HIGH');
     expect(category.documents.map((d) => d.key)).toEqual(expect.arrayContaining(['DOC_NATIONAL_ID', 'DOC_POLICE_CLEARANCE', 'DOC_GEI_ELECTRICAL_LICENCE']));
+    // [REVIEW-F #2053 S4-3] the yearly re-check is said to the installer (the GEI licence is in the January re-check set)
+    expect(category.documents).toContainEqual(expect.objectContaining({
+      key: 'NOTE_SOLAR_GENERATOR_INVERTER_INSTALLER_1', label: 'Your GEI electrical licence is checked again every January.',
+    }));
   });
 
   it.each(NEWLY_HELD)('%s is held: no profile, no request, an under-review topic, no checklist', async (trade) => {
