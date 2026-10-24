@@ -25,6 +25,9 @@ import {
 import { statusChip, timeAgo } from './order-chip';
 // The app's own O-4 rules and words (plain file, imported as is).
 import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, pickupCheckWords } from '../../../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
+import { RiderHandoverLine } from '@/components/rider-handover-line';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -58,8 +61,13 @@ function actionsFor(o: VendorOrder) {
   } else if (COURIER_ACTIVE.includes(s)) {
     if (!o.preparingAt) out.push({ label: 'Start preparing', kind: 'preparing' });
     else if (!o.readyAt) out.push({ label: 'Ready for delivery', kind: 'ready' });
+    // [STORE-DASH · O-2] The rider is at the counter: one tap records the hand-over.
+    else if (canMarkHandedToRider(o)) out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) {
-    out.push({ label: 'Mark picked up', kind: 'complete-pickup' });
+    // [STORE-DASH · O-2] With the store's pickup code off: one tap after checking the name and order number.
+    out.push(handoverNeedsNoCode(o) ? { label: 'Handed to customer', kind: 'handed-to-customer' } : { label: 'Mark picked up', kind: 'complete-pickup' });
+  } else if (canMarkHandedToRider(o)) {
+    out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if (
     (s === 'READY' || s === 'READY_FOR_PICKUP')
     && o.fulfillment === 'DELIVERY'
@@ -256,6 +264,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       if (kind === 'ready') return markReady(id);
       if (kind === 'delivered') return markDelivered(id);
       if (kind === 'complete-pickup') return completePickup(id, pickupCode.trim());
+      if (kind === 'handed-to-customer') return completePickup(id);
+      if (kind === 'handed-to-rider') return handedToRider(id);
       if (kind === 'complete-appointment') {
         const { apiFetch } = await import('@/lib/auth');
         return apiFetch(`/api/v1/vendor/orders/${id}/complete-appointment`, { method: 'PUT', body: '{}' });
@@ -501,6 +511,10 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
               Call
             </a>
           )}
+          {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider"; then that it went. */}
+          {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
+          {actions.some((a) => a.kind === 'handed-to-rider') && <div className="w-full"><RiderHandoverLine rider={o.rider} /></div>}
+          {o.handedToRiderAt && <p className="w-full text-sm font-semibold text-[var(--swift-muted)]">{HANDOVER_WORDS.handedToRider}</p>}
         </section>
       )}
 
@@ -559,8 +573,10 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           by `fulfillment`, which the API does send; every PICKUP order is
           issued a code at creation (order.service.ts). The code itself stays
           off this screen. */}
-      {o.fulfillment === 'PICKUP' && s !== 'COMPLETED' && (
-        <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
+      {/* [REVIEW-F S4-3 on #2054] Not on a closed order; with the code off, the name and order-number
+          check (never a hand-over prompt while paused — storeHandover.pickupCheckWords). */}
+      {o.fulfillment === 'PICKUP' && !['COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s) && (
+        <p className="mt-3 text-sm text-[var(--swift-muted)]">{pickupCheckWords(o, paused) ?? 'Customer collects with a pickup code.'}</p>
       )}
 
       {/* [STORE-DASH] The lines are ticked on the order's own state, never on the board's copy. */}
