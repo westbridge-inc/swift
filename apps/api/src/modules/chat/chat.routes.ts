@@ -1,7 +1,7 @@
 import { emitToChatRoom } from '../order/order-room-emission.service';
 import { scanUpload } from '../../lib/malware-scan';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
 import { chatContentFilterEnabled, chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';

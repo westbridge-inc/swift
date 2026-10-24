@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from '../lib/zod';
 
 /**
  * SWIFT-103: client-supplied money is an integer in the platform's storage

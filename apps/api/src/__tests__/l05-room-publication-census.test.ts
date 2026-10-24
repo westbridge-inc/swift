@@ -72,8 +72,9 @@ describe('sensitive room publication census', () => {
     // + the swap question withdrawn at its deadline on MMG (#1830, through the gate)
     // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance).
     // + the taxi stop change (multi-stop part 4: ride:stop_changed, through the gate).
+    // + the OF-33 no-show release back to dispatch (pickup-overdue.ts, through the gate).
     // + [O-4] the out-of-stock question asked before acceptance, and the free cancel when the only
     //   item left gets no answer (picking.service, both through the gate).
-    expect(orderPublishers).toBe(50);
+    expect(orderPublishers).toBe(51);
   });
 });

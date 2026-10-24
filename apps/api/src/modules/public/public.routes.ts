@@ -2,7 +2,7 @@ import { servedPhotoAddress } from '../../utils/photo-address';
 import { FastifyInstance } from 'fastify';
 import { resolvePublicMarketTenant } from '../search/search-scope';
 import { enterTenant } from '../../plugins/tenant-context';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { NotFoundError } from '../../utils/errors';
 import { ratingSurfaces } from '../rating/rating-surface';
 import { serveEmergencyPolicy } from '../country/emergency-policy';
