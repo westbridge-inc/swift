@@ -1493,8 +1493,11 @@ class AdminConsoleCompose(unittest.TestCase):
         admin = self.admin()
         self.assertIn("dockerfile: apps/admin/Dockerfile", admin)
         self.assertIn("image: swift-admin:${SWIFT_TAG:-local}", admin)
+        # [ADMIN-TILES] The only other input is the Live Ops map's MapTiler BROWSER key (public by
+        # design, certified !not-a-secret in security/public-env-allowlist.txt), the website's key.
         self.assertEqual(re.findall(r"(?m)^        ([A-Z][A-Z0-9_]*): (.*)$", admin),
-                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}")])
+                         [("NEXT_PUBLIC_API_URL", "https://${API_HOST:-localhost}"),
+                          ("NEXT_PUBLIC_MAPTILER_KEY", "${WEB_MAPTILER_KEY:-}")])
 
     def test_the_console_has_a_memory_ceiling_that_v8_collects_below(self):
         admin = self.admin()
@@ -1800,7 +1803,11 @@ class AdminConsoleDockerfile(unittest.TestCase):
         declared = re.search(r"(?m)^ARG NEXT_PUBLIC_API_URL$", build)
         self.assertIsNotNone(declared, "NEXT_PUBLIC_API_URL must be a build ARG with no baked-in default")
         self.assertLess(declared.start(), build.index("RUN pnpm run build"))
-        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL"])
+        # [ADMIN-TILES] ...and the Live Ops map's public MapTiler browser key, also before the build.
+        tiles = re.search(r"(?m)^ARG NEXT_PUBLIC_MAPTILER_KEY$", build)
+        self.assertIsNotNone(tiles, "NEXT_PUBLIC_MAPTILER_KEY must be a build ARG with no baked-in default")
+        self.assertLess(tiles.start(), build.index("RUN pnpm run build"))
+        self.assertEqual(re.findall(r"(?m)^ARG (\S+)", self.text), ["NEXT_PUBLIC_API_URL", "NEXT_PUBLIC_MAPTILER_KEY"])
         self.assertIn("ENV SWIFT_ADMIN_IMAGE_BUILD=1", build)
         # A public variable in the runtime would claim a setting the bundle cannot change.
         self.assertNotIn("NEXT_PUBLIC_", self.stages["runtime"])
@@ -1810,7 +1817,14 @@ class AdminConsoleDockerfile(unittest.TestCase):
         for line in re.findall(r"(?m)^ENV (.*)$", self.text):
             names += re.findall(r"([A-Z][A-Z0-9_]*)=", line)
         self.assertTrue(names)
+        # [ADMIN-TILES] Exempt ONLY a public (NEXT_PUBLIC_) name the allowlist certifies "!not-a-secret"
+        # with its written who-can-read / what-it-allows reasoning — today the MapTiler browser key.
+        certified = set(re.findall(r"(?m)^(NEXT_PUBLIC_[A-Z0-9_]+) !not-a-secret ",
+                                   (DEPLOY.parent / "security" / "public-env-allowlist.txt").read_text()))
+        self.assertEqual(certified & set(names), {"NEXT_PUBLIC_MAPTILER_KEY"})
         for name in names:
+            if name in certified:
+                continue
             self.assertNotRegex(name, r"SECRET|TOKEN|PASSWORD|PASSWD|KEY|HASH|CREDENTIAL|AUTH", name)
         # The build context never carries a settings file: every .env stays out.
         ignored = (DEPLOY.parent / ".dockerignore").read_text().splitlines()
