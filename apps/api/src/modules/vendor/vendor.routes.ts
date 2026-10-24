@@ -91,6 +91,7 @@ import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
 import { redactCustomerContact, riderCounterpartySelect } from '../../utils/counterparty';
 import { resolveAvatarUrls } from '../../utils/avatar-url';
+import { HANDED_TO_RIDER_NOTE } from '../order/store-handover-log';
 import { assertStorePinInMarket } from './store-pin';
 import { lockStorePin, recordStorePinMove } from './store-pin-move';
 import { registerPartnerCardRoutes, withCardPayAction } from '../billing/card-rail.routes';
@@ -655,8 +656,7 @@ function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{
   return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
 }
 
-/** [O-2 · owner 22 Oct 2026] The status-log note of the store's one-tap "Handed to rider". */
-export const HANDED_TO_RIDER_NOTE = 'Handed to the rider by the store';
+export { HANDED_TO_RIDER_NOTE };
 
 /**
  * [O-2] What the store's order card needs for the handover, for a page of its orders:

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
-import { Prisma, type UserRole } from '@prisma/client';
+import { Prisma, type Order, type UserRole } from '@prisma/client';
 import { beginRequestTenantContext, prismaPlugin, runWithoutTenant } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
 import { authPlugin } from '../plugins/auth';
@@ -12,6 +12,8 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { customerRoutes } from '../modules/user/customer.routes';
 import { vendorRoutes, HANDED_TO_RIDER_NOTE } from '../modules/vendor/vendor.routes';
 import { riderRoutes } from '../modules/rider/rider.routes';
+import { assignmentLogWhere } from '../modules/order/store-handover-log';
+import { verifyHandoverDecision } from '../modules/handover/handover-decision';
 
 // ---------------------------------------------------------------------------
 // [O-2 · owner 22 Oct 2026, ruling 19:45Z] "Stores: no pickup code" — every
@@ -241,6 +243,23 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
   });
 });
 
+describe('[O-2] the waiver is decided on the locked store row, not the route preview', () => {
+  const lockedTx = (requirePickupCode: boolean) => ({
+    vendor: { findUnique: async () => ({ requirePickupCode }) },
+    order: { update: async () => ({}) },
+  }) as unknown as Prisma.TransactionClient;
+  const source = { id: 'o2-unit', vendorId: 'o2-store', pickupCode: 'stored-code-digest', pickupCodeAttempts: 0 } as unknown as Order;
+
+  it('the store turned the code ON after the route read "off": no code is refused', async () => {
+    const failure = await verifyHandoverDecision(lockedTx(true), source, { purpose: 'pickup', codeWaived: true });
+    expect(failure?.handoverFailure.code).toBe('MISSING_PICKUP_CODE');
+  });
+
+  it('still off under the lock: no code needed', async () => {
+    expect(await verifyHandoverDecision(lockedTx(false), source, { purpose: 'pickup', codeWaived: true })).toBeNull();
+  });
+});
+
 describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the rider\'s "Picked up"', () => {
   it('the card names the rider (photo resolved, first name, vehicle, plate); one tap writes one log row and moves nothing; a repeat is a 200 no-op', async () => {
     const rider = await makeRider('Ravi');
@@ -256,8 +275,17 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     });
     expect(card.rider?.user).not.toHaveProperty('avatar'); // never the raw stored value
 
+    // The dispatch journal counts assignment episodes by RIDER_ASSIGNED rows: the store's evidence row
+    // (written while the order sits at RIDER_ASSIGNED) must never look like a second assignment.
+    expect(before.status).toBe('RIDER_ASSIGNED');
+    const episodes = () => sys(() => app.prisma.orderStatusLog.count({ where: assignmentLogWhere(orderId, 'RIDER_ASSIGNED') }));
+    const episodesBefore = await episodes();
+    expect(episodesBefore).toBe(1);
+
     const tap = await handedToRider(orderId);
     expect(tap.statusCode, tap.body).toBe(200);
+    expect(await episodes()).toBe(episodesBefore);
+    expect((await logs(orderId)).filter((l) => l.status === 'RIDER_ASSIGNED')).toHaveLength(2); // the assignment + the tap
     const at = tap.json().data.handedToRiderAt as string;
     expect(new Date(at).getTime()).toBeGreaterThan(0);
     const after = await orderRow(orderId);
