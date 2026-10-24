@@ -80,9 +80,8 @@ it('explicit retained close allows a successful retry after the peer removes its
   let onClose = 0;
   try {
     await h.start(async (app) => {
-      originals.push(...trackingMethods(h));
       app.addHook('onClose', async () => { onClose++; });
-    });
+    }, () => { originals.push(...trackingMethods(h)); });
     const actor = await h.actor();
     const notice = await peer.notification.create({ data: {
       userId: actor.userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Peer blocker', body: 'Fixture only',
@@ -120,7 +119,7 @@ it.each([false, true])('preserves the original cleanup error when terminal dispo
   const disposalError = new Error('terminal disposal failure');
   const originals: unknown[] = [];
   try {
-    await h.start(async () => { originals.push(...trackingMethods(h)); });
+    await h.start(undefined, () => { originals.push(...trackingMethods(h)); });
     const preflight = vi.spyOn(h.app.prisma.user, 'findMany').mockRejectedValueOnce(cleanupError);
     const realClose = h.app.close.bind(h.app);
     const closing = vi.spyOn(h.app, 'close').mockImplementation((async () => {

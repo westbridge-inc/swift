@@ -182,12 +182,15 @@ export function createGolden(phonePrefix: string, fixture: string) {
     });
   }
 
-  async function start(extra?: (instance: FastifyInstance) => Promise<void>) {
+  /** `extra` registers more routes (tracking is already on); `beforeTracking`
+   *  sees the client as it was before the insert tracking wrapped it. */
+  async function start(extra?: (instance: FastifyInstance) => Promise<void>, beforeTracking?: (instance: FastifyInstance) => void) {
     app = Fastify({ logger: false });
     registerErrorHandler(app);
     registerEmptyJsonBodyParser(app);
     await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
     await app.register(prismaPlugin);
+    beforeTracking?.(app);
     // [G7-01] Track every production write path, for every alert kind
     // (helpers/insert-ownership): a single create owns its ID only after
     // success, bulk RETURNING captures only rows actually inserted (so
