@@ -26,6 +26,9 @@ export interface EvidenceRow {
   coverageClass: CoverageClass | null;
   hireClassConfirmed: boolean;
   plateCrossChecked: boolean;
+  /** [ROLE-DOCS · PR 3] Who approved the record ('system' / 'kyc:auto' for an engine; else the reviewer's user id), and when. */
+  approvedBy: string;
+  approvedAt: Date;
 }
 
 export async function approvedEvidenceFor(db: EvidenceDb, userId: string, checklist: readonly string[], now: Date): Promise<EvidenceRow[]> {
@@ -53,7 +56,7 @@ export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklis
       ],
     },
     select: {
-      docType: true, expiresOn: true,
+      docType: true, expiresOn: true, approvedBy: true, approvedAt: true,
       submission: { select: { retentionExpiresAt: true, reviewedAt: true, userId: true, subjectId: true, coverageClass: true, hireClassConfirmed: true, plateCrossChecked: true } },
     },
   });
@@ -61,6 +64,7 @@ export async function recordEvidenceFor(db: EvidenceDb, userId: string, checklis
     docType: r.docType, expiresAt: r.expiresOn, retentionExpiresAt: r.submission.retentionExpiresAt, reviewedAt: r.submission.reviewedAt,
     userId: r.submission.userId, subjectId: r.submission.subjectId, coverageClass: r.submission.coverageClass,
     hireClassConfirmed: r.submission.hireClassConfirmed, plateCrossChecked: r.submission.plateCrossChecked,
+    approvedBy: r.approvedBy, approvedAt: r.approvedAt,
   }));
 }
 
