@@ -1547,7 +1547,8 @@ class AdminConsoleRenderedByCompose(unittest.TestCase):
         self.assertNotIn("ports", admin)
         self.assertEqual(list((admin.get("networks") or {}).keys()), ["private"])
         self.assertEqual(sorted((admin.get("environment") or {}).keys()), ["NODE_OPTIONS"])
-        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid"})
+        # [ADMIN-TILES] No WEB_MAPTILER_KEY in deploy/.env: an empty key, so the Live Ops map has no tiles.
+        self.assertEqual(admin["build"]["args"], {"NEXT_PUBLIC_API_URL": "https://api-staging.example.invalid", "NEXT_PUBLIC_MAPTILER_KEY": ""})
         self.assertEqual(model["services"]["caddy"]["environment"]["ADMIN_HOST"], "admin-staging.example.invalid")
         # pilot-up's isolation check passes with the console in the model.
         check = subprocess.run(
