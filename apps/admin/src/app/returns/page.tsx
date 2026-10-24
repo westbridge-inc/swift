@@ -67,7 +67,7 @@ export default function ReturnsPage() {
               aria-pressed={filter === f}
               className="mc-tab"
             >
-              {f.toLowerCase()}
+              {f.replaceAll('_', ' ').toLowerCase()}
             </button>
           ))}
         </div>
