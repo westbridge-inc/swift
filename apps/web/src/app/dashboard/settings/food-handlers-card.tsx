@@ -32,8 +32,8 @@ export function FoodHandlersCard({ storeId, isOwner, vendorType }: { storeId: st
       ) : (
         <>
           <p className="mt-1 text-sm text-[var(--swift-muted)]">
-            No certificate to upload: confirm it for the people who handle food at {store.name}. You can still add your
-            own food handler&apos;s certificate in the app under Documents — customers see it on your store page.
+            Instead of uploading a certificate, confirm it for the people who handle food at {store.name}. You can still
+            add your own food handler&apos;s certificate in the app under Documents — customers see it on your store page.
           </p>
           <label className="mt-3 flex items-start gap-2 text-sm">
             <input type="checkbox" checked={ticked} onChange={(e) => setTicked(e.target.checked)} className="mt-0.5" />

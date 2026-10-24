@@ -42,7 +42,7 @@ export function FoodHandlersCard({ role, status }: { role: string; status: unkno
     <Card style={{ marginTop: space.md, gap: space.sm }}>
       <T variant="label" weight="bold">Your food handlers</T>
       <T variant="caption" tone="muted">
-        No certificate to upload: confirm it for the people who handle food at your restaurant. You can still add your own food handler’s certificate below — customers see it on your store page.
+        Instead of uploading a certificate, confirm it for the people who handle food at your restaurant. You can still add your own food handler’s certificate below — customers see it on your store page.
       </T>
       {stores.map((store) => (
         <StoreTick key={store.vendorId} role={role} store={store} tick={words.tick} version={words.version} named={stores.length > 1} />
