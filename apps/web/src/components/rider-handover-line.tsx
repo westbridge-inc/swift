@@ -18,6 +18,7 @@ export function RiderHandoverLine({ rider }: { rider: VendorOrder['rider'] }) {
     <div data-testid="rider-handover-line" className="flex items-center gap-3 rounded-lg bg-[var(--swift-subtle)] p-2">
       {photo
         // A signed per-rider address: a plain <img>, never the image optimiser's cache.
+        // eslint-disable-next-line @next/next/no-img-element
         ? <img src={photo} alt={`Photo of ${rider?.user?.firstName ?? 'the rider'}`} width={36} height={36} className="h-9 w-9 shrink-0 rounded-full object-cover" />
         : <span aria-hidden className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--swift-red)]/10 font-bold text-[var(--swift-red)]">{initial}</span>}
       <span className="min-w-0">

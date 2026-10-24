@@ -41,7 +41,7 @@ function api(orders: Array<Record<string, unknown>>, store: { role?: string; req
       }] } } };
     }
     if (path === '/vendor/orders') return { body: { success: true, data: orders, meta: { total: orders.length } } };
-    if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: orders.find((o) => `/vendor/orders/${o.id}` === path) ?? orders[0] } };
+    if (path.startsWith('/vendor/orders/')) return { body: { success: true, data: orders.find((o) => `/vendor/orders/${String(o['id'])}` === path) ?? orders[0] } };
     return { status: 404, body: { success: false } };
   });
 }
@@ -108,7 +108,8 @@ describe('[O-2] the card: one-tap hand-overs (#2033 F S4-2)', () => {
   });
 
   it('control: an older server (no new fields) — today\'s card: "Mark picked up", no rider check', async () => {
-    const { handedToRiderAt: _gone, ...oldDelivery } = riderDelivery({ id: 'o-6', orderNumber: 'SW-6006' });
+    const oldDelivery: Record<string, unknown> = riderDelivery({ id: 'o-6', orderNumber: 'SW-6006' });
+    delete oldDelivery['handedToRiderAt'];
     api([takeaway({ id: 'o-5', orderNumber: 'SW-6005' }), oldDelivery]);
     const view = renderWithQuery(<OrdersPage />);
     const t = await card('SW-6005', view);

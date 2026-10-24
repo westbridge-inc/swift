@@ -152,7 +152,8 @@ describe('[O-2] delivery: "Handed to rider"', () => {
   });
 
   it('control: an older server (no handedToRiderAt field) shows nothing new', async () => {
-    const { handedToRiderAt: _gone, ...old } = riderDelivery();
+    const old: Record<string, unknown> = riderDelivery();
+    delete old['handedToRiderAt'];
     const text = await show(old, []);
     expect(text).not.toContain('Check the rider before you hand it over:');
     expect(text).not.toContain('Handed to the rider');

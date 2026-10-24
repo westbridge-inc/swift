@@ -57,7 +57,8 @@ describe('[O-2] when "Handed to rider" may be tapped', () => {
     expect(canMarkHandedToRider(delivery({ handedToRiderAt: '2026-10-23T10:00:00.000Z' }))).toBe(false);
   });
   it('an older server (no handedToRiderAt field): never offered', () => {
-    const { handedToRiderAt: _gone, ...old } = delivery();
+    const old: Record<string, unknown> = delivery();
+    delete old['handedToRiderAt'];
     expect(canMarkHandedToRider(old)).toBe(false);
   });
   it('not a Swift-rider delivery: takeaway, the store\'s own delivery, an appointment', () => {
