@@ -12,7 +12,10 @@
  *    to the tenant only) and the re-sweep of a closed account (late rows);
  *  - pinned: nothing between the tombstone's new place and its old one reads users.status or users.phone
  *    (the code, and the triggers on the tables that step writes), and the functions read users only for the
- *    guard.
+ *    guard. One exception, by design: #1984's off-site erasure ledger. Its row capture reads the tombstone,
+ *    so the first pass now also ledgers every row its cleanup removes ('deleted_rows'); it only appends to
+ *    the ledger. Its closed-account entry needs the complete tombstone (checked with a person already named
+ *    'Deleted User', for whom it fires at the cut-off: the restore's rule still keeps none of the removed rows).
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -42,7 +45,7 @@ let app: FastifyInstance;
 let tenant: TenantModule;
 let prismaModule: typeof import('../plugins/prisma');
 
-const ids = { admin: '', live: '', deactivated: '', byAdmin: '', own: '', byJob: '' };
+const ids = { admin: '', live: '', deactivated: '', byAdmin: '', own: '', byJob: '', namedDeleted: '' };
 const users: string[] = [];
 
 const mkUser = async (roles: string[], activeRole: string, extra: Record<string, unknown> = {}) => {
@@ -53,10 +56,27 @@ const mkUser = async (roles: string[], activeRole: string, extra: Record<string,
   users.push(id);
   return id;
 };
+/** The ids of what `seed` wrote, per person: the off-site ledger names removed rows by table and id. */
+const seeded: Record<string, Array<{ tbl: string; id: string }>> = {};
 /** One inbox notice and one push registration of `userId` (written as the owner, past the wall). */
 const seed = async (userId: string, label: string) => {
-  await owner.notification.create({ data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Guard', body: `guard-${label}-${RUN}` } });
-  await owner.deviceToken.create({ data: { userId, token: `ExponentPushToken[oweg-${label}-${RUN}]`, platform: 'ios' } });
+  const notice = await owner.notification.create({ data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title: 'Guard', body: `guard-${label}-${RUN}` } });
+  const device = await owner.deviceToken.create({ data: { userId, token: `ExponentPushToken[oweg-${label}-${RUN}]`, platform: 'ios' } });
+  (seeded[userId] ??= []).push({ tbl: 'notifications', id: notice.id }, { tbl: 'device_tokens', id: device.id });
+};
+type LedgerEntry = { kind: string; entry: { tbl?: string; id?: string; kept?: Array<{ tbl: string; id: string }> } };
+/** [#1984] The off-site erasure ledger's entries about `userId`'s account and the seeded rows. */
+const ledgerOf = async (userId: string) => {
+  const rowIds = (seeded[userId] ?? []).map((r) => r.id);
+  return owner.$queryRaw<LedgerEntry[]>`
+    SELECT kind, entry FROM erasure_ledger_entry
+     WHERE (kind = 'closed_accounts' AND entry->>'id' = ${userId}) OR (kind = 'deleted_rows' AND entry->>'id' = ANY(${rowIds}::text[]))
+     ORDER BY "createdAt", id`;
+};
+/** The restore's own rule (deploy/restore-offsite-ledger.sql): kept = every tombstone entry's list minus the deleted rows. */
+const restoreKeeps = (rows: LedgerEntry[]) => {
+  const gone = new Set(rows.filter((r) => r.kind === 'deleted_rows').map((r) => `${r.entry.tbl}/${r.entry.id}`));
+  return rows.filter((r) => r.kind === 'closed_accounts').flatMap((r) => r.entry.kept ?? []).filter((k) => !gone.has(`${k.tbl}/${k.id}`));
 };
 const held = async (userId: string) => ({
   notices: await owner.notification.count({ where: { userId } }),
@@ -76,6 +96,9 @@ beforeAll(async () => {
   ids.byAdmin = await mkUser(['CUSTOMER'], 'CUSTOMER');
   ids.own = await mkUser(['CUSTOMER'], 'CUSTOMER');
   ids.byJob = await mkUser(['CUSTOMER'], 'CUSTOMER');
+  // [#1984] A person whose own row already reads as the complete tombstone (named 'Deleted User', no email, no
+  // password, no location): the ledger's closed-account trigger fires at the cut-off write, before the cleanup.
+  ids.namedDeleted = await mkUser(['CUSTOMER'], 'CUSTOMER', { firstName: 'Deleted', lastName: 'User' });
   for (const [key, id] of Object.entries(ids)) if (key !== 'admin') await seed(id, key);
 
   process.env['DATABASE_URL'] = logins.requestUrl;
@@ -155,7 +178,26 @@ describe('[row 622] the erasure still removes everything', () => {
     for (const person of [ids.byAdmin, ids.own, ids.byJob]) {
       expect(await held(person), person).toEqual({ notices: 0, devices: 0 });
       expect(await owner.user.findUniqueOrThrow({ where: { id: person } }), person).toMatchObject({ status: 'DEACTIVATED', phone: `deleted:${person}` });
+      // [#1984] The tombstone comes first, so the off-site ledger names every row the cleanup removed, and the
+      // closed-account entry (the complete tombstone, after the cleanup) keeps none of them.
+      const ledger = await ledgerOf(person);
+      expect(ledger.filter((r) => r.kind === 'deleted_rows').map((r) => ({ tbl: r.entry.tbl, id: r.entry.id })), person)
+        .toEqual(expect.arrayContaining(seeded[person]!));
+      expect(ledger.filter((r) => r.kind === 'closed_accounts'), person).toHaveLength(1);
+      expect(restoreKeeps(ledger), person).toEqual([]);
     }
+  });
+
+  it('[#1984] a person already named \'Deleted User\': the early closed-account entry keeps rows the cleanup then removes, and each is ledgered as deleted', async () => {
+    await asPerson(ids.admin, () => closeAccount(ids.namedDeleted));
+    expect(await held(ids.namedDeleted)).toEqual({ notices: 0, devices: 0 });
+    const ledger = await ledgerOf(ids.namedDeleted);
+    const [early] = ledger.filter((r) => r.kind === 'closed_accounts');
+    // The edge is real: the cut-off write fired the entry before the cleanup, so it lists the seeded rows as kept.
+    expect(early!.entry.kept, 'early entry').toEqual(expect.arrayContaining(seeded[ids.namedDeleted]!));
+    expect(ledger.filter((r) => r.kind === 'deleted_rows').map((r) => ({ tbl: r.entry.tbl, id: r.entry.id })))
+      .toEqual(expect.arrayContaining(seeded[ids.namedDeleted]!));
+    expect(restoreKeeps(ledger)).toEqual([]);
   });
 
   it('the re-sweep: a closed account\'s late notice and registration go when the closure runs again (the retry job, an admin)', async () => {
@@ -226,30 +268,63 @@ describe('[row 622] pinned: nothing between the tombstone and its old place read
     expect(stripComments(notices)).toContain('SELECT public.swift_owner_wall_erase_notices(${userId})');
   });
 
-  it('no trigger fires on the cleanup\'s deletes or its money-command update, and users triggers ignore status, phone and avatar', async () => {
+  it('on the cleanup\'s deletes only the off-site ledger\'s row capture fires (none on its money-command update), and users triggers ignore status, phone and avatar or need the complete tombstone', async () => {
     const deleted = ['sessions', 'device_tokens', 'verification_decision_outbox', 'notifications', 'money_surface_commands',
       'mover_revocation_outbox', 'guardian_checkin_deliveries', 'renewal_schedule', 'admins'];
-    const fired = await owner.$queryRaw<Array<{ table: string; name: string }>>`
-      SELECT c.relname::text AS "table", t.tgname::text AS name
+    const fired = await owner.$queryRaw<Array<{ table: string; name: string; fn: string; tgtype: number }>>`
+      SELECT c.relname::text AS "table", t.tgname::text AS name, p.proname::text AS fn, t.tgtype::int AS tgtype
         FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+        JOIN pg_proc p ON p.oid = t.tgfoid
        WHERE NOT t.tgisinternal
          AND ((c.relname = ANY(${deleted}::text[]) AND (t.tgtype & 8) <> 0)
-           OR (c.relname = 'money_surface_commands' AND (t.tgtype & 16) <> 0))`;
-    expect(fired).toEqual([]);
-    const onUsers = await owner.$queryRaw<Array<{ name: string; columns: string[]; def: string }>>`
+           OR (c.relname = 'money_surface_commands' AND (t.tgtype & 16) <> 0))
+       ORDER BY 1, 2`;
+    // [#1984] The ONE trigger allowed here: the off-site erasure ledger's capture of a deleted row of a closed
+    // account, AFTER DELETE FOR EACH ROW (tgtype 9: it cannot change the delete). It reads the tombstone phone, so
+    // with the tombstone first the first pass now ledgers every row its cleanup removes ('deleted_rows'; the
+    // behaviour is checked above). Nothing on money_surface_commands.
+    const captured = deleted.filter((t) => t !== 'money_surface_commands');
+    expect(fired).toEqual(captured.sort().map((table) => ({ table, name: 'erasure_ledger_deleted_row', fn: 'erasure_ledger_capture_closed_row', tgtype: 9 })));
+    // That capture reads users only for the tombstone and writes only the append-only ledger (no INSERT trigger there).
+    const [capture] = await owner.$queryRaw<Array<{ src: string }>>`
+      SELECT p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
+       WHERE p.proname = 'erasure_ledger_capture_closed_row'`;
+    const src = capture!.src;
+    expect(src.match(/\busers\b/g)).toEqual(['users']);
+    expect(src).toContain('FROM users u WHERE u.id = owner AND u.phone = \'deleted:\' || u.id');
+    expect([...src.matchAll(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(\w+)/gi)].map((m) => `${m[1]!.toUpperCase()} ${m[2]}`)).toEqual(['INSERT INTO erasure_ledger_entry']);
+    expect(src).toMatch(/RETURN NULL;\s*END\s*$/);
+    const onLedger = await owner.$queryRaw<Array<{ name: string }>>`
+      SELECT t.tgname::text AS name FROM pg_trigger t
+       WHERE t.tgrelid = 'public.erasure_ledger_entry'::regclass AND NOT t.tgisinternal AND (t.tgtype & 4) <> 0`;
+    expect(onLedger).toEqual([]);
+    const onUsers = await owner.$queryRaw<Array<{ name: string; columns: string[]; def: string; fn: string }>>`
       SELECT t.tgname::text AS name,
              ARRAY(SELECT a.attname::text FROM unnest(t.tgattr::int2[]) k JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k ORDER BY 1) AS columns,
-             pg_get_triggerdef(t.oid) AS def
-        FROM pg_trigger t
+             pg_get_triggerdef(t.oid) AS def, p.proname::text AS fn
+        FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
        WHERE t.tgrelid = 'public.users'::regclass AND NOT t.tgisinternal AND (t.tgtype & 16) <> 0
        ORDER BY 1`;
     expect(onUsers.length).toBeGreaterThan(0);
     // Each users UPDATE trigger names its columns or a WHEN on the tenant: none fires for the tombstone write.
+    // [#1984] One more: the ledger's closed-account entry, whose WHEN needs the COMPLETE tombstone (name 'Deleted
+    // User', no email, no password, no location), which the cut-off write (status, phone, avatar) does not make
+    // unless the person's row already read so; even then it only appends an entry, and every row the cleanup
+    // removes after it is ledgered as deleted (checked above with such a person).
+    const completeTombstone = ['(new."firstName" = \'Deleted\'::text)', '(new."lastName" = \'User\'::text)', '(new.email IS NULL)',
+      '(new."passwordHash" IS NULL)', '(new."lastKnownLat" IS NULL)', '(new."lastKnownLng" IS NULL)'];
     for (const t of onUsers) {
       const keyed = t.columns.length > 0 && !t.columns.some((c) => ['status', 'phone', 'avatar'].includes(c));
       const tenantOnly = /WHEN \(\(old\."tenantId" IS DISTINCT FROM new\."tenantId"\)\) EXECUTE/.test(t.def);
-      expect(keyed || tenantOnly, `${t.name}: ${t.def}`).toBe(true);
+      const ledger = t.name === 'erasure_ledger_closed_accounts' && t.fn === 'erasure_ledger_capture_closed_account'
+        && /^CREATE TRIGGER erasure_ledger_closed_accounts AFTER UPDATE ON public\.users FOR EACH ROW WHEN /.test(t.def)
+        && completeTombstone.every((c) => t.def.includes(c));
+      expect(keyed || tenantOnly || ledger, `${t.name}: ${t.def}`).toBe(true);
     }
+    const [account] = await owner.$queryRaw<Array<{ src: string }>>`
+      SELECT p.prosrc AS src FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
+       WHERE p.proname = 'erasure_ledger_capture_closed_account'`;
+    expect([...account!.src.matchAll(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(\w+)/gi)].map((m) => `${m[1]!.toUpperCase()} ${m[2]}`)).toEqual(['INSERT INTO erasure_ledger_entry']);
   });
 
   it('both erase functions read users only for the guard: the tombstone of the person they erase', async () => {
