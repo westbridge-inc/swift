@@ -4,7 +4,7 @@ import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft } from 'lucide-react';
-import { fetchOrderDetail, cancelOrder, settleOrderRefund } from '@/lib/api';
+import { fetchOrderDetail, cancelOrder, settleOrderRefund, revealOrderPartyPhone, type OrderContactParty } from '@/lib/api';
 import { statusClass } from '@/lib/status';
 import { label } from '@/lib/labels';
 import { QueryFailed } from '@/components/mc/QueryFailed';
@@ -41,7 +41,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Party({ label, name, phone, href }: { label: string; name?: string | null; phone?: string | null; href?: string }) {
+/**
+ * [O-1] A party on the order. The server sends the phone MASKED; "Show number"
+ * reads the full one through the audited door (a reason, recorded before the
+ * number is sent), and only for this page view.
+ */
+function Party({ label, name, phone, href, revealed, onReveal }: {
+  label: string; name?: string | null; phone?: string | null; href?: string;
+  revealed?: string; onReveal?: () => void;
+}) {
   if (!name) return null;
   return (
     <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
@@ -56,7 +64,18 @@ function Party({ label, name, phone, href }: { label: string; name?: string | nu
         )}
       </div>
       {/* [MC shell] No click-to-call: calls are not a console feature (owner ruling, 6 Oct). */}
-      {phone ? <span className="text-xs text-[var(--muted)]">{phone}</span> : null}
+      {phone ? (
+        <div className="flex flex-col items-end gap-1">
+          <span className="text-xs text-[var(--muted)] mc-numbers">{revealed ?? phone}</span>
+          {revealed ? (
+            <span className="text-[11px] text-[var(--muted)]">Read recorded in the audit log</span>
+          ) : onReveal ? (
+            <button type="button" onClick={onReveal} className="text-xs underline text-[var(--muted)] hover:text-white">
+              Show number
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -73,6 +92,8 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   // the panel: the order is named, a refusal stays in the panel with what was
   // typed, and a 202 (a refund close is C4) reads as queued, never a failure.
   const [refundCloseQueued, setRefundCloseQueued] = useState(false);
+  // [O-1] Full numbers read through the audited door, for this page view only.
+  const [revealed, setRevealed] = useState<Partial<Record<OrderContactParty, string>>>({});
   const o: any = data?.data;
   // [TAXI waiting charge] The ride's frozen breakdown, when the server sends one.
   const waiting: { routeFare: number; waitingMinutes: number; waitingCharge: number; total: number } | null =
@@ -98,6 +119,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
   const isMmg = o.paymentMethod === 'MOBILE_MONEY';
   const refundingStore = o.vendor?.name ?? 'the store';
   const timeline: any[] = o.statusHistory ?? [];
+  const revealFor = (party: OrderContactParty, who: string) => () => void actions.run({
+    title: `Show the ${who}'s full number for order ${o.orderNumber}?`,
+    body: <p>Your reason and this read are recorded in the audit log before the number is shown.</p>,
+    confirmLabel: 'Show number',
+    submit: ({ reason }) => revealOrderPartyPhone(id, party, reason),
+    success: (result) => {
+      setRevealed((now) => ({ ...now, [party]: result.data.phone }));
+      return `The ${who}'s number is shown. The read is recorded.`;
+    },
+  });
 
   return (
     <div>
@@ -294,12 +325,16 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
                 label="Customer"
                 name={[o.customer?.firstName, o.customer?.lastName].filter(Boolean).join(' ') || null}
                 phone={o.customer?.phone}
+                revealed={revealed.customer}
+                onReveal={revealFor('customer', 'customer')}
               />
-              <Party label="Vendor" name={o.vendor?.name} phone={o.vendor?.phone} />
+              <Party label="Vendor" name={o.vendor?.name} phone={o.vendor?.phone} revealed={revealed.store} onReveal={revealFor('store', 'store')} />
               <Party
                 label={moverLabel ?? 'Mover'}
                 name={mover ? [mover.firstName, mover.lastName].filter(Boolean).join(' ') : null}
                 phone={mover?.phone}
+                revealed={revealed.mover}
+                onReveal={revealFor('mover', (moverLabel ?? 'mover').toLowerCase())}
               />
               {!o.vendor && !mover && !o.customer && <p className="text-sm text-[var(--muted)]">—</p>}
             </div>
