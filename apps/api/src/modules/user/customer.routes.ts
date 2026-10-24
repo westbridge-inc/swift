@@ -18,7 +18,7 @@ import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
 import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCounter, ratingReportTenancyCounter, ratingPipelineCounter } from '../../plugins/observability';
 import { promoDiscount } from '../../utils/order-total';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
 import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
@@ -154,14 +154,14 @@ const addCartItemSchema = z.object({
   vendorId: z.string().min(1),
   itemId: z.string().min(1),
   quantity: z.number().int().min(1).max(99).optional(),
-  selectedOptions: z.record(z.unknown()).optional(),
+  selectedOptions: z.record(z.string(), z.unknown()).optional(),
   specialInstructions: z.string().max(500).optional(),
 });
 
 const updateCartItemSchema = z.object({
   // <= 0 removes the item, so no lower bound here
   quantity: z.number().int().max(99),
-  selectedOptions: z.record(z.unknown()).optional(),
+  selectedOptions: z.record(z.string(), z.unknown()).optional(),
   specialInstructions: z.string().max(500).optional(),
 });
 
@@ -181,7 +181,7 @@ const MAX_TIP_GYD = 50_000;
 // Per-vendor DELIVERY|PICKUP choice for multi-vendor carts. [E01] ONE schema
 // for the checkout body and the cart quote, so the preview accepts exactly the
 // choices checkout does.
-const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
+const fulfillmentSelectionsSchema = z.record(z.string(), z.enum(['DELIVERY', 'PICKUP']));
 
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
