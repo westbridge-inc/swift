@@ -184,13 +184,19 @@ const awaited = (body: string) => [...stripComments(body).matchAll(/await\s+([\w
 describe('[row 622] pinned: nothing between the tombstone and its old place reads users.status or users.phone', () => {
   const account = read('modules/user/account.service.ts');
 
-  it('the first pass writes the tombstone, then runs the cleanup, then returns; the re-sweep runs it only on a tombstoned account', () => {
+  it('the first pass writes the tombstone, then runs the cleanup, then its cut-off audit row, then returns; the re-sweep runs it only on a tombstoned account', () => {
     const tombstone = 'data: { status: \'DEACTIVATED\', phone: `deleted:${userId}`, avatar: null },\n      });';
     const at = account.indexOf(tombstone);
     expect(at, 'the first pass tombstone').toBeGreaterThan(-1);
     expect(account.indexOf(tombstone, at + 1), 'one tombstone write in deleteAccount').toBe(-1);
-    const next = stripComments(account.slice(at + tombstone.length, account.indexOf('return { hold,', at))).trim();
-    expect(next).toBe('await revokeAccessBeforeCleanup();');
+    const next = stripComments(account.slice(at + tombstone.length, account.indexOf('return { hold,', at)))
+      .split('\n').map((l) => l.trim()).filter(Boolean);
+    // [#1945] The erasure's cut-off audit row stays AFTER the cleanup, where it was: swift_erased_person (the
+    // database's erasure exceptions) needs that row, so it stays false during the cleanup exactly as before.
+    expect(next).toEqual([
+      'await revokeAccessBeforeCleanup();',
+      'await tx.auditLog.create({ data: { userId, action: ACCOUNT_ERASURE_CUTOFF, entity: \'User\', entityId: userId } });',
+    ]);
     const resweep = bodyOf(account, 'if (user.phone === `deleted:${userId}`) {', '\n      }\n');
     expect(awaited(resweep)).toContain('revokeAccessBeforeCleanup');
   });
