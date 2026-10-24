@@ -14,7 +14,7 @@ import {
   qualificationTypeMatchesTrade,
   refreshProviderVerification,
   requireCanonicalServiceTrade,
-  requiredLicenceCheckedOn,
+  requiredLicenceStatus,
   riskGuidance,
   serviceTradeLabel,
   tradeRiskTier,
@@ -357,7 +357,8 @@ export async function servicesRoutes(app: FastifyInstance) {
       && qualificationTypeMatchesTrade(q.type, trade)
     ));
     // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person, counts too (and carries its date)
-    const licenceOn = trade === null ? null : await requiredLicenceCheckedOn(app.prisma, request.user.userId);
+    const licence = trade === null ? { required: false, checkedOn: null } : await requiredLicenceStatus(app.prisma, request.user.userId);
+    const licenceOn = licence.checkedOn;
     const certified = matching.length > 0 || licenceOn !== null;
     const licenceCheckedOn = [licenceOn, ...matching.map((q) => q.verifiedAt)].reduce<Date | null>(
       (latest, at) => (at && (!latest || at > latest) ? at : latest), null,
@@ -370,7 +371,8 @@ export async function servicesRoutes(app: FastifyInstance) {
         ...(await shownRatingTotals(app.prisma, 'SERVICE_PROVIDER', request.user.userId)),
         tradeLabel: serviceTradeLabel(provider.trade),
         categoryUnavailable: trade === null || !isServiceCategoryOperational(trade),
-        selfSkilled: !certified,
+        // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+        selfSkilled: !certified && !licence.required,
         certified,
         // [R7 · ROLE-DOCS PR 3] "Licence on file, checked on [date]": the latest day a person checked one (null = none).
         licenceCheckedOn,
@@ -471,7 +473,8 @@ export async function servicesRoutes(app: FastifyInstance) {
     const live = await Promise.all(pageCandidates.map(async (provider) => {
       const verified = await isProviderVerified(app.prisma, provider.userId);
       // [ROLE-DOCS · PR 3] the licence the trade REQUIRES, approved by a person (read only for a listed provider)
-      return { provider, verified, licenceOn: verified ? await requiredLicenceCheckedOn(app.prisma, provider.userId) : null };
+      const licence = verified ? await requiredLicenceStatus(app.prisma, provider.userId) : { required: false, checkedOn: null };
+      return { provider, verified, licenceOn: licence.checkedOn, licenceRequired: licence.required };
     }));
     // [ALG-31 / L2] The star line comes from THE ONE MAPPER, never from the raw
     // lifetime mean. `rating-surface.ts` is the single definition of what a
@@ -484,6 +487,7 @@ export async function servicesRoutes(app: FastifyInstance) {
     // let a single 1-star rating brand a provider on the browse page.
     const visible = live.filter(({ verified }) => verified).map(({ provider }) => provider);
     const licenceOnOf = new Map(live.map(({ provider, licenceOn }) => [provider.id, licenceOn]));
+    const licenceRequiredOf = new Map(live.map(({ provider, licenceRequired }) => [provider.id, licenceRequired]));
     // [COORD 18 Oct, option S] The star a customer (or the provider) sees is from whole groups of 5 only; the
     // ranking below still reads the true mean (display only).
     const shown = await shownRatingsFor(app.prisma, 'SERVICE_PROVIDER', visible.map((p) => p.userId));
@@ -508,7 +512,8 @@ export async function servicesRoutes(app: FastifyInstance) {
           ...shownSurface(shown.get(provider.userId)!),
           averageRating: shown.get(provider.userId)!.average,
           totalRatings: shown.get(provider.userId)!.ratingCount,
-          selfSkilled: qualifications.length === 0 && licenceOn === null,
+          // [REVIEW-F #2053 S4-2] a trade that requires a licence is never "self-skilled"
+          selfSkilled: qualifications.length === 0 && licenceOn === null && !licenceRequiredOf.get(provider.id),
           certified: qualifications.length > 0 || licenceOn !== null,
           badges: qualifications.map((qualification) => qualification.type),
           // [R7] "Licence on file, checked on [date]": the latest day a person checked one of these (null = none).
