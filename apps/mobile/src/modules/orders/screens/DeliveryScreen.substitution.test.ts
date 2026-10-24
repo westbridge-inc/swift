@@ -33,8 +33,8 @@ describe('the order screen follows a substitution as it happens', () => {
   });
 
   it('the customer reads what approving changes before the buttons, and decides through the hook bound to this order', () => {
-    // [TRANSFORMED 17 Oct: the import gains swapDeadlineText.]
-    expect(SCREEN).toContain("import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';");
+    // [TRANSFORMED 17 Oct: the import gains swapDeadlineText. O-4 22 Oct: and the removal question's two helpers.]
+    expect(SCREEN).toContain("import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';");
     expect(CARD.indexOf('swapChangeText(it.substitution, o.paymentMethod)')).toBeGreaterThan(CARD.indexOf('Rejecting removes the item and lowers your total.'));
     // [TRANSFORMED after #1707: the order travels with each decision, never the render's closure.]
     expect(SCREEN).toContain('const decideSub = useDecideSubstitution();');
@@ -55,4 +55,28 @@ it('both decision controls follow the permitted decisions, and MMG settlement gu
 it('the swap card states the deadline and the no-answer outcome before the buttons', () => {
   expect(CARD).toContain('{swapDeadlineText(it.substitution) ? (');
   expect(CARD).toContain('{swapDeadlineText(it.substitution)}');
+});
+
+// [O-4 · owner 22 Oct 2026] Nothing to swap, asked before the store accepted: the customer continues
+// without the item (the server lowers the total) or cancels the order through the screen's own
+// re-checked cancel flow (free while the store has not accepted).
+it('a removal question gets its own card: "Continue without it" answers yes, "Cancel order" opens the checked cancel', () => {
+  const removal = SCREEN.slice(SCREEN.indexOf('isRemovalQuestion(it.substitution) ? ('), SCREEN.indexOf('label="Approve swap"'));
+  expect(removal).toContain('is out of stock');
+  expect(removal).toContain('removalChangeText(it.substitution)');
+  expect(removal).toContain('swapDeadlineText(it.substitution)');
+  const yes = removal.slice(removal.indexOf('label="Continue without it"'), removal.indexOf('label="Cancel order"'));
+  expect(yes).toContain('decideSub.mutate({ orderId, lineId: it.id, approve: true })');
+  expect(yes).toContain('!swapDecisionPermissions(it.substitution, o.paymentMethod).approve');
+  const cancel = removal.slice(removal.indexOf('label="Cancel order"'));
+  expect(cancel).toContain('disabled={!o.canCancel}');
+  expect(cancel).toContain('void openCancelConfirmation();');
+  expect(removal).not.toContain('approve: false');
+});
+
+it('[REVIEW-F S3-1] the only item left: the card drops "Continue without it" and keeps the free cancel', () => {
+  const removal = SCREEN.slice(SCREEN.indexOf('isRemovalQuestion(it.substitution) ? ('), SCREEN.indexOf('label="Approve swap"'));
+  expect(removal).toContain('{it.substitution?.lastItem ? null : (');
+  expect(removal.indexOf('{it.substitution?.lastItem ? null : (')).toBeLessThan(removal.indexOf('label="Continue without it"'));
+  expect(removal).toContain('label="Cancel order"');
 });

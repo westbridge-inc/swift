@@ -164,17 +164,23 @@ afterAll(async () => {
 });
 
 describe('pick list + ready gate', () => {
-  it('SUPERMARKET ready is blocked while lines are open, clears when picked', async () => {
+  // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order: a tick is a tool, never a gate. Only an
+  // open customer question holds the bag (proved below); the ticks still work.
+  it('SUPERMARKET ready is blocked only while a customer question is open; ticking is optional and still works', async () => {
     const a = await makeItem({ name: `Rice ${seq}` });
     const b = await makeItem({ name: `Milk ${seq}` });
+    const sub = await makeItem({ name: `Rice brand B ${seq}` });
     const order = await makeOrderWithLines([
       { itemId: a.id, name: a.name, qty: 2, price: 500 },
       { itemId: b.id, name: b.name, qty: 1, price: 800 },
     ]);
 
+    const asked = await inject('POST', `/api/v1/vendor/orders/${order.id}/items/${order.items[0]!.id}/substitute`, owner.token, { substituteItemId: sub.id });
+    expect(asked.statusCode, asked.body).toBe(200);
     const blocked = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token, {});
     expect(blocked.statusCode).toBe(409);
     expect(blocked.json().error.code).toBe('PICKING_INCOMPLETE');
+    expect((await inject('POST', `/api/v1/customer/orders/${order.id}/items/${order.items[0]!.id}/substitution`, customer.token, { approve: true })).statusCode).toBe(200);
 
     for (const line of order.items) {
       const tick = await inject('PUT', `/api/v1/vendor/orders/${order.id}/items/${line.id}/picked`, owner.token, { picked: true });
@@ -229,10 +235,8 @@ describe('substitution round-trip', () => {
     const log = await app.prisma.stockAdjustment.findFirst({ where: { itemId: original.id, reason: 'RETURN' } });
     expect(log?.delta).toBe(2);
 
-    // Approved line still needs shelf-picking before ready
-    const stillBlocked = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token, {});
-    expect(stillBlocked.statusCode).toBe(409);
-    await inject('PUT', `/api/v1/vendor/orders/${order.id}/items/${line.id}/picked`, owner.token, { picked: true });
+    // [O-4] An answered swap no longer waits for a tick: ticking stays available, never required.
+    expect((await inject('PUT', `/api/v1/vendor/orders/${order.id}/items/${line.id}/picked`, owner.token, { picked: true })).statusCode).toBe(200);
     const ready = await inject('PUT', `/api/v1/vendor/orders/${order.id}/ready`, owner.token, {});
     expect(ready.statusCode).toBe(200);
   });
@@ -735,6 +739,7 @@ describe('[L09 · M028] the customer sees the actual substitute and decides on i
     const pending = (await inject('GET', `/api/v1/customer/orders/${order.id}?swapDecisions=v1`, customer.token)).json().data.items[0];
     expect(pending.substitution).toEqual({
       state: 'PENDING',
+      kind: 'SWAP', // [O-4] a swap, as against a removal question asked before acceptance
       original: { name: original.name, unitPrice: 1450, options: chosen },
       proposed: { itemId: substitute.id, name: substitute.name, unitPrice: 1150 },
       priceDelta: -300,
@@ -849,7 +854,8 @@ describe('[L09 · M026] the store sees the options the customer chose', () => {
 
 // Ruling A: only a client that renders server decision permissions may opt in.
 describe('swap capability and current money holds', () => {
-  it.each(['', '?swapDecisions=v0', '?swapDecisions=v2', '?swapDecisions=v1&swapDecisions=v0'])(
+  // [O-4] v2 is now a real level (it adds the pre-accept removal question); v3 is the unknown one.
+  it.each(['', '?swapDecisions=v0', '?swapDecisions=v3', '?swapDecisions=v1&swapDecisions=v0'])(
     'legacy/unknown capability %s preserves the old item response', async (query) => {
       const original = await makeItem({ name: `Legacy original ${seq}`, price: 500, group: `legacy-${seq}` });
       const replacement = await makeItem({ name: `Legacy replacement ${seq}`, price: 900, group: `legacy-${seq}` });

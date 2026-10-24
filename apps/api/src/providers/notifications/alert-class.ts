@@ -70,6 +70,8 @@ export const ALERT_CLASS_KINDS: Readonly<Record<AlertClass, readonly string[]>> 
     'mmg_unattested_cancellation', 'supply_returned',
     // [owner 18 Oct 2026] the customer says they paid; the store is asked to check its MMG (standard, like its MMG peers)
     'mmg_customer_says_paid',
+    // [O-4] the customer answered an out-of-stock question asked before acceptance; the store may accept now
+    'vendor_customer_answered',
     // Rides
     'ride_queue_matched', 'ride_queue_expired', 'ride_released_no_drivers',
     // [VERIFY-DOCS · owner ruling 9] A queued ride whose class is no longer offered
