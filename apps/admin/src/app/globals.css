@@ -521,3 +521,6 @@ select.mc-input { padding-right: .4rem; }
 .review-center .rc-empty > span:first-child { display: block; font-weight: 700; color: var(--mc-ink); margin-bottom: .25rem; }
 .review-center .rc-evidence-viewport { background: var(--mc-surface); }
 .mc-badge-alarm { background: var(--mc-bad); color: #fff; border-color: transparent; }
+/* Wide money tables size their columns to the content; a right-aligned cell stays right-aligned. */
+.mc-table.mc-table-auto { table-layout: auto; }
+.mc-table th.text-right, .mc-table td.text-right { text-align: right; }
