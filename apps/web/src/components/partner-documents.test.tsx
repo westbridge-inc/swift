@@ -78,7 +78,7 @@ describe('[DOCS-1] what each document row says and allows', () => {
   });
 
   it('names every document exactly as the phone app does', () => {
-    const source = readFileSync(join(__dirname, '..', '..', '..', 'mobile', 'src', 'components', 'onboarding', 'DocumentUploadCard.tsx'), 'utf8');
+    const source = readFileSync(join(__dirname, '..', '..', '..', 'mobile', 'src', 'components', 'onboarding', 'docLabels.ts'), 'utf8');
     const block = /const DOC_LABELS: Record<string, string> = \{([\s\S]*?)\n\};/.exec(source);
     expect(block, 'the app’s DOC_LABELS').not.toBeNull();
     const app = Object.fromEntries([...block![1]!.matchAll(/^\s*([a-z_]+):\s*(['"])(.*)\2,\s*$/gm)].map((m) => [m[1]!, m[3]!]));
@@ -260,7 +260,7 @@ describe('[DOCS-1] a mover’s Documents page', () => {
     fireEvent.change(within(police).getByLabelText('File for Police Clearance Certificate'), { target: { files: [new File(['jpg'], 'police.jpg', { type: 'image/jpeg' })] } });
     expect(await within(police).findByText('Sent. It is in review now.')).toBeTruthy();
     expect(posts('/api/v1/verification/documents').map((body) => JSON.parse(String(body)))).toEqual([
-      { role: 'MOVER', docType: 'police_clearance', fileUrl: 'private/verification/police.jpg', consent: true, privacyNoticeVersion: 'web-v1' },
+      { role: 'MOVER', docType: 'police_clearance', fileUrl: 'private/verification/police.jpg', consent: true, privacyNoticeVersion: 'web-v1', consentTick: 'document_v1' },
     ]);
   });
 
