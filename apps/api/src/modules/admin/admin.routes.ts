@@ -1653,6 +1653,8 @@ export async function adminRoutes(app: FastifyInstance) {
         checklist: { items: goLive.checklist.items, complete: goLive.checklist.complete },
         disclosure: goLive.disclosure,
         ready: goLive.ready,
+        // [FOOD-PERMIT] a registered restaurant's owner tick (required to go live), never its words or ledger row
+        foodHandlers: goLive.foodHandlers,
         next,
       },
     };

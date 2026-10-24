@@ -40,6 +40,7 @@ import { publishLegalDocumentOnce, recordConsent, type ConsentSurface } from '..
 import { LEGAL_VERSION } from '../legal/legal.routes';
 import { ACTIVITY_CLASSES, DECLARATION_CONSENT_TYPE, DECLARATION_VERSION, UNREGISTERED_TRADER_DECLARATION_V1, renderDeclarationPdf } from './unregistered-declaration';
 import { OWN_NAME_CONSENT_TYPE, OWN_NAME_DECLARATION_V1, OWN_NAME_DECLARATION_VERSION, OWN_NAME_VENDOR_TYPES, renderOwnNamePdf, storeNameIsOwnName } from './own-name';
+import { FOOD_HANDLERS_CONSENT_TYPE, FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies, storeAttested } from './food-handlers';
 import { DECLARATION_DOC_TYPE, OWN_NAME_DOC_TYPE } from '../verification/doc-registry';
 import { validRegistrationRecord } from './vendor-tier';
 import { parseCsvWithHeader } from '../../utils/csv';
@@ -1512,6 +1513,48 @@ export async function vendorRoutes(app: FastifyInstance) {
     await verification.reprojectVendorActivation(userId);
     const role = vendor.vendorType as 'RESTAURANT' | 'SUPERMARKET' | 'STORE' | 'SERVICE';
     return { success: true, data: { nameBasis: 'REGISTERED', status: await verification.getStatus(userId, role) } };
+  });
+
+  /**
+   * [FOOD-PERMIT · owner ruling 24 Oct 2026] POST /onboarding/food-handlers — the owner of a REGISTERED restaurant
+   * ticks, for the selected store: "Everyone who handles food here holds a current food handler's certificate."
+   * (vendor/food-handlers.ts). The words are published as their own versioned document and the tick is a row in the
+   * consent ledger (append-only): who (the owner), which store (evidence.vendorId), when, the words' version and hash.
+   * A store that was waiting only for it goes live now (the activation projection), not at the next daily belt.
+   * Refused for a home cook (self-declared tier: the certificate itself is required) and every other store type.
+   * Ticking again changes nothing. Owner only.
+   */
+  app.post('/onboarding/food-handlers', auth, async (request, reply) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const userId = request.user.userId;
+    z.object({ accept: z.literal(true), attestationVersion: z.literal(FOOD_HANDLERS_VERSION) }).parse(request.body ?? {});
+    const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, vendorType: true, tier: true } });
+    if (!foodHandlerTickApplies(vendor)) {
+      throw new AppError(409, 'FOOD_HANDLERS_NOT_APPLICABLE', vendor.vendorType === 'RESTAURANT'
+        ? 'A self-declared food seller uploads their own food handler’s certificate under Documents. This tick is for registered restaurants.'
+        : 'Only a restaurant confirms its food handlers.');
+    }
+    await publishLegalDocumentOnce(app.prisma, { documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION, renderedText: FOOD_HANDLERS_TICK_V1 });
+    const platform = String(request.headers['x-client-platform'] ?? '').toLowerCase();
+    const surface: ConsentSurface = platform === 'ios' || platform === 'android' ? platform : 'vendor_web';
+    const recorded = await app.prisma.$transaction(async (tx) => {
+      // One tick per store at a time: the store row is the lock, and the tick is decided again under it.
+      await tx.$queryRaw`SELECT "id" FROM "vendors" WHERE "id" = ${vendor.id} FOR UPDATE /* food-handlers-tick */`;
+      if (await storeAttested(tx, userId, vendor.id)) return false;
+      await recordConsent(tx, {
+        subjectType: 'vendor_user', subjectId: userId, documentType: FOOD_HANDLERS_CONSENT_TYPE, version: FOOD_HANDLERS_VERSION,
+        action: 'granted', surface, ip: request.ip,
+        evidence: { vendorId: vendor.id, storeName: vendor.name, control: 'checkbox', attestedAt: new Date().toISOString() },
+      });
+      return true;
+    });
+    if (recorded) {
+      // A failure here never undoes the tick: the daily belt makes the store live.
+      await verification.reprojectVendorActivation(userId)
+        .catch((err) => request.log.warn({ err, vendorId: vendor.id }, 'go-live projection after the food handlers tick is held for the belt'));
+    }
+    reply.code(recorded ? 201 : 200);
+    return { success: true, data: { foodHandlers: { vendorId: vendor.id, attested: true, version: FOOD_HANDLERS_VERSION }, status: await verification.getStatus(userId, 'RESTAURANT') } };
   });
 
   /**
