@@ -147,6 +147,13 @@ export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
   'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
   'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
 ]);
+/**
+ * [ROLE-DOCS · owner 21 Oct 2026 · PR 3] The documents a trade may require that are LICENCES issued for the trade:
+ * the GEI electrical licence (electrician, solar / generator / inverter installer) and the Pesticides and Toxic
+ * Chemicals Control Board's operator licence (pest control). An ID, a police clearance, a food handler's certificate or
+ * a premises registration is never called a licence. A registry fact (DOC-INV-2): services reads it, never re-types it.
+ */
+export const TRADE_LICENCE_DOC_TYPES: ReadonlySet<string> = new Set(['gei_electrical_licence', 'pest_control_operator_licence']);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):

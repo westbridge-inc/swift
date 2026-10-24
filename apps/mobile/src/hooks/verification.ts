@@ -1,6 +1,6 @@
 import { prepareUploadImage } from '../lib/uploadImage';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { verificationApi, partnerApi, type VehicleKind } from '../services/api';
+import { verificationApi, partnerApi, vendorApi, type VehicleKind } from '../services/api';
 import { maybePrimeNotifications } from '../services/notification-priming';
 import { useMoverPreview } from '../stores/moverPreview';
 import { useBusinessSetupDraft } from '../stores/businessSetupDraft';
@@ -95,6 +95,15 @@ export function useBecomePartner() {
         }
       }
       requireAuthSessionForPrincipal(owner);
+      // [ROLE-DOCS · owner 21 Oct 2026] The owner ticked the own-name declaration before the store existed: it is
+      // signed now, in the same turn as the session check above, so it is this account's. Here, not on the screen:
+      // the store's creation swaps the navigator, and a callback on an unmounted screen never runs. A failure never
+      // fails the store; its Documents checklist offers the same signature again.
+      if (data.role === 'VENDOR' && data.business?.nameBasis === 'OWN_NAME') {
+        let signing: Promise<unknown>;
+        try { signing = Promise.resolve(vendorApi.signOwnName()); } catch { signing = Promise.resolve(); }
+        await signing.catch(() => undefined);
+      }
       // The store exists: its List-your-business draft is done. Cleared here,
       // not by the screen — a per-call observer callback never runs once the
       // screen has unmounted — and only for the account that submitted it.
