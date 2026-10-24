@@ -226,6 +226,15 @@ describe('[O-2] takeaway: the pickup code is off by default, for every store', (
     expect((await logs(order.id)).at(-1)).toMatchObject({ status: 'COMPLETED', note: "Handed to the customer without a pickup code (the store's code is off)" });
   });
 
+  it('[COORD ruling, G S4-3] an order locked by wrong-code guesses never completes without a code, even with the code off', async () => {
+    const order = await readyTakeaway();
+    await sys(() => app.prisma.order.update({ where: { id: order.id }, data: { pickupCodeAttempts: 5 } }));
+    const res = await completePickup(order.id);
+    expect(res.statusCode, res.body).toBe(400);
+    expect(res.json().error.code).toBe('MAX_ATTEMPTS');
+    expect((await orderRow(order.id)).status).toBe('READY_FOR_PICKUP');
+  });
+
   it('an older store build that still sends the code: the code is verified exactly as before (a wrong one refused)', async () => {
     const order = await readyTakeaway();
     expect(order.code).toMatch(/^\d{6}$/);
@@ -268,6 +277,12 @@ describe('[O-2] the waiver is decided on the locked store row, not the route pre
     expect(failure?.handoverFailure.code).toBe('MISSING_PICKUP_CODE');
   });
 
+  it('a locked order (MAX_ATTEMPTS) is refused even when the code is off', async () => {
+    const locked = { ...source, pickupCodeAttempts: 5 } as unknown as Order;
+    const failure = await verifyHandoverDecision(lockedTx(false), locked, { purpose: 'pickup', codeWaived: true });
+    expect(failure?.handoverFailure.code).toBe('MAX_ATTEMPTS');
+  });
+
   it('still off under the lock: no code needed', async () => {
     expect(await verifyHandoverDecision(lockedTx(false), source, { purpose: 'pickup', codeWaived: true })).toBeNull();
   });
@@ -276,13 +291,17 @@ describe('[O-2] the waiver is decided on the locked store row, not the route pre
 describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the rider\'s "Picked up"', () => {
   it('the card names the rider (photo resolved, first name, vehicle, plate); one tap writes one log row and moves nothing; a repeat is a 200 no-op', async () => {
     const rider = await makeRider('Ravi');
-    await sys(() => app.prisma.user.update({ where: { id: rider.userId }, data: { avatar: 'https://cdn.example.test/ravi.jpg' } }));
+    // [REVIEW-G S4-1] A bare storage key (how production stores it): the card gets a signed URL, never the key.
+    const AVATAR_KEY = 'avatars/o2-ravi.jpg';
+    await sys(() => app.prisma.user.update({ where: { id: rider.userId }, data: { avatar: AVATAR_KEY } }));
     const orderId = await riderOwnedDelivery(rider);
     const before = await orderRow(orderId);
     const card = await storeDetail(orderId);
     expect(card).toMatchObject({ handedToRiderAt: null });
+    expect(typeof card.rider?.photoUrl).toBe('string');
+    expect(card.rider?.photoUrl).not.toBe(AVATAR_KEY);
+    expect(card.rider?.photoUrl).toMatch(/\?.*(expires|signature)=/i); // a signed, expiring read of the private object
     expect(card.rider).toMatchObject({
-      photoUrl: 'https://cdn.example.test/ravi.jpg',
       vehicleMake: 'Honda', vehicleModel: 'CG125', vehicleColor: 'Red', licensePlate: 'CJ 1234',
       user: { firstName: 'Ravi' },
     });
@@ -343,9 +362,47 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     expect(await storeDetail(orderId)).toMatchObject({ handedToRiderAt: tap.json().data.handedToRiderAt });
   });
 
+  it('[REVIEW-G S4-2] the tap waits for the order lock: a handback committing first means "no rider yet", not a row', async () => {
+    const rider = await makeRider('Lola');
+    const orderId = await riderOwnedDelivery(rider);
+    let locked!: () => void; const isLocked = new Promise<void>((r) => { locked = r; });
+    let release!: () => void; const released = new Promise<void>((r) => { release = r; });
+    // Another transition (a rider handing back) holds the order lock and clears the rider.
+    const holder = sys(() => app.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${orderId} FOR UPDATE`;
+      locked();
+      await released;
+      await tx.order.update({ where: { id: orderId }, data: { status: 'PREPARING', riderId: null } });
+    }, { timeout: 20_000 }));
+    await isLocked;
+    const tap = handedToRider(orderId);
+    await new Promise((r) => setTimeout(r, 400)); // the tap is now waiting on the lock
+    release();
+    await holder;
+    const res = await tap;
+    expect(res.statusCode, res.body).toBe(409);
+    expect(res.json().error.code).toBe('NO_RIDER_YET');
+    expect((await logs(orderId)).some((l) => l.note === HANDED_TO_RIDER_NOTE)).toBe(false);
+  });
+
+  it('[REVIEW-G S4-4] a closed store cannot tap, like every other in-flight store action', async () => {
+    const rider = await makeRider('Tari');
+    const orderId = await riderOwnedDelivery(rider);
+    await sys(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'CLOSED' } }));
+    try {
+      const res = await handedToRider(orderId);
+      expect(res.statusCode, res.body).toBe(403);
+      expect((await logs(orderId)).some((l) => l.note === HANDED_TO_RIDER_NOTE)).toBe(false);
+    } finally {
+      await sys(() => app.prisma.vendor.update({ where: { id: vendorId }, data: { status: 'ACTIVE' } }));
+    }
+  });
+
   it('the rider\'s "Picked up" records the GPS distance to the store as evidence; a rider with no fix is never stopped', async () => {
     const near = await makeRider('Nia', STORE);
+    await sys(() => app.prisma.user.update({ where: { id: near.userId }, data: { avatar: 'avatars/o2-nia.jpg' } }));
     const nearOrder = await riderOwnedDelivery(near);
+    expect(typeof (await storeDetail(nearOrder)).rider?.photoUrl).toBe('string');
     expect((await handedToRider(nearOrder)).statusCode).toBe(200);
     for (const step of ['en-route-pickup', 'arrived-pickup', 'picked-up']) {
       const res = await call('PUT', `/api/v1/rider/orders/${nearOrder}/${step}`, near.token, {});
@@ -353,6 +410,11 @@ describe('[O-2] delivery: the store taps "Handed to rider"; custody stays the ri
     }
     const picked = (await logs(nearOrder)).find((l) => l.status === 'PICKED_UP')!;
     expect(picked.note).toMatch(/^Rider confirmed collecting the order — .*\(0 m from the pickup, fix \d+s old\)$/);
+
+    // [REVIEW-G S3-1] Once the rider has it, the store no longer gets the rider's photo (the name and
+    // vehicle stay, like every other part of the card).
+    const after = await storeDetail(nearOrder);
+    expect(after.rider).toMatchObject({ photoUrl: null, user: { firstName: 'Nia' } });
 
     // [REVIEW-F S3-2] The customer's timeline: the store's tap is not a second "Rider assigned" step, and
     // the rider's position evidence never reaches the customer (the record keeps it, above).

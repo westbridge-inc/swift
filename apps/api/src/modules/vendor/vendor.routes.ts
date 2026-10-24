@@ -658,6 +658,9 @@ function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{
 
 export { HANDED_TO_RIDER_NOTE };
 
+/** [O-2] The order is still with the store, so a rider may be handed it (and the card shows who). */
+const STORE_HANDOVER_LIVE_STATUSES: readonly string[] = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', 'RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
 /**
  * [O-2] What the store's order card needs for the handover, for a page of its orders:
  * - pickupCodeRequired: the store's takeaway-code setting (off by default);
@@ -667,10 +670,14 @@ export { HANDED_TO_RIDER_NOTE };
  */
 async function storeHandoverFields(
   app: FastifyInstance,
-  orders: ReadonlyArray<{ id: string; riderId?: string | null; vendor?: { requirePickupCode?: boolean } | null; rider?: object | null }>,
+  orders: ReadonlyArray<{ id: string; status: string; fulfillment: string; riderId?: string | null; vendor?: { requirePickupCode?: boolean } | null; rider?: object | null }>,
 ): Promise<Map<string, { pickupCodeRequired: boolean; handedToRiderAt: string | null; rider?: object | null }>> {
-  const ids = orders.map((o) => o.id);
-  const riderIds = [...new Set(orders.map((o) => o.riderId).filter((r): r is string => !!r))];
+  // Only a delivery with a Swift rider has a handover to record (a booking, a takeaway: nothing to read).
+  const ids = orders.filter((o) => o.fulfillment === 'DELIVERY' && o.riderId).map((o) => o.id);
+  // [REVIEW-G S3-1 on #2055] The store needs the rider's face only to hand the order over: the photo is
+  // read and given only while the order is still with the store (before Picked up), never on a past order.
+  const handoverLive = (o: { status: string }) => STORE_HANDOVER_LIVE_STATUSES.includes(o.status);
+  const riderIds = [...new Set(orders.filter(handoverLive).map((o) => o.riderId).filter((r): r is string => !!r))];
   const [handed, riders] = await Promise.all([
     ids.length ? app.prisma.orderStatusLog.findMany({
       where: handoverEpisodeRowsWhere(ids), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
@@ -684,8 +691,8 @@ async function storeHandoverFields(
   for (const order of orders) {
     out.set(order.id, {
       pickupCodeRequired: order.vendor?.requirePickupCode === true,
-      handedToRiderAt: firstHanded.get(order.id)?.toISOString() ?? null,
-      ...(order.rider && order.riderId ? { rider: { ...order.rider, photoUrl: photoOf.get(order.riderId) ?? null } } : {}),
+      handedToRiderAt: order.riderId ? firstHanded.get(order.id)?.toISOString() ?? null : null,
+      ...(order.rider && order.riderId ? { rider: { ...order.rider, photoUrl: handoverLive(order) ? photoOf.get(order.riderId) ?? null : null } } : {}),
     });
   }
   return out;
@@ -2697,7 +2704,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const { code } = completePickupSchema.parse(request.body ?? {});
     await assertHandoverRequestBudget(app.redis, order.id);
     // [O-2 · owner 22 Oct 2026] With the store's takeaway code OFF (the default) the store hands the
-    // order over after checking the customer's first name + order number: no code needed. A code an
+    // order over without a code (the owner's rule: it checks the first name + order number). A code an
     // older store build still sends is verified exactly as before; with the setting ON, today's flow.
     const codeWaived = order.vendor?.requirePickupCode !== true;
     // [REVIEW-F S3-1 on #2055] The note records only what the server knows: no code was asked for.
@@ -2720,6 +2727,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   // Plain `auth`: the tap pushes no customer, so it does not carry the push-after-response hook.
   app.put<{ Params: IdParam }>('/orders/:id/handed-to-rider', auth, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
+    // [REVIEW-G S4-4 on #2055] Like every other in-flight store action: a closed (or non-billing
+    // suspended) store's staff cannot tap.
+    await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'DELIVERY' || order.fulfillmentMode === 'VENDOR_DELIVERY' || order.orderType === 'COURIER' || order.orderType === 'TAXI') {
       throw new AppError(400, 'NOT_A_RIDER_DELIVERY', 'This order is not handed to a Swift rider.');
     }
@@ -2736,7 +2746,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       const episodeRows = await tx.orderStatusLog.findMany({
         where: handoverEpisodeRowsWhere([order.id]), select: { orderId: true, status: true, note: true, createdAt: true }, orderBy: { createdAt: 'asc' },
       });
-      const already = handedToRiderSinceAssignment(episodeRows).get(order.id) ?? null;
+      // A rider who handed the order back leaves no current rider: an earlier tap answers nothing then.
+      const already = live.riderId ? handedToRiderSinceAssignment(episodeRows).get(order.id) ?? null : null;
       if (already || AFTER_PICKUP.includes(live.status)) return { handedToRiderAt: already, wrote: false };
       if (!live.riderId && (BEFORE_A_RIDER.includes(live.status) || HANDOVER_STATUSES.includes(live.status))) {
         throw new AppError(409, 'NO_RIDER_YET', 'No Swift rider has taken this order yet. Hand it over when the rider arrives.');

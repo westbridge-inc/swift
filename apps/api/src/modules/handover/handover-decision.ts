@@ -77,17 +77,18 @@ export async function verifyHandoverDecision(tx: Prisma.TransactionClient, sourc
   // Existing in-flight legacy rows remain compatible. Appointment proof is a
   // separate client rollout; this operation never changes that contract.
   if (!secret) return null;
-  // [O-2] No code, and the store has the takeaway code off: no proof is asked. (Before the attempt
-  // lockout: the lockout guards code GUESSES, and none is being made.) The route's read is a
+  const attempts = pickup ? source.pickupCodeAttempts : source.ridePinAttempts;
+  const { locked, remaining } = handoverAttemptState(attempts);
+  // [O-2 · COORD ruling on #2055 G S4-3] An order locked by wrong-code guesses never completes, not
+  // even by the no-code path below: someone tried codes, so it fails safe to the support outcome.
+  if (locked) return { handoverFailure: { statusCode: 400, code: 'MAX_ATTEMPTS', message: 'Too many incorrect handover-code attempts on this order. Please contact support.' } };
+  // [O-2] No code, and the store has the takeaway code off: no proof is asked. The route's read is a
   // preview: the setting is re-read here, on the store row authorizeHandover holds FOR SHARE, so a
   // store that turned the code ON in the meantime is asked for it.
   if (pickup && proof.codeWaived === true && !proof.code && source.vendorId) {
     const store = await tx.vendor.findUnique({ where: { id: source.vendorId }, select: { requirePickupCode: true } });
     if (store && store.requirePickupCode !== true) return null;
   }
-  const attempts = pickup ? source.pickupCodeAttempts : source.ridePinAttempts;
-  const { locked, remaining } = handoverAttemptState(attempts);
-  if (locked) return { handoverFailure: { statusCode: 400, code: 'MAX_ATTEMPTS', message: 'Too many incorrect handover-code attempts on this order. Please contact support.' } };
   if (!proof.code) return { handoverFailure: { statusCode: 400, code: pickup ? 'MISSING_PICKUP_CODE' : 'MISSING_PIN',
     message: pickup ? "Enter the customer's pickup code to hand over this order." : "Enter the customer's 6-digit delivery PIN." } };
   // Fixed-length digests avoid a secret-dependent comparison or length exit.
