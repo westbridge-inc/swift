@@ -171,8 +171,12 @@ export const registryCode = (countryCode: string, legacyCode: string) => `${coun
  * plate photo (merged into the car photo), the TIN certificate (dropped) and the single hire-car permit
  * (split into the person's and the car's licences). Documents of them already exist, so the registry
  * keeps describing them — never as a requirement.
+ * [ROLE-DOCS · owner 21 Oct 2026] The liquor licence, pharmacy authorisation and NIS employer registration
+ * joined them: no list or gate asks for them, but stored copies wait out their retention clock, and staging
+ * and production already hold their rows from the earlier seed. The seed rewrites such a row's expiry facts
+ * from the code (the liquor licence's annual printed expiry is gone), so the registry never carries recall.
  */
-export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit'];
+export const RETIRED_DOC_TYPES: readonly string[] = ['vehicle_plate_photo', 'tin_certificate', 'hire_car_permit', 'liquor_licence', 'pharmacy_authorisation', 'nis_employer_reg'];
 const humanize = (code: string) => code.split('_').map((w) => (w === 'id' || w === 'tin' || w === 'gra' || w === 'gei' ? w.toUpperCase() : w[0]!.toUpperCase() + w.slice(1))).join(' ');
 
 export interface RegistrySeedResult { docTypes: number; requirementSets: number; requirementItems: number; validators: number; extraDocTypes: number; categoryGates: number }
@@ -428,7 +432,11 @@ export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySee
           extractionProfile: 'UNPROFILED', externalProcessingAllowed: false, legalFactsSourceNote: PROVISIONAL_NOTE, isActive: false,
           alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
         },
-        update: { legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode) },
+        update: {
+          legacyCode, hasExpiry: validity !== undefined, defaultValidityDays: validity ?? null, alwaysReview: ALWAYS_REVIEW_LEGACY_CODES.has(legacyCode),
+          // a retired type's row is the code's description only: its expiry source follows the same truth as on create
+          ...(RETIRED_DOC_TYPES.includes(legacyCode) && { expirySource: validity !== undefined ? 'PRINTED' : 'NONE' }),
+        },
       });
       docTypes += 1;
     }

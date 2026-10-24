@@ -12,7 +12,7 @@ import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from '../../../
 import { canVendorConfirmDelivered } from '../../../mobile/src/modules/vendor/screens/delivery-owner';
 import { addAppointmentDays, appointmentDayKey } from '../../../mobile/src/lib/appointmentTime';
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
