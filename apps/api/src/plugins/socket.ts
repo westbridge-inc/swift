@@ -1,7 +1,7 @@
 import { emitToChatRoom } from '../modules/order/order-room-emission.service';
 import fp from 'fastify-plugin';
 import { Server } from 'socket.io';
-import { z } from 'zod';
+import { z } from '../lib/zod';
 import type { FastifyInstance } from 'fastify';
 import type Redis from 'ioredis';
 import type {

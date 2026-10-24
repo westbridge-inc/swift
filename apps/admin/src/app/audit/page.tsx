@@ -34,7 +34,7 @@ export default function AuditPage() {
   return (
     <div className="mc-page">
       <p className="mc-muted mb-4">
-        Every recorded action — admins' approvals, document decisions, setting changes and claim payouts, and the claims customers and partners make. Nothing here can be edited or deleted.
+        Every recorded action — admins’ approvals, document decisions, setting changes and claim payouts, and the claims customers and partners make. Nothing here can be edited or deleted.
       </p>
 
       {isLoading ? (

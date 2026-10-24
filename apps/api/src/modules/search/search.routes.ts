@@ -1,7 +1,7 @@
 import { readFeePause } from '../billing/mmg-pause';
 import { launchMarketAt } from '../auth/launch-market';
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { SearchService } from './search.service';
 import { AppError, ForbiddenError } from '../../utils/errors';
 import { EARTH_RADIUS_KM, sortByDistance } from '../../utils/distance';

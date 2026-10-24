@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { NotFoundError } from '../../utils/errors';
 import { AttributionService } from './attribution.service';
 import { appStoreUrl, playStoreUrlFor } from './attribution';

@@ -19,7 +19,7 @@
  */
 import type { OrderStatus } from '@prisma/client';
 import { ORDER_TRANSITIONS, RECOVERY_TRANSITIONS, isTerminalOrderStatus } from '../../modules/order/order-status';
-import { adminCall, advance, call, castWalk, drainDue, type Cast, type WalkWorld } from './order-walk-world';
+import { adminCall, advance, call, castWalk, deleteUnfinished, drainDue, placeCashOrder, releaseCast, type Cast, type WalkWorld } from './order-walk-world';
 
 export const RIDER_STEPS = ['en-route-pickup', 'arrived-pickup', 'picked-up', 'en-route-delivery', 'arrived'] as const;
 export type RiderStep = (typeof RIDER_STEPS)[number];
@@ -338,13 +338,11 @@ async function checkInvariants(
  *  deletes its line here, and its pinned trace in the test turns red if the
  *  violation is still produced. */
 export function classify(x: Violation, s: Snap): string | null {
-  const noRider = s.riderId == null;
-  const dispatchLoop = /Still looking for a mover|No movers available|Dispatch exhausted/;
-  if (x.inv === 'EXIT' && (s.status === 'ACCEPTED' || s.status === 'PREPARING') && noRider && s.readyAt == null) return 'OF-01';
-  if (x.inv === 'NOTICE-ONCE' && dispatchLoop.test(x.detail)) return 'OF-01';
+  // OF-01 (riderless never-ready exit + the dispatch notice loop) is FIXED:
+  // it is no longer classified, so any recurrence fails the walk.
   if (x.inv === 'REFUND-OVER-CAPTURED' && s.paymentMethod === 'CASH' && s.paymentStatus === 'PENDING') return 'OF-02';
   if (x.inv === 'EXIT' && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(s.status)) return 'OF-12';
-  if (x.inv === 'EXIT' && ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'].includes(s.status) && !noRider) return 'OF-33';
+  // OF-33 (an assigned rider who never picks up) is FIXED: no longer classified.
   return null;
 }
 
@@ -371,16 +369,8 @@ async function walk(w: WalkWorld, riders: number, next: Next, opts: RunOptions =
     // stays; nothing dispatches a terminal order.)
     w.onTick = null;
     w.sched.pending = [];
-    for (const r of cast.riders) {
-      await w.app.prisma.rider.update({ where: { id: r.riderId }, data: { isOnline: false, isAvailable: false, currentOrderId: null } }).catch(() => {});
-    }
-    await w.app.prisma.vendor.update({ where: { id: cast.vendorId }, data: { acceptingOrders: false, isCurrentlyOpen: false } }).catch(() => {});
-    for (const id of [...w.orderIds].filter((x) => !before.has(x))) {
-      const o = await w.app.prisma.order.findUnique({ where: { id }, select: { status: true } }).catch(() => null);
-      if (!o || isTerminalOrderStatus(o.status)) continue;
-      await w.app.prisma.$executeRawUnsafe('DELETE FROM dispatch_searches WHERE "subjectId" = $1', id).catch(() => {});
-      await w.app.prisma.order.delete({ where: { id } }).then(() => w.orderIds.delete(id)).catch(() => {});
-    }
+    await releaseCast(w, cast);
+    for (const id of [...w.orderIds].filter((x) => !before.has(x))) await deleteUnfinished(w, id);
   }
 }
 
@@ -389,16 +379,13 @@ async function walkCast(w: WalkWorld, cast: Cast, next: Next, opts: RunOptions):
   const actions: Action[] = [];
   const result: WalkResult = { trace: { riders, actions }, orderId: null, finalStatus: null, violations: [], coverage: new Map(), edges: new Set() };
   for (const r of cast.riders) await call(w, 'POST', '/api/v1/rider/go-online', r.token, { latitude: r.lat, longitude: r.lng });
-  await call(w, 'DELETE', '/api/v1/customer/cart', cast.customer.token);
-  await call(w, 'POST', '/api/v1/customer/cart/items', cast.customer.token, { vendorId: cast.vendorId, itemId: cast.itemId, quantity: 1 });
-  const co = await call(w, 'POST', '/api/v1/customer/checkout', cast.customer.token, { paymentMethod: 'CASH' });
-  const orderId = co.json()?.data?.order?.id as string | undefined;
-  if (co.statusCode !== 200 || !orderId) {
-    result.violations.push({ inv: 'SETUP', detail: `checkout ${co.statusCode}: ${co.body.slice(0, 200)}`, at: -1, status: 'none', finding: null });
+  const co = await placeCashOrder(w, cast);
+  const orderId = co.orderId;
+  if (!orderId) {
+    result.violations.push({ inv: 'SETUP', detail: `checkout ${co.status}: ${co.body.slice(0, 200)}`, at: -1, status: 'none', finding: null });
     return result;
   }
   result.orderId = orderId;
-  w.orderIds.add(orderId);
   await drainDue(w);
   const st: CheckState = { reportedNotice: new Set(), jobErrorsSeen: w.jobErrors.length, prev: null, noticeEpoch: new Map() };
   w.onTick = async () => { await stampNotices(w, orderId, st); };
