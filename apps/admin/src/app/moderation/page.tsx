@@ -63,6 +63,8 @@ function targetSummary(report: any): string {
   return report.targetId;
 }
 
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
 export default function ModerationPage() {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>('content');
@@ -196,7 +198,7 @@ export default function ModerationPage() {
                     <span className={reasonClass(r.reason)}>{humanise(r.reason)}</span>
                     <span className="mc-muted text-xs">{humanise(r.targetType)}</span>
                     <span className="text-xs mc-muted ml-auto">
-                      {new Date(r.createdAt).toLocaleString()}
+                      {when(r.createdAt)}
                     </span>
                   </div>
                   <p className="mt-2">{targetSummary(r)}</p>
@@ -315,7 +317,7 @@ export default function ModerationPage() {
                   <div className="flex items-start gap-3">
                     <span className="mc-badge mc-tone-warn">{humanise(r.reason)}</span>
                     <span className="text-xs mc-muted ml-auto">
-                      {new Date(r.createdAt).toLocaleString()}
+                      {when(r.createdAt)}
                     </span>
                   </div>
                   <p className="mt-2">
@@ -369,7 +371,7 @@ export default function ModerationPage() {
                       {h.score}★
                     </span>
                     <span className="text-xs mc-muted ml-auto">
-                      {new Date(h.createdAt).toLocaleString()}
+                      {when(h.createdAt)}
                     </span>
                   </div>
                   <p className="mt-2">{h.comment || 'No text'}</p>

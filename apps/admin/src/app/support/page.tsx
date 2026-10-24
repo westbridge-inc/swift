@@ -35,6 +35,8 @@ const SAFETY_NOTE_MIN = 20;
 const CLOSURE_SUBJECT = 'Account closure request';
 const isClosureRequest = (t: { category?: string; subject?: string }) => t.category === 'ACCOUNT' && t.subject === CLOSURE_SUBJECT;
 
+const when = (iso: string) => new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
 export default function SupportPage() {
   const qc = useQueryClient();
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>('OPEN');
@@ -143,7 +145,7 @@ export default function SupportPage() {
                     {humanise(String(t.category))}
                   </span>
                   <span className="mc-card-title">{t.subject}</span>
-                  <span className="mc-muted mc-numbers ml-auto text-xs">{new Date(t.createdAt).toLocaleString()}</span>
+                  <span className="mc-muted mc-numbers ml-auto text-xs">{when(t.createdAt)}</span>
                 </div>
                 <p className="mt-2 whitespace-pre-wrap">{t.message}</p>
                 <div className="mc-muted mt-3 flex flex-wrap items-center gap-4">
