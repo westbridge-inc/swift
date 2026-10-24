@@ -102,15 +102,16 @@ const EMAIL_CHANGED_BODY = "Your Swift account email address was just changed. I
  * reports a committed change as failed, and the inbox notice already holds.
  */
 async function tellOfEmailChange(app: FastifyInstance, userId: string, noticeId: string, to: { phone: string; oldEmail: string | null }): Promise<void> {
-  const channels = getChannels();
+  // Channels are resolved inside each attempt: a provider that cannot even be
+  // built (a mailbox with no host) is one failed attempt, not a failed request.
   const attempts: Array<{ channel: string; send: () => Promise<unknown> }> = [
     { channel: 'fanout', send: () => new NotificationService(app.prisma, app.io).publishPersisted(noticeId) },
   ];
   // The launch-market destination gate every other text passes.
-  if (smsDestinationAllowed(to.phone)) attempts.push({ channel: 'sms', send: () => channels.sms.sendSms(to.phone, EMAIL_CHANGED_BODY) });
+  if (smsDestinationAllowed(to.phone)) attempts.push({ channel: 'sms', send: () => getChannels().sms.sendSms(to.phone, EMAIL_CHANGED_BODY) });
   if (to.oldEmail) {
     const oldEmail = to.oldEmail;
-    attempts.push({ channel: 'email', send: () => channels.email.sendEmail(oldEmail, EMAIL_CHANGED_TITLE, EMAIL_CHANGED_BODY) });
+    attempts.push({ channel: 'email', send: () => getChannels().email.sendEmail(oldEmail, EMAIL_CHANGED_TITLE, EMAIL_CHANGED_BODY) });
   }
   await Promise.all(attempts.map(async ({ channel, send }) => {
     try {

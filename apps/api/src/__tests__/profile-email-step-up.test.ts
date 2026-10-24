@@ -11,6 +11,7 @@ import { devChannelLog, getChannels } from '../providers/notifications/channels'
 import { grantStepUp } from './helpers/step-up';
 import { testPhone } from './helpers/fixture-ids';
 import { stepUpKey } from '../modules/auth/step-up';
+import { notificationFailuresCounter } from '../plugins/observability';
 
 // ---------------------------------------------------------------------------
 // [L04 #1550] An account's email is where receipts and notices go, and a second
@@ -51,6 +52,8 @@ const put = (token: string, body: Record<string, unknown>, after?: 'ban') => app
 });
 const notices = (userId: string) => app.prisma.notification.findMany({ where: { userId, data: { path: ['kind'], equals: 'email_changed' } } });
 const account = (userId: string) => app.prisma.user.findUniqueOrThrow({ where: { id: userId } });
+const failures = async (channel: string) => (await notificationFailuresCounter.get()).values
+  .find((v) => v.labels['channel'] === channel && v.labels['stage'] === 'email_change')?.value ?? 0;
 
 beforeAll(async () => {
   app = Fastify({ logger: false });
@@ -197,21 +200,27 @@ describe('[L04 #1550] a customer email change takes a fresh code on this session
     await grantStepUp(app, f.token);
     const next = email();
     const start = devChannelLog.length;
+    const failed = { sms: await failures('sms'), email: await failures('email') };
     // The text: the dev SMS is one shared (sealed) object, so the spy is the one the route calls.
     const sms = vi.spyOn(getChannels().sms, 'sendSms').mockRejectedValueOnce(new Error('synthetic SMS outage'));
-    // The email: a mailbox with no host refuses every send (placeholder config, no network).
-    const saved = { provider: process.env['EMAIL_PROVIDER'], host: process.env['SMTP_HOST'] };
-    process.env['EMAIL_PROVIDER'] = 'smtp';
-    delete process.env['SMTP_HOST'];
+    // The email: a configured mailbox that cannot be reached (placeholder values
+    // only; a closed local port, so nothing reaches any network or account).
+    const keys = ['EMAIL_PROVIDER', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'EMAIL_FROM', 'SMTP_TLS', 'SMTP_TIMEOUT_MS'] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    Object.assign(process.env, {
+      EMAIL_PROVIDER: 'smtp', SMTP_HOST: '127.0.0.1', SMTP_PORT: '1', SMTP_USER: 'placeholder', SMTP_PASS: 'placeholder',
+      EMAIL_FROM: 'placeholder@example.test', SMTP_TLS: 'none', SMTP_TIMEOUT_MS: '1000',
+    });
     try {
       expect((await put(f.token, { email: next })).statusCode).toBe(200);
       expect(sms, 'the text was attempted and failed').toHaveBeenCalledTimes(1);
     } finally {
       sms.mockRestore();
-      if (saved.provider === undefined) delete process.env['EMAIL_PROVIDER']; else process.env['EMAIL_PROVIDER'] = saved.provider;
-      if (saved.host !== undefined) process.env['SMTP_HOST'] = saved.host;
+      for (const k of keys) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]!; }
     }
     expect(devChannelLog.slice(start).filter((n) => n.to === f.user.email || n.to === f.user.phone), 'nothing was delivered').toHaveLength(0);
+    expect({ sms: await failures('sms'), email: await failures('email') }, 'each failure is counted, by channel only')
+      .toEqual({ sms: failed.sms + 1, email: failed.email + 1 });
     expect((await account(f.user.id)).email).toBe(next);
     expect(await notices(f.user.id)).toHaveLength(1);
   });
