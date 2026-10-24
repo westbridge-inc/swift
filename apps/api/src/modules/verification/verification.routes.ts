@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { VehicleType } from '@prisma/client';
 import { VerificationService } from './verification.service';
 import { NotificationService, notifyAdmins, tenantOfUser } from '../notification/notification.service';

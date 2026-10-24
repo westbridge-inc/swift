@@ -23,6 +23,7 @@ const REFUSED_WROTE_NOTHING = new Set([
   'STOP_TOO_CLOSE', 'STOP_OUT_OF_MARKET', 'EXPECTED_FARE_REQUIRED', 'IDEMPOTENCY_KEY_REUSED',
   'RIDE_IN_PROGRESS', 'ACCOUNT_RESTRICTED', 'NO_DRIVERS_NEARBY', 'STRIKE_RESTRICTED', 'SELFIE_REQUIRED',
   'MULTI_STOP_ZONE_PRICED', 'INVALID_RIDE_CLASS', 'TOO_MANY_PASSENGERS', 'FARE_CHANGED', 'ID_VERIFICATION_REQUIRED',
+  'WAITING_TERMS_CHANGED',
 ]);
 
 function requestRefusedWroteNothing(error: unknown): boolean {
@@ -142,10 +143,16 @@ export function useJoinQueue() {
       dropoffAddress: string;
       passengerCount?: number;
       rideClass?: RideClass;
+      /** [PRICE-LOCK · row 448] The fare on screen: the queue books the ride only at it. */
+      expectedFare?: number;
     }) => unwrap<QueueStatus>(rideApi.queueJoin(data)),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['rides', 'queue'] });
       track('ride_queue_joined', {});
+    },
+    // [PRICE-LOCK · row 448] The fare moved since the quote: fetch the new one to show.
+    onError: (error) => {
+      if (errorCodeOf(error) === 'FARE_CHANGED') void qc.invalidateQueries({ queryKey: ['rides', 'estimate'] });
     },
   });
 }
@@ -203,7 +210,7 @@ export function useRequestRide() {
       }
       if (code === 'IDEMPOTENCY_KEY_REUSED') void qc.invalidateQueries({ queryKey: ['rides', 'active'] });
       // The quote moved under the passenger: fetch the new one to show.
-      if (code === 'FARE_CHANGED') void qc.invalidateQueries({ queryKey: ['rides', 'estimate'] });
+      if (code === 'FARE_CHANGED' || code === 'WAITING_TERMS_CHANGED') void qc.invalidateQueries({ queryKey: ['rides', 'estimate'] });
       // The stop switch moved: re-read how many stops this server takes.
       if (code === 'MULTI_STOP_UNAVAILABLE' || code === 'TOO_MANY_STOPS') void qc.invalidateQueries({ queryKey: ['rides', 'capabilities'] });
     },

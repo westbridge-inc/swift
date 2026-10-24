@@ -4,7 +4,7 @@ import type {
   ServiceJob,
   ServiceJobStatus,
 } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { insertNoticeFor } from '../../lib/owner-wall-notices';
 

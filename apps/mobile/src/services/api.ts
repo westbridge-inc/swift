@@ -491,7 +491,7 @@ export const customerApi = {
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
   // This client renders the server's swap permissions and refusal guidance.
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v1' } }),
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2' } }), // [O-4] v2 = renders the removal question
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.
@@ -624,6 +624,8 @@ export interface RideRequestBody {
   stops?: TaxiStopInput[];
   /** The fare of the chosen class from the latest quote of exactly this itinerary. */
   expectedFare?: number;
+  /** [TAXI waiting charge · quote proof] The waiting terms shown beside that fare, when any were. */
+  waiting?: { chargePerBlock: number; blockMinutes: number };
 }
 /** Customer-side safety surfaces [safety spec / rides 12.2] — thin client
  *  over the ONE safety engine; zero safety logic lives on the phone. */
@@ -773,6 +775,8 @@ export const rideApi = {
     dropoffAddress: string;
     passengerCount?: number;
     rideClass?: RideClass;
+    /** [PRICE-LOCK · row 448] The fare on screen: the queue books the ride only at it. */
+    expectedFare?: number;
   }) => api.post('/rides/queue/join', data),
   queueLeave: () => api.post('/rides/queue/leave', {}),
   queueStatus: () => api.get('/rides/queue'),
@@ -1273,6 +1277,8 @@ export const vendorApi = {
   setFulfillmentMode: (id: string, mode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY') =>
     api.put(`/vendor/orders/${id}/fulfillment-mode`, { mode }),
   completePickup: (id: string, code?: string) => api.put(`/vendor/orders/${id}/complete-pickup`, { code }),
+  /** [O-2] The store handed the order to the Swift rider (one status-log row; custody stays the rider's "Picked up"). */
+  handedToRider: (id: string) => api.put(`/vendor/orders/${id}/handed-to-rider`, {}),
   completeAppointment: (id: string) => api.put(`/vendor/orders/${id}/complete-appointment`),
   // [E10] The API refuses a rejection without a reason; every caller passes one.
   reject: (id: string, reason: string) => api.put(`/vendor/orders/${id}/reject`, { reason }),
@@ -1289,6 +1295,14 @@ export const vendorApi = {
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
   updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
   deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
+  // [IMAGES-E2E PR4] A menu section's own photo: uploaded (the server checks it is a photo,
+  // scans it, redraws it without location or camera data and serves it to customers), or taken down.
+  uploadCategoryPhoto: (id: string, form: FormData) =>
+    api.post(`/vendor/categories/${id}/image`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeCategoryPhoto: (id: string) => api.delete(`/vendor/categories/${id}/image`),
   createItem: (
     data: VendorItemInput,
     session?: AuthSessionSnapshot,
@@ -1350,7 +1364,7 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; requirePickupCode?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
   // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
   // redraws it without location or camera data, and serves it to customers), or taken down.

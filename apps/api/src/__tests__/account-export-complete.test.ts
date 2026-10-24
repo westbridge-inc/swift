@@ -38,6 +38,7 @@ afterAll(async () => {
   await app.prisma.vendor.deleteMany({ where: { owner: where } });
   await app.prisma.vendorOwner.deleteMany({ where });
   await app.prisma.rider.deleteMany({ where });
+  await app.prisma.driver.deleteMany({ where });
   await app.prisma.notification.deleteMany({ where });
   await app.prisma.emergencyContact.deleteMany({ where });
   await app.prisma.deviceToken.deleteMany({ where });
@@ -296,9 +297,52 @@ describe('the account export', () => {
       for (const clause of match) {
         const values = Object.values(clause);
         expect(values, call.model).toHaveLength(1);
-        expect(mine.has(String(values[0])), `${call.model} ${JSON.stringify(clause)}`).toBe(true);
+        // A child table read through its parent (a ride's stops through the ride): one relation, then one person column.
+        const leaf = values[0] !== null && typeof values[0] === 'object' ? Object.values(values[0] as Record<string, unknown>) : values;
+        expect(leaf, call.model).toHaveLength(1);
+        expect(mine.has(String(leaf[0])), `${call.model} ${JSON.stringify(clause)}`).toBe(true);
       }
     }
+  });
+
+  it('gives a passenger the places their taxi rides stopped at, with the ride; never another passenger’s, who moved a stop or the driver’s evidence (REVIEW-M S3-1)', async () => {
+    const passenger = await person();
+    const other = await person();
+    const driverUser = await person();
+    const driver = await app.prisma.driver.create({ data: { userId: driverUser, vehicleMake: 'Synthetic', vehicleModel: 'Car', vehicleYear: 2025, vehicleColor: 'Blue', licensePlate: `EX${nanoid(5)}`, driverLicenseUrl: '', vehicleInsuranceUrl: '' } });
+    const taxi = (customerId: string, i: number) => ({
+      orderNumber: `EXP-${MARK}-T${i}`, orderType: 'TAXI' as const, customerId, driverId: driver.id, status: 'DELIVERED' as const, taxiStopCount: 2,
+      pickupAddress: `${i} Pickup Road`, pickupLat: 6.81, pickupLng: -58.16, deliveryAddress: `${i} Drop Road`, deliveryLat: 6.79, deliveryLng: -58.12,
+      subtotalBase: 1500, subtotalMarkup: 0, subtotalCustomer: 1500, deliveryFee: 0, totalAmount: 1500, paymentMethod: 'CASH' as const,
+    });
+    const ride = await app.prisma.order.create({ data: taxi(passenger, 8_001) });
+    const theirs = await app.prisma.order.create({ data: taxi(other, 8_002) });
+    const at = new Date(Date.now() - 3_600_000);
+    await app.prisma.taxiTripStop.create({ data: {
+      orderId: ride.id, sequence: 1, lat: 6.8012, lng: -58.1503, address: `Stop One ${MARK}`, legMeters: 1200, legSeconds: 240,
+      status: 'DEPARTED', arrivedAt: at, arrivalVerified: true, departedAt: new Date(at.getTime() + 300_000), actedBy: driverUser, evidenceNote: `fix 40 m from the stop ${MARK}`,
+    } });
+    await app.prisma.taxiTripStop.create({ data: {
+      orderId: ride.id, sequence: 2, lat: 6.7955, lng: -58.1402, address: `Stop Two ${MARK}`, status: 'SKIPPED', skippedAt: at, skipReason: 'Couldn’t reach the stop', actedBy: driverUser,
+    } });
+    await app.prisma.taxiTripStop.create({ data: { orderId: theirs.id, sequence: 1, lat: 6.8, lng: -58.15, address: `Their Stop ${MARK}` } });
+    const data = await service().exportData(passenger) as unknown as Record<string, Array<Record<string, unknown>>> & { coverage: Record<string, unknown> };
+    expect(data['taxiStops']).toEqual([
+      expect.objectContaining({ orderId: ride.id, sequence: 1, address: `Stop One ${MARK}`, lat: 6.8012, lng: -58.1503, legMeters: 1200, legSeconds: 240, status: 'DEPARTED', arrivalVerified: true }),
+      expect.objectContaining({ orderId: ride.id, sequence: 2, address: `Stop Two ${MARK}`, lat: 6.7955, lng: -58.1402, status: 'SKIPPED', skipReason: 'Couldn’t reach the stop' }),
+    ]);
+    // No arrival, no verified claim (an empty column is left out, like every other).
+    expect(data['taxiStops']![1]).not.toHaveProperty('arrivalVerified');
+    expect(data.coverage['taxiStops']).toEqual({ rows: 2, complete: true });
+    // The ride they belong to is in "orders" under the same id.
+    expect(data['orders']).toEqual([expect.objectContaining({ id: ride.id, taxiStopCount: 2 })]);
+    const text = JSON.stringify(data);
+    for (const leak of [`Their Stop ${MARK}`, theirs.id, driverUser, `fix 40 m from the stop ${MARK}`, '"actedBy"', '"evidenceNote"', '"tenantId"']) expect(text).not.toContain(leak);
+    // The driver gets their trips, never the passengers' stops.
+    const driverData = await service().exportData(driverUser) as unknown as Record<string, unknown[]>;
+    expect(driverData['tripsAsDriver']).toHaveLength(2);
+    expect(driverData['taxiStops']).toEqual([]);
+    for (const leak of [`Stop One ${MARK}`, `Stop Two ${MARK}`, `Their Stop ${MARK}`]) expect(JSON.stringify(driverData)).not.toContain(leak);
   });
 
   it('gives a rider their work record, never the customer’s address', async () => {

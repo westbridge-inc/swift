@@ -14,8 +14,9 @@ import { registerErrorHandler } from '../middleware/error-handler';
 // ---------------------------------------------------------------------------
 // Owner decision 50 (14 Oct 2026): "remember the 5 minute timer to cancel —
 // same thing, after the 5 minutes no cancelling allowed, so no fee shown."
-// Rides, parcels and service bookings cancel FREE inside the five-minute
-// window; after it there is no in-app cancel (the customer contacts the driver,
+// Rides, parcels and service bookings cancel FREE inside the window — ONE
+// minute after acceptance since the owner's 22 Oct 2026 ruling (was five,
+// FREE_CANCEL_WINDOW_MIN); after it there is no in-app cancel (the customer contacts the driver,
 // the rider or the provider) and there is NO fee anywhere — the G$500 marker
 // is gone. The exits that keep a customer from being stuck stay free: nobody
 // has accepted it yet, no mover was found, and the driver/rider/provider is
@@ -28,9 +29,9 @@ import { registerErrorHandler } from '../middleware/error-handler';
 
 const DAY = 24 * 60 * 60 * 1000;
 const PUBLISHED = '+5926004321';
-const RIDE_CLOSED = 'This ride can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact your driver.';
-const PARCEL_CLOSED = 'This delivery can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact your rider.';
-const BOOKING_CLOSED = 'This booking can no longer be cancelled in the app: the 5-minute cancellation window has passed. Contact the provider to change or cancel it.';
+const RIDE_CLOSED = 'This ride can no longer be cancelled in the app: the 1-minute cancellation window has passed. Contact your driver.';
+const PARCEL_CLOSED = 'This delivery can no longer be cancelled in the app: the 1-minute cancellation window has passed. Contact your rider.';
+const BOOKING_CLOSED = 'This booking can no longer be cancelled in the app: the 1-minute cancellation window has passed. Contact the provider to change or cancel it.';
 const RIDE_LATE_MESSAGE = 'Your driver is running very late. You can cancel the ride for free.';
 const PARCEL_LATE_MESSAGE = 'Your rider is running very late. You can cancel for free.';
 
@@ -256,7 +257,7 @@ afterAll(async () => {
   await app.close();
 });
 
-describe('[owner ruling 14 Oct] the five minutes count from ACCEPTANCE — rides, parcels and bookings alike', () => {
+describe('[owner ruling 14 Oct · 22 Oct] the one minute counts from ACCEPTANCE — rides, parcels and bookings alike', () => {
   const kinds = ['ride', 'parcel', 'booking'] as const;
   async function accepted(kind: (typeof kinds)[number], placedMinutesAgo: number, acceptedMinutesAgo: number) {
     const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
@@ -267,16 +268,17 @@ describe('[owner ruling 14 Oct] the five minutes count from ACCEPTANCE — rides
     return { me, order: await makeBooking(me.userId, await makeProvider(), 'ACCEPTED', { placedAt, acceptedAt: at }), at, closed: BOOKING_CLOSED };
   }
 
-  it.each(kinds)('%s accepted at minute 7: free for five more minutes from that acceptance', async (kind) => {
+  it.each(kinds)('%s accepted at minute 7: free for one more minute from that acceptance', async (kind) => {
     const { me, order, at } = await accepted(kind, 7, 0);
     const shown = await orderPreview(order.id, me.token);
     expect(shown).toMatchObject({ canCancel: true, cancellationFee: 0, cancelUnavailable: null });
-    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(at.getTime() + 5 * 60_000);
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(at.getTime() + 60_000);
     await expectCancelledFree(order.id, await inject('POST', `/api/v1/customer/orders/${order.id}/cancel`, me.token, {}));
   });
 
-  it.each(kinds)('%s six minutes after acceptance: refused, with who to contact', async (kind) => {
-    const { me, order, closed } = await accepted(kind, 9, 6);
+  // [owner 22 Oct 2026] Two minutes after acceptance was free under the old five-minute window; now it is refused.
+  it.each(kinds)('%s two minutes after acceptance: refused, with who to contact', async (kind) => {
+    const { me, order, closed } = await accepted(kind, 9, 2);
     expect(await orderPreview(order.id, me.token)).toMatchObject({
       canCancel: false, cancellationFee: 0, freeCancellationExpiresAt: null, cancelUnavailable: { code: 'CANCEL_WINDOW_CLOSED', message: closed },
     });
@@ -295,15 +297,15 @@ describe('[owner ruling 14 Oct] the five minutes count from ACCEPTANCE — rides
   });
 });
 
-describe('[owner #50] a ride cancels free inside the five-minute window, then not at all', () => {
-  it('a driver accepted a minute in: still free at minute three — no fee, the driver is freed', async () => {
+describe('[owner #50 · 22 Oct] a ride cancels free inside the one-minute window, then not at all', () => {
+  it('a driver accepted 30 seconds ago: still free — no fee, the driver is freed', async () => {
     const rider = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const ride = await makeTaxi(rider.userId, 'DRIVER_ASSIGNED', { placedAt: minutesAgo(3), acceptedAt: minutesAgo(2) });
+    const ride = await makeTaxi(rider.userId, 'DRIVER_ASSIGNED', { placedAt: minutesAgo(3), acceptedAt: minutesAgo(0.5) });
 
     const shown = await activeRide(rider.token);
     expect(shown).toMatchObject({ id: ride.id, canCancel: true, cancelUnavailable: null });
     // [owner ruling 14 Oct] The window counts from the driver's acceptance, not from placing.
-    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(ride.acceptedAt!.getTime() + 5 * 60_000);
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(ride.acceptedAt!.getTime() + 60_000);
 
     const res = await inject('POST', `/api/v1/rides/${ride.id}/cancel`, rider.token, {});
     await expectCancelledFree(ride.id, res);
@@ -387,7 +389,7 @@ describe('[owner #50] a parcel follows the same rule — through the sender canc
 
   it('inside the window the sender cancel is free even with a rider on it', async () => {
     const sender = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(2) }, minutesAgo(1));
+    const parcel = await makeParcel(sender.userId, 'RIDER_ASSIGNED', { placedAt: minutesAgo(2) }, minutesAgo(0.5));
     const res = await inject('POST', `/api/v1/courier/order/${parcel.id}/cancel`, sender.token, {});
     expect(res.statusCode, res.body).toBe(200);
     expect((await app.prisma.order.findUniqueOrThrow({ where: { id: parcel.id } })).status).toBe('CANCELLED');
@@ -428,13 +430,13 @@ describe('[owner #50] a booking: free in the window or until the provider accept
     await expectUntouched(booking.id, 'ACCEPTED', {});
   });
 
-  it('accepted within the window: free, counting down to acceptance + 5 minutes', async () => {
+  it('accepted within the window: free, counting down to acceptance + 1 minute', async () => {
     const vendorId = await makeProvider();
     const me = await makeUserWithSession(['CUSTOMER'], 'CUSTOMER');
-    const booking = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(2) });
+    const booking = await makeBooking(me.userId, vendorId, 'ACCEPTED', { placedAt: minutesAgo(2), acceptedAt: minutesAgo(0.5) });
     const shown = await orderPreview(booking.id, me.token);
     expect(shown).toMatchObject({ canCancel: true, cancellationFee: 0, cancelUnavailable: null });
-    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(booking.acceptedAt!.getTime() + 5 * 60_000);
+    expect(Date.parse(shown.freeCancellationExpiresAt ?? '')).toBe(booking.acceptedAt!.getTime() + 60_000);
     const res = await inject('POST', `/api/v1/customer/orders/${booking.id}/cancel`, me.token, {});
     await expectCancelledFree(booking.id, res);
     expect(res.json().data).toEqual({ message: 'Booking cancelled — no charge', cancellationFee: 0 });

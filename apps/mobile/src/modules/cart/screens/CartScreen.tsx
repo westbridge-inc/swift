@@ -812,9 +812,12 @@ export function CartScreen() {
                       paying — it must show what they are actually buying, or
                       nothing. Photography carries its own corner radius and
                       sits on the page ground, unboxed. */}
+                  {/* [UI-SWEEP U-P3] No photo: the icon alone. The name is printed
+                      beside the tile; squeezed into 64pt it broke across lines. */}
                   <Photo
                     uri={itemPhoto(it)}
                     label={it.name}
+                    showLabel={false}
                     transition={150}
                     style={{ width: 64, height: 64, borderRadius: radius.md }}
                     contentFit="cover"

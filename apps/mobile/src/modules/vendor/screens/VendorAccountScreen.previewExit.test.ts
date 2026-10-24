@@ -219,6 +219,8 @@ vi.mock('zustand', async () => {
 });
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => fx.queryClient,
+  // [STORE-DASH] the board's per-order wait reads the mutation cache: nothing is out here.
+  useMutationState: () => [],
   useMutation: (options: NonNullable<typeof fx.lastMutation>) => {
     const invoke = (variables: unknown) => fx.runMutations ? options.mutationFn?.(variables) : undefined;
     const result = { mutate: vi.fn(invoke), mutateAsync: vi.fn(invoke), isPending: false, isError: false, isSuccess: false };
@@ -595,6 +597,16 @@ describe('a signed-in account keeps the server-authorized switch', () => {
 describe('[Q8] the Account tab moves the store pin', () => {
   const pinnedStore = { ...liveStore, addressLine1: '12 Regent Street', city: 'Georgetown', latitude: 6.8046, longitude: -58.1553 };
   const moved = { latitude: 6.8102, longitude: -58.1623, address: '14 Regent St, Georgetown' };
+
+  it('[PIN-OWNER] a manager has no store-pin move control', async () => {
+    await signIn('manager-a', ['CUSTOMER']);
+    fx.profile = { data: { myRole: 'MANAGER', vendors: [pinnedStore] }, error: null };
+    const account = fx.mount(VendorAccountScreen, {});
+
+    expect(named(account.output, 'StoreLocationCard')).toHaveLength(0);
+    expect(named(account.output, 'StoreLocationPicker')).toHaveLength(0);
+    expect(fx.updateProfile).not.toHaveBeenCalled();
+  });
 
   /** The Account tab's store-location card, rendered, with its map opened from the row. */
   async function openStoreMap() {

@@ -86,7 +86,6 @@ export default function OrdersPage() {
 
   return (
     <div className="mc-page">
-      <h1 className="mc-numbers text-2xl font-semibold mb-4" style={{ letterSpacing: '-0.02em' }}>Orders</h1>
       <HeldOrders />
       <ActionResult outcome={result} onDismiss={() => setResult(null)} className="mb-4" />
       <ListToolbar

@@ -45,7 +45,9 @@ import { moverPool, type MoverPool } from './helpers/mover-pool';
 //      old to deliver: dispatch stops re-offering, the SYSTEM cancels it with
 //      a reason that marks nobody, the customer and the store are told what is
 //      true for their rail, and the row says why. A younger order is offered
-//      as today. COURIER has no cutoff.
+//      as today. COURIER is not on the food clock (its own wait: OF-17,
+//      riderless-exit.test.ts); a store order nobody marked ready is timed
+//      from its prep promise (OF-01, same file).
 //   ① From the second cascade an offer carries Swift's OWN money; the payable
 //      exists only once the rider has durably claimed the job, once per order.
 //      Ships at 0 — the founder sets the amount.
@@ -213,16 +215,31 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 describe('[ALG-06 ②] food age — the pure rule', () => {
-  it('measures from readyAt against the vertical limit; no readyAt or no limit means never too old', () => {
+  it('measures from readyAt against the vertical limit; nothing started or no limit means never too old', () => {
     const now = new Date('2026-08-30T12:00:00Z');
     const ready = (min: number) => ({ readyAt: new Date(now.getTime() - min * MIN) });
-    expect(foodAge(ready(50), 45, now)).toEqual({ tooOld: true, ageMinutes: 50 });
-    expect(foodAge(ready(20), 45, now)).toEqual({ tooOld: false, ageMinutes: 20 });
+    expect(foodAge(ready(50), 45, now)).toEqual({ tooOld: true, ageMinutes: 50, basis: 'READY' });
+    expect(foodAge(ready(20), 45, now)).toEqual({ tooOld: false, ageMinutes: 20, basis: 'READY' });
     // Exactly at the limit is still deliverable — past it is not.
     expect(foodAge(ready(45), 45, now).tooOld).toBe(false);
     expect(foodAge(ready(46), 45, now).tooOld).toBe(true);
-    expect(foodAge({ readyAt: null }, 45, now)).toEqual({ tooOld: false, ageMinutes: null });
-    expect(foodAge(ready(500), null, now)).toEqual({ tooOld: false, ageMinutes: null });
+    expect(foodAge({ readyAt: null }, 45, now)).toEqual({ tooOld: false, ageMinutes: null, basis: null });
+    expect(foodAge(ready(500), null, now)).toEqual({ tooOld: false, ageMinutes: null, basis: null });
+  });
+
+  it('[OF-01] never marked ready: timed from acceptance + the prep promise (the Vendor default when none); [OF-17] a parcel from its start', () => {
+    const now = new Date('2026-08-30T12:00:00Z');
+    const ago = (min: number) => new Date(now.getTime() - min * MIN);
+    // Accepted 80 min ago, 30-min prep: 50 min past the promise.
+    expect(foodAge({ readyAt: null, acceptedAt: ago(80), estimatedPrepTime: 30 }, 45, now)).toEqual({ tooOld: true, ageMinutes: 50, basis: 'PREP_PROMISE' });
+    expect(foodAge({ readyAt: null, acceptedAt: ago(70), estimatedPrepTime: 30 }, 45, now).tooOld).toBe(false);
+    // No prep minutes on the order: the Vendor default (30).
+    expect(foodAge({ readyAt: null, acceptedAt: ago(80), estimatedPrepTime: null }, 45, now).ageMinutes).toBe(50);
+    // Once marked ready, readyAt rules again.
+    expect(foodAge({ readyAt: ago(10), acceptedAt: ago(200), estimatedPrepTime: 30 }, 45, now)).toEqual({ tooOld: false, ageMinutes: 10, basis: 'READY' });
+    // A parcel: from the latest of placing, hold end and slot.
+    expect(foodAge({ orderType: 'COURIER', readyAt: null, placedAt: ago(90), holdExpiresAt: ago(70), scheduledFor: null }, 60, now))
+      .toEqual({ tooOld: true, ageMinutes: 70, basis: 'PARCEL' });
   });
 
   it('ships 45 min for FOOD, 90 for GROCERY, no cutoff for COURIER; the incentive ships at 0', () => {
@@ -309,7 +326,7 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
     await app.prisma.rider.update({ where: { id: rider.riderId }, data: { isOnline: false, isAvailable: false } });
   });
 
-  it('an ACCEPTED order that is not ready yet has no age — the clock starts at readyAt', async () => {
+  it('dispatch never retires an order that is not ready — [OF-01] the sweep owns that wait (notice, grace, cancel)', async () => {
     const order = await makeOrder({ status: 'ACCEPTED', readyAgoMin: null });
     // No candidate online ⇒ the loop exhausts honestly instead of retiring.
     const r = await dispatch.dispatchOrder(order.id);
@@ -330,7 +347,7 @@ describe('[ALG-06 ②] the cutoff inside dispatch', () => {
     expect(await app.prisma.algoDecision.count({ where: { algo: 'ALG-06', subjectId: order.id } })).toBe(0);
   });
 
-  it('the watchdog sweep: grocery past 90 min is retired, 60 min kept, COURIER never', async () => {
+  it('the watchdog sweep: grocery past 90 min is retired, 60 min kept; a fresh COURIER is not on the food clock', async () => {
     const old = await makeOrder({ orderType: 'GROCERY_DELIVERY', readyAgoMin: 100 });
     const fresh = await makeOrder({ orderType: 'GROCERY_DELIVERY', readyAgoMin: 60 });
     const courier = await makeOrder({ orderType: 'COURIER', readyAgoMin: 400 });

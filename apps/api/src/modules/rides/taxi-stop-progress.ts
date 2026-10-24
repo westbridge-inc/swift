@@ -2,6 +2,7 @@ import type { Prisma, PrismaClient, TaxiStopStatus } from '@prisma/client';
 import { AppError, NotFoundError } from '../../utils/errors';
 import { haversineDistance } from '../../utils/distance';
 import { gpsEvidence } from '../cash/cash-rules.service';
+import { arrivalGate } from '../dispatch/arrival-evidence';
 import { isTaxiStopOpen, isTaxiStopTransition, TAXI_STOP_PARENT_STATUS } from '../order/order-status';
 import { lockTaxiOrderForCustodyDecision } from './passenger-custody';
 import { nextStopSequence, TAXI_STOP_PUBLIC_SELECT, type TaxiStopRow } from './taxi-stops-read';
@@ -130,8 +131,15 @@ export async function moveTaxiStop(
     if (!isTaxiStopTransition(stop.status, target)) {
       throw new AppError(409, 'STOP_NOT_ARRIVED', `Mark that you have arrived at stop ${stop.sequence} first, or skip it.`, { sequence: stop.sequence });
     }
+    // [COORD ruling 19 Oct, option A] The arrival is never refused, but only one
+    // the E19 arrival gate accepts (a fresh fix within 300 m of the stop) starts
+    // a billable wait: the passenger is never charged for a wait the GPS can't place.
+    const verified = input.action === 'arrived' ? arrivalGate(input.fix, { lat: stop.lat, lng: stop.lng }, now).allowed : false;
     const data: Prisma.TaxiTripStopUpdateManyMutationInput = input.action === 'arrived'
-      ? { status: target, arrivedAt: now, actedBy: input.actorUserId, evidenceNote: stopArrivalNote(stop.sequence, input.fix, stop, now) }
+      ? {
+        status: target, arrivedAt: now, arrivalVerified: verified, actedBy: input.actorUserId,
+        evidenceNote: `${stopArrivalNote(stop.sequence, input.fix, stop, now)}${verified ? '' : ' — not verified, so this wait is not charged'}`,
+      }
       : input.action === 'depart'
         ? { status: target, departedAt: now, actedBy: input.actorUserId }
         : { status: target, skippedAt: now, skipReason: input.reason ?? null, actedBy: input.actorUserId };

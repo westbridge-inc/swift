@@ -104,7 +104,7 @@ async function makeDriver(): Promise<DriverActor> {
   return { ...u, driverId: driver.id };
 }
 
-type StopSpec = { status: TaxiStopStatus; arrivedAt?: Date; departedAt?: Date; skippedAt?: Date; skipReason?: string };
+type StopSpec = { status: TaxiStopStatus; arrivedAt?: Date; departedAt?: Date; skippedAt?: Date; skipReason?: string; arrivalVerified?: boolean };
 interface RideSpec {
   status: OrderStatus;
   driverArrivedAt?: Date | null;
@@ -142,6 +142,8 @@ async function makeRide(spec: RideSpec) {
           create: stops.map((s, i) => ({
             sequence: i + 1, lat: 6.41 + i * 0.003, lng: -58.62 - i * 0.003, address: `Stop ${i + 1} ${door}`,
             status: s.status, arrivedAt: s.arrivedAt ?? null, departedAt: s.departedAt ?? null, skippedAt: s.skippedAt ?? null, skipReason: s.skipReason ?? null,
+            // [option A] An arrival here is one the E19 gate accepted, unless a case says otherwise.
+            arrivalVerified: s.arrivalVerified ?? (s.arrivedAt ? true : null),
           })),
         },
       } : {}),
@@ -161,7 +163,12 @@ function call(method: 'GET' | 'POST' | 'PUT', url: string, token: string, payloa
     ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}),
   });
 }
+/** A build 9 / 10 booking: no quoted fare, no echo (those apps never showed the waiting terms). */
 const trip = () => ({ pickup: PICKUP, dropoff: DEST, pickupAddress: PICKUP_ADDRESS, dropoffAddress: DROPOFF_ADDRESS, passengerCount: 1, rideClass: 'ECONOMY' });
+/** A build 11 / 12 booking: the fare from the quote screen (which shows the terms beside it), no echo. */
+const quoted = () => ({ ...trip(), expectedFare: 1700 });
+/** The website (and the phone from build 13): the quoted fare and the echoed terms. */
+const echoed = (terms = { chargePerBlock: 300, blockMinutes: 10 }) => ({ ...quoted(), waiting: terms });
 const paid = (r: Awaited<ReturnType<typeof makeRide>>) => call('POST', `/api/v1/driver/rides/${r.order.id}/handover`, r.driver.token, { outcome: 'paid', gps: r.drop });
 
 /** Everything money about a ride, read back from the database. */
@@ -345,12 +352,12 @@ describe('disclosure before booking (CONTRACT §8.2)', () => {
     const customer = await makeCustomer();
     on();
     const key = `on-${nanoid(10)}`;
-    const res = await call('POST', '/api/v1/rides/request', customer.token, trip(), { 'idempotency-key': key });
+    const res = await call('POST', '/api/v1/rides/request', customer.token, quoted(), { 'idempotency-key': key });
     expect(res.statusCode, res.body).toBe(201);
     const ride = res.json().data.ride as { id: string; orderNumber: string; ridePin: string };
     const masked = (body: string) => body.replace(ride.id, '<ID>').replace(ride.orderNumber, '<NUMBER>').replace(`"ridePin":"${ride.ridePin}"`, '"ridePin":"<PIN>"');
     expect(masked(res.body)).toBe(PINNED_SINGLE_LEG_ANSWER.replace('"dropoffAddress":"Bartica Airstrip"}', `"dropoffAddress":"Bartica Airstrip","waiting":${DISCLOSED}}`));
-    const replay = await call('POST', '/api/v1/rides/request', customer.token, trip(), { 'idempotency-key': key });
+    const replay = await call('POST', '/api/v1/rides/request', customer.token, quoted(), { 'idempotency-key': key });
     expect(replay.statusCode).toBe(201);
     expect(replay.json().replayed).toBe(true);
     expect(replay.json().data).toEqual(res.json().data);
@@ -369,7 +376,7 @@ describe('disclosure before booking (CONTRACT §8.2)', () => {
       const customer = await makeCustomer();
       const estimate = await call('POST', '/api/v1/rides/estimate', customer.token, { pickup: PICKUP, dropoff: DEST });
       expect(estimate.json().data.waiting).toEqual({ chargePerBlock: 750, blockMinutes: 15, currencyCode: 'GYD', text: 'Waiting: 750 per 15 minutes after your driver arrives' });
-      const res = await call('POST', '/api/v1/rides/request', customer.token, trip());
+      const res = await call('POST', '/api/v1/rides/request', customer.token, echoed({ chargePerBlock: 750, blockMinutes: 15 }));
       expect(res.statusCode, res.body).toBe(201);
       const id = res.json().data.ride.id as string;
       expect(res.json().data.ride.waiting).toMatchObject({ chargePerBlock: 750, blockMinutes: 15 });
@@ -473,7 +480,8 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
     const zone = await sys(() => app.prisma.zone.create({ data: { name: `${FIXTURE} pickup ${nanoid(6)}`, boundary: box as never, tenantId: 'swift-default', countryCode: 'GY', taxiPerKm: 900 } }));
     try {
       on();
-      const res = await call('POST', '/api/v1/rides/request', customer.token, trip());
+      // The echo alone proves the quote screen (the zone fare is not 1700).
+      const res = await call('POST', '/api/v1/rides/request', customer.token, { ...trip(), waiting: { chargePerBlock: 300, blockMinutes: 10 } });
       expect(res.statusCode, res.body).toBe(201);
       const fare = res.json().data.ride.fare as number;
       expect(fare).not.toBe(plain); // the zone's per-km priced it, not the market's
@@ -606,6 +614,79 @@ describe('"Fare collected" freezes the charge once, into every money surface (CO
     expect(res.json().data.claim).toMatchObject({ amount: 2000 });
     expect(await money(r.order.id)).toEqual({ status: 'FAILED', total: 2000, route: 2000, earnings: [], waiting: { seconds: null, minutes: null, charge: null, frozen: false } });
     expect((await call('GET', `/api/v1/rides/${r.order.id}`, r.customer.token)).body).not.toMatch(WAIT_KEYS);
+  });
+});
+
+// ===========================================================================
+// [quote proof · COORD ruling 21 Oct (#1996 C4)] Terms are frozen only on a
+// booking that shows the passenger saw them: the quoted fare (builds 11, 12,
+// the website) or an explicit echo (the website; the phone from build 13).
+describe('quote proof: only a booking from the screen that showed the terms is ever charged for waiting', () => {
+  /** Book through /request, then drive the ride: the driver arrives, waits
+   *  `waitMin` minutes, picks up, and the passenger pays at the drop-off. */
+  async function bookAndComplete(customer: Actor, body: Record<string, unknown>, waitMin: number) {
+    const res = await call('POST', '/api/v1/rides/request', customer.token, body);
+    expect(res.statusCode, res.body).toBe(201);
+    const id = res.json().data.ride.id as string;
+    const driver = await makeDriver();
+    const t = Date.now();
+    await sys(() => walkOrderStatus(app.prisma, id, 'RIDE_IN_PROGRESS', {
+      driverId: driver.driverId, driverArrivedAt: new Date(t - (waitMin + 5) * MIN), pickedUpAt: new Date(t - 5 * MIN),
+      ridePinVerified: true, ridePinVerifiedAt: new Date(t - 5 * MIN),
+    }));
+    await sys(() => app.prisma.driver.update({ where: { id: driver.driverId }, data: { currentRideId: id } }));
+    const done = await call('POST', `/api/v1/driver/rides/${id}/handover`, driver.token, { outcome: 'paid', gps: DEST });
+    expect(done.statusCode, done.body).toBe(200);
+    return { id, answer: res.json().data.ride as Record<string, unknown> };
+  }
+
+  it('a build 9/10 booking (no quoted fare, no echo) with the switch on: no terms are frozen, and a 29-minute wait is never charged', async () => {
+    on();
+    const customer = await makeCustomer();
+    const { id, answer } = await bookAndComplete(customer, trip(), 29);
+    expect(answer['waiting']).toBeUndefined();
+    expect(await money(id)).toEqual({ status: 'DELIVERED', total: 1700, route: 1700, earnings: [1700], waiting: null });
+    expect((await call('GET', `/api/v1/rides/${id}`, customer.token)).body).not.toMatch(WAIT_KEYS);
+  });
+
+  it('a build 11/12 booking (the quoted fare, no echo): 300 per FULL 10 minutes, so a 29-minute wait adds exactly 600', async () => {
+    on();
+    const customer = await makeCustomer();
+    const { id, answer } = await bookAndComplete(customer, quoted(), 29);
+    expect(answer['waiting']).toEqual(JSON.parse(DISCLOSED));
+    expect(await money(id)).toEqual({ status: 'DELIVERED', total: 2300, route: 1700, earnings: [2300], waiting: { seconds: 29 * 60, minutes: 29, charge: 600, frozen: true } });
+  });
+
+  it('a build 11/12 booking whose wait is one second short of a block: 9:59 is charged nothing, 10:00 is charged 300', async () => {
+    on();
+    const short = await bookAndComplete(await makeCustomer(), quoted(), 10 - 1 / 60);
+    expect((await money(short.id)).waiting).toEqual({ seconds: 599, minutes: 9, charge: 0, frozen: true });
+    const full = await bookAndComplete(await makeCustomer(), quoted(), 10);
+    expect(await money(full.id)).toMatchObject({ total: 2000, route: 1700, waiting: { seconds: 600, minutes: 10, charge: 300, frozen: true } });
+  });
+
+  it('an echo of the terms shown books them; an echo that no longer matches is refused (409 WAITING_TERMS_CHANGED) before anything is written', async () => {
+    on();
+    const customer = await makeCustomer();
+    const ok = await call('POST', '/api/v1/rides/request', customer.token, echoed());
+    expect(ok.statusCode, ok.body).toBe(201);
+    const row = await sys(() => app.prisma.taxiRideWaiting.findUniqueOrThrow({ where: { orderId: ok.json().data.ride.id } }));
+    expect({ chargePerBlock: Number(row.chargePerBlock), blockMinutes: row.blockMinutes }).toEqual({ chargePerBlock: 300, blockMinutes: 10 });
+
+    const other = await makeCustomer();
+    const before = await sys(() => app.prisma.order.count({ where: { customerId: other.userId } }));
+    const stale = await call('POST', '/api/v1/rides/request', other.token, echoed({ chargePerBlock: 200, blockMinutes: 10 }));
+    expect(stale.statusCode, stale.body).toBe(409);
+    expect(stale.json().error.code).toBe('WAITING_TERMS_CHANGED');
+    expect(await sys(() => app.prisma.order.count({ where: { customerId: other.userId } }))).toBe(before);
+  });
+
+  it('switched off: neither the quoted fare nor an echo writes terms; the ride is today\'s', async () => {
+    vi.stubEnv('TAXI_WAITING_CHARGE', '');
+    const customer = await makeCustomer();
+    const { id, answer } = await bookAndComplete(customer, echoed(), 29);
+    expect(answer['waiting']).toBeUndefined();
+    expect(await money(id)).toEqual({ status: 'DELIVERED', total: 1700, route: 1700, earnings: [1700], waiting: null });
   });
 });
 

@@ -26,9 +26,11 @@ import { nanoid } from 'nanoid';
 import type { FastifyInstance } from 'fastify';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { createTenantProbeLogins } from './helpers/tenant-probe-logins';
+import { delegateEscapes } from './helpers/delegate-escapes';
 import { testPhone } from './helpers/fixture-ids';
 import { OWNER_WALL_DEVICE_ACTIONS, readOwnerWallFacts } from '../lib/owner-rls';
 import { OWNER_WALL_NOTICE_ACTIONS } from '../lib/owner-wall-notices';
+import { OWNER_WALL_TICKET_ACTIONS } from '../lib/owner-wall-tickets';
 
 // [R048-001] creates only this suite's temporary request/system LOGIN roles, and grants the owner wall to one, by raw DDL.
 grantSuiteCapability('ddl');
@@ -207,8 +209,8 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
              has_function_privilege('swift_app', p.oid, 'EXECUTE') AS app_exec
         FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace AND n.nspname = 'public'
        WHERE p.proname LIKE 'swift_owner_wall_%' ORDER BY 1`;
-    // [item 20 · notifications] The notice actions (owner-wall-notifications) are the only others.
-    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS].sort());
+    // [item 20 · notifications · support tickets] The notice and ticket actions (owner-wall-notifications) are the only others.
+    expect(rows.map((r) => r.name).sort()).toEqual([...OWNER_WALL_DEVICE_ACTIONS, ...OWNER_WALL_NOTICE_ACTIONS, ...OWNER_WALL_TICKET_ACTIONS].sort());
     for (const r of rows) {
       expect(r, r.name).toMatchObject({ secdef: true, public_exec: false, app_exec: true });
       expect(r.config, r.name).toContain('search_path=pg_catalog, public');
@@ -228,6 +230,7 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
     walk(root);
     const calls: Record<string, number> = {};
     const txWrites: string[] = [];
+    const escapes: string[] = [];
     for (const path of files) {
       const rel = relative(root, path);
       const text = readFileSync(path, 'utf8');
@@ -235,6 +238,7 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
       if (n > 0) calls[rel] = n;
       if (rel !== 'lib/owner-rls.ts' && /swift_owner_wall_(revoke_devices|revoke_device|erase_devices)\b/.test(text)) txWrites.push(`${rel}: calls a device action by name`);
       for (const m of text.matchAll(/\btx\s*\.\s*deviceToken\s*\.\s*(update|updateMany|delete|deleteMany|create|createMany|upsert)\b/g)) txWrites.push(`${rel}: tx.deviceToken.${m[1]}`);
+      for (const form of delegateEscapes(text, 'deviceToken')) escapes.push(`${rel} ${form}`);
     }
     expect(calls).toEqual({
       'modules/auth/auth.service.ts': 3,
@@ -242,6 +246,9 @@ describe('[item 20] device tokens: writes for someone else inside a transaction'
       'modules/user/account.service.ts': 1,
     });
     expect(txWrites).toEqual([]);
+    // [REVIEW-M S4-3] ...and none reaches the device delegate any way the regex above cannot see (as a value, by a quoted
+    // name, destructured).
+    expect(escapes).toEqual([]);
   });
 });
 

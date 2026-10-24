@@ -1,4 +1,5 @@
 import type { NextConfig } from 'next';
+import { mapTilesBuildCheck } from './src/lib/map-tiles';
 
 const API = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 
@@ -26,6 +27,12 @@ const API = process.env['NEXT_PUBLIC_API_URL'] || 'http://localhost:3000';
 const imageBuild = process.env['SWIFT_ADMIN_IMAGE_BUILD'] === '1';
 if (imageBuild && !/^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(process.env['NEXT_PUBLIC_API_URL'] ?? '')) {
   throw new Error('NEXT_PUBLIC_API_URL must be the https origin of the API (https://host, no path) to build the admin image');
+}
+// [ADMIN-TILES] The Live Ops map's MapTiler browser key (lib/map-tiles.ts): a malformed key
+// stops the build; a production build without one says so in its log and draws no tiles.
+{
+  const tiles = mapTilesBuildCheck(process.env['NODE_ENV'] === 'production' ? 'production' : 'development', process.env['NEXT_PUBLIC_MAPTILER_KEY']);
+  if (tiles.warning) console.warn(`[admin] ${tiles.warning}`);
 }
 const imageBuildConfig: Pick<NextConfig, 'output' | 'typescript' | 'eslint'> = imageBuild
   ? { output: 'standalone', typescript: { ignoreBuildErrors: true }, eslint: { ignoreDuringBuilds: true } }

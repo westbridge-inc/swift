@@ -13,7 +13,7 @@ import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -137,7 +137,9 @@ const configValueSchema = z.object({
   // stray blob can't bloat the table or a response. (No key drives live
   // behaviour today — real config is CountryConfig — so we bound rather than
   // allowlist; add a semantic allowlist when a key starts gating behaviour.)
-  value: z.any().refine(
+  // `.optional()`: zod 4 refuses an absent z.any() key that zod 3 let through
+  // (as undefined); the 16KB bound below is unchanged.
+  value: z.any().optional().refine(
     (v) => { try { return JSON.stringify(v ?? null).length <= 16_384; } catch { return false; } },
     'Config value must be JSON-serialisable and under 16KB',
   ),
@@ -252,7 +254,9 @@ const createZoneSchema = z.object({
   name: z.string().trim().min(1).max(100),
   description: z.string().max(500).optional(),
   // GeoJSON blob — stored as JSON, shape owned by the maps layer
-  boundary: z.any(),
+  // `.optional()` keeps zod 3's reading of an absent boundary (undefined);
+  // zod 4 would refuse the missing key.
+  boundary: z.any().optional(),
   deliveryBaseFee: z.number().min(0).optional(),
   deliveryPerKm: z.number().min(0).optional(),
   surgeMultiplier: z.number().min(0.5).max(10).optional(),
@@ -297,7 +301,7 @@ const broadcastSchema = z.object({
   title: z.string().trim().min(1).max(150),
   body: z.string().trim().min(1).max(1000),
   role: z.nativeEnum(UserRole).optional(),
-  data: z.record(z.unknown()).optional(),
+  data: z.record(z.string(), z.unknown()).optional(),
   /** [REPORT-021 F-021-03] Every broadcast declares its PURPOSE. 'service'
    *  = operational notices (goes to everyone); 'marketing' = offers/promos —
    *  delivered ONLY to subjects whose marketing consent is granted at the
@@ -1678,6 +1682,10 @@ export async function adminRoutes(app: FastifyInstance) {
    *  - the reinstate decides again inside its transaction, under the owner's
    *    account lock and the store row lock [Opus S3-1], so a deletion or a
    *    document decision racing it cannot be undone by it;
+   *  - waiting, every go-live rule met, while billing holds its weekly fee
+   *    (subscription SUSPENDED or CHURNED) → the projection makes it live
+   *    UNDER billing's hold (SUSPENDED, source BILLING, intake closed) and the
+   *    owner is told to pay the fee to open it; the payment lifts it [#1541];
    *  - otherwise refused with what is missing, and nothing changes.
    */
   app.put('/vendors/:id/approve', { preHandler: [adminGuard] }, async (request) => {
@@ -1699,6 +1707,8 @@ export async function adminRoutes(app: FastifyInstance) {
     if (refused) throw refused;
 
     let updated;
+    // [#1541] Documents approved while billing holds the weekly fee: live under that hold, not open.
+    let feeHeld = false;
     if (next === 'CAN_ACTIVATE') {
       // The one authority that makes a store live, on every path (review,
       // auto-approval, the reconcile belt — and now this button), run for this
@@ -1708,7 +1718,8 @@ export async function adminRoutes(app: FastifyInstance) {
         extra: { previousStatus: vendor.status, previousSuspensionSource: vendor.suspensionSource, verdict: next },
       }));
       updated = await app.prisma.vendor.findUniqueOrThrow({ where: { id } });
-      if (updated.status !== 'ACTIVE') {
+      feeHeld = updated.status === 'SUSPENDED' && updated.suspensionSource === 'BILLING';
+      if (updated.status !== 'ACTIVE' && !feeHeld) {
         throw new AppError(409, 'ACTIVATION_HELD', `${vendor.name} was not activated: Swift's activation did not make it live (its documents or details may have changed while approving). Refresh and check its checklist.`);
       }
     } else if (next === 'CAN_LIFT_TO_WAITING') {
@@ -1779,7 +1790,9 @@ export async function adminRoutes(app: FastifyInstance) {
     // On-write search sync [SWIFT-UG-SRCH-01]: status changes gate the vendor in/out of the index.
     scheduleVendorSearchSync(app, id);
 
-    await notifications.send({
+    // [#1541] A store that went live under billing's hold was told so by the projection itself (documents
+    // approved, pay the weekly fee to open): one notice, on both activation edges.
+    if (!feeHeld) await notifications.send({
       userId: vendor.owner.userId,
       type: 'SYSTEM_ANNOUNCEMENT',
       ...(next === 'CAN_LIFT_TO_WAITING'
@@ -5273,7 +5286,7 @@ export async function adminRoutes(app: FastifyInstance) {
       agentRef: z.string().trim().max(200).optional(),
       payerMsisdn: z.string().trim().max(30).optional(),
       verifiedInPortal: z.literal(true, {
-        errorMap: () => ({ message: 'Manual credits require verifying the receipt in the MMG portal/statement first (law 26.5).' }),
+        error: 'Manual credits require verifying the receipt in the MMG portal/statement first (law 26.5).',
       }),
     }).parse(request.body ?? {});
     const { AgentCashService } = await import('../billing/agent-cash.service');
@@ -6842,7 +6855,8 @@ export async function adminRoutes(app: FastifyInstance) {
   });
 
   // ── Support tickets ──────────────────────────────────────────────────────
-  const support = new SupportService(tenantPrisma, notifications);
+  // [item 20 · support tickets] With the owner wall on, the queue reaches other people's tickets as this capability.
+  const support = new SupportService(tenantPrisma, notifications, { capability: 'admin:support-queue', client: app.prisma });
 
   app.get('/support', { preHandler: [adminGuard] }, async (request) => {
     const { status, page } = z.object({
@@ -6874,9 +6888,16 @@ export async function adminRoutes(app: FastifyInstance) {
   // is never closed from the support queue.
   app.post('/support/:id/complete-account-closure', { preHandler: [adminGuard] }, async (request) => {
     const { id } = request.params as { id: string };
-    const ticket = await tenantPrisma.supportTicket.findUnique({
-      where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
-    });
+    // [item 20 · support tickets] Another person's ticket: with the owner wall on, the named capability inside this
+    // request's tenant boundary (the same boundary tenantPrisma adds).
+    const closureScope = ownerRlsBindEnabled() ? { user: { tenantId: requireTenantId() } } : null;
+    const ticket = closureScope
+      ? await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.findFirst({
+        where: { AND: [{ id }, closureScope] }, select: { id: true, userId: true, category: true, subject: true, status: true },
+      }))
+      : await tenantPrisma.supportTicket.findUnique({
+        where: { id }, select: { id: true, userId: true, category: true, subject: true, status: true },
+      });
     if (!ticket) throw new NotFoundError('SupportTicket', id);
     // The subject alone can be typed by anyone; the confirmation record is
     // written only by the in-app request, behind the deletion step-up.
@@ -6899,15 +6920,18 @@ export async function adminRoutes(app: FastifyInstance) {
     }
     const outcome = await new AccountService(app).deleteAccount(ticket.userId);
     const complete = 'deleted' in outcome && outcome.deleted === true;
-    await tenantPrisma.supportTicket.updateMany({
-      where: { id, status: { not: 'RESOLVED' } },
-      data: {
-        status: 'RESOLVED', resolution: 'ACTION_TAKEN', resolvedById: request.user.userId, resolvedAt: new Date(),
-        adminNote: complete
-          ? 'Account closed and personal data de-identified; financial and legal records are retained.'
-          : 'Account closed; the remaining erasure is pending and retried automatically.',
-      },
-    });
+    const closureWhere = { id, status: { not: 'RESOLVED' as const } };
+    const closureData = {
+      status: 'RESOLVED' as const, resolution: 'ACTION_TAKEN' as const, resolvedById: request.user.userId, resolvedAt: new Date(),
+      adminNote: complete
+        ? 'Account closed and personal data de-identified; financial and legal records are retained.'
+        : 'Account closed; the remaining erasure is pending and retried automatically.',
+    };
+    if (closureScope) {
+      await ownerWallSystem('admin:support-closure', () => app.prisma.supportTicket.updateMany({ where: { AND: [closureWhere, closureScope] }, data: closureData }));
+    } else {
+      await tenantPrisma.supportTicket.updateMany({ where: closureWhere, data: closureData });
+    }
     return { success: true, data: { ticketId: id, outcome } };
   });
 

@@ -85,6 +85,7 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'DepositConfirmation', field: 'depositedGyd', unit: 'MAJOR_2DP' },
   { model: 'Earning', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FeeReceipt', field: 'amount', unit: 'MAJOR_WHOLE' },
+  { model: 'FeeReceiptAllocation', field: 'amount', unit: 'MAJOR_WHOLE' },
   { model: 'FxRate', field: 'rate', unit: 'FX_RATE' },
   { model: 'Item', field: 'basePrice', unit: 'MAJOR_WHOLE' },
   { model: 'LedgerEntry', field: 'credit', unit: 'MAJOR_WHOLE' },
@@ -150,6 +151,9 @@ export const MONEY_COLUMNS: readonly MoneyColumn[] = [
   { model: 'RlpReserveEntry', field: 'amount', unit: 'MAJOR_2DP' },
   { model: 'ReturnRequest', field: 'refundAmount', unit: 'MAJOR_WHOLE' },
   { model: 'ReturnRequest', field: 'refundInferredAmount', unit: 'MAJOR_WHOLE' },
+  // [PRICE-LOCK · row 448] The fare a queued passenger was shown at join: the scan
+  // books only at it (whole units, CHECKed whole and non-negative).
+  { model: 'RideQueueEntry', field: 'quotedFare', unit: 'MAJOR_WHOLE' },
   { model: 'Rider', field: 'committedFloat', unit: 'MAJOR_WHOLE' },
   { model: 'Rider', field: 'floatLimit', unit: 'MAJOR_WHOLE' },
   { model: 'RunStop', field: 'cashToCollect', unit: 'MAJOR_WHOLE' },

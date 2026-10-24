@@ -7,6 +7,7 @@ import { Feather } from '@expo/vector-icons';
 import { Pressable } from 'react-native';
 import { color, radius, space } from '@swift/ui';
 import { ErrorState, Card, Header, LoadingBlock, PillButton, T, TonePill } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { useMyAdvertisers, useAdvertiserCampaigns, useCampaignStats, useAdvertiserActions } from '../../../hooks/advertiser';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { adsApi } from '../../../services/api';
@@ -141,7 +142,8 @@ export function CampaignDetailScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: space.xl, paddingVertical: space.md }}>
-        <Pressable onPress={() => navigation.goBack()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => navigation.goBack()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(22)}>
           <Feather name="arrow-left" size={22} color={color.text.primary} />
         </Pressable>
         <T variant="heading" numberOfLines={1} style={{ marginLeft: space.lg, flex: 1 }}>

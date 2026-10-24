@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { CardSessionStatus, PrismaClient, Subscription } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { AppError } from '../../utils/errors';
 import { log } from '../../utils/logger';
 import { isProduction } from '../../utils/runtime-mode';

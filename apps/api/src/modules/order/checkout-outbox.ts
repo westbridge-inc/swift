@@ -234,6 +234,32 @@ export async function persistReleaseAlertLadderInTransaction(
   return row.id;
 }
 
+/**
+ * [O-4 · owner 22 Oct 2026] The vendor no-response auto-cancel, armed again
+ * for a later instant: a store that asked the customer about an out-of-stock
+ * item before accepting gets its full response time from the customer's answer
+ * (response-sla storeClockAfterQuestion). One row per due instant (its own
+ * dedupe key), inside the caller's transaction; the drainer publishes it like
+ * the checkout row, and the job re-decides on the locked row when it runs.
+ */
+export async function persistAutoCancelRearmInTransaction(
+  tx: Prisma.TransactionClient,
+  input: { orderId: string; tenantId: string; dueAt: Date; now?: Date },
+): Promise<string> {
+  const now = input.now ?? new Date();
+  const dedupeKey = `${checkoutOutboxDedupeKey(input.orderId, 'auto-cancel')}:after-question:${input.dueAt.getTime()}`;
+  const id = checkoutOutboxId(dedupeKey);
+  await tx.orderOutbox.createMany({
+    data: [{
+      id, tenantId: input.tenantId, dedupeKey, orderId: input.orderId, kind: 'auto-cancel', queue: 'order',
+      payload: { version: CHECKOUT_OUTBOX_VERSION, orderId: input.orderId } as Prisma.InputJsonValue,
+      delayMs: Math.max(0, input.dueAt.getTime() - now.getTime()), availableAt: now,
+    }],
+    skipDuplicates: true,
+  });
+  return id;
+}
+
 /** [S-13] A durable dispatch command, inside the caller's transaction: the
  *  order must be dispatched again, whatever happens to the process after the
  *  commit. Deterministic id = the BullMQ jobId, so an inline fast-path enqueue

@@ -627,6 +627,46 @@ backups. Before the first production backup:
    swift-backup-hourly.timer is enabled and active, and doctor.sh reports it. Local copies are kept 2 days on production by default
    (BACKUP_RETAIN_DAYS); the off-site bucket is the history. The droplet's
    daily snapshots stay on as well.
+4. Install the OFF-SITE ERASURE LEDGER timer (production and staging). Every
+   erasure writes its ledger entry in its own transaction; this unit ships the
+   unshipped entries every minute, encrypted to the same owner key, to
+   `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`:
+
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.service /etc/systemd/system/swift-erasure-ledger.service
+       install -m 0644 /opt/swift/deploy/swift-erasure-ledger.timer /etc/systemd/system/swift-erasure-ledger.timer
+       systemctl daemon-reload
+       systemctl enable --now swift-erasure-ledger.timer
+       systemctl list-timers swift-erasure-ledger.timer
+
+   The ledger objects live under the backups' own prefix, so the bucket
+   keeps them at least as long as the backups. Never give the
+   `erasure-ledger/` prefix a shorter lifecycle rule than the dumps. An entry
+   still unshipped after 10 minutes pages the platform responders (the API's
+   erasure-ledger watch; production only), and doctor.sh FAILs. pilot-up.sh
+   refuses a production stage that starts the API unless this timer is
+   enabled and active. Every batch is encrypted to the owner key in every
+   environment, so staging needs BACKUP_GPG_RECIPIENT_FILE and
+   BACKUP_GPG_FINGERPRINT too, or it ships nothing (and doctor.sh FAILs).
+
+   Replaying it (a restore without the live database):
+   - Fetch EVERY object under `s3://$BACKUP_BUCKET/$BACKUP_PREFIX/erasure-ledger/`.
+     The ones from before the backup you restore are harmless (each fact is
+     applied once). Fetch them all rather than guess the cut.
+   - Decrypt them on the owner's own computer, concatenate them into one file,
+     and `chmod 600` it.
+   - Copy it to the restore host and run `restore.sh --project <name>
+     --no-live-ledger --i-know-live-is-gone --ledger-from <file> <dump>`. Add
+     the two DR flags only when the live database is really gone; with it,
+     `--ledger-from` joins the live ledger.
+   - When the restore is done, shred the decrypted file on BOTH machines
+     (`shred -u <file>`, or `rm -P` on a Mac).
+
+   Every restore (drill, rehearsal or DR) also prints
+   `NOT erasure-complete for #1905/#1945 de-identifications`: the replay does not yet re-run the
+   app's own erasure passes, so those de-identifications (updates, not
+   deletes) are not re-applied to the copy. Until the follow-up lands, re-apply
+   them by hand for every closed account before anything from a restored copy
+   is used.
 
 ## 5. Restore drill, with no live overwrite
 
@@ -1078,7 +1118,14 @@ explicitly off. Beyond the earlier guards:
   a person. The poller leaves every MMG row
   untouched, and any MMG call refuses with MMG_DISABLED.
   To switch MMG on, set `MMG_DRIVER=live` and `MMG_CHECKOUT_ENABLED=1`
-  together (cash partners pay through the checkout page) and redeploy;
+  together (cash partners pay through the checkout page) and redeploy:
+  production refuses `MMG_DRIVER=live` without `MMG_CHECKOUT_ENABLED=1`,
+  since it never sends MMG charge requests and the checkout page is the
+  only MMG way to pay. The pause also counts MMG as a way to pay only
+  while the checkout is live on EVERY platform (the platform-config row
+  `billing.feeCheckout.platforms`): **never set a platform there to
+  `false` while fees run** unless pausing every partner's fee is intended
+  (one platform off pauses every fee on the server, cash included);
   turning a real card provider on also ends the pause, so do it only when
   partners can open the card pages (note the per-platform card switch: iOS
   is off unless switched on). While the launch lock below holds, production
@@ -1233,12 +1280,55 @@ serve: use the whole stack), or when Docker cannot say whether it is. Stop
 the two again with `docker compose -f deploy/docker-compose.yml stop api
 worker` before another `--data-only` run, which refuses while they run.
 
+**Address search, live (PLACES_PROVIDER=google).** Before DNS moves, prove the
+owner's key against Google from inside the API container. Three real calls:
+autocomplete "Giftland" restricted to Guyana, place details for the first
+suggestion, and one reverse geocode of a public landmark:
+
+    docker compose -f deploy/docker-compose.yml exec -T api node dist/scripts/places-smoke.js
+
+It prints PASS or FAIL per call with Google's status words only (never the
+key, a place name, an address or Google's own message) and ends with
+`PLACES SMOKE PASS`. It exits 1 when a call fails, and 2 when the container is
+not set up for Google (PLACES_PROVIDER is not `google`, or the key file is not
+wired). A FAIL names the class: `auth` is the key itself (invalid, restricted
+to the apps or to other APIs, the API not enabled in the project, or billing
+off: Places API (New) serves autocomplete and details, the Geocoding API
+serves reverse), then `quota`, `rejected`, `upstream`, `timeout`, `network` or
+`bad_response`. Do not move DNS on a FAIL: every customer search would answer
+"Address search isn't working right now. Set the place on the map."
+
+After launch the API reports the same by itself, without calling Google for
+it: `/ready` names the provider and its last known status (`ok` or `failing`,
+`since` a time; it never makes `/ready` fail), the token-gated `/health`
+detail names the last failure's class and Google status, the metric
+`swift_places_calls_total` counts every call by outcome, each failure is an
+error-level log line `places provider failure` (status words and the query's
+length, never the query), and five failures inside ten minutes open one
+platform page, "Address search is failing", which closes itself once search
+answers again and the failures have aged out of the window.
+
 ### The whole stack
 
 Once the owner's provider secrets are stored and wired (TWILIO_*,
 SMTP_PASS_FILE, OPS_ONCALL_PHONES) and DNS points at this host, run
 `./deploy/pilot-up.sh "$APPROVED_SHA"`. It ends with `PRODUCTION READY at
 exact SHA …`. Then follow section 9 for the certificate chain.
+
+**Launch: the requested revision's own pilot-up.sh (staging #14, 23 Oct).**
+After its checkout pilot-up.sh now restarts itself once from the requested
+revision's own pilot-up.sh when that differs (`pilot-up: <sha> has its own
+pilot-up.sh; restarting it`), so a newer revision's steps (the clamd start and
+EICAR proof) are never skipped; a checkout older than this fix (production
+before launch) still runs its old steps, so move it first:
+`git fetch origin main && git switch --detach "$APPROVED_SHA"`, then run
+pilot-up as above. Fallback manual check, every deploy:
+clamd healthy + EICAR proof after pilot-up
+(`docker compose -f deploy/docker-compose.yml ps clamd` healthy, and the log
+line `upload malware scanner ready: … EICAR refused`); if either is missing,
+`docker compose -f deploy/docker-compose.yml up -d --wait clamd` at once
+(uploads fail closed until it is healthy) and rerun pilot-up with the same SHA
+for the proof.
 
 ## 13. The least-privilege database logins (TA-S0-003)
 
