@@ -12,6 +12,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { color, radius, space } from '@swift/ui';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { CodeInput, DecorativeIcon, EmptyState, ErrorState, Eyebrow, LockIn, PillButton, PopupCard, PopupTitle, Screen, Spinner, StatusRail, T, type TimelineStep, cardShadow, lockInButtonStyle } from '../../../kit';
+import { touchTarget } from '../../../kit/touch-target';
 import { Stars } from '../../../kit/controls';
 import { useMoverKind, useActiveJob, useActiveJobs, useDriverAction, useRiderAction, useRateCustomer, useCourierProof, useCourierCollect, useCourierPickupProof, useCourierReturn, useCourierReturnProof, useDriverRouteLine } from '../../../hooks';
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -681,7 +682,8 @@ export function ActiveJobScreen({ navigation }: any) {
       )}
 
       <View style={{ position: 'absolute', top: insets.top, left: 0, right: 0, zIndex: 10, flexDirection: 'row', alignItems: 'center', padding: space.lg }}>
-        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10}>
+        {/* [UI-SWEEP U-P2 census] Back is 44pt on its own, not only through hitSlop. */}
+        <Pressable onPress={() => navigation?.goBack?.()} hitSlop={10} accessibilityRole="button" accessibilityLabel="Back" style={touchTarget(40)}>
           {({ pressed }) => (
             <View style={[{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: dk.card, borderWidth: 1, borderColor: dk.line, opacity: pressed ? 0.7 : 1 }, cardShadow]}>
               <Feather name="chevron-left" size={22} color={dk.text} />

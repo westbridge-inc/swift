@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { shownRatingTotals, shownRatingsFor, shownSurface } from '../rating/rating-groups';
 import type { Prisma } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { RatingService } from '../rating/rating.service';
 import { NotificationService } from '../notification/notification.service';
 import {

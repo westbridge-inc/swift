@@ -7,7 +7,9 @@
  * as CAPTURED). The server lets both proceed (order.service.ts
  * MMG_MONEY_MOVED).
  */
-export const MMG_MONEY_MOVED = ['CAPTURED', 'CLAIMED'] as const;
+// [REVIEW-F S4-2 on #2032] One money-moved set for the phone and the web (plain app file, imported as is).
+export { MMG_MONEY_MOVED } from '../../../mobile/src/modules/vendor/storeOrderRules';
+import { MMG_MONEY_MOVED } from '../../../mobile/src/modules/vendor/storeOrderRules';
 export function mmgMoneyMoved(paymentStatus: string | null | undefined): boolean {
   return (MMG_MONEY_MOVED as readonly string[]).includes(String(paymentStatus ?? ''));
 }

@@ -33,7 +33,7 @@ import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
-import { swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
+import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
@@ -1069,7 +1069,63 @@ export function DeliveryScreen() {
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {!terminal ? items
             .filter((it: any) => it.subStatus === 'PENDING')
-            .map((it: any) => (
+            .map((it: any) => isRemovalQuestion(it.substitution) ? (
+              /* [O-4 · owner 22 Oct 2026] Asked before the store accepted: nothing to swap. The
+                 customer agrees to the changed order before paying, or cancels it (free while the
+                 store has not accepted). */
+              <View
+                key={`sub-${it.id}`}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <Feather name="alert-circle" size={16} color={color.brand[600]} />
+                  <T variant="label" weight="bold" style={{ flex: 1 }}>
+                    {it.name} is out of stock
+                  </T>
+                </View>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {it.substitution?.lastItem
+                    ? `${o.vendor?.name ?? 'The store'} can't supply it.`
+                    : `${o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.`}
+                </T>
+                {removalChangeText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {removalChangeText(it.substitution)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  {it.substitution?.lastItem ? null : (
+                    <PillButton
+                      label="Continue without it"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={decideSub.isPending}
+                      disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                      onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
+                    />
+                  )}
+                  <PillButton
+                    label="Cancel order"
+                    variant="soft"
+                    size="md"
+                    style={{ flex: 1 }}
+                    loading={cancelChecking || cancelOrder.isPending}
+                    disabled={!o.canCancel}
+                    onPress={() => { void openCancelConfirmation(); }}
+                  />
+                </View>
+              </View>
+            ) : (
               <View
                 key={`sub-${it.id}`}
                 style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}

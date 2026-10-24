@@ -23,8 +23,19 @@ import {
   retryDispatch, setFulfillmentMode, setPicked, type OrderLine, type VendorOrder,
 } from '@/lib/vendor-api';
 import { statusChip, timeAgo } from './order-chip';
+// The app's own O-4 rules and words (plain file, imported as is).
+import { OUT_OF_STOCK_WORDS, canMarkOutOfStock, customerDeciding, lastLineStanding, lineStockWords, nothingToAccept } from '../../../../../mobile/src/modules/vendor/storeOrderRules';
+import { HANDOVER_WORDS, canMarkHandedToRider, handoverNeedsNoCode, pickupCheckWords } from '../../../../../mobile/src/modules/vendor/storeHandover';
+import { handedToRider } from '@/lib/store-handover-api';
+import { RiderHandoverLine } from '@/components/rider-handover-line';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
+
+/** [STORE-DASH] The board's copy of one order (its `{ orders }` page), when the board holds it. */
+export function boardOrder(board: unknown, id: string): VendorOrder | undefined {
+  const rows = (board as { orders?: unknown } | null | undefined)?.orders;
+  return Array.isArray(rows) ? (rows as VendorOrder[]).find((o) => o?.id === id) : undefined;
+}
 const PICKABLE_STATES = ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP', ...COURIER_ACTIVE];
 
 /** Mirrors the mobile app's orderActions — one source of truth for what a
@@ -35,18 +46,28 @@ function actionsFor(o: VendorOrder) {
   const isAppt = o.fulfillment === 'APPOINTMENT';
   const out: Array<{ label: string; kind: string; tone?: 'danger' }> = [];
   if (s === 'PENDING' || s === 'PLACED') {
-    out.push({ label: 'Accept', kind: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
+    // [STORE-DASH · O-4] No Accept while the customer answers an "Out of stock" question, or once
+    // every item came off (the server refuses both); Reject stays.
+    if (!customerDeciding(o) && !nothingToAccept(o)) out.push({ label: 'Accept', kind: 'accept' });
+    out.push({ label: isAppt ? 'Decline' : 'Reject', kind: 'reject', tone: 'danger' });
   } else if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) {
     out.push({ label: 'Mark complete', kind: 'complete-appointment' });
   } else if (s === 'ACCEPTED' || s === 'CONFIRMED') {
-    out.push({ label: 'Start preparing', kind: 'preparing' });
+    // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order's one step is "Paid by MMG" (below);
+    // the server refuses Start preparing for it (MMG_PAYMENT_PENDING).
+    if (!(o.paymentMethod === 'MOBILE_MONEY' && !mmgMoneyMoved(o.paymentStatus))) out.push({ label: 'Start preparing', kind: 'preparing' });
   } else if (s === 'PREPARING') {
-    out.push({ label: isPickup ? 'Ready for pickup' : 'Mark ready', kind: 'ready' });
+    out.push({ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', kind: 'ready' });
   } else if (COURIER_ACTIVE.includes(s)) {
     if (!o.preparingAt) out.push({ label: 'Start preparing', kind: 'preparing' });
-    else if (!o.readyAt) out.push({ label: 'Mark ready', kind: 'ready' });
+    else if (!o.readyAt) out.push({ label: 'Ready for delivery', kind: 'ready' });
+    // [STORE-DASH · O-2] The rider is at the counter: one tap records the hand-over.
+    else if (canMarkHandedToRider(o)) out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if ((s === 'READY' || s === 'READY_FOR_PICKUP') && isPickup) {
-    out.push({ label: 'Mark picked up', kind: 'complete-pickup' });
+    // [STORE-DASH · O-2] With the store's pickup code off: one tap after checking the name and order number.
+    out.push(handoverNeedsNoCode(o) ? { label: 'Handed to customer', kind: 'handed-to-customer' } : { label: 'Mark picked up', kind: 'complete-pickup' });
+  } else if (canMarkHandedToRider(o)) {
+    out.push({ label: 'Handed to rider', kind: 'handed-to-rider' });
   } else if (
     (s === 'READY' || s === 'READY_FOR_PICKUP')
     && o.fulfillment === 'DELIVERY'
@@ -213,7 +234,12 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const storeId = useStoreId();
   // [PERF row 8] The store's live feed re-reads this order on its events; the poll is the fallback.
   const orderPoll = useFeedPollInterval(storeId, 10_000, 30_000);
-  const order = useQuery({ queryKey: storeKey(storeId, 'order', id), queryFn: () => getOrder(id), refetchInterval: orderPoll });
+  const order = useQuery({
+    queryKey: storeKey(storeId, 'order', id), queryFn: () => getOrder(id), refetchInterval: orderPoll,
+    // [STORE-DASH · as on the phone] The window opens at once from the board's own copy of the
+    // order; the order's own read replaces it the moment it answers (isPlaceholderData).
+    placeholderData: () => boardOrder(queryClient.getQueryData(storeKey(storeId, 'orders')), id),
+  });
   const [prepTime, setPrepTime] = useState(20);
   const [pickupCode, setPickupCode] = useState('');
   // [W-25] The store's attestation carries the provider reference from its own
@@ -222,6 +248,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   const [error, setError] = useState<string | null>(null);
   const [confirmDelivered, setConfirmDelivered] = useState(false);
   const [confirmReject, setConfirmReject] = useState(false);
+  // [REVIEW-F S3-2 on #2048] The last item out of stock = Reject (out of stock), asked once.
+  const [lastOut, setLastOut] = useState(false);
 
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: storeKey(storeId, 'order', id) });
@@ -236,6 +264,8 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       if (kind === 'ready') return markReady(id);
       if (kind === 'delivered') return markDelivered(id);
       if (kind === 'complete-pickup') return completePickup(id, pickupCode.trim());
+      if (kind === 'handed-to-customer') return completePickup(id);
+      if (kind === 'handed-to-rider') return handedToRider(id);
       if (kind === 'complete-appointment') {
         const { apiFetch } = await import('@/lib/auth');
         return apiFetch(`/api/v1/vendor/orders/${id}/complete-appointment`, { method: 'PUT', body: '{}' });
@@ -263,6 +293,13 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
   // [E10] The API requires a reason on every rejection, so reject is its own
   // mutation keyed on the chosen preset — it never flows through `act` with no
   // reason. Same three presets the mobile app offers.
+  // [STORE-DASH · O-4] "Out of stock" on a waiting order: one tap asks the customer (continue
+  // without it, or cancel); the server recalculates the total only after the answer.
+  const outOfStock = useMutation({
+    mutationFn: (lineId: string) => refundLine(id, lineId),
+    onError: (e) => setError((e as Error).message),
+    onSettled: refresh,
+  });
   const reject = useMutation({
     mutationFn: (why: string) => rejectOrder(id, why),
     onError: (e) => setError((e as Error).message),
@@ -376,12 +413,51 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
       {paused && <p role="status" className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{MMG_DISPUTE_NOTICE.body}</p>}
 
       <div className="mt-4 space-y-1.5">
-        {o.items.map((it) => (
-          <div key={it.id} className="flex justify-between gap-3 text-sm">
-            <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
-            <span className="shrink-0 font-medium">{money(it.totalCustomer)}</span>
-          </div>
-        ))}
+        {o.items.map((it) => {
+          const stock = s === 'PENDING' ? lineStockWords(it) : null;
+          return (
+            <div key={it.id} className="text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                <span className="min-w-0 break-words"><b>{it.quantity}×</b> {it.name}{it.specialInstructions ? <i className="text-[var(--swift-muted)]"> — {it.specialInstructions}</i> : null}</span>
+                {/* [BUG-GUARDS C8] The row wraps at 360px: the item, then its step and price. */}
+                <span className="flex flex-wrap items-center justify-end gap-2">
+                  {!paused && lastLineStanding(o, it) && !lastOut && (
+                    <button
+                      type="button"
+                      onClick={() => setLastOut(true)}
+                      disabled={act.isPending || reject.isPending}
+                      className="min-h-9 rounded-lg border border-[var(--swift-red)]/30 px-3 text-xs font-bold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                    >
+                      {OUT_OF_STOCK_WORDS.lastButton}
+                    </button>
+                  )}
+                  {!paused && canMarkOutOfStock(o, it) && !lastLineStanding(o, it) && (
+                    <button
+                      type="button"
+                      onClick={() => outOfStock.mutate(it.id)}
+                      disabled={outOfStock.isPending || act.isPending || reject.isPending}
+                      aria-label={`${OUT_OF_STOCK_WORDS.button}: ${it.name}`}
+                      className="min-h-9 rounded-lg border border-[var(--swift-red)]/30 px-3 text-xs font-bold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                    >
+                      {OUT_OF_STOCK_WORDS.button}
+                    </button>
+                  )}
+                  <span className="font-medium">{money(it.totalCustomer)}</span>
+                </span>
+              </div>
+              {stock && <p className="mt-0.5 text-xs font-semibold text-amber-700">{stock}</p>}
+              {lastOut && lastLineStanding(o, it) && (
+                <div role="group" aria-label="Reject the order as out of stock" className="mt-2 rounded-lg bg-[var(--swift-red)]/5 p-3">
+                  <p className="text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.lastAsk}</p>
+                  <div className="mt-2 flex gap-2">
+                    <button type="button" disabled={reject.isPending} onClick={() => { setLastOut(false); reject.mutate(OUT_OF_STOCK_WORDS.lastReason); }} className="min-h-11 rounded-lg bg-[var(--swift-red)] px-4 text-sm font-semibold text-white disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastYes}</button>
+                    <button type="button" disabled={reject.isPending} onClick={() => setLastOut(false)} className="min-h-11 rounded-lg border border-[var(--swift-border)] px-4 text-sm font-semibold disabled:opacity-50">{OUT_OF_STOCK_WORDS.lastKeep}</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
       {isMmg && mmgMoneyMoved(o.paymentStatus) && <p className="mt-2 text-sm font-semibold text-[var(--swift-success)]">{mmgMovedLabel(o.paymentStatus)}</p>}
 
@@ -435,6 +511,10 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
               Call
             </a>
           )}
+          {/* [STORE-DASH · O-2] The rider's photo, first name and vehicle, checked before "Handed to rider"; then that it went. */}
+          {/* [REVIEW-F S3-1/S4-1 on #2054] Only beside "Handed to rider" (never before ready, never while paused), as on the phone. */}
+          {actions.some((a) => a.kind === 'handed-to-rider') && <div className="w-full"><RiderHandoverLine rider={o.rider} /></div>}
+          {o.handedToRiderAt && <p className="w-full text-sm font-semibold text-[var(--swift-muted)]">{HANDOVER_WORDS.handedToRider}</p>}
         </section>
       )}
 
@@ -493,103 +573,17 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           by `fulfillment`, which the API does send; every PICKUP order is
           issued a code at creation (order.service.ts). The code itself stays
           off this screen. */}
-      {o.fulfillment === 'PICKUP' && s !== 'COMPLETED' && (
-        <p className="mt-3 text-sm text-[var(--swift-muted)]">Customer collects with a pickup code.</p>
+      {/* [REVIEW-F S4-3 on #2054] Not on a closed order; with the code off, the name and order-number
+          check (never a hand-over prompt while paused — storeHandover.pickupCheckWords). */}
+      {o.fulfillment === 'PICKUP' && !['COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'].includes(s) && (
+        <p className="mt-3 text-sm text-[var(--swift-muted)]">{pickupCheckWords(o, paused) ?? 'Customer collects with a pickup code.'}</p>
       )}
 
-      {pickable && <PickList order={o} onBusy={act.isPending} />}
+      {/* [STORE-DASH] The lines are ticked on the order's own state, never on the board's copy. */}
+      {pickable && !order.isPlaceholderData && <PickList order={o} onBusy={act.isPending} />}
 
+      {/* [STORE-DASH] Payment and rider notes stay with the order; its next step is the bar at the bottom. */}
       <div className="mt-5 flex flex-wrap items-center gap-2">
-        {actions.map((a) => (
-          <span key={a.kind} className="flex items-center gap-2">
-            {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
-              <select
-                value={prepTime}
-                onChange={(e) => setPrepTime(Number(e.target.value))}
-                aria-label="Preparation time"
-                className="rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
-              >
-                {[10, 15, 20, 30, 45, 60].map((m) => <option key={m} value={m}>{m} min prep</option>)}
-              </select>
-            )}
-            {a.kind === 'complete-pickup' && (
-              <input
-                value={pickupCode}
-                onChange={(e) => setPickupCode(e.target.value)}
-                placeholder="Pickup code"
-                aria-label="Pickup code"
-                className="w-32 rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
-              />
-            )}
-            <button
-              onClick={() =>
-                a.kind === 'delivered'
-                  ? setConfirmDelivered(true)
-                  : a.kind === 'reject'
-                    ? setConfirmReject(true)
-                    : act.mutate(a.kind)}
-              aria-busy={act.isPending && act.variables === a.kind}
-              disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
-              className={`rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 ${
-                a.tone === 'danger'
-                  ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
-                  : 'bg-[var(--swift-red)] text-white hover:bg-[var(--swift-red-600)]'
-              }`}
-            >
-              {a.label}
-            </button>
-          </span>
-        ))}
-        {confirmDelivered && !paused && (
-          <div role="dialog" aria-label="Confirm store delivery" className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4">
-            <p className="text-sm font-semibold text-amber-950">Did your store hand this order to the customer?</p>
-            <p className="mt-1 text-sm text-amber-900">Only confirm after the handoff. This closes the order as delivered.</p>
-            <div className="mt-3 flex gap-2">
-              <button
-                onClick={() => {
-                  setConfirmDelivered(false);
-                  act.mutate('delivered');
-                }}
-                disabled={act.isPending}
-                className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
-              >
-                Yes, delivered
-              </button>
-              <button
-                onClick={() => setConfirmDelivered(false)}
-                disabled={act.isPending}
-                className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              >
-                Not yet
-              </button>
-            </div>
-          </div>
-        )}
-        {confirmReject && (
-          <div role="dialog" aria-label={order.data?.fulfillment === 'APPOINTMENT' ? 'Confirm booking decline' : 'Confirm order rejection'} className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
-            <p className="text-sm font-semibold text-[var(--swift-red)]">{order.data?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}</p>
-            <p className="mt-1 text-sm text-[var(--swift-muted)]">The customer is told right away — pick what happened. This can’t be undone.</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {rejectReasonsFor(order.data?.fulfillment).map((why) => (
-                <button
-                  key={why}
-                  onClick={() => reject.mutate(why)}
-                  disabled={reject.isPending}
-                  className="rounded-lg border border-[var(--swift-red)]/30 px-4 py-2 text-sm font-semibold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
-                >
-                  {why}
-                </button>
-              ))}
-              <button
-                onClick={() => setConfirmReject(false)}
-                disabled={reject.isPending}
-                className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              >
-                Keep it
-              </button>
-            </div>
-          </div>
-        )}
         {payBlockedReason && (
           <p className="w-full text-sm text-[var(--swift-muted)]">{payBlockedReason}</p>
         )}
@@ -639,7 +633,6 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
           </section>
         )}
       </div>
-      {error && <p role="alert" className="mt-3 text-sm text-[var(--swift-red)]">{error}</p>}
 
       {/* [U25] The immutable status log, oldest first, and the quoted prep time — as on the phone. */}
       {timeline.length > 0 && (
@@ -659,6 +652,105 @@ export function OrderDetail({ id, onClose }: { id: string; onClose: () => void }
         </section>
       )}
       {prepLine && <p className="mt-3 text-xs text-[var(--swift-muted)]">{prepLine}</p>}
+      {/* [STORE-DASH · owner 22 Oct "fast taps"] The next step is a big button in a bar that stays at the
+          bottom of the window while it scrolls, as on the phone (VendorOrderDetailScreen action bar). */}
+      {(actions.length > 0 || confirmDelivered || confirmReject || error) && (
+        <div data-testid="order-action-bar" className="sticky bottom-0 z-10 -mx-6 -mb-6 mt-5 flex flex-wrap items-center gap-2 border-t border-[var(--swift-border)] bg-[var(--swift-card)] px-6 py-4">
+          {!paused && customerDeciding(o) && <p role="status" className="w-full text-sm font-semibold text-amber-800">{OUT_OF_STOCK_WORDS.deciding}</p>}
+          {!paused && nothingToAccept(o) && <p role="status" className="w-full text-sm font-semibold text-[var(--swift-red)]">{OUT_OF_STOCK_WORDS.nothing}</p>}
+          {actions.map((a) => (
+            <span key={a.kind} className="flex min-w-0 flex-1 items-center gap-2">
+              {a.kind === 'accept' && o.fulfillment !== 'APPOINTMENT' && (
+                <select
+                  value={prepTime}
+                  onChange={(e) => setPrepTime(Number(e.target.value))}
+                  aria-label="Preparation time"
+                  className="rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
+                >
+                  {[10, 15, 20, 30, 45, 60].map((m) => <option key={m} value={m}>{m} min prep</option>)}
+                </select>
+              )}
+              {a.kind === 'complete-pickup' && (
+                <input
+                  value={pickupCode}
+                  onChange={(e) => setPickupCode(e.target.value)}
+                  placeholder="Pickup code"
+                  aria-label="Pickup code"
+                  className="w-32 rounded-lg border border-[var(--swift-border)] px-2 py-2 text-sm"
+                />
+              )}
+              <button
+                onClick={() =>
+                  a.kind === 'delivered'
+                    ? setConfirmDelivered(true)
+                    : a.kind === 'reject'
+                      ? setConfirmReject(true)
+                      : act.mutate(a.kind)}
+                aria-busy={act.isPending && act.variables === a.kind}
+                disabled={act.isPending || reject.isPending || (a.kind === 'complete-pickup' && pickupCode.trim().length < 4)}
+                className={`min-h-12 flex-1 rounded-xl px-5 py-3 text-base font-bold disabled:opacity-50 ${
+                  a.tone === 'danger'
+                    ? 'border border-[var(--swift-red)]/30 text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5'
+                    : 'bg-[var(--swift-red)] text-white hover:bg-[var(--swift-red-600)]'
+                }`}
+              >
+                {a.label}
+              </button>
+            </span>
+          ))}
+          {confirmDelivered && !paused && (
+            <div role="dialog" aria-label="Confirm store delivery" className="w-full rounded-xl border border-amber-300 bg-amber-50 p-4">
+              <p className="text-sm font-semibold text-amber-950">Did your store hand this order to the customer?</p>
+              <p className="mt-1 text-sm text-amber-900">Only confirm after the handoff. This closes the order as delivered.</p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => {
+                    setConfirmDelivered(false);
+                    act.mutate('delivered');
+                  }}
+                  disabled={act.isPending}
+                  className="rounded-lg bg-[var(--swift-red)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  Yes, delivered
+                </button>
+                <button
+                  onClick={() => setConfirmDelivered(false)}
+                  disabled={act.isPending}
+                  className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Not yet
+                </button>
+              </div>
+            </div>
+          )}
+          {confirmReject && (
+            <div role="dialog" aria-label={order.data?.fulfillment === 'APPOINTMENT' ? 'Confirm booking decline' : 'Confirm order rejection'} className="w-full rounded-xl border border-[var(--swift-red)]/30 bg-[var(--swift-red)]/5 p-4">
+              <p className="text-sm font-semibold text-[var(--swift-red)]">{order.data?.fulfillment === 'APPOINTMENT' ? 'Decline this booking?' : 'Reject this order?'}</p>
+              <p className="mt-1 text-sm text-[var(--swift-muted)]">The customer is told right away — pick what happened. This can’t be undone.</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {rejectReasonsFor(order.data?.fulfillment).map((why) => (
+                  <button
+                    key={why}
+                    onClick={() => reject.mutate(why)}
+                    disabled={reject.isPending}
+                    className="rounded-lg border border-[var(--swift-red)]/30 px-4 py-2 text-sm font-semibold text-[var(--swift-red)] hover:bg-[var(--swift-red)]/5 disabled:opacity-50"
+                  >
+                    {why}
+                  </button>
+                ))}
+                <button
+                  onClick={() => setConfirmReject(false)}
+                  disabled={reject.isPending}
+                  className="rounded-lg border border-[var(--swift-border)] px-4 py-2 text-sm font-semibold disabled:opacity-50"
+                >
+                  Keep it
+                </button>
+              </div>
+            </div>
+          )}
+          {error && <p role="alert" className="w-full text-sm text-[var(--swift-red)]">{error}</p>}
+        </div>
+      )}
     </div>
   );
 }

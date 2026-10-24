@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { getPlacesProvider, type PlacesProvider } from '../../providers/places/places-provider';
 import { PLACES_UNAVAILABLE_CODE, PLACES_UNAVAILABLE_MESSAGE } from '../../providers/places/places-failure';
 import {

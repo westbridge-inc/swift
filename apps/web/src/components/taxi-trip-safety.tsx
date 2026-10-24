@@ -1,8 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { TileMap } from '@/components/tile-map';
-import { rideSos } from '@/lib/customer-rides';
+import { answerCheckin, outstandingCheckin, rideSos, type GuardianCheckin } from '@/lib/customer-rides';
 import { mapLinkUrl, type Point } from '@/lib/live-tracking';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +39,39 @@ const START_CODE = /^\d{6}$/;
 
 type SosState = { kind: 'closed' } | { kind: 'asking' } | { kind: 'sending' } | { kind: 'paged' } | { kind: 'failed' };
 
+/** [WEB-TAXI] How often the page asks whether Trip Guardian is waiting on this rider (the hard check gives 2 minutes). */
+export const CHECKIN_POLL_MS = 5_000;
+
+/**
+ * [WEB-TAXI · owner 21 Oct 2026] Trip Guardian's check-in, on the web.
+ *
+ * The phone's card (TaxiScreen): raised by the order room's live event and by
+ * asking the server on arrival. The website has no order-room socket, so the
+ * page ASKS — on arrival, every few seconds while the ride is in progress, and
+ * the moment the tab is shown again — and the server decides: a check-in that
+ * was answered, escalated or belongs to another trip is null, and no card
+ * shows. With the tab closed the rider is texted instead (the server's SMS
+ * fallback), so the card is one door in, never the only one.
+ */
+function useGuardianCheckin(rideId: string, inProgress: boolean) {
+  const [checkin, setCheckin] = useState<GuardianCheckin | null>(null);
+  useEffect(() => {
+    if (!inProgress) { setCheckin(null); return; }
+    let live = true;
+    const ask = () => {
+      outstandingCheckin()
+        .then((pending) => { if (live) setCheckin(pending && pending.orderId === rideId ? pending : null); })
+        .catch(() => { /* offline or a failed read: the next ask, and the text, are the other ways in */ });
+    };
+    ask();
+    const timer = window.setInterval(ask, CHECKIN_POLL_MS);
+    const onShow = () => { if (document.visibilityState === 'visible') ask(); };
+    document.addEventListener('visibilitychange', onShow);
+    return () => { live = false; window.clearInterval(timer); document.removeEventListener('visibilitychange', onShow); };
+  }, [rideId, inProgress]);
+  return [checkin, setCheckin] as const;
+}
+
 /** A fix only if the browser already allows it, and only if it comes quickly: help is never held up by a prompt. */
 async function quickFixIfAllowed(): Promise<Point | null> {
   try {
@@ -59,6 +92,9 @@ async function quickFixIfAllowed(): Promise<Point | null> {
 
 export function TaxiTripSafety({ rideId, status, facts }: { rideId: string; status: string; facts: TaxiSafetyFacts | null }) {
   const [sos, setSos] = useState<SosState>({ kind: 'closed' });
+  const [checkin, setCheckin] = useGuardianCheckin(rideId, status === 'RIDE_IN_PROGRESS');
+  const [answering, setAnswering] = useState(false);
+  const [answerNote, setAnswerNote] = useState<string | null>(null);
   // The phone's start-code ceremony: while a driver is coming and the code is
   // unchecked, the code — or, if it is missing, a warning not to begin.
   const codeDue = !facts?.ridePinVerified && CODE_STATUSES.includes(status);
@@ -77,9 +113,43 @@ export function TaxiTripSafety({ rideId, status, facts }: { rideId: string; stat
     }
   }
 
+  // The phone's two answers. OK: the card closes (a failed send says so — the
+  // check stays open on the server and asks again). I need help: the server
+  // raises the SOS itself, and the emergency panel opens either way, with the
+  // truth about whether Swift heard.
+  async function answer(response: 'OK' | 'NEED_HELP') {
+    if (answering) return;
+    setAnswering(true);
+    setAnswerNote(null);
+    let sent = true;
+    try {
+      await answerCheckin(response);
+    } catch {
+      sent = false;
+    }
+    setAnswering(false);
+    setCheckin(null);
+    if (response === 'OK') {
+      if (!sent) setAnswerNote('Couldn’t send that — Trip Guardian will check in again.');
+      return;
+    }
+    if (!sent) setAnswerNote('Your answer didn’t send — if you need help, use Alert Swift now.');
+    setSos(sent ? { kind: 'paged' } : { kind: 'asking' });
+  }
+
   return (
     <section aria-labelledby="taxi-safety-title" className="flex flex-col gap-3 rounded-2xl border border-[var(--swift-border)] bg-[var(--swift-card)] p-4">
       <h2 id="taxi-safety-title" className="sw-heading">Ride safety</h2>
+
+      {checkin && (
+        <div role="alertdialog" aria-labelledby="taxi-checkin-title" aria-describedby="taxi-checkin-body" className="flex flex-col gap-2 rounded-xl border border-[var(--swift-border)] p-3">
+          <p id="taxi-checkin-title" className="font-semibold">Everything okay?</p>
+          <p id="taxi-checkin-body" className="sw-caption">Swift’s Trip Guardian checks in when a trip pauses or changes route. Your driver can’t see your answer.</p>
+          <button type="button" className="sw-btn sw-btn-block" disabled={answering} onClick={() => void answer('OK')}>I’m okay</button>
+          <button type="button" className="sw-btn sw-btn-outline sw-btn-block" disabled={answering} onClick={() => void answer('NEED_HELP')}>I need help</button>
+        </div>
+      )}
+      {answerNote && <p role="alert" className="sw-note sw-note-error">{answerNote}</p>}
 
       {codeDue && (
         <div className="flex flex-col gap-1">

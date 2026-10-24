@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyError, FastifyRequest, FastifyReply } from 'fastify';
 import { AppError } from '../utils/errors';
-import { ZodError } from 'zod';
+import { ZodError } from '../lib/zod';
 import { isDevelopment } from '../utils/runtime-mode';
 import { requestLogContext } from '../utils/logger-config';
 import { captureError } from '../plugins/observability';
