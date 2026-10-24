@@ -141,6 +141,14 @@ export async function publicPhoneAsked(tx: TxRaw, userId: string, vendorId: stri
   return row?.asked === true;
 }
 
+/** [FOOD-PERMIT] Does this person already hold a notice under this dedupe key? Read inside the caller's transaction:
+ *  with the wall on through the narrow action that already answers it (swift_owner_wall_notice_id), off as a plain read. */
+export async function noticeHeld(db: TxRaw & { notification: Pick<Prisma.TransactionClient['notification'], 'findFirst'> }, userId: string, dedupeKey: string): Promise<boolean> {
+  if (!ownerRlsBindEnabled()) return (await db.notification.findFirst({ where: { userId, dedupeKey }, select: { id: true } })) !== null;
+  const [held] = await db.$queryRaw<Array<{ id: string | null }>>`SELECT public.swift_owner_wall_notice_id(${userId}, ${dedupeKey}) AS id`;
+  return (held?.id ?? null) !== null;
+}
+
 /** [#1905 erasure] Remove every notice of a person being erased, from inside the erasure transaction (which
  *  holds their users row lock), whoever runs it: the person, an admin closing the account, the retry sweep.
  *  Returns how many. */

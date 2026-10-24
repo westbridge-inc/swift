@@ -1245,6 +1245,11 @@ export const vendorApi = {
   signOwnName: () => api.post('/vendor/onboarding/own-name', { accept: true, attestationVersion: OWN_NAME_DECLARATION_VERSION }),
   /** [ROLE-DOCS] Use a registered business name instead: the store asks for its registration again. */
   dropOwnName: () => api.delete('/vendor/onboarding/own-name'),
+  /** [FOOD-PERMIT · owner 24 Oct 2026] A registered restaurant's owner ticks, for ONE store (named by its id, so the tick
+   *  never lands on whichever store happens to be selected): everyone who handles food there holds a current food
+   *  handler's certificate. `version` is the server's (GET /verification/status → foodHandlerAttestation). */
+  tickFoodHandlers: (vendorId: string, version: string) =>
+    api.post('/vendor/onboarding/food-handlers', { accept: true, attestationVersion: version }, { headers: { [VENDOR_STORE_HEADER]: vendorId } }),
   // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
   toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
   toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
