@@ -16,7 +16,7 @@ import { assessFix, pushTrace, recentTrace, traceKey, recordGpsFlag, flagSentenc
 import { algoValue } from '../algo/algo-config';
 import { assessHandback, assessCompletion } from '../integrity/rider-gaming';
 import { noteLiveEta } from '../eta/promise';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { RiderType, VehicleType, EarningType, EarningStatus, type OrderStatus } from '@prisma/client';
 import { OrderService, notHeldFilter } from '../order/order.service';
 import { riderDispatchableStatusesFor, riderDispatchReadinessFilter, withheldAwaitingReadiness, dispatchHoldExpired } from '../dispatch/dispatch-trigger';

@@ -42,6 +42,30 @@ const reads = (action?: string) =>
     orderBy: { at: 'desc' },
   });
 
+// The access record is written by the admin plugin's onResponse hook, which
+// runs AFTER inject() has resolved. A fixed sleep loses that race on a loaded
+// runner (CI #2029 shard 2/4: "expected undefined to be truthy"), and a late
+// row then lands inside the NEXT test. So wait for the row itself — bounded —
+// and count only the rows the read under test added.
+const readsAfter = async (action: string, before: number) => {
+  const deadline = Date.now() + 10_000;
+  let rows = await reads(action);
+  while (rows.length <= before && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    rows = await reads(action);
+  }
+  return rows;
+};
+
+// Absence needs a clock that is not a guess: a RECORDED read made after the
+// read under test, waited for until its row has landed. Only then is "no new
+// row" evidence rather than impatience.
+const recordedSentinelRead = async () => {
+  const before = (await reads('GET /users')).length;
+  expect((await call('GET', '/api/v1/admin/users?limit=1')).statusCode).toBe(200);
+  expect((await readsAfter('GET /users', before)).length, 'the sentinel read was recorded').toBe(before + 1);
+};
+
 beforeAll(async () => {
   app = Fastify({ logger: false });
   registerErrorHandler(app);
@@ -82,10 +106,10 @@ afterAll(async () => {
 
 describe('[ADM-007] looking at a person leaves a record', () => {
   it('opening the customer list is recorded — actor, action, capability and purpose', async () => {
+    const before = (await reads('GET /users')).length;
     const res = await call('GET', '/api/v1/admin/users?limit=1');
     expect(res.statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 200));
-    const [row] = await reads('GET /users');
+    const [row] = await readsAfter('GET /users', before);
     expect(row, 'a record for the read').toBeTruthy();
     expect(row!.actorUserId).toBe(userIds[0]);
     expect(row!.capability).toBe('user.read');
@@ -95,10 +119,10 @@ describe('[ADM-007] looking at a person leaves a record', () => {
 
   it('opening ONE person names them as the subject', async () => {
     const subject = await app.prisma.user.findFirstOrThrow({ where: { id: userIds[0] } });
+    const before = (await reads('GET /users/:id')).length;
     const res = await call('GET', `/api/v1/admin/users/${subject.id}`);
     expect(res.statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 200));
-    const [row] = await reads('GET /users/:id');
+    const [row] = await readsAfter('GET /users/:id', before);
     expect(row).toBeTruthy();
     expect(row!.subjectId).toBe(subject.id);
   });
@@ -107,7 +131,7 @@ describe('[ADM-007] looking at a person leaves a record', () => {
     const before = (await reads('GET /users/:id')).length;
     const res = await call('GET', '/api/v1/admin/users/no-such-person');
     expect(res.statusCode).toBe(404);
-    await new Promise((r) => setTimeout(r, 200));
+    await recordedSentinelRead();
     expect((await reads('GET /users/:id')).length).toBe(before);
   });
 
@@ -115,24 +139,25 @@ describe('[ADM-007] looking at a person leaves a record', () => {
     const before = (await reads()).length;
     expect((await call('GET', '/api/v1/admin/dashboard/overview')).statusCode).toBe(200);
     expect((await call('GET', '/api/v1/admin/vendors')).statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 200));
-    expect((await reads()).length).toBe(before);
+    await recordedSentinelRead();
+    expect((await reads()).length, 'only the sentinel read added a row').toBe(before + 1);
   });
 
   it('a stated reason becomes the purpose, where the route asks for one', async () => {
+    const before = (await reads('GET /orders')).length;
     const res = await call('GET', '/api/v1/admin/orders?limit=1', { 'x-swift-reason': 'Fraud review case 4182, customer complaint' });
     expect(res.statusCode).toBe(200);
-    await new Promise((r) => setTimeout(r, 200));
-    const [row] = await reads('GET /orders');
+    const [row] = await readsAfter('GET /orders', before);
+    expect(row, 'a record for the read').toBeTruthy();
     expect(row!.purpose).toBe('Fraud review case 4182, customer complaint');
   });
 });
 
 describe('[ADM-007] the record cannot be edited by the person who left it', () => {
   it('an access row is append-only at the database', async () => {
+    const before = (await reads('GET /users')).length;
     await call('GET', '/api/v1/admin/users?limit=1');
-    await new Promise((r) => setTimeout(r, 200));
-    const [row] = await reads('GET /users');
+    const [row] = await readsAfter('GET /users', before);
     expect(row).toBeTruthy();
     await expect(app.prisma.sensitiveReadLog.update({ where: { id: row!.id }, data: { purpose: 'something else' } }))
       .rejects.toThrow(/append-only/);
@@ -142,9 +167,10 @@ describe('[ADM-007] the record cannot be edited by the person who left it', () =
   });
 
   it('retention goes through the same named purge the audit trail uses', async () => {
+    const before = (await reads('GET /users')).length;
     await call('GET', '/api/v1/admin/users?limit=1');
-    await new Promise((r) => setTimeout(r, 200));
-    const [row] = await reads('GET /users');
+    const [row] = await readsAfter('GET /users', before);
+    expect(row, 'a record for the read').toBeTruthy();
     const removed = await purgeSensitiveReadLogs(app.prisma, { id: row!.id }, 'retention:adm007-suite');
     expect(removed).toBe(1);
     await expect(purgeSensitiveReadLogs(app.prisma, { id: 'x' }, 'no')).rejects.toThrow(/must name its reason/);

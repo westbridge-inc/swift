@@ -2,6 +2,8 @@
 export interface HubStore {
   id?: string; name?: string; vendorType?: string; status?: string; isVerified?: boolean;
   isCurrentlyOpen?: boolean; acceptingOrders?: boolean; selfDeliveryEnabled?: boolean;
+  /** [O-2] "Ask for the pickup code" (absent on an older server). */
+  requirePickupCode?: boolean;
   operatingHours?: unknown; _count?: { orders?: number; items?: number };
 }
 

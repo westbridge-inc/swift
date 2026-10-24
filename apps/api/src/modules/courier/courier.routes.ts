@@ -8,7 +8,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
@@ -473,7 +473,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       invalidStatus: courierNotCancellable,
       // [owner #50] The sender's cancel follows the one cancellation rule on
       // the locked row: free while no rider has taken the parcel, inside the
-      // five-minute window, or when the rider is very late — otherwise refused
+      // one-minute window, or when the rider is very late — otherwise refused
       // (contact the rider). Never a fee.
       customerCancel: true,
     });

@@ -49,6 +49,70 @@ export interface PartnerPricing {
   franchise: { minLocations: number; discountPct: number } | null;
   /** @deprecated Conflated numbers kept for older apps — never read them. */
   weekly?: Record<string, number | null>;
+  /** [row 628] The weekly fee words shown before sign-up, and the tick. Absent from an API that predates the tick. */
+  feeTerms?: FeeTerms;
+}
+
+/** [COORD ruling 22 Oct 2026 · row 628] The server's own words about the weekly fee — what it
+ *  covers, when it starts, how it is paid, the 14-day rule — and the tick beside them. The
+ *  server anchors the consent row to exactly these words (weekly_fee_acknowledgement), so the
+ *  app shows them as served and never writes its own. */
+export interface FeeTerms {
+  version: string;
+  items: { heading: string; text: string }[];
+  tick: string;
+}
+
+/** What sign-up sends for the tick: the words' version and the fee on screen. The server
+ *  refuses an amount that is not its quote right now, before anything is written. */
+export interface WeeklyFeeAck {
+  version: string;
+  amount: number;
+  currencyCode: string;
+}
+
+/**
+ * The weekly-fee tick for the fee on screen:
+ *  - `none`: the server serves no words (an API older than the tick) — nothing to tick, nothing sent;
+ *  - `invalid`: it serves something that is not them — refused, like a price it could not confirm;
+ *  - `tick`: the words to show, the `key` a tick is given to (the words and the amount: a new
+ *    amount or new words clear it), and the `ack` sign-up sends once ticked.
+ */
+export type FeeTick =
+  | { kind: 'none' }
+  | { kind: 'invalid' }
+  | { kind: 'tick'; terms: FeeTerms; key: string; ack: WeeklyFeeAck };
+
+const nonEmpty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
+
+function validFeeTerms(value: unknown): value is FeeTerms {
+  const t = value as FeeTerms | null;
+  return !!t && typeof t === 'object' && nonEmpty(t.version) && nonEmpty(t.tick)
+    && Array.isArray(t.items) && t.items.length > 0 && t.items.every((i) => !!i && nonEmpty(i.heading) && nonEmpty(i.text));
+}
+
+/** The tick for `rate` (the quote the gate confirmed), or `none` while there is no confirmed quote. */
+export function feeTick(pricing: PartnerPricing | null | undefined, rate: number | null): FeeTick {
+  if (!pricing || pricing.feeTerms === undefined || rate === null) return { kind: 'none' };
+  if (!validFeeTerms(pricing.feeTerms) || !isRate(rate) || !nonEmpty(pricing.currencyCode)) return { kind: 'invalid' };
+  const terms = pricing.feeTerms;
+  const ack = { version: terms.version, amount: rate, currencyCode: pricing.currencyCode };
+  return { kind: 'tick', terms, key: `${ack.version}|${ack.currencyCode}|${ack.amount}`, ack };
+}
+
+/** What the disabled submit control says while the fee is not ticked, or its words cannot be shown. */
+export const FEE_TICK_COPY = {
+  ask: 'Tick “I understand the weekly fee” first',
+  invalid: 'Couldn’t load the weekly fee terms — try again later',
+} as const;
+
+/** The server's refusals of the tick, named so a screen can show its words and refresh the fee. */
+export const FEE_TICK_ERRORS: readonly string[] = ['WEEKLY_FEE_ACK_REQUIRED', 'WEEKLY_FEE_CHANGED', 'WEEKLY_FEE_TERMS_CHANGED'];
+
+/** The server's own words for a refused tick (the fee changed since it was read, or new words), else null. */
+export function feeTickError(error: unknown): string | null {
+  const body = (error as { response?: { data?: { error?: { code?: string; message?: string } } } } | null)?.response?.data?.error;
+  return body?.code && FEE_TICK_ERRORS.includes(body.code) ? body.message ?? 'The weekly fee changed. Read it again and tick to continue.' : null;
 }
 
 /** What a business is quoted: its tier today and the steps it can move along. */

@@ -429,6 +429,10 @@ export function assertMmgFulfilmentAllowed(
   }
 }
 
+/** [O-3 · REVIEW-F S4-2 on #2024] How close to its time a pre-order's accept may also start its
+ *  preparation. Further ahead, the store accepts now and taps "Start preparing" when it is time. */
+export const SCHEDULED_PREP_LEAD_MINUTES = 60;
+
 /**
  * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
  * store order the store has just accepted (or, for MMG, just marked "Paid by
@@ -440,10 +444,15 @@ export function assertMmgFulfilmentAllowed(
  * gate: the seam re-decides the next hop with its own gates on the locked row.
  */
 export function preparationMayStart(
-  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'>,
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'> & { scheduledFor?: Date | null },
+  now: Date = new Date(),
 ): boolean {
   if (order.fulfillment === 'APPOINTMENT') return false;
   if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
+  // [O-3 · REVIEW-F S4-2 on #2024] A pre-order for later (SCHEDULED_ORDERS_ENABLED, off at launch) is
+  // accepted now and prepared near its time: the walk stops at ACCEPTED while the slot is more than
+  // SCHEDULED_PREP_LEAD_MINUTES away, and the store's "Start preparing" starts it.
+  if (order.scheduledFor && order.scheduledFor.getTime() - now.getTime() > SCHEDULED_PREP_LEAD_MINUTES * 60_000) return false;
   try {
     assertMmgFulfilmentAllowed(order, 'PREPARING');
     return true;
@@ -506,8 +515,10 @@ export function holdWindowMs(): number | null {
   // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
   // env examples say 5 since #792). The code defaulting 2 meant an env that
   // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (FREE_CANCEL_WINDOW_MIN = 5) outlived the hold, putting
-  // orders on the vendor board while still free to cancel.
+  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
+  // putting orders on the vendor board while still free to cancel. The boot
+  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
+  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
   const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
@@ -2761,7 +2772,7 @@ export class OrderService {
           };
           const verdict = cancellationVerdict(policyOrder, now);
           // [owner #46/#50] Not the customer's to cancel any more (the store
-          // accepted, or the five-minute window of a ride, parcel or booking
+          // accepted, or the one-minute window of a ride, parcel or booking
           // has passed): refused before anything is written, in the words the
           // apps show as-is.
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);

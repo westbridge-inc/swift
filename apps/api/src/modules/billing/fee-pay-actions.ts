@@ -6,6 +6,7 @@ import { payAheadAllows } from './pay-ahead';
 import { weeklyFeeAmount } from './subscription-fee';
 import { OPERABLE_STATUSES } from '../subscription/operate-gate';
 import type { CardPayAction } from './card-pay-action';
+import { FEE_CHECKOUT_PLATFORMS_KEY, platformSwitches, type PlatformSwitches } from './fee-checkout-switch';
 
 // ---------------------------------------------------------------------------
 // The ways a partner can pay the weekly fee IN THE APP, decided in one place
@@ -28,8 +29,7 @@ export type PayAction =
   | { id: 'MMG_CHECKOUT'; state: 'off' }
   | CardPayAction;
 
-/** The per-platform switch: {"ios": true, "android": true, "web": true}. */
-export const FEE_CHECKOUT_PLATFORMS_KEY = 'billing.feeCheckout.platforms';
+export { FEE_CHECKOUT_PLATFORMS_KEY };
 const SWITCH_TTL_MS = 60_000;
 /** Paying rejoins a CHURNED account; PAUSED (billing stopped) and CANCELLED do not pay. */
 const PAYABLE: ReadonlySet<SubscriptionStatus> = new Set<SubscriptionStatus>([...OPERABLE_STATUSES, 'SUSPENDED', 'CHURNED']);
@@ -50,43 +50,15 @@ export function checkoutAmountGyd(fee: { weeklyFeeGyd: number; amountDueGyd: num
   return Math.ceil(Math.round(owed * 100) / 100);
 }
 
-type PlatformSwitches = Record<'ios' | 'android' | 'web', boolean>;
-const PLATFORMS = ['ios', 'android', 'web'] as const;
 let switchCache: { at: number; switches: PlatformSwitches } | null = null;
 /** Tests reset the one-minute cache of the per-platform switch. */
 export function resetFeeCheckoutSwitchCache(): void {
   switchCache = null;
 }
 
-/** The switch row as read, at most once a minute: a missing row, or a
- *  platform missing from it, is ON (owner ruling "3 b"). [DS633] Only a real
- *  boolean counts: any other value for a platform (the string "false"
- *  included) switches that platform OFF, and a row that is not an object
- *  switches every platform OFF, each with a warning, so a kill switch written
- *  with the wrong type still kills. */
-function platformSwitches(row: { value: unknown } | null): PlatformSwitches {
-  if (!row) return { ios: true, android: true, web: true };
-  const value = row.value;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY }, '[MMG checkout] the per-platform switch is not an object of true/false values; the MMG checkout is OFF on every platform until it is corrected');
-    return { ios: false, android: false, web: false };
-  }
-  const switches = { ios: true, android: true, web: true };
-  for (const platform of PLATFORMS) {
-    if (!Object.prototype.hasOwnProperty.call(value, platform)) continue;
-    const on = (value as Record<string, unknown>)[platform];
-    if (typeof on === 'boolean') {
-      switches[platform] = on;
-    } else {
-      switches[platform] = false;
-      log().warn({ key: FEE_CHECKOUT_PLATFORMS_KEY, platform }, '[MMG checkout] a per-platform switch value is not true or false; the MMG checkout is OFF on that platform until it is corrected');
-    }
-  }
-  return switches;
-}
-
 /** A missing row, or a platform missing from it, is ON (owner ruling "3 b");
- *  `false`, or any value that is not a real boolean, switches a platform off. */
+ *  `false`, or any value that is not a real boolean, switches a platform off.
+ *  The row is read at most once a minute (platformSwitches: fee-checkout-switch.ts). */
 export async function feeCheckoutPlatforms(prisma: Pick<PrismaClient, 'platformConfig'>): Promise<Record<'ios' | 'android' | 'web', boolean>> {
   const now = Date.now();
   if (!switchCache || now - switchCache.at > SWITCH_TTL_MS) {

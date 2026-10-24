@@ -14,7 +14,7 @@ import { isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-clas
 import { assessFix, pushTrace, traceKey, recordGpsFlag, flagSentence } from '../dispatch/gps-plausibility';
 import { algoValue } from '../algo/algo-config';
 import { explainEarning } from '../../utils/explain-earning';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { OrderStatus, EarningType, EarningStatus, RideClass } from '@prisma/client';
 import { OrderService } from '../order/order.service';
 import { earningsWindow } from '../order/earnings-window';

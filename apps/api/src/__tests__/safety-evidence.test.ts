@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { UserRole } from '@prisma/client';
 import { prismaPlugin } from '../plugins/prisma';
 import { redisPlugin } from '../plugins/redis';
@@ -22,6 +24,19 @@ grantSuiteCapability('ddl');
 // DATABASE (Postgres triggers — attacked here with raw Prisma writes), every
 // content view requires a logged reason, and retention only ever deletes
 // unsealed case-less bundles.
+
+/** The CREATE OR REPLACE FUNCTION statement of `name` in the newest migration that defines it. */
+function newestDefinitionOf(name: string): string {
+  const dir = join(process.cwd(), 'prisma/migrations');
+  const pattern = new RegExp(`CREATE OR REPLACE FUNCTION ${name}\\([^)]*\\)[\\s\\S]*?\\$\\$ LANGUAGE \\w+(?: STABLE)?;`);
+  for (const migration of readdirSync(dir).filter((d) => /^\d{14}_/.test(d)).sort().reverse()) {
+    let sql: string;
+    try { sql = readFileSync(join(dir, migration, 'migration.sql'), 'utf8'); } catch { continue; }
+    const found = sql.match(pattern);
+    if (found) return found[0];
+  }
+  throw new Error(`no migration defines ${name}`);
+}
 
 let app: FastifyInstance;
 const userIds: string[] = [];
@@ -84,15 +99,9 @@ beforeAll(async () => {
   // the seal triggers live in the migration (prod's source of truth, replay-
   // verified by the Migration Replay job). Install them here idempotently so
   // THIS suite exercises the real database refusals under any DB setup.
-  await app.prisma.$executeRawUnsafe(`
-    CREATE OR REPLACE FUNCTION evidence_item_block_sealed() RETURNS trigger AS $$
-    BEGIN
-      IF OLD."sealedAt" IS NOT NULL THEN
-        RAISE EXCEPTION 'evidence item % is sealed — sealed evidence is immutable', OLD."id";
-      END IF;
-      IF (TG_OP = 'DELETE') THEN RETURN OLD; END IF;
-      RETURN NEW;
-    END $$ LANGUAGE plpgsql`);
+  // The sealed-item law as its newest migration writes it, with the account erasure's one exception (read from
+  // the file, so this suite never installs an older copy over the migrated one).
+  for (const name of ['swift_erased_person', 'evidence_item_block_sealed']) await app.prisma.$executeRawUnsafe(newestDefinitionOf(name));
   await app.prisma.$executeRawUnsafe(`DROP TRIGGER IF EXISTS evidence_item_no_mutation ON "EvidenceItem"`);
   await app.prisma.$executeRawUnsafe(`CREATE TRIGGER evidence_item_no_mutation BEFORE UPDATE OR DELETE ON "EvidenceItem" FOR EACH ROW EXECUTE FUNCTION evidence_item_block_sealed()`);
   await app.prisma.$executeRawUnsafe(`

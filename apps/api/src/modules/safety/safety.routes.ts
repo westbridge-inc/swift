@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { scanUpload } from '../../lib/malware-scan';
 import { recordUnscannedUpload } from '../../lib/upload-scan-debt';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { SosService, LIVE_SOS_STATUSES } from './sos.service';
 import { GuardianService } from './guardian.service';
 import { LivenessService } from './liveness.service';
@@ -407,6 +407,39 @@ export async function safetyRoutes(app: FastifyInstance) {
   // be able to learn "no", not just "yes".
   app.get('/guardian/checkin', auth, async (request) => {
     return { success: true, data: await guardian.outstandingCheckin(request.user.userId) };
+  });
+
+  // [WEB-TAXI · owner 21 Oct 2026] The texted answer link (guardian-delivery
+  // passengerCheckinSms): a passenger no push reached answers here WITHOUT
+  // signing in — a sign-in code would eat the deadline. UNAUTHENTICATED BY
+  // DESIGN, like the trip share: the one-time secret of ONE ask IS the
+  // credential, it answers only that waiting check-in, and every miss is the
+  // same 404 (no oracle).
+  //
+  // [REVIEW-F S3-1 · F-027-17] NO rate limit stands between a person and HELP,
+  // and Guyana's carrier NAT puts many riders behind one address: a VALID
+  // answer — "I need help" above all, and "I'm OK" too, whose loss would only
+  // raise a false alarm — is never refused by a limit. Only MISSES are counted,
+  // per address; an address past CHECKIN_LINK_MISS_LIMIT misses in ten minutes
+  // is answered 429 for its further misses. The secret is 128 bits: the count
+  // is a brake on noise, not the guard against guessing.
+  const CHECKIN_LINK_MISS_LIMIT = 50;
+  const CHECKIN_LINK_MISS_WINDOW_S = 600;
+  app.post('/public/checkin', { config: { rateLimit: false as const } }, async (request, reply) => {
+    const body = z.object({ ref: z.string().min(1).max(64), secret: z.string().min(1).max(64), response: z.enum(['OK', 'NEED_HELP']) }).parse(request.body ?? {});
+    const answer = await guardian.answerByLink(body.ref, body.secret, body.response);
+    if (answer) return { success: true, data: answer };
+    const missKey = `guardian-link-miss:${request.ip}`;
+    const misses = await app.redis.incr(missKey).then(async (n) => {
+      if (n === 1) await app.redis.expire(missKey, CHECKIN_LINK_MISS_WINDOW_S);
+      return n;
+    }).catch(() => 0);
+    if (misses > CHECKIN_LINK_MISS_LIMIT) {
+      reply.code(429);
+      return { success: false, error: { code: 'TOO_MANY_ATTEMPTS', message: 'Too many attempts from this connection. If you are in danger, call 911.' } };
+    }
+    reply.code(404);
+    return { success: false, error: { code: 'CHECKIN_NOT_AVAILABLE', message: 'This safety check is already closed, or the link is not valid. If you are in danger, call 911.' } };
   });
 
   // [F-028-19] NOT lifeSafety. The exemption exists so a throttle can never

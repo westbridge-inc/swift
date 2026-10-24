@@ -289,6 +289,8 @@ describe('with the routing engine: the road itself', () => {
     ['the engine finds no route', async () => new Response(JSON.stringify({ code: 'NoRoute', routes: [] }))],
     ['the answer is not JSON', async () => new Response('<html>')],
     ['the route has no geometry', async () => new Response(JSON.stringify({ code: 'Ok', routes: [{ distance: 10 }] }))],
+    // REVIEW-G #2016 S4-1: only an 'Ok' answer is a road, even when another code arrives with a usable geometry.
+    ['the engine says it is not Ok but still sends a line', async () => new Response(JSON.stringify({ code: 'InvalidQuery', routes: [{ distance: 4100, duration: 600, geometry: { type: 'LineString', coordinates: [[-58.6, 4.4], [-58.59, 4.41]] } }] }))],
     ['a point is not a number', osrmLine([[-58.6, 4.4], ['-58.6', 4.41]])],
     ['a point is not finite', osrmLine([[-58.6, 4.4], [null, 4.41]])],
     ['a point is off the globe', osrmLine([[-58.6, 4.4], [-58.6, 91]])],

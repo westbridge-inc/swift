@@ -14,7 +14,7 @@ import { resolveVerificationObject } from '../verification/object-authority';
 import { assertPromotable } from '../vendor/vendor-tier';
 import { staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { bindTenantTransaction } from '../../plugins/prisma';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { isCategoryIconKey } from '../discovery/category-icon-keys';
 import { Prisma, UserRole, UserStatus, VendorStatus, VendorType, RiderType, OrderStatus, OrderType, SettlementStatus, CashSettlementStatus, SubscriptionStatus, SubscriptionType, DiscountType, VerificationDocumentStatus, ClaimStatus, ReturnStatus, RideClass, type PrismaClient } from '@prisma/client';
 import { withLiveDocuments } from './live-documents';
@@ -138,7 +138,9 @@ const configValueSchema = z.object({
   // stray blob can't bloat the table or a response. (No key drives live
   // behaviour today — real config is CountryConfig — so we bound rather than
   // allowlist; add a semantic allowlist when a key starts gating behaviour.)
-  value: z.any().refine(
+  // `.optional()`: zod 4 refuses an absent z.any() key that zod 3 let through
+  // (as undefined); the 16KB bound below is unchanged.
+  value: z.any().optional().refine(
     (v) => { try { return JSON.stringify(v ?? null).length <= 16_384; } catch { return false; } },
     'Config value must be JSON-serialisable and under 16KB',
   ),
@@ -253,7 +255,9 @@ const createZoneSchema = z.object({
   name: z.string().trim().min(1).max(100),
   description: z.string().max(500).optional(),
   // GeoJSON blob — stored as JSON, shape owned by the maps layer
-  boundary: z.any(),
+  // `.optional()` keeps zod 3's reading of an absent boundary (undefined);
+  // zod 4 would refuse the missing key.
+  boundary: z.any().optional(),
   deliveryBaseFee: z.number().min(0).optional(),
   deliveryPerKm: z.number().min(0).optional(),
   surgeMultiplier: z.number().min(0.5).max(10).optional(),
@@ -298,7 +302,7 @@ const broadcastSchema = z.object({
   title: z.string().trim().min(1).max(150),
   body: z.string().trim().min(1).max(1000),
   role: z.nativeEnum(UserRole).optional(),
-  data: z.record(z.unknown()).optional(),
+  data: z.record(z.string(), z.unknown()).optional(),
   /** [REPORT-021 F-021-03] Every broadcast declares its PURPOSE. 'service'
    *  = operational notices (goes to everyone); 'marketing' = offers/promos —
    *  delivered ONLY to subjects whose marketing consent is granted at the
@@ -5283,7 +5287,7 @@ export async function adminRoutes(app: FastifyInstance) {
       agentRef: z.string().trim().max(200).optional(),
       payerMsisdn: z.string().trim().max(30).optional(),
       verifiedInPortal: z.literal(true, {
-        errorMap: () => ({ message: 'Manual credits require verifying the receipt in the MMG portal/statement first (law 26.5).' }),
+        error: 'Manual credits require verifying the receipt in the MMG portal/statement first (law 26.5).',
       }),
     }).parse(request.body ?? {});
     const { AgentCashService } = await import('../billing/agent-cash.service');

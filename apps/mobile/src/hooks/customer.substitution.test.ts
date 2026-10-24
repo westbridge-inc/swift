@@ -76,5 +76,6 @@ describe('[L09 · M028] deciding a substitute refreshes the order the screen sho
 it('only the permission-aware client opts into the swap response', async () => {
   await customerApi.getOrder('order-7');
   expect(seen[0]?.url).toBe('/customer/orders/order-7');
-  expect(seen[0]?.params).toEqual({ swapDecisions: 'v1' });
+  // [O-4] v2: this build renders the pre-accept removal question too (a v1 client is served a legacy line).
+  expect(seen[0]?.params).toEqual({ swapDecisions: 'v2' });
 });

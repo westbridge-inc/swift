@@ -8,10 +8,11 @@
 // directly instead (order-dispute, delivery-owner, appointmentTime).
 // ---------------------------------------------------------------------------
 import { withoutForwardWorkWhilePaused } from '../../../mobile/src/modules/vendor/order-dispute';
+import { customerDeciding, mmgAwaitingPayment, nothingToAccept } from '../../../mobile/src/modules/vendor/storeOrderRules';
 import { canVendorConfirmDelivered } from '../../../mobile/src/modules/vendor/screens/delivery-owner';
 import { addAppointmentDays, appointmentDayKey } from '../../../mobile/src/lib/appointmentTime';
 
-export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment';
+export type VendorOrderActionKind = 'accept' | 'preparing' | 'ready' | 'delivered' | 'reject' | 'complete-pickup' | 'complete-appointment' | 'confirm-payment' | 'handed-to-rider' | 'handed-to-customer';
 
 const COURIER_ACTIVE = ['RIDER_ASSIGNED', 'RIDER_EN_ROUTE_PICKUP', 'RIDER_ARRIVED_PICKUP'];
 
@@ -25,17 +26,25 @@ export function statusActions(order: any): { label: string; action: VendorOrderA
   const s = (order?.status || '').toUpperCase();
   const isPickup = order?.fulfillment === 'PICKUP';
   const isAppt = order?.fulfillment === 'APPOINTMENT';
-  if (s === 'PENDING' || s === 'PLACED')
+  if (s === 'PENDING' || s === 'PLACED') {
+    // [STORE-DASH · O-4] While the customer answers an "Out of stock" question, or once every item
+    // came off, the store cannot accept (the server refuses: CUSTOMER_DECIDING / NOTHING_TO_ACCEPT).
+    if (customerDeciding(order) || nothingToAccept(order)) return [{ label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
     return [{ label: 'Accept', action: 'accept' }, { label: isAppt ? 'Decline' : 'Reject', action: 'reject' }];
+  }
   // Appointments skip prepare/ready — accepting books the slot, then the vendor marks it done.
   if (isAppt && (s === 'ACCEPTED' || s === 'CONFIRMED')) return [{ label: 'Mark complete', action: 'complete-appointment' }];
+  // [STORE-DASH · REVIEW-F S4-1 on #2024] An unpaid MMG order moves only after "Paid by MMG" (the server
+  // refuses Start preparing with MMG_PAYMENT_PENDING), so that is its one step, on the card's MMG block.
+  if ((s === 'ACCEPTED' || s === 'CONFIRMED') && mmgAwaitingPayment(order)) return [];
   if (s === 'ACCEPTED' || s === 'CONFIRMED') return [{ label: 'Start preparing', action: 'preparing' }];
-  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Mark ready', action: 'ready' }];
+  // [STORE-DASH · owner 22 Oct 2026] The button names the next step in the owner's words: ready for pickup or for delivery.
+  if (s === 'PREPARING') return [{ label: isPickup ? 'Ready for pickup' : 'Ready for delivery', action: 'ready' }];
   // A rider claimed the order before the kitchen tapped anything (the normal
   // case when movers are close) — the buttons keep working via timestamps.
   if (COURIER_ACTIVE.includes(s)) {
     if (!order?.preparingAt) return [{ label: 'Start preparing', action: 'preparing' }];
-    if (!order?.readyAt) return [{ label: 'Mark ready', action: 'ready' }];
+    if (!order?.readyAt) return [{ label: 'Ready for delivery', action: 'ready' }];
     return [];
   }
   // Takeaway: the vendor closes the order when the customer collects it (no rider).

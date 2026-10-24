@@ -288,6 +288,7 @@ const PENDING_ELSEWHERE: Record<string, string> = {
 const KNOWN: Record<string, string> = {
   'modules/mover/screens/ActiveJobScreen.tsx | Nobody at the door': 'A button that records the cash outcome "nobody at the door" for a job already on screen, not an empty state.',
   'modules/vendor/screens/VendorOps.tsx | Nothing waiting': 'pendingOrders is numericFact(analytics?.pendingOrders): null when the analytics read failed or lacks the figure (its own branch says so); 0 only when the server counted none.',
+  'modules/vendor/screens/VendorMenuScreen.tsx | No items yet.': 'A row of the windowed menu list (SPEED 22 Oct): the list, and so this row, renders only once the menu read has data; a failed first read shows the ErrorState instead (menuQ.isError && !menuQ.data), and a failed re-read keeps the last menu under its own "Showing the menu from the last check" line, exactly as before the list was windowed.',
   'modules/movement/screens/TaxiScreen.tsx | No eligible driver available for this request': 'With no supply snapshot, supplyNone can only be the server refusing this request with NO_DRIVERS_NEARBY: the message repeats that refusal, it does not read the counts.',
 };
 

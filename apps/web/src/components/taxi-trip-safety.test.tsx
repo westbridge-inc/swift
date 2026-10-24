@@ -12,6 +12,8 @@ const FACTS: TaxiSafetyFacts = { ridePin: '482913', ridePinVerified: false, driv
 
 beforeEach(() => {
   vi.spyOn(rides, 'rideSos').mockResolvedValue({ status: 'ACTIVE', sosAlertId: 'sos-1' });
+  vi.spyOn(rides, 'outstandingCheckin').mockResolvedValue(null);
+  vi.spyOn(rides, 'answerCheckin').mockResolvedValue({ escalated: false });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -112,5 +114,84 @@ describe('SOS', () => {
     render(<TaxiTripSafety rideId="ride-1" status={status} facts={FACTS} />);
     expect(screen.queryByRole('button', { name: 'Emergency — get help now' })).toBeNull();
     expect(screen.queryByRole('img', { name: /driver’s position/ })).toBeNull();
+  });
+});
+
+// [WEB-TAXI · owner 21 Oct 2026] Trip Guardian's check-in on the trip page:
+// the phone's card, raised by asking the server (the website has no order-room
+// socket), answered at the phone's endpoint, with the phone's honest failures.
+describe('Trip Guardian check-in', () => {
+  const PENDING = { sessionId: 's-1', orderId: 'ride-1', level: 'HARD' as const, requestedAt: '2026-10-21T12:00:00.000Z', deadlineAt: '2026-10-21T12:05:00.000Z' };
+
+  it('asks the server on arrival during the ride and shows the phone’s card', async () => {
+    vi.mocked(rides.outstandingCheckin).mockResolvedValue(PENDING);
+    render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+    const card = await screen.findByRole('alertdialog', { name: 'Everything okay?' });
+    expect(card.textContent).toContain('Swift’s Trip Guardian checks in when a trip pauses or changes route. Your driver can’t see your answer.');
+    expect(screen.getByRole('button', { name: 'I’m okay' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'I need help' })).toBeTruthy();
+  });
+
+  it('keeps asking while the ride is in progress, and again when the tab is shown', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+      await waitFor(() => expect(rides.outstandingCheckin).toHaveBeenCalledTimes(1));
+      vi.mocked(rides.outstandingCheckin).mockResolvedValue(PENDING);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await screen.findByRole('alertdialog', { name: 'Everything okay?' })).toBeTruthy();
+      const before = vi.mocked(rides.outstandingCheckin).mock.calls.length;
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(vi.mocked(rides.outstandingCheckin).mock.calls.length).toBe(before + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['DRIVER_EN_ROUTE', 'DRIVER_ARRIVED', 'COMPLETED'])('does not ask outside the ride itself (%s)', async (status) => {
+    render(<TaxiTripSafety rideId="ride-1" status={status} facts={FACTS} />);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(rides.outstandingCheckin).not.toHaveBeenCalled();
+  });
+
+  it('a check-in for another trip is not this trip’s card', async () => {
+    vi.mocked(rides.outstandingCheckin).mockResolvedValue({ ...PENDING, orderId: 'ride-2' });
+    render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+    await waitFor(() => expect(rides.outstandingCheckin).toHaveBeenCalled());
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('I’m okay answers the server and closes the card; a failed send says so', async () => {
+    vi.mocked(rides.outstandingCheckin).mockResolvedValueOnce(PENDING).mockResolvedValue(null);
+    vi.mocked(rides.answerCheckin).mockRejectedValueOnce(new Error('offline'));
+    const user = userEvent.setup();
+    render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+    await user.click(await screen.findByRole('button', { name: 'I’m okay' }));
+    expect(rides.answerCheckin).toHaveBeenCalledWith('OK');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(screen.getByRole('alert').textContent).toBe('Couldn’t send that — Trip Guardian will check in again.');
+    expect(rides.rideSos).not.toHaveBeenCalled();
+  });
+
+  it('I need help is the emergency answer: the server pages Swift, and the police line is right there', async () => {
+    vi.mocked(rides.outstandingCheckin).mockResolvedValueOnce(PENDING).mockResolvedValue(null);
+    vi.mocked(rides.answerCheckin).mockResolvedValue({ escalated: true });
+    const user = userEvent.setup();
+    render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+    await user.click(await screen.findByRole('button', { name: 'I need help' }));
+    expect(rides.answerCheckin).toHaveBeenCalledWith('NEED_HELP');
+    expect(await screen.findByText(/Swift’s safety team has been paged/)).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Call 911' }).getAttribute('href')).toBe('tel:911');
+  });
+
+  it('a distress answer that did not send never pretends it did: it says so and opens Alert Swift', async () => {
+    vi.mocked(rides.outstandingCheckin).mockResolvedValueOnce(PENDING).mockResolvedValue(null);
+    vi.mocked(rides.answerCheckin).mockRejectedValue(new Error('offline'));
+    const user = userEvent.setup();
+    render(<TaxiTripSafety rideId="ride-1" status="RIDE_IN_PROGRESS" facts={FACTS} />);
+    await user.click(await screen.findByRole('button', { name: 'I need help' }));
+    expect(screen.getAllByRole('alert').map((n) => n.textContent)).toContain('Your answer didn’t send — if you need help, use Alert Swift now.');
+    expect(screen.queryByText(/has been paged/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Alert Swift now' })).toBeTruthy();
   });
 });
