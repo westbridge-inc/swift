@@ -131,6 +131,22 @@ describe('[MASTER-025] a stock adjustment is one command', () => {
     expect(await movementsOf(item.id)).toHaveLength(2);
   });
 
+  it('a retry of a committed removal that emptied the shelf returns its receipt, not "below zero"', async () => {
+    // The receipt is read BEFORE the movement is tried: replaying the same
+    // command must not depend on the stock still being there to move.
+    const item = await makeItem(5);
+    const key = `m025-empty-${nanoid(10)}`;
+    const first = await adjust(item.id, { delta: -5, reason: 'DAMAGED' }, key);
+    expect(first.statusCode).toBe(200);
+    expect(await stockOf(item.id)).toBe(0);
+    const again = await adjust(item.id, { delta: -5, reason: 'DAMAGED' }, key);
+    expect(again.statusCode).toBe(200);
+    expect(again.json().data.replayed).toBe(true);
+    expect(again.json().data.adjustment.id).toBe(first.json().data.adjustment.id);
+    expect(await stockOf(item.id)).toBe(0);
+    expect(await movementsOf(item.id)).toHaveLength(1);
+  });
+
   it('the same key with a different adjustment is refused and changes nothing', async () => {
     const item = await makeItem(5);
     const key = `m025-reuse-${nanoid(10)}`;
