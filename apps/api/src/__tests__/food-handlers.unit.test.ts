@@ -15,6 +15,8 @@ import { vendorActivationNext, vendorActivationRefusal } from '../modules/admin/
 import { feePausePredicate } from '../modules/billing/mmg-pause';
 import { FOOD_HANDLERS_TICK_V1, FOOD_HANDLERS_VERSION, foodHandlerTickApplies } from '../modules/vendor/food-handlers';
 import { FOOD_HANDLER_ATTESTATION_TYPE } from '../modules/verification/doc-registry';
+import { storefrontSeller } from '../modules/verification/storefront-seller';
+import type { DisclosureBlock } from '../modules/verification/storefront-disclosure';
 
 const CERT = 'food_handler_cert';
 
@@ -83,5 +85,20 @@ describe('[FOOD-PERMIT] the console never makes an unticked restaurant live', ()
     expect(vendorActivationNext({ ...base, status: 'PENDING_APPROVAL' }, goLive(true))).toBe('CAN_ACTIVATE');
     expect(vendorActivationNext({ ...base, status: 'PENDING_APPROVAL' }, goLive(false, false))).toBe('CAN_ACTIVATE');
     expect(vendorActivationNext({ ...base, status: 'ACTIVE' }, goLive(false))).toBe('LIVE');
+  });
+});
+
+describe('[FOOD-PERMIT] the trust badge: a food handler’s certificate on file is said on the store page', () => {
+  const block = (docTypes: string[]) => ({
+    complete: true, missing: [], legalName: null, address: null, contact: null,
+    licences: docTypes.map((docType) => ({ value: 'on file', source: 'RECORD', docType })),
+    operator: { legalName: 'x', registeredAddress: 'x', supportEmail: 'x' }, compiledAt: new Date(0).toISOString(),
+  }) as DisclosureBlock;
+  const store = { mmgPayUrl: null, mmgNumber: null, refundRule: null };
+
+  it('only from a current certificate record in the compiled block (the block holds VALID records only)', () => {
+    expect(storefrontSeller(block([CERT, 'gra_restaurant_licence']), store).foodHandlerCertificate).toBe(true);
+    expect(storefrontSeller(block(['gra_restaurant_licence']), store).foodHandlerCertificate).toBe(false);
+    expect(storefrontSeller(block([]), store).foodHandlerCertificate).toBe(false);
   });
 });

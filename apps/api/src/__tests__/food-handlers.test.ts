@@ -123,7 +123,10 @@ const notices = (o: Owner) => system(() => app.prisma.notification.findMany({ wh
 async function approveAll(o: Owner, role: 'RESTAURANT' | 'SUPERMARKET', docTypes: readonly string[]) {
   for (const docType of docTypes) {
     const doc = await service.submitDocument(o.userId, role, docType, await ownedVerificationFixture(app.prisma, o.userId, `food-${docType}`), 'v1');
-    await service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * DAY), undefined, reviewerTyped(docType, doc.id));
+    // what a reviewer types (helpers/reviewer-typed), the certificate year as the console sends it: a number
+    const typed: Record<string, unknown> = { ...reviewerTyped(docType, doc.id) };
+    if (typeof typed['certificateYear'] === 'string') typed['certificateYear'] = Number(typed['certificateYear']);
+    await service.approveDocument(doc.id, adminId, new Date(Date.now() + 200 * DAY), undefined, typed);
   }
 }
 const REGISTERED_DOCS = ['owner_national_id', 'business_registration', 'gra_restaurant_licence', 'storefront_photo'] as const;
@@ -236,12 +239,17 @@ describe('[FOOD-PERMIT] a registered restaurant never goes live without the tick
   });
 
   it('a restaurant already live is never taken down for it — it is told once to tick', async () => {
-    const o = await restaurant({ status: 'ACTIVE', isVerified: true });
+    const o = await restaurant();
     await approveAll(o, 'RESTAURANT', REGISTERED_DOCS);
+    // live before this change shipped: an older server made it live on its documents (then with the certificate)
+    await system(() => app.prisma.vendor.update({ where: { id: o.vendorId }, data: { status: 'ACTIVE', isVerified: true, acceptingOrders: true } }));
+    await system(() => app.prisma.notification.deleteMany({ where: { userId: o.userId } }));
+    await service.reprojectVendorActivation(o.userId);
     await service.reprojectVendorActivation(o.userId);
     expect(await store(o)).toEqual({ status: 'ACTIVE', isVerified: true });
     const told = await notices(o);
     expect(told).toHaveLength(1);
+    expect(told[0]!.body).toMatch(/^Swift now asks every restaurant to confirm its food handlers/);
     expect(told[0]!.body).toContain(FOOD_HANDLERS_TICK_V1);
   });
 
