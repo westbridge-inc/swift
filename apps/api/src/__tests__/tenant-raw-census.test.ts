@@ -33,8 +33,7 @@ const CENSUS: Record<string, { sites: number; role: Role }> = {
   // [item 20] The owner wall's boot attestation: catalogue reads only (role membership, row security, the policy).
   'lib/owner-rls.ts': { sites: 3, role: 'INFRA' }, // + [REVIEW-M S4-1] the walled-definer catalogue read
   // [item 20 · notifications] The idempotent notice write's read-back (a narrow SECURITY DEFINER action), in the caller's transaction or on its root client.
-  // + [FOOD-PERMIT] noticeHeld: the same narrow action (swift_owner_wall_notice_id) read inside the projection's transaction.
-  'lib/owner-wall-notices.ts': { sites: 2, role: 'SHARED' },
+  'lib/owner-wall-notices.ts': { sites: 1, role: 'SHARED' },
   'lib/rls-attestation.ts': { sites: 5, role: 'INFRA' },
   'modules/admin/admin.routes.ts': { sites: 3, role: 'REQUEST' },
   'modules/ads/checkout-scan.ts': { sites: 2, role: 'SHARED' },

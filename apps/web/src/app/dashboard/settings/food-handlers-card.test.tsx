@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { renderWithQuery } from '@/test/test-utils';
 import * as vendorApi from '@/lib/vendor-api';
@@ -15,6 +15,9 @@ const TICK = 'Everyone who handles food here holds a current food handler’s ce
 const answer = (attested: boolean) => ({ version: 'v1', tick: TICK, stores: [{ vendorId: 'store-2', name: 'Second Sample Kitchen', attested }] });
 
 afterEach(() => vi.restoreAllMocks());
+
+/** Let the read's answer land and render (a card drawn for the wrong store would be on screen by now). */
+const settled = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
 
 describe('[FOOD-PERMIT] the food handlers card', () => {
   it('shows the server’s words for the selected restaurant; the button waits for the tick, then sends it', async () => {
@@ -45,11 +48,13 @@ describe('[FOOD-PERMIT] the food handlers card', () => {
     unmount();
     const other = renderWithQuery(<FoodHandlersCard storeId="store-9" isOwner />);
     await waitFor(() => expect(read).toHaveBeenCalled());
+    await settled();
     expect(other.container.textContent).toBe('');
     other.unmount();
     read.mockResolvedValue(null);
     const none = renderWithQuery(<FoodHandlersCard storeId="store-2" isOwner />);
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await settled();
     expect(none.container.textContent).toBe('');
   });
 });
