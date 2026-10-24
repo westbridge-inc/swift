@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 const fx = vi.hoisted(() => {
   const token: unknown = new Proxy({}, { get: (_target, key) => key === Symbol.toPrimitive ? () => 0 : token });
-  return { token, sub: {} as Record<string, unknown>, orders: [] as unknown[], pending: new Set<string>(), mutate: vi.fn(), sharedPending: true };
+  return { token, sub: {} as Record<string, unknown>, orders: [] as unknown[], pending: new Set<string>(), mutate: vi.fn(), sharedPending: true, steps: [] as Array<{ label: string; action: string }> };
 });
 vi.mock('react', async (original) => {
   const actual = await original<typeof import('react')>();
@@ -38,6 +38,10 @@ vi.mock('../../../modules/vendor/shared', () => ({
   reconciledRevenueDays: () => [], windowTotals: () => ({}), numericFact: () => null,
   TYPES: {}, GUTTER: 0, TabHeader: 'TabHeader', DAY_LABELS: [], catalogueMeta: () => ({}),
   BoardFirstRun: 'BoardFirstRun', BoardFirstRunRow: 'BoardFirstRunRow',
+  // The shared step list (pinned by its own tests); the card adds the hand-overs on top.
+  orderActions: () => fx.steps,
+  OrderStatusPill: 'OrderStatusPill', FulfillmentTag: 'FulfillmentTag', MmgDisputeNotice: 'MmgDisputeNotice', DeltaBadge: 'DeltaBadge',
+  fmtClock: () => '', fmtWhen: () => '', formatSlot: () => '',
 }));
 import { VendorOps } from './VendorOps';
 
@@ -102,5 +106,45 @@ describe('[STORE-DASH] the board: only the tapped order waits', () => {
     fx.orders = [order('order-a', 'PENDING'), order('order-b', 'PREPARING')];
     fx.pending = new Set();
     expect(cards(board()).every((c) => c.props.busy === false)).toBe(true);
+  });
+});
+
+// [REVIEW-F S3-1 on #2054] The board CARD itself (its function called with the
+// board's own props): on an order paused for an MMG payment review there is no
+// hand-over prompt — no "Handed to rider", no rider check, no name check —
+// right under "Don't hand anything over until then". Controls: the same orders
+// unpaused show them.
+describe('[REVIEW-F S3-1 on #2054] the board card: no hand-over prompt on a paused order', () => {
+  const pause = { paymentMethod: 'MOBILE_MONEY', mmgClaimMismatchAt: '2026-10-23T09:05:00.000Z' };
+  const riderOrder = (extra: Record<string, unknown> = {}) => ({ ...order('order-r', 'RIDER_ARRIVED_PICKUP'), riderId: 'r-1', rider: { user: { firstName: 'Devon' } }, handedToRiderAt: null, ...extra });
+  const takeaway = (extra: Record<string, unknown> = {}) => ({ ...order('order-t', 'READY_FOR_PICKUP'), fulfillment: 'PICKUP', customer: { firstName: 'Asha' }, pickupCodeRequired: false, ...extra });
+  function cardTree(o: Record<string, unknown>) {
+    fx.orders = [o];
+    fx.pending = new Set();
+    fx.steps = [];
+    const card = cards(board()).find((c) => c.props.order.id === o.id)! as El & { type: { type: (_p: unknown) => unknown } };
+    return elements(card.type.type(card.props));
+  }
+  const labels = (tree: El[]) => tree.map((e) => (e.props as { label?: unknown }).label).filter(Boolean);
+  const texts = (tree: El[]) => tree.flatMap((e) => (typeof e.props.children === 'string' ? [e.props.children] : Array.isArray(e.props.children) ? e.props.children.filter((c: unknown) => typeof c === 'string') : []));
+  const riderCheck = (tree: El[]) => tree.some((e) => typeof e.type === 'function' && (e.type as { name?: string }).name === 'RiderHandoverLine');
+
+  it('control: an unpaused rider delivery offers "Handed to rider" with the rider check', () => {
+    const tree = cardTree(riderOrder());
+    expect(labels(tree)).toContain('Handed to rider');
+    expect(riderCheck(tree)).toBe(true);
+  });
+  it('paused rider delivery: no "Handed to rider", no rider check', () => {
+    const tree = cardTree(riderOrder(pause));
+    expect(labels(tree)).not.toContain('Handed to rider');
+    expect(riderCheck(tree)).toBe(false);
+  });
+  it('control: an unpaused takeaway with the code off says to check the name', () => {
+    expect(texts(cardTree(takeaway()))).toContain('Check the name before you hand it over: Asha · order #ORDER-T');
+  });
+  it('paused takeaway with the code off: no name check, only that the customer collects', () => {
+    const shown = texts(cardTree(takeaway(pause)));
+    expect(shown).toContain('The customer collects this order.');
+    expect(shown.some((t) => t.startsWith('Check the name'))).toBe(false);
   });
 });
