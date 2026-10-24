@@ -7,6 +7,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { searchRoutes } from '../modules/search/search.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [B2] Search wears the ONE vendor-visibility predicate, on every door.
@@ -24,7 +25,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 
 let app: FastifyInstance;
 let token: string;
-const NEEDLE = `svisneedle${nanoid(6).toLowerCase()}`;
+const NEEDLE = `svisneedle${wordFreeTag(8)}`;
 
 const createdUserIds: string[] = [];
 const createdVendorIds: string[] = [];

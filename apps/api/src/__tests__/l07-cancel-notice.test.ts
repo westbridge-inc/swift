@@ -60,8 +60,8 @@ async function fixture(assigned = true) {
     subtotalBase: 0, subtotalMarkup: 0, subtotalCustomer: 0, deliveryFee: 0, totalAmount: 0,
     paymentMethod: 'CASH', readyAt: new Date(),
     // [owner #46/#52, 13–14 Oct] An accepted store order is the customer's to
-    // cancel only when it is very late — 30 minutes past its promise.
-    promisedAt: new Date(Date.now() - 31 * 60_000),
+    // cancel only when it is very late — 60 minutes (owner 17 Oct; was 30) past its promise.
+    promisedAt: new Date(Date.now() - 61 * 60_000),
   } });
   orders.push(order.id);
   return { customer, mover, order };

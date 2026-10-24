@@ -240,6 +240,8 @@ async function allRedisKeys(): Promise<Set<string>> {
 
 beforeAll(async () => {
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', PAY_HOST);
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   app = Fastify({ logger: false });
   registerErrorHandler(app);
   registerEmptyJsonBodyParser(app);
@@ -476,7 +478,7 @@ describe('GOLD-5 · ADMIN-03 — admin cancel and refund settlement', () => {
     expect(bare.statusCode).toBe(400);
     const template = await app.inject({ method: 'PUT', url: `/api/v1/admin/orders/${o1.orderId}/cancel`, payload: { refund: true, reason: 'Cancelled by admin' }, headers: { authorization: `Bearer ${ops.token}`, 'content-type': 'application/json' } });
     expect(template.statusCode).toBe(400);
-    expect((await orderRow(o1.orderId)).status).toBe('ACCEPTED');
+    expect((await orderRow(o1.orderId)).status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
 
     const reason = 'The store lost power and cannot cook this order';
     const cancelAt = Date.now();
@@ -495,7 +497,7 @@ describe('GOLD-5 · ADMIN-03 — admin cancel and refund settlement', () => {
     const told = await sys(() => app.prisma.notification.findMany({ where: { userId: customer.userId, title: 'Order Cancelled' } }));
     expect(told.map((n) => n.body)).toEqual([`Your order ${o1.orderNumber} has been cancelled. Any cash you paid will be refunded — our team will follow up.`]);
     const trail = await sys(() => app.prisma.auditLog.findMany({ where: { entityId: o1.orderId, action: 'CANCEL_ORDER' } }));
-    expect(trail.map((t) => ({ by: t.userId, changes: t.changes }))).toEqual([{ by: ops.userId, changes: { reason, refund: true, previousStatus: 'ACCEPTED' } }]);
+    expect(trail.map((t) => ({ by: t.userId, changes: t.changes }))).toEqual([{ by: ops.userId, changes: { reason, refund: true, previousStatus: 'PREPARING' } }]); // [O-3]
   });
 
   it('settling is a C4 money action: the ask waits for a SECOND admin, the requester cannot approve it, and nothing moves meanwhile', async () => {
@@ -547,6 +549,15 @@ describe('GOLD-5 · ADMIN-03 — admin cancel and refund settlement', () => {
     expect((await approvalRow(approvalId)).status).toBe('APPROVED');
     row = await orderRow(o1.orderId);
     expect({ status: row.status, ref: row.refundRef, paid: row.refundPaidAmount }).toEqual({ status: 'CANCELLED', ref: null, paid: null });
+
+    // [U06] While that approved ask stands, nobody can ask again to settle this
+    // order (one ask per act): it is applied, or it expires...
+    const again = await admin({ ...settle(o1.orderId, ref('OTHER'), owed1), token: ops.token });
+    expect(again.statusCode, again.body).toBe(409);
+    expect(again.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    expect(again.json().error.details).toEqual({ approvalId, approvalStatus: 'APPROVED', askedByYou: true });
+    // ...24 h later (the clock moved here rather than waited for): the next ask is new.
+    await sys(() => app.prisma.privilegedApproval.update({ where: { id: approvalId }, data: { expiresAt: new Date(Date.now() - 1_000) } }));
   });
 
   it('the exact amount closes the obligation ONCE; a duplicate is refused; one handover cannot settle two orders; the books reconcile', async () => {

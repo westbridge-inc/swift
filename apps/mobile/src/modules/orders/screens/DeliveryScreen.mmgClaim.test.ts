@@ -22,7 +22,9 @@ describe('the order screen wires the customer\'s payment claim', () => {
 
   it('declares the claim mutation with the other hooks — before any early return', () => {
     const hook = SCREEN.indexOf('useClaimMmgPayment()');
-    const earlyReturn = SCREEN.indexOf('if (order.isError || !o)');
+    // The early return is "no order loaded" (row 5: a failed background
+    // refresh keeps the order on screen); the hook must still come first.
+    const earlyReturn = SCREEN.indexOf('if (!o) {');
     expect(hook).toBeGreaterThan(-1);
     expect(earlyReturn).toBeGreaterThan(-1);
     expect(hook).toBeLessThan(earlyReturn);

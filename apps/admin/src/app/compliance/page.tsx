@@ -1,9 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetchCompliance, runComplianceAudit, decideComplianceReview, resolveComplianceViolation } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 /**
  * The liability shield. Three panels:
@@ -16,20 +17,44 @@ import { askReason } from '@/lib/ask-reason';
  */
 export default function CompliancePage() {
   const qc = useQueryClient();
-  const [note, setNote] = useState<Record<string, string>>({});
   const [openEvidence, setOpenEvidence] = useState<string | null>(null);
 
   const q = useQuery({ queryKey: ['compliance'], queryFn: fetchCompliance, refetchInterval: 60_000 });
   const refresh = () => qc.invalidateQueries({ queryKey: ['compliance'] });
 
-  const run = useMutation({ mutationFn: runComplianceAudit, onSettled: refresh });
-  const decide = useMutation({
-    mutationFn: ({ id, pass, reason }: { id: string; pass: boolean; reason: string }) => decideComplianceReview(id, pass, note[id], reason),
-    onSettled: refresh,
+  // [U28] Running the audit, deciding a re-verification and resolving a
+  // violation used to fail in silence (only a refetch followed). Each now goes
+  // through the in-page panel, which keeps the server's refusal in view, and
+  // the answer stays on the page. Running the audit can force movers offline,
+  // so it is confirmed first.
+  const actions = useActionRunner(() => void refresh());
+  const runAudit = () => void actions.run({
+    title: 'Run the compliance audit now?',
+    body: <p>Everyone online is checked against their document checklist. Anyone failing it is forced offline at once, with the evidence kept.</p>,
+    reason: false,
+    confirmLabel: 'Run audit',
+    submit: () => runComplianceAudit(),
+    success: () => 'Audit run. Its counts are in the evidence trail below.',
   });
-  const resolve = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) => resolveComplianceViolation(id, reason),
-    onSettled: refresh,
+  const decide = (c: any, pass: boolean) => {
+    const who = [c.user?.firstName, c.user?.lastName].filter(Boolean).join(' ') || 'this mover';
+    void actions.run({
+      title: pass ? `Pass the re-verification of ${who}?` : `Fail the re-verification of ${who} and force them offline?`,
+      body: pass
+        ? <p>Confirm you re-opened their documents in Verification and they are genuine and current.</p>
+        : <p>They go offline at once and stay offline until their documents pass again.</p>,
+      confirmLabel: pass ? 'Documents check out' : 'Fail and force offline',
+      fields: [{ kind: 'text', name: 'note', label: 'Note for the record', required: !pass, hint: pass ? 'Optional' : 'Required: what is wrong with the documents' }],
+      submit: ({ reason, values }) => decideComplianceReview(c.id, pass, String(values['note'] ?? '') || undefined, reason),
+      success: () => (pass ? 'Re-verification passed.' : 'Re-verification failed: they are offline.'),
+    });
+  };
+  const resolve = (v: any) => void actions.run({
+    title: 'Mark this compliance violation as resolved?',
+    body: <p>This only succeeds once their document checklist passes again.</p>,
+    confirmLabel: 'Mark resolved',
+    submit: ({ reason }) => resolveComplianceViolation(v.id, reason),
+    success: () => 'Violation resolved.',
   });
 
   const d = q.data?.data;
@@ -42,11 +67,11 @@ export default function CompliancePage() {
       <div className="flex items-center justify-between mb-1">
         <h1 className="text-2xl font-bold">Compliance</h1>
         <button
-          onClick={() => run.mutate()}
-          disabled={run.isPending}
+          type="button"
+          onClick={runAudit}
           className="px-4 py-2 bg-[var(--accent)] text-white rounded-lg text-sm font-medium hover:bg-[var(--accent)]/80 disabled:opacity-50"
         >
-          {run.isPending ? 'Auditing…' : 'Run audit now'}
+          Run audit now
         </button>
       </div>
       <p className="text-[var(--muted)] text-sm mb-6">
@@ -54,6 +79,15 @@ export default function CompliancePage() {
         An unlicensed or uninsured mover operating here is a lawsuit — this page is where that never happens.
       </p>
 
+      {actions.banner}
+
+      {q.isLoading ? (
+        <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 text-center text-[var(--muted)]">Loading…</div>
+      ) : q.isError ? (
+        // A failed read is never "nobody is operating outside the rules": say we could not look.
+        <QueryFailed error={q.error} what="the compliance checks" onRetry={() => void q.refetch()} retrying={q.isFetching} />
+      ) : (
+      <>
       {/* Open violations */}
       <h2 className="font-semibold mb-2">
         Open violations{' '}
@@ -90,8 +124,8 @@ export default function CompliancePage() {
                   {openEvidence === v.id ? 'Hide evidence' : 'View evidence'}
                 </button>
                 <button
-                  onClick={() => { const reason = askReason({ action: 'mark this compliance violation as resolved', subject: `violation ${v.id}` }); if (reason) resolve.mutate({ id: v.id, reason }); }}
-                  disabled={resolve.isPending}
+                  type="button"
+                  onClick={() => resolve(v)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                   title="Only succeeds once their checklist passes again"
                 >
@@ -129,22 +163,16 @@ export default function CompliancePage() {
                 Re-open their documents in Verification and confirm they are genuine and current — then decide here.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <input
-                  value={note[c.id] ?? ''}
-                  onChange={(e) => setNote({ ...note, [c.id]: e.target.value })}
-                  placeholder="Note (required for fail)"
-                  className="flex-1 min-w-48 bg-[var(--panel-2)] px-3 py-1.5 rounded-lg text-sm border border-[var(--border)] focus:border-[var(--accent)] focus:outline-none"
-                />
                 <button
-                  onClick={() => { const reason = askReason({ action: 'pass this re-verification review' }); if (reason) decide.mutate({ id: c.id, pass: true, reason }); }}
-                  disabled={decide.isPending}
+                  type="button"
+                  onClick={() => decide(c, true)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 disabled:opacity-50"
                 >
                   Documents check out
                 </button>
                 <button
-                  onClick={() => { const reason = askReason({ action: 'fail this re-verification review and force offline' }); if (reason) decide.mutate({ id: c.id, pass: false, reason }); }}
-                  disabled={decide.isPending || !(note[c.id] ?? '').trim()}
+                  type="button"
+                  onClick={() => decide(c, false)}
                   className="px-3 py-1.5 text-xs rounded-lg bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
                 >
                   Fail — force offline
@@ -188,6 +216,8 @@ export default function CompliancePage() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
     </div>
   );
 }

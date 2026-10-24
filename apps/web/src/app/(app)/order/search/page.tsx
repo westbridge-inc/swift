@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
-import { searchCatalogue, type CatalogueResults } from '@/lib/customer';
+import { searchCatalogue, searchSuggestions, searchTrending, TRENDING_SHOWN, type CatalogueResults, type SearchSuggestion } from '@/lib/customer-search';
+import type { MarketItem } from '@/lib/customer';
 import { BackButton, useOwnBackButton } from '@/components/customer-shell';
 import { VendorCard, VendorGridSkeleton, EmptyNote, ItemCard, VENDOR_GRID } from '@/components/order-ui';
 import { MARKET_GRID } from '@/components/customer-skeletons';
@@ -21,6 +22,18 @@ import { MARKET_GRID } from '@/components/customer-skeletons';
  * [Owner 13 Oct] Closed stores and their dishes are shown too, after the open
  * ones (the server orders them): a closed store's card says "Closed right now"
  * (VendorCard), and a closed store's dish says so under its store's name.
+ *
+ * [row 110] The browse pages' search bar (CatalogueSearchBar) hands its words
+ * and category over in the address, `?q=…&type=RESTAURANT`, as the phone's
+ * category screens open Search with `{ q, type }`: the page starts with them.
+ * As you type it also offers the engine's suggestions (GET /search/
+ * suggestions) as tappable words, as the phone does ([B2] "did you mean").
+ *
+ * [B2 · the phone's SearchScreen] A search with no matches under All, Food or
+ * Groceries (the kinds the phone's engine search covers) also offers "Worth
+ * trying right now": the most ordered dishes in open stores (GET
+ * /search/trending), asked once, and only when nothing matched. A failed read
+ * shows none — like the suggestions, it is an invitation, never an error.
  */
 const KINDS: { key: string; label: string; types: string[] | null }[] = [
   { key: 'all', label: 'All', types: null },
@@ -31,15 +44,40 @@ const KINDS: { key: string; label: string; types: string[] | null }[] = [
 ];
 
 const NONE: CatalogueResults = { stores: [], items: [] };
+/** The kinds the phone's engine search (and so its "Worth trying") covers: everything, food, groceries. */
+const TRENDING_KINDS = new Set(['all', 'food', 'groceries']);
+
+/** Dishes and products as cards, each opening its own store at the item. */
+function DishGrid({ items }: { items: MarketItem[] }) {
+  return (
+    <ul className={MARKET_GRID}>
+      {items.map((item) => (
+        <li key={item.id} className="min-w-0">
+          <ItemCard
+            href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
+            name={item.name}
+            price={item.basePrice}
+            imageUrl={item.imageUrl}
+            meta={item.vendorIsCurrentlyOpen === false ? `${item.vendorName} · Closed right now` : item.vendorName}
+            isNew={item.isNew}
+          />
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export default function SearchPage() {
   useOwnBackButton();
   const [q, setQ] = useState('');
   const [kind, setKind] = useState('all');
   const [results, setResults] = useState<CatalogueResults | null>(null);
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([]);
   const [busy, setBusy] = useState(false);
   // A search that could not be asked is not "nothing matches" (DS1081 S4).
   const [failed, setFailed] = useState(false);
+  const [trending, setTrending] = useState<MarketItem[] | null>(null);
+  const trendingAsked = useRef(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sequence = useRef(0);
   const input = useRef<HTMLInputElement | null>(null);
@@ -49,21 +87,44 @@ export default function SearchPage() {
     setQ(v);
     if (debounce.current) clearTimeout(debounce.current);
     const request = ++sequence.current;
-    if (v.trim().length < 2) { setResults(null); setFailed(false); setBusy(false); return; }
+    if (v.trim().length < 2) { setResults(null); setSuggestions([]); setFailed(false); setBusy(false); return; }
     setBusy(true);
     debounce.current = setTimeout(() => {
-      searchCatalogue(v.trim())
+      const words = v.trim();
+      // Suggestions are garnish: a failed read shows none, never an error.
+      searchSuggestions(words)
+        .then((list) => { if (sequence.current === request) setSuggestions(list.filter((s) => s.text.toLowerCase() !== words.toLowerCase()).slice(0, 6)); })
+        .catch(() => { if (sequence.current === request) setSuggestions([]); });
+      searchCatalogue(words)
         .then((r) => { if (sequence.current === request) { setResults(r); setFailed(false); } })
         .catch(() => { if (sequence.current === request) { setResults(NONE); setFailed(true); } })
         .finally(() => { if (sequence.current === request) setBusy(false); });
     }, 300);
   }
 
+  // [row 110] On arrival: the words and category a search bar handed over.
+  // Mount-only on purpose (onChange only touches state setters and refs); it
+  // runs again on a StrictMode remount, after the cleanup above cleared its timer.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const handed = KINDS.find((k) => k.types?.includes(params.get('type') ?? ''));
+    if (handed) setKind(handed.key);
+    const words = params.get('q');
+    if (words) onChange(words.slice(0, 100));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const current = KINDS.find((k) => k.key === kind);
   const types = current?.types ?? null;
   const stores = (results?.stores ?? []).filter((v) => !types || types.includes(v.vendorType));
   const dishes = types ? [] : (results?.items ?? []);
   const nothingAtAll = results !== null && results.stores.length === 0 && results.items.length === 0;
+  const offerTrending = !busy && results !== null && !failed && stores.length === 0 && dishes.length === 0 && TRENDING_KINDS.has(kind);
+  useEffect(() => {
+    if (!offerTrending || trendingAsked.current) return;
+    trendingAsked.current = true;
+    searchTrending().then(setTrending, () => setTrending([]));
+  }, [offerTrending]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -78,6 +139,11 @@ export default function SearchPage() {
           ) : null}
         </label>
       </div>
+      {suggestions.length > 0 ? (
+        <div className="sw-chip-row" role="group" aria-label="Suggestions">
+          {suggestions.map((s) => <button key={`${s.type}-${s.text}`} type="button" onClick={() => onChange(s.text)} className="sw-chip">{s.text}</button>)}
+        </div>
+      ) : null}
       <div className="sw-chip-row" role="group" aria-label="Kinds of store">
         {KINDS.map((k) => <button key={k.key} type="button" aria-pressed={kind === k.key} onClick={() => setKind(k.key)} className="sw-chip">{k.label}</button>)}
       </div>
@@ -95,6 +161,12 @@ export default function SearchPage() {
               ? `Nothing matches “${q.trim()}” — try a store’s name, a dish or a cuisine.`
               : `No ${current?.label.toLowerCase()} stores match “${q.trim()}”.`}</EmptyNote>
           ) : null}
+          {offerTrending && trending && trending.length > 0 ? (
+            <section aria-label="Worth trying right now" className="flex flex-col gap-3">
+              <h3 className="sw-heading">Worth trying right now</h3>
+              <DishGrid items={trending.slice(0, TRENDING_SHOWN)} />
+            </section>
+          ) : null}
           {stores.length > 0 ? (
             <section aria-label="Stores" className="flex flex-col gap-3">
               {dishes.length > 0 ? <h3 className="sw-heading">Stores</h3> : null}
@@ -104,20 +176,7 @@ export default function SearchPage() {
           {dishes.length > 0 ? (
             <section aria-label="Dishes and products" className="flex flex-col gap-3">
               <h3 className="sw-heading">Dishes and products</h3>
-              <ul className={MARKET_GRID}>
-                {dishes.map((item) => (
-                  <li key={item.id} className="min-w-0">
-                    <ItemCard
-                      href={`/order/vendor/${encodeURIComponent(item.vendorId)}?item=${encodeURIComponent(item.id)}`}
-                      name={item.name}
-                      price={item.basePrice}
-                      imageUrl={item.imageUrl}
-                      meta={item.vendorIsCurrentlyOpen === false ? `${item.vendorName} · Closed right now` : item.vendorName}
-                      isNew={item.isNew}
-                    />
-                  </li>
-                ))}
-              </ul>
+              <DishGrid items={dishes} />
             </section>
           ) : null}
         </>

@@ -26,11 +26,20 @@ export const MAX_OFFSET_DEG = 0.09;
 
 const CLOSED: ReadonlySet<ReviewSessionStatus> = new Set<ReviewSessionStatus>(['EXPIRED', 'REVOKED']);
 
-/** 410: the session is over. The app shows the DL-9 honest screen, never production data. */
+/** What the person holding the demo login is told, word for word, on every app build. */
+export const REVIEW_SESSION_CLOSED_MESSAGE = 'This demo has ended, so its sample stores and orders are no longer available.';
+
+/** 410: the session is over. The app shows the DL-9 honest screen, never production data.
+ *  [Row 353] The message is the person's sentence, never the internal session id (builds 9–11 show
+ *  a server message as it is); the id and status stay on the error for the server's own log. */
 export class ReviewSessionClosedError extends AppError {
+  readonly sessionId: string | null;
+  readonly sessionStatus: ReviewSessionStatus;
   constructor(sessionId: string | null, status: ReviewSessionStatus) {
-    super(410, 'REVIEW_SESSION_CLOSED', sessionId ? `Review session ${sessionId} is ${status}` : 'This demo session has expired');
+    super(410, 'REVIEW_SESSION_CLOSED', REVIEW_SESSION_CLOSED_MESSAGE);
     this.name = 'ReviewSessionClosedError';
+    this.sessionId = sessionId;
+    this.sessionStatus = status;
   }
 }
 

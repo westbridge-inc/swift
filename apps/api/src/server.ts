@@ -11,12 +11,17 @@ import { attestTenantWallAtBoot } from './boot/tenant-wall';
 import { attestSystemLoginAtBoot } from './boot/system-login';
 import { runAsSystem } from './plugins/tenant-context';
 import { checkDeploymentIdentityAtStart } from './utils/deployment-identity';
+import { assertEmergencyPolicySigningConfig } from './modules/country/emergency-policy-signature';
 
 const PORT = parseInt(process.env['PORT'] || '3000', 10);
 const HOST = process.env['HOST'] || '0.0.0.0';
 async function start() {
   try {
     assertSafeBootConfig();
+    // [AUD-G7-023] The emergency-number policy signing key: required in
+    // production, refused anywhere when short. HTTP process only (it signs
+    // GET /public/emergency-policy); the worker never holds it.
+    const emergencyPolicyKey = assertEmergencyPolicySigningConfig();
     // [S3-L1] Only on a database of this process's own kind (its
     // deployment_identity), and BEFORE the app is built: building it starts
     // the in-process job workers.
@@ -39,6 +44,10 @@ async function start() {
 
     await app.listen({ port: PORT, host: HOST });
     console.warn(`Swift API running on http://${HOST}:${PORT}`);
+    // The PUBLIC half only (never the key): the owner pins it in the app
+    // (apps/mobile/src/lib/emergencyPolicyPins.ts) — deploy/PILOT-RUNBOOK.md.
+    if (emergencyPolicyKey) app.log.info({ kid: emergencyPolicyKey.kid, ed25519: emergencyPolicyKey.publicKeyHex }, '[AUD-G7-023] emergency policy signing: public key to pin in the app');
+    else app.log.warn('[AUD-G7-023] no EMERGENCY_POLICY_SIGNING_KEY (not production): emergency policies are served unsigned and build 12+ phones use their bundled numbers');
 
     // [MKT G3/G5] PLANT THE DISCOVERY TAXONOMY.
     //
@@ -91,6 +100,10 @@ async function start() {
         const { enforceRegistryCompletenessAtBoot } = await import('./modules/verification/doc-registry');
         const { resolvesImpl } = await import('./modules/verification/validators');
         await enforceRegistryCompletenessAtBoot(app.prisma, app.log, resolvesImpl);
+        // [Row 208 guard · GUARDRAILS §7] The rescue incentive is Swift's own money with no payout
+        // path and no deletion block yet: a stored non-zero value keeps production's readiness 503.
+        const { enforceRescueIncentiveOffAtBoot } = await import('./modules/dispatch/rescue-incentive-guard');
+        await enforceRescueIncentiveOffAtBoot(app.prisma, app.log);
         // [R048-006] The contract is COMPLETE only here. Readiness answers 503
         // until this line runs, so an orchestrator never routes to a process
         // whose category rail would be empty.

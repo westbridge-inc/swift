@@ -22,10 +22,12 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { adminRoutes } from '../modules/admin/admin.routes';
 import { purgeAuditLogs } from '../lib/audit-immutability';
 import { APPROVAL_HEADER } from '../modules/admin/admin-approval';
+import { seedSecondApproval } from './helpers/admin-approval';
 import { TERMINAL_ORDER_STATUSES, MOVER_HOLDING_STATUSES } from '../modules/order/order-status';
 import { assertOrderMayProceed } from '../modules/compliance/prohibited-gate';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8);
+const RUN = wordFreeTag(8);
 const REASON = 'The store cannot fulfil this order; support is following up with the store about its direct refund.';
 const sys = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'test:mmg-store-close');
 let app: FastifyInstance;
@@ -140,10 +142,14 @@ describe('record-only closure of store-claimed MMG orders', () => {
     expect(notices).toHaveLength(2);
     expect(new Set(notices.map((n) => n.userId))).toEqual(new Set([customerId, ownerId]));
     // The store is told exactly how much it owes back; the customer how much is coming.
-    expect(notices.find((n) => n.userId === ownerId)!.body).toContain('GY$1,300');
-    expect(notices.find((n) => n.userId === customerId)!.body).toContain('GY$1,300');
+    const storeNotice = notices.find((n) => n.userId === ownerId)!;
+    const customerNotice = notices.find((n) => n.userId === customerId)!;
+    expect(storeNotice.body).toContain('GY$1,300');
+    expect(customerNotice.body).toContain('GY$1,300');
+    expect(storeNotice.body).toMatch(/store.*refund.*within 72 hours/i);
+    // [Owner legal plan 15 Oct · R31, research E7] The customer's notice, sentence by sentence.
+    expect(customerNotice.body).toBe(`Your order ${before.orderNumber} was cancelled. Swift does not hold your money. Fixture ${RUN} received GY$1,300 by MMG and must refund it to you within 72 hours. If it does not, contact support from the order screen and we will follow up.`);
     for (const notice of notices) {
-      expect(notice.body).toMatch(/store.*refund/i);
       expect(notice.body).toMatch(/Swift.*(never|does not).*money/i);
       expect(notice.body).not.toMatch(/refund (is confirmed|has arrived)|Swift refunded/);
     }
@@ -200,7 +206,15 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const cash = await order({ paymentMethod: 'CASH' });
     expect((await close(cash.id, 'ADMIN', 3, await approve(cash.id))).statusCode).toBe(409);
     const o = await order();
-    const a = await approve(o.id), b = await approve(o.id, 'SUPER_ADMIN');
+    const a = await approve(o.id);
+    // [U06] While that ask stands, a second ask for the same close is refused
+    // at the gate (one ask per act), whoever asks...
+    const second = await close(o.id, 'SUPER_ADMIN');
+    expect(second.statusCode, second.body).toBe(409);
+    expect(second.json().error.code).toBe('APPROVAL_ALREADY_OPEN');
+    // ...so a second independently approved request can only be one written
+    // before that rule. The close's own guard must still let exactly one act.
+    const b = await seedSecondApproval(app, a, { requestedBy: people['SUPER_ADMIN']!.id, approvedBy: people['ADMIN']!.id });
     const results = await Promise.all([close(o.id, 'ADMIN', 3, a), close(o.id, 'SUPER_ADMIN', 3, b)]);
     expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
     expect((await close(o.id, 'ADMIN', 3, await approve(o.id))).statusCode).toBe(409);
@@ -237,9 +251,12 @@ describe('record-only closure of store-claimed MMG orders', () => {
     const notices = await sys(() => app.prisma.notification.findMany({ where: { userId: { in: [customerId, ownerId] }, data: { path: ['orderId'], equals: o.id } } }));
     expect(notices).toHaveLength(2);
     for (const n of notices) {
-      expect(n.body).toMatch(/provider/i);
-      expect(n.body).not.toMatch(/\bstore\b/i);
+      expect(`${n.title} ${n.body}`).toMatch(/provider/i);
+      expect(`${n.title} ${n.body}`).not.toMatch(/\bstore\b/i);
     }
+    // [R31 · E7] The customer is told who received the money (the provider, by name) and by when it is refunded.
+    const customerNotice = notices.find((n) => n.userId === customerId)!;
+    expect(customerNotice.body).toBe(`Your booking ${o.orderNumber} was cancelled. Swift does not hold your money. Fixture ${RUN} received GY$1,300 by MMG and must refund it to you within 72 hours. If it does not, contact support from the order screen and we will follow up.`);
   });
 
   it('refuses a claim with no attested amount: there is nothing to record', async () => {

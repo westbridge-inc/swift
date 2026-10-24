@@ -168,3 +168,14 @@ describe('public pricing page — every partner reads their own weekly fee', () 
     expect(screen.queryByRole('heading', { name: 'Services' })).toBeNull();
   });
 });
+
+// [WEB-LAUNCH-CHECK F5] The price cards were h3 straight under the page's h1:
+// a screen reader's heading list skipped a level. No heading may skip one.
+describe('[WEB-LAUNCH-CHECK F5] the pricing page outline', () => {
+  it('no heading skips a level', async () => {
+    await renderPage();
+    const levels = screen.getAllByRole('heading').map((h) => Number(h.tagName.slice(1)));
+    expect(levels[0]).toBe(1);
+    levels.forEach((level, i) => { if (i > 0) expect(level - levels[i - 1]!, `heading ${i}: h${levels[i - 1]} -> h${level}`).toBeLessThanOrEqual(1); });
+  });
+});

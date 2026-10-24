@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import Redis from 'ioredis';
@@ -17,7 +17,7 @@ import { customerRoutes } from '../../modules/user/customer.routes';
 import { vendorRoutes } from '../../modules/vendor/vendor.routes';
 import { riderRoutes } from '../../modules/rider/rider.routes';
 import { adminRoutes } from '../../modules/admin/admin.routes';
-import { rateLimitKey } from '../../utils/rate-limit-key';
+import { RATE_LIMIT_NAMESPACE, rateLimitOptions, watchRateLimitStore } from '../../utils/rate-limit-options';
 import { devChannelLog, getChannels } from '../../providers/notifications/channels';
 import { OTP_RESEND_WINDOW_S } from '../../utils/otp';
 import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutability';
@@ -48,9 +48,11 @@ import { purgeAuditLogs, purgeSensitiveReadLogs } from '../../lib/audit-immutabi
 //            Bearer …" per request no longer gets a fresh limiter bucket each
 //            time (fixed by #1294: utils/rate-limit-key.ts keys only a VERIFIED
 //            token by its userId; anything else shares the resolved-IP bucket).
-//   G5-F3    [it.fails] app.ts promises the production limiter "must fail
-//            OPEN, never … crash a request if Redis blips"; with its store
-//            unreachable every request answers 500 instead.
+//   G5-F3    app.ts promised the production limiter "must fail OPEN, never …
+//            crash a request if Redis blips"; with its store unreachable every
+//            request answered 500 instead (pinned here as it.fails). Fixed by
+//            row 331: the limiter fails open (skipOnError) with a logged alert,
+//            and /live no longer consults it.
 //
 // Fixture range: +5920352nnn (this file only; audited range-aware). The
 // PLAT-03 instances use the limiter namespace production uses; nothing else in
@@ -64,7 +66,7 @@ const PHONE_PREFIX = '+5920352';
 const FIXTURE = 'gold5-plat-fixture';
 const TENANT_SLUG_PREFIX = 'gold5-plat-';
 const TENANT_B = `${TENANT_SLUG_PREFIX}${nanoid(6).toLowerCase()}`;
-const RL_NAMESPACE = 'swift-rl:';
+const RL_NAMESPACE = RATE_LIMIT_NAMESPACE;
 const STORE_AT = { lat: 6.80131, lng: -58.15512 };
 const HOME_AT = { lat: 6.80455, lng: -58.15533 };
 const smsDayKey = () => `sms_global_day:${new Date().toISOString().slice(0, 10)}`;
@@ -235,7 +237,10 @@ async function allRedisKeys(client: Pick<Redis, 'scan'>): Promise<Set<string>> {
  * The limiter PLAT-03 composes IS production's: app.ts's two statements —
  * the store client and the registration — must read exactly as below
  * (comments and layout aside). Any change to them fails here first, so the
- * replica and G5-F3 are revisited rather than going quietly stale.
+ * compositions and G5-F3 are revisited rather than going quietly stale.
+ * [row 331] Both now come from utils/rate-limit-options, and every limiter in
+ * this file is built with the same rateLimitOptions(); only the store client
+ * is the test's own (same options, its own connection name).
  */
 function assertProductionLimiterBinding() {
   const appTs = path.resolve(process.cwd(), 'src', 'app.ts');
@@ -247,10 +252,10 @@ function assertProductionLimiterBinding() {
     return code.slice(from, code.indexOf(end, from) + end.length);
   };
   expect(between('const rateLimitRedis =', ': undefined;')).toBe(
-    "const rateLimitRedis = isProduction() ? new Redis(process.env['REDIS_URL'] || 'redis://localhost:6379', { connectionName: 'swift-rate-limit', maxRetriesPerRequest: 1, enableOfflineQueue: false, }) : undefined;",
+    "const rateLimitRedis = isProduction() ? createRateLimitStore(process.env['REDIS_URL'] || 'redis://localhost:6379', app.log) : undefined;",
   );
-  expect(between('await app.register(rateLimit, {', '});')).toBe(
-    `await app.register(rateLimit, { ...(rateLimitRedis ? { redis: rateLimitRedis, nameSpace: '${RL_NAMESPACE}' } : {}), keyGenerator: rateLimitKey((token) => app.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute', });`,
+  expect(between('await app.register(rateLimit, ', '}));')).toBe(
+    "await app.register(rateLimit, rateLimitOptions({ store: rateLimitRedis, verify: (token) => app.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));",
   );
 }
 
@@ -442,7 +447,7 @@ describe('GOLD-5 · PLAT-01 — tenant isolation and the IDOR denial matrix', ()
 
   it('SELF-OWN: a rider cannot take the delivery of an order placed by their own account', async () => {
     const before = await orderFacts(selfOrder);
-    expect(before.status).toBe('ACCEPTED');
+    expect(before.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     expect(before.riderId).toBeNull();
     const grab = await call('POST', `/api/v1/rider/orders/${selfOrder}/accept`, rider.token, {});
     expect(grab.statusCode).toBe(409);
@@ -476,13 +481,7 @@ describe('GOLD-5 · PLAT-03 — OTP and rate-limit abuse', () => {
     const store = new Redis(process.env['REDIS_URL'] as string, { connectionName: `gold5-rl-${label}`, maxRetriesPerRequest: 1, enableOfflineQueue: false });
     stores.push(store);
     if (store.status !== 'ready') await new Promise<void>((resolve) => store.once('ready', () => resolve()));
-    await server.register(rateLimit, {
-      redis: store,
-      nameSpace: RL_NAMESPACE,
-      keyGenerator: rateLimitKey((token) => server.jwt.verify(token)),
-      max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10),
-      timeWindow: '1 minute',
-    });
+    await server.register(rateLimit, rateLimitOptions({ store, verify: (token) => server.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));
     await server.register(prismaPlugin);
     await server.register(redisPlugin);
     await server.register(authPlugin);
@@ -629,7 +628,7 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
     registerEmptyJsonBodyParser(server);
     store = new Redis(process.env['REDIS_URL'] as string, { connectionName: 'gold5-rl-f2', maxRetriesPerRequest: 1, enableOfflineQueue: false });
     if (store.status !== 'ready') await new Promise<void>((resolve) => store.once('ready', () => resolve()));
-    await server.register(rateLimit, { redis: store, nameSpace: RL_NAMESPACE, keyGenerator: rateLimitKey((token) => server.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
+    await server.register(rateLimit, rateLimitOptions({ store, verify: (token) => server.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }));
     await server.register(prismaPlugin);
     await server.register(redisPlugin);
     await server.register(authPlugin);
@@ -659,29 +658,34 @@ describe('GOLD-5 · PLAT-03 — G5-F2', () => {
 });
 
 // ---------------------------------------------------------------------------
-// G5-F3 — the production limiter fails CLOSED (500) when its store blips
+// G5-F3 — the production limiter used to fail CLOSED (500) when its store blipped
 // ---------------------------------------------------------------------------
 //
 // app.ts, over the limiter it composes in production: "A rate-limit store
 // must fail OPEN, never queue or crash a request if Redis blips — the plugin
 // degrades gracefully on a store error." @fastify/rate-limit 10.3 only does
-// that with `skipOnError: true`, which app.ts does not pass; with the offline
+// that with `skipOnError: true`, which app.ts did not pass; with the offline
 // queue disabled, a lost connection rejects the INCR at once and the global
-// hook turns EVERY route into a 500. The limiter is composed as above; the
-// healthy control and the connection loss run in beforeAll, so this can only
-// fail on the request made while the store is unreachable.
+// hook turned EVERY route into a 500. [row 331] rateLimitOptions now passes
+// it, and the store's watcher logs the outage. The limiter is composed as
+// production composes it; the healthy control and the connection loss run in
+// beforeAll, so this can only fail on the request made while the store is
+// unreachable.
 describe('GOLD-5 · PLAT-03 — G5-F3', () => {
   let server: FastifyInstance;
   let store: Redis;
   const namespace = `${RL_NAMESPACE}gold5-f3:`;
+  const alerts = { error: vi.fn(), info: vi.fn() };
 
   beforeAll(async () => {
     assertProductionLimiterBinding();
     server = Fastify({ logger: false });
     registerErrorHandler(server);
     store = new Redis(process.env['REDIS_URL'] as string, { connectionName: 'gold5-rl-f3', maxRetriesPerRequest: 1, enableOfflineQueue: false });
+    watchRateLimitStore(store, alerts);
     if (store.status !== 'ready') await new Promise<void>((resolve) => store.once('ready', () => resolve()));
-    await server.register(rateLimit, { redis: store, nameSpace: namespace, keyGenerator: rateLimitKey((token) => server.jwt.verify(token)), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10), timeWindow: '1 minute' });
+    // Production's options; only the namespace is this test's own, so its keys never meet PLAT-03's.
+    await server.register(rateLimit, { ...rateLimitOptions({ store, verify: (token) => server.jwt.verify(token), max: parseInt(process.env['RATE_LIMIT_MAX'] || '200', 10) }), nameSpace: namespace });
     server.get('/ping', async () => ({ ok: true }));
     await server.ready();
     const healthy = await server.inject({ method: 'GET', url: '/ping', remoteAddress: '10.35.4.1' });
@@ -698,8 +702,9 @@ describe('GOLD-5 · PLAT-03 — G5-F3', () => {
     if (keys.length > 0) await app.redis.del(...keys);
   });
 
-  it.fails('[G5-F3] with the limiter’s store unreachable an ordinary request is still served', async () => {
+  it('[G5-F3] with the limiter’s store unreachable an ordinary request is still served, and the outage is logged', async () => {
     const during = await server.inject({ method: 'GET', url: '/ping', remoteAddress: '10.35.4.1' });
     expect(during.statusCode).toBe(200);
+    expect(alerts.error).toHaveBeenCalledWith(expect.objectContaining({ event: 'end' }), expect.stringMatching(/failing OPEN/));
   });
 });

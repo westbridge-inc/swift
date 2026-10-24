@@ -1,6 +1,6 @@
 /** @jsxImportSource react */
 import { MapCredits } from '../../../components/MapCredits';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, PROVIDER_DEFAULT } from 'react-native-maps';
@@ -10,6 +10,8 @@ import { haptic } from '../../../lib/haptics';
 import { Feather, MaterialCommunityIcons } from '@expo/vector-icons';
 import { ErrorState, Pictogram, TonePill, LoadingBlock, PillButton, Screen, T, cardShadow } from '../../../kit';
 import { goOnlineDoorFor } from '../../../lib/goOnlineDoor';
+import { boardPaused, recentBoard } from '../../../lib/moverBoard';
+import { demandTapFor } from '../demandTap';
 import {
   useMoverKind,
   useMoverStats,
@@ -50,6 +52,9 @@ import { offerEarnings } from './offer-earnings';
 import { rideStops } from '../../../lib/taxiItinerary';
 import { StopsSummary } from '../TaxiItinerary';
 import { RelayTasks } from '../RelayTasks';
+import { useJobRing } from '../../../hooks/useJobRing';
+import { PushOffStrip } from '../../../components/PushOffStrip';
+import { docLabel } from '../../../components/onboarding/docLabels';
 
 /**
  * The earner home (dashboard plan Phase B/C): light, map-first, demand-aware.
@@ -95,6 +100,18 @@ export function DispatchOfferCard({
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [offer.orderId, total, deadlineAt]);
+
+  // [RINGER · owner ruling 15 Oct] The offer rings (Swift's tone on build 12,
+  // the buzz on every build) from the moment the card shows until Accept is
+  // tapped, Decline unmounts the card, or the offer's clock runs out; never
+  // in the background. The deadline is fixed when each offer opens.
+  const ringDeadline = useMemo<number | undefined>(
+    () => deadlineAt ?? (total ? Date.now() + total * 1000 : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [offer.orderId, deadlineAt, total],
+  );
+  const clockOpen = ringDeadline === undefined || secs > 0;
+  useJobRing(!accepting && clockOpen, ringDeadline);
 
   const isDriver = kind === 'DRIVER';
   const fare = job ? jobAmount(job) : null;
@@ -396,6 +413,14 @@ function MoverKindChoiceScreen({
 export function MoverHomeScreen({ navigation }: any) {
   const preview = useMoverPreview((state) => state.preview);
   const insets = useSafeAreaInsets();
+  // [STORE-ALERT] Offers ring a mover's phone: ask while the OS still can
+  // (once per app session). A preview rings nothing, so it never asks.
+  useEffect(() => {
+    if (preview) return;
+    void Promise.all([import('../../../services/notification-priming'), import('../../../services/push')])
+      .then(([priming, push]) => priming.maybePrimeEarnerNotifications('mover_dashboard', push.pushPermission))
+      .catch(() => undefined);
+  }, [preview]);
   const {
     kind,
     profile,
@@ -423,7 +448,8 @@ export function MoverHomeScreen({ navigation }: any) {
   // [B6] The run strip: server-computed, rendered as-is. Null unless stacked.
   const run = useActiveJobs(kind).run;
   const online = !!profile?.isOnline;
-  const available = useAvailableJobs(kind, online);
+  // [PERF partner #4] A taxi driver's board rests during a ride (one ride at a time).
+  const available = useAvailableJobs(kind, online, !!active.data);
   const { offer, queuedBehind, dismiss } = useDispatchOffers(kind, online);
 
   const liveLocation = grantedLocationFix(latitude, longitude, locationStatus);
@@ -431,6 +457,8 @@ export function MoverHomeScreen({ navigation }: any) {
     ? { lat: liveLocation.latitude, lng: liveLocation.longitude }
     : undefined;
   const demand = useDemand<any>(kind, here);
+  // [row 54] A tap on map demand can open the sheet onto the open board.
+  const sheetRef = useRef<BottomSheet>(null);
 
   // DASH-03: last 7 days from the SERVER-aggregated daily endpoint — the old
   // client-side grouping summed the paginated (limit-20) earnings list, so an
@@ -480,7 +508,9 @@ export function MoverHomeScreen({ navigation }: any) {
 
   const isDriver = kind === 'DRIVER';
   const activeJob = active.data;
-  const jobs: any[] = available.data ?? [];
+  // While the board rests, its last answer is not shown (no stale pins on the map).
+  // ...and after it, the board's answer from before the ride is not drawn again (#1919 review S4-1).
+  const jobs: any[] = boardPaused(kind, !!activeJob) ? [] : recentBoard(available.data, available.dataUpdatedAt, Date.now());
   const errMsg = (goOnline.error as any)?.response?.data?.error?.message;
   // [E12 §7.1] The two liveness refusals are ACTIONABLE, not just readable:
   // 428 wants a selfie check (there's a screen for that now); 423 means only
@@ -565,6 +595,18 @@ export function MoverHomeScreen({ navigation }: any) {
     }
   };
 
+  // [row 54 · owner 9 Oct] "N waiting" on the map answers a tap with what is
+  // true (modules/mover/demandTap): the open board when it has jobs, how the
+  // work reaches the mover when it does not, GO when offline. Never a dead tap,
+  // never a customer's location.
+  const demandTap = demandTapFor({ online, hasActiveJob: !!activeJob, boardCount: jobs.length, isDriver });
+  const onDemandTap = demandTap
+    ? () => {
+        if (demandTap.kind === 'show-board') sheetRef.current?.snapToIndex(1);
+        else toast.show(demandTap.title, demandTap.body);
+      }
+    : undefined;
+
   // Camera sits slightly SOUTH of the earner so the location dot floats in
   // the upper map half, clear of the GO ring.
   const region = {
@@ -627,14 +669,14 @@ export function MoverHomeScreen({ navigation }: any) {
         {isDriver
           ? [
               ...(d.points ?? []).map((p: any, i: number) => (
-                <Marker key={`p${i}`} coordinate={{ latitude: p.lat, longitude: p.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+                <Marker key={`p${i}`} coordinate={{ latitude: p.lat, longitude: p.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false} onPress={onDemandTap}>
                   <DemandDot />
                 </Marker>
               )),
               ...(d.clusters ?? [])
                 .filter((c: any) => c.count > 1)
                 .map((c: any, i: number) => (
-                  <Marker key={`c${i}`} coordinate={{ latitude: c.lat, longitude: c.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}>
+                  <Marker key={`c${i}`} coordinate={{ latitude: c.lat, longitude: c.lng }} anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false} onPress={onDemandTap}>
                     <ClusterBadge count={c.count} />
                   </Marker>
                 )),
@@ -700,6 +742,7 @@ export function MoverHomeScreen({ navigation }: any) {
       ) : null}
 
       <BottomSheet
+        ref={sheetRef}
         index={0}
         snapPoints={['34%', '80%']}
         enableDynamicSizing={false}
@@ -736,6 +779,9 @@ export function MoverHomeScreen({ navigation }: any) {
               </Pressable>
             ) : null}
           </View>
+
+          {/* [STORE-ALERT] Says so when this phone cannot ring for offers. */}
+          {!preview ? <PushOffStrip audience="mover" style={{ marginTop: space.lg }} /> : null}
 
           {!online && !activeJob && demandOpportunity ? (
             <DemandBand
@@ -789,7 +835,7 @@ export function MoverHomeScreen({ navigation }: any) {
                 <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, borderRadius: radius.lg, backgroundColor: withAlpha(color.warning, 0.12), borderWidth: 1, borderColor: withAlpha(color.warning, 0.4), padding: space.md, marginTop: space.md, opacity: pressed ? 0.85 : 1 }}>
                   <Feather name="clock" size={15} color={dk.warning} style={{ marginTop: 1 }} />
                   <T variant="label" style={{ flex: 1, color: dk.text }}>
-                    Your {expiringDoc.docType.replace(/_/g, ' ')} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
+                    Your {docLabel(expiringDoc.docType)} expires in {expiringDoc.days} day{expiringDoc.days === 1 ? '' : 's'} — tap to upload the renewal.
                   </T>
                 </View>
               )}
@@ -915,6 +961,12 @@ export function MoverHomeScreen({ navigation }: any) {
                 <T variant="label" style={{ color: dk.muted, marginTop: space.sm }}>
                   {demandLine ?? 'Waiting for nearby jobs…'}
                 </T>
+                {demandLine ? (
+                  // [row 54] Demand is not a list to grab from: say how it arrives.
+                  <T variant="caption" center style={{ color: dk.muted, marginTop: space.xs, paddingHorizontal: space.lg }}>
+                    Requests reach you as offers on this screen. Stay online.
+                  </T>
+                ) : null}
               </View>
             ) : (
               <>

@@ -1,4 +1,5 @@
-import type { OrderVertical as SharedOrderVertical, OrderVerticalFacts } from '@swift/types';
+import type { OrderStatus, OrderVertical as SharedOrderVertical, OrderVerticalFacts } from '@swift/types';
+import { storeOrderStatusWords } from '@swift/types';
 
 /**
  * What an order's status is called, in words, for the person waiting on it.
@@ -125,6 +126,25 @@ export function orderStatusLabel(status: string | null | undefined, kind?: strin
   return table[s] ?? 'In progress';
 }
 
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U72] What a STORE calls an order status: its board pill and the
+// order's history. The words are the shared map the web store console reads
+// too (@swift/types order-words), so the phone and the console never name one
+// status two ways. A status this build has no words for reads "Status
+// unavailable", never the code.
+// ---------------------------------------------------------------------------
+
+/** A status in the store's words (the board pill). */
+export function storeStatusLabel(status: string | null | undefined): string {
+  return storeOrderStatusWords(status);
+}
+
+/** The store's order history: the same words, except a new order was "Placed". */
+export function storeTimelineLabel(status: string | null | undefined): string {
+  const s = String(status ?? '').trim().toUpperCase();
+  return s === 'PENDING' || s === 'PLACED' ? 'Placed' : storeOrderStatusWords(s);
+}
+
 /** What a screen presents: a declared vertical, or an explicit UNKNOWN for a
  *  wire value this app has no words for (never silently a store). */
 export type PresentedVertical = OrderVertical | 'UNKNOWN';
@@ -189,4 +209,44 @@ export function canAttestPayment(paymentStatus: string | null | undefined): bool
 /** The sentence to show instead of the button, or null when there is nothing to say. */
 export function paymentAttestBlockedReason(paymentStatus: string | null | undefined): string | null {
   return PAYMENT_BLOCKED[String(paymentStatus ?? '')] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U73] What a rider's or driver's screens call a job's status (the
+// active job header and the job history pill). The header used to read "rider
+// en route pickup" / "ride in progress", and the history pill printed any
+// status it had not been taught as the code with spaces. Rider and driver
+// statuses have distinct names, so one table serves both. Typed by the enum:
+// a new status without words fails to compile.
+// ---------------------------------------------------------------------------
+
+const MOVER: Readonly<Record<`${OrderStatus}`, string>> = {
+  PENDING: 'Waiting',
+  ACCEPTED: 'Accepted',
+  PREPARING: 'Being prepared',
+  READY_FOR_PICKUP: 'Ready to collect',
+  RIDER_ASSIGNED: 'Assigned to you',
+  RIDER_EN_ROUTE_PICKUP: 'On the way to the pickup',
+  RIDER_ARRIVED_PICKUP: 'At the pickup',
+  PICKED_UP: 'Picked up',
+  EN_ROUTE_DELIVERY: 'On the way to the drop-off',
+  ARRIVED: 'At the drop-off',
+  DRIVER_ASSIGNED: 'Assigned to you',
+  DRIVER_EN_ROUTE: 'On the way to the passenger',
+  DRIVER_ARRIVED: 'At the pickup',
+  RIDE_IN_PROGRESS: 'Trip in progress',
+  DELIVERED: 'Delivered',
+  COMPLETED: 'Completed',
+  CANCELLED: 'Cancelled',
+  REFUNDED: 'Refunded',
+  FAILED: 'Failed',
+  RETURNING: 'Taking it back',
+  RETURNED: 'Returned',
+};
+
+/** A job's status in the rider's or driver's words; one this build has not been taught reads "Status unavailable"
+ *  (as on the store screens), never the code and never "In progress", which is untrue for a status that ended. */
+export function moverStatusLabel(status: string | null | undefined): string {
+  const s = String(status ?? '').trim().toUpperCase();
+  return Object.prototype.hasOwnProperty.call(MOVER, s) ? MOVER[s as `${OrderStatus}`] : 'Status unavailable';
 }

@@ -1,4 +1,5 @@
 import { bindTenantTransaction } from '../../plugins/prisma';
+import { scanUpload } from '../../lib/malware-scan';
 import { createHash } from 'node:crypto';
 import type { Order, Prisma, PrismaClient } from '@prisma/client';
 import { AppError } from '../../utils/errors';
@@ -57,6 +58,7 @@ export async function issueHandoverPhoto(
   const buffer = stripImageMetadata(input.buffer, input.mimeType);
   const bindingDigest = handoverBinding(order);
   const ext = input.mimeType === 'image/png' ? 'png' : input.mimeType === 'image/webp' ? 'webp' : 'jpg';
+  await scanUpload(buffer, { surface: 'handover-proof' });
   const { url } = await storage.upload({ buffer, mimeType: input.mimeType, filename: `photo.${ext}`, folder: `handover-proof/${order.id}` });
   return db.$transaction(async (tx) => {
       await bindTenantTransaction(tx);

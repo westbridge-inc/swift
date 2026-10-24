@@ -34,11 +34,19 @@ export const SECRET_FILE_NAMES = [
   'MASTER_KEK',
   'STORAGE_SIGNING_SECRET',
   'STORAGE_SIGNING_SECRET_PREVIOUS',
+  // [AUD-G7-023] The emergency-number policy signing key (Ed25519 derived from
+  // it; the app pins the public half). Read by the API process only, generated
+  // ON the host by deploy/owner/emergency-policy-key.command.
+  'EMERGENCY_POLICY_SIGNING_KEY',
   'CONSENT_IP_PEPPER',
   // Search.
   'MEILISEARCH_KEY',
   // Notifications.
   'TWILIO_API_KEY_SECRET',
+  // [R22] The account token Twilio signs inbound STOP requests with
+  // (sms-inbound.routes.ts). Verification only, under its own name: the
+  // outbound adapter never reads it (deploy/TWILIO.md).
+  'TWILIO_WEBHOOK_AUTH_TOKEN',
   'SMTP_PASS',
   // [L04] Non-production SMS recipient allowlist: phone numbers are personal
   // data, so they arrive by file from the store, never in a compose file.

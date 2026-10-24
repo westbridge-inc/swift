@@ -17,7 +17,7 @@ PRIVATE `api-journeys` instance (see `deploy/PILOT-RUNBOOK.md` §8, Pilot journe
 LIVETEST_BASE_URL=http://localhost:3000 LIVETEST_ADMIN_PHONE=+5920400000 \
   apps/api/node_modules/.bin/tsx scripts/livetest/run.ts                    # golden path
 LIVETEST_BASE_URL=http://localhost:3000 LIVETEST_ADMIN_PHONE=+5920400000 \
-  apps/api/node_modules/.bin/tsx scripts/livetest/run.ts --suite=journeys   # all 42 journeys
+  apps/api/node_modules/.bin/tsx scripts/livetest/run.ts --suite=journeys   # all 43 journeys
 ```
 
 Exit code `0` = nothing failed, `1` = a flow/journey failed, `2` = the harness
@@ -70,5 +70,5 @@ target (the reason names it); FAIL means a step failed or no negative check ran.
 | `flows.ts` | the golden-path assertions (cash-only, IDOR, stock race, …) |
 | `guard.ts` | the target and phone refusals |
 | `journey.ts`, `report.ts` | journey recording, status rules, result files |
-| `journeys/*.ts` | the 42 journeys, by ledger group |
+| `journeys/*.ts` | the 43 journeys, by ledger group |
 | `run.ts` | orchestrates either suite, prints the summary, sets the exit code |

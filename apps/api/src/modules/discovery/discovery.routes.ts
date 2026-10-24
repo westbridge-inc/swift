@@ -1,8 +1,9 @@
 import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@prisma/client';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { bindBrowseTenant, requireRequestTenant } from '../search/search-scope';
 import { customerPoint } from './customer-point';
+import { legacyCategoryMark } from './legacy-category-mark';
 import { classifyCategory } from '../compliance/prohibited-items';
 
 // ---------------------------------------------------------------------------
@@ -111,7 +112,7 @@ export async function discoveryRoutes(app: FastifyInstance) {
       .map((c) => ({
         slug: c.slug,
         name: c.name,
-        emoji: c.emoji,
+        emoji: legacyCategoryMark(c), // builds 9-11 draw it; never blank
         iconKey: c.iconKey,
         kind: c.kind,
         vertical: c.vertical,

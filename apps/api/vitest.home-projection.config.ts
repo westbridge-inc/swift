@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { sideConfigTestEnv } from './src/lib/test-target-lock';
 
 // Explicit service-free allowlist. Do not inherit the API DB/Redis lock setup.
 export default defineConfig({
@@ -22,6 +23,7 @@ export default defineConfig({
     setupFiles: ['src/__tests__/helpers/home-service-free.setup.ts'],
     fileParallelism: false,
     maxWorkers: 3,
-    env: { NODE_ENV: 'test' },
+    // [AUD-G7-040] a disposable DB/Redis target, like vitest.config.ts.
+    env: { ...sideConfigTestEnv(), NODE_ENV: 'test' },
   },
 });

@@ -40,6 +40,12 @@ import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
 
 const DAY = 24 * 60 * 60 * 1000;
 const WEEK = 7 * DAY;
+/** [R27 · security review] A lower tier moves only when it holds on two consecutive weekly passes:
+ *  run the re-tier now and a week later, and sum what each pass changed. */
+async function twoWeeklyPasses(pass: (at: Date) => Promise<number>): Promise<number> {
+  const t = Date.now();
+  return (await pass(new Date(t))) + (await pass(new Date(t + 7 * 24 * 60 * 60 * 1000)));
+}
 // This file's own fixture block (+5920328nnn). Grep the repo: no other file
 // uses 5920328 (stop-billing uses 5920326).
 const PHONE_PREFIX = '+5920328';
@@ -304,7 +310,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
     await billing.lapseStoppedSubscriptions(now);
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: paused.subId } })).status).toBe('PAUSED');
 
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
 
     // The FUTURE rate moved, with its audit event; the plan is still paused.
     expect(await rate(paused.subId)).toBe(6000);
@@ -340,7 +346,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
     const negotiated = await makeRiderSub({ due: owedWeek, status: 'PAUSED', autoRenew: false, weeklyRate: 7500, customRate: 7500 });
     const waived = await makeRiderSub({ due: owedWeek, status: 'PAUSED', autoRenew: false, feeWaived: true });
 
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
 
     expect(await rate(suspended.subId)).toBe(6000);
     expect(await retierEvents(suspended.subId)).toHaveLength(1);
@@ -363,7 +369,7 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
     const paused = await makeVendorSub({ due, status: 'PAUSED', autoRenew: false });
     const suspended = await makeVendorSub({ due, status: 'SUSPENDED' });
 
-    await billing.recalculateVendorTiers();
+    await twoWeeklyPasses((at) => billing.recalculateVendorTiers(at));
 
     for (const { subId } of [paused, suspended]) {
       expect(await rate(subId)).toBe(15000); // no listings: the small tier
@@ -371,6 +377,52 @@ describe('AX332 F1: the weekly re-tier reaches a dormant plan', () => {
       expect(events).toHaveLength(1);
       expect(Number(events[0]!.amount)).toBe(15000);
     }
+  });
+
+  it('[R27 · G S4-2] a rate agreed or a fee waived while the pass runs is never overwritten by a lower tier', async () => {
+    const due = new Date(Date.now() + 3 * DAY);
+    const negotiated = await makeVendorSub({ due, status: 'ACTIVE' });
+    const waived = await makeVendorSub({ due, status: 'ACTIVE' });
+    // The first weekly pass sees the lower tier (no listings: 15,000) and moves nothing yet.
+    const t = Date.now();
+    await billing.recalculateVendorTiers(new Date(t));
+    expect(await rate(negotiated.subId)).toBe(20000);
+    expect(await rate(waived.subId)).toBe(20000);
+
+    // The next weekly pass reads every vendor plan first, then moves each one in its own transaction.
+    // Between the two, a person agrees a rate at today's fee (the USD migration writes the same) and
+    // another waives a fee. Neither changes weeklyRate, so only the move's own write can see them.
+    const human = new Map<string, () => Promise<unknown>>([
+      [negotiated.subId, () => app.prisma.subscription.update({ where: { id: negotiated.subId }, data: { customRate: 20000 } })],
+      [waived.subId, () => app.prisma.subscription.update({ where: { id: waived.subId }, data: { feeWaived: true, feeWaivedBy: 'test-admin', feeWaivedReason: 'test waiver' } })],
+    ]);
+    let moving: string | null = null;
+    const racing = new Proxy(app.prisma, {
+      get(target, prop) {
+        if (prop === '$transaction') {
+          return async (...args: unknown[]) => {
+            const decide = moving ? human.get(moving) : undefined;
+            if (decide) { human.delete(moving!); await decide(); }
+            return (target.$transaction as (...a: unknown[]) => unknown)(...args);
+          };
+        }
+        const value = Reflect.get(target, prop, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const racingBilling = new BillingService(racing, new NotificationService(app.prisma, app.io), getPaymentProvider());
+    const seam = racingBilling as unknown as { retierTarget: (id: string, ...rest: unknown[]) => unknown };
+    const realTarget = seam.retierTarget.bind(racingBilling);
+    seam.retierTarget = (id, ...rest) => { moving = id; return realTarget(id, ...rest); };
+
+    await racingBilling.recalculateVendorTiers(new Date(t + WEEK));
+    expect(human.size).toBe(0); // both decisions landed between the read and the move
+
+    const neg = await app.prisma.subscription.findUniqueOrThrow({ where: { id: negotiated.subId } });
+    expect({ weeklyRate: Number(neg.weeklyRate), customRate: Number(neg.customRate) }).toEqual({ weeklyRate: 20000, customRate: 20000 });
+    expect(await retierEvents(negotiated.subId)).toHaveLength(0);
+    expect(await rate(waived.subId)).toBe(20000);
+    expect(await retierEvents(waived.subId)).toHaveLength(0);
   });
 });
 
@@ -384,7 +436,7 @@ describe('AX332 F2: due now is the charge already issued', () => {
     const request = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: rider.subId } });
     expect({ amount: Number(request.amount), status: request.status }).toEqual({ amount: 8000, status: 'PENDING' });
 
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     expect(await rate(rider.subId)).toBe(6000);
 
     // What approving settles is what the screen says is due; the new fee is
@@ -420,7 +472,7 @@ describe('AX332 F2: due now is the charge already issued', () => {
     await app.prisma.subscription.update({ where: { id: rider.subId }, data: { suspendedAt: new Date(now.getTime() - DAY) } });
     await paymentRow(rider.subId, 8000, 'PENDING', owedWeek, `mmgtx_pending_${nanoid(8)}`);
 
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     expect(await rate(rider.subId)).toBe(6000);
 
     await billing.sweepSuspended(now);
@@ -460,14 +512,14 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
   it.each(['ACTIVE', 'PAST_DUE', 'TRIAL', 'PAUSED', 'SUSPENDED'] as const)('re-tiers a %s taxi once with the new rate and an audit event', async (status) => {
     const due = new Date(Date.now() + DAY);
     const taxi = await makeTaxiSub({ due, status });
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     const after = await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxi.subId } });
     expect({ rate: Number(after.weeklyRate), status: after.status, due: after.nextBillingDate }).toEqual({ rate: 8000, status, due });
     const events = await retierEvents(taxi.subId);
     expect(events).toHaveLength(1);
     expect(Number(events[0]!.amount)).toBe(8000);
     expect(events[0]!.idempotencyKey).toContain(':9000->8000');
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     expect(await retierEvents(taxi.subId)).toHaveLength(1);
   });
 
@@ -475,7 +527,7 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
     const due = new Date(Date.now() + DAY);
     const custom = await makeTaxiSub({ due, status: 'PAUSED', weeklyRate: 7500, customRate: 7500 });
     const waived = await makeTaxiSub({ due, status: 'SUSPENDED', feeWaived: true });
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     expect(await rate(custom.subId)).toBe(7500);
     expect(await rate(waived.subId)).toBe(9000);
     expect(await retierEvents(custom.subId)).toHaveLength(0);
@@ -487,7 +539,7 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
     const taxi = await makeTaxiSub({ due: new Date(Date.now() - DAY), stoppedPaid: true, prepaid: 9000 });
     await billing.lapseStoppedSubscriptions();
     expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: taxi.subId } })).status).toBe('PAUSED');
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     // [SAFE-B] The billing-method routes need a stepped-up session.
     await grantStepUp(app, taxi.httpToken);
     const resume = await app.inject({ method: 'PUT', url: '/api/v1/driver/subscription/billing-method', payload: { method: 'CASH' }, headers: { 'content-type': 'application/json', authorization: `Bearer ${taxi.httpToken}` } });
@@ -504,7 +556,7 @@ describe('owner taxi 8,000: future fees change, issued money does not', () => {
     expect(await billing.billSubscription((await subWithRelations(taxi.subId)) as never)).toBe('pending');
     const issued = await app.prisma.subscriptionPayment.findFirstOrThrow({ where: { subscriptionId: taxi.subId } });
     expect(Number(issued.amount)).toBe(9000);
-    await billing.recalculateMoverTiers();
+    await twoWeeklyPasses((at) => billing.recalculateMoverTiers(at));
     const screen = await feeScreen(taxi.httpToken, 'driver');
     expect({ due: screen.amountDueGyd, weekly: screen.weeklyFeeGyd }).toEqual({ due: 9000, weekly: 8000 });
     await billing.pollPendingMmgCharges();

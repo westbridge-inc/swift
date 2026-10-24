@@ -3,13 +3,14 @@ import type { AuditFacts, OnAudit } from '../../lib/audit-writer';
 import { AppError } from '../../utils/errors';
 import { isDuplicateOn } from '../money/evidence';
 import { lockMoverFeeAuthority, lockSubscriptionPayer } from '../subscription/mover-fee-authority';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { isSoleApprover } from '../admin/solo-approval';
 import { normaliseReference } from '../money/evidence';
 import { postLedger, refundPaidPostings, refundReleasePostings, refundSetAsidePostings } from './ledger';
 import { feeReversalOpenInTx } from './dunning-clock';
 import { feeReturnMayStillLandInTx, referenceOnRecord } from './mmg-fee-reversal';
 import { formatGuyanaTime } from '../../utils/guyana-day';
+import { recordSetAsideReleasedInTx, recordWalletDebitInTx } from './fee-receipt-allocation';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 2026-10-07] Unused prepaid weekly-fee credit is refunded, then
@@ -226,6 +227,8 @@ export async function setAsideCreditRefund(prisma: PrismaClient, input: {
       idempotencyKey: eventKey,
       note: `Unused fee credit set aside for a refund (asked by ${input.adminId}). Not paid yet: pay it outside Swift, then record the payout.`,
     } });
+    // [R12] The whole wallet is set aside: each receipt's unused money says so.
+    await recordWalletDebitInTx(tx, { subscriptionId: input.subscriptionId, amount, balanceBefore: amount, kind: 'REFUND_SET_ASIDE', billingEventId: event.id });
     await postLedger(tx, {
       idempotencyKey: `ledger:${eventKey}`,
       description: 'Unused fee credit set aside for a refund',
@@ -424,6 +427,8 @@ export async function releaseCreditRefund(prisma: PrismaClient, input: {
       idempotencyKey: eventKey,
       note: `Refund set-aside returned to the fee credit unpaid (asked by ${input.adminId})`,
     } });
+    // [R12] The receipts the set-aside came from get that money back.
+    await recordSetAsideReleasedInTx(tx, { subscriptionId: input.subscriptionId, setAsideEventId: open.opened.id, amount: Number(open.amount), billingEventId: event.id });
     await postLedger(tx, {
       idempotencyKey: `ledger:${eventKey}`,
       description: 'Refund set-aside returned to the fee credit unpaid',

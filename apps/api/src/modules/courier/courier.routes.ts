@@ -1,4 +1,5 @@
 import { courierReceiptKey, openCourierAnswer, sealCourierAnswer } from './courier-receipt';
+import { scanUpload } from '../../lib/malware-scan';
 import { checkoutRequestHash, persistCheckoutReceiptInTransaction, persistDispatchCommandInTransaction, drainCheckoutOutbox } from '../order/checkout-outbox';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
 import { assertRoadTripInMarket } from '../rides/road-trip-market';
@@ -6,7 +7,7 @@ import { issueHandoverPhoto } from '../cash/handover-evidence';
 import type { FastifyInstance } from 'fastify';
 import { runAsSystem } from '../../plugins/tenant-context';
 import { canonicalBillableKm } from '../../utils/billable-distance';
-import { z } from 'zod';
+import { z } from '../../lib/zod';
 import { createHash, randomBytes } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { estimateCourierFee, type CourierRates, type PackageSize, type DeliverySpeed } from './courier.service';
@@ -471,7 +472,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       invalidStatus: courierNotCancellable,
       // [owner #50] The sender's cancel follows the one cancellation rule on
       // the locked row: free while no rider has taken the parcel, inside the
-      // five-minute window, or when the rider is very late — otherwise refused
+      // one-minute window, or when the rider is very late — otherwise refused
       // (contact the rider). Never a fee.
       customerCancel: true,
     });
@@ -524,6 +525,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: `courier-proof/${id}/pickup` });
     // The pickup mirror of [REPORT-016 F-016-04]: record the SERVER-issued URL
     // and the rider it was issued to. /pickup-proof exact-matches it, so pickup
@@ -844,6 +846,7 @@ export default async function courierRoutes(app: FastifyInstance) {
       throw new AppError(400, 'INVALID_POINT', 'lat and lng are required.');
     }
 
+    await scanUpload(buffer, { surface: 'courier-proof', log: request.log });
     const { url } = await storage.upload({ buffer, filename, mimeType: mimetype, folder: `courier-proof/${id}/return` });
 
     const { order: updated } = await orderService.transitionOrderAtomically({

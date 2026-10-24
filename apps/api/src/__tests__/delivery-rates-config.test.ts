@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { PrismaClient } from '@prisma/client';
+import type { PrismaClient } from '@prisma/client';
+import { testPrismaClient } from './helpers/test-prisma-client';
 import { nanoid } from 'nanoid';
 import {
   calculateDeliveryFee,
@@ -57,7 +58,7 @@ describe('CountryConfigService.getDeliveryRates (reads config, resilient)', () =
 
   beforeAll(async () => {
     process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift_test';
-    prisma = new PrismaClient();
+    prisma = testPrismaClient();
     svc = new CountryConfigService(prisma);
     await prisma.countryConfig.create({
       data: {

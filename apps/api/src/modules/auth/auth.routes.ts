@@ -1,8 +1,10 @@
 import type { FastifyInstance } from 'fastify';
-import { z } from 'zod';
+import { scanUpload } from '../../lib/malware-scan';
+import { z } from '../../lib/zod';
 import { AuthService } from './auth.service';
 import { TRIAL_DAYS } from '../subscription/subscription.service';
 import { partnerPriceList } from '../country/partner-pricing';
+import { weeklyFeeTerms } from '../partner/weekly-fee-ack';
 import { resolveAvatarUrl } from '../../utils/avatar-url';
 import { queueStorageOrphan, recordStorageOrphan, retryStorageOrphan } from '../../lib/storage-orphans';
 import { isOwnedAvatarKey } from '../verification/object-authority';
@@ -295,6 +297,7 @@ export async function authRoutes(app: FastifyInstance) {
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
 
+    await scanUpload(buffer, { surface: 'avatar', log: request.log });
     const storage = getStorageProvider();
     const { url } = await storage.upload({
       buffer,
@@ -514,6 +517,9 @@ export async function authRoutes(app: FastifyInstance) {
         isActive: config.isActive,
         trialDays: TRIAL_DAYS,
         ...partnerPriceList(config.subscriptionTiers),
+        // [Row 628] The weekly fee's words, shown with the amount before a partner signs up; the
+        // "I understand the weekly fee" tick is recorded anchored to exactly these (partner/weekly-fee-ack.ts).
+        feeTerms: weeklyFeeTerms(),
       },
     });
   });

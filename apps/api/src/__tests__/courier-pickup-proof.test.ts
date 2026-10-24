@@ -16,6 +16,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerPublicUploads } from '../utils/public-uploads';
 import { retainedCohort, retainedPhonePrefix, retireKeptScaffolding, without } from './helpers/retained-evidence';
 import { REAL_PNG } from './helpers/real-image';
+import { walkOrderStatus } from './helpers/order-status-walk';
 
 // ---------------------------------------------------------------------------
 // [E16] Courier pickup custody proof.
@@ -347,7 +348,7 @@ describe('[E16] pickup is confirmed only with the issued photo and a location', 
     const firstAssignmentUrl = up.json().data.url as string;
     // The rider hands the job back, then is given it again (A -> none -> A).
     await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
-    await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.id, status: 'RIDER_ARRIVED_PICKUP' } });
+    await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
 
     const stale = await confirmPickup(order.id, mover.token, { proofPhotoUrl: firstAssignmentUrl, gps: PICKUP_GPS });
     expect(stale.statusCode, stale.body).toBe(400);
@@ -375,7 +376,7 @@ describe('[E16] pickup is confirmed only with the issued photo and a location', 
       await waiting;
       try {
         await app.prisma.order.update({ where: { id: order.id }, data: { riderId: null, status: 'READY_FOR_PICKUP' } });
-        await app.prisma.order.update({ where: { id: order.id }, data: { riderId: rider.id, status: 'RIDER_ARRIVED_PICKUP' } });
+        await walkOrderStatus(app.prisma, order.id, 'RIDER_ARRIVED_PICKUP', { riderId: rider.id });
       } finally { resume(); }
       const res = await pending;
       expect(res.statusCode, res.body).toBe(409);

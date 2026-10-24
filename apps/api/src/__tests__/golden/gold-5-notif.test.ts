@@ -260,8 +260,10 @@ describe('GOLD-5 · NOTIF-01 — push register and inbox', () => {
 
     const accepted = await call('PUT', `/api/v1/vendor/orders/${order.orderId}/accept`, owner.token, {});
     expect(accepted.statusCode, accepted.body).toBe(200);
-    expect(accepted.json().data.status).toBe('ACCEPTED');
+    expect(accepted.json().data.status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
 
+    // [O-3] ONE notice for the one tap, in the acceptance's own words (its body already says "is preparing it");
+    // the payload keeps status 'ACCEPTED', the notice every build already knows.
     const expectedData = { orderId: order.orderId, orderNumber: order.orderNumber, status: 'ACCEPTED' };
     const rows = await sys(() => app.prisma.notification.findMany({ where: { userId: alice.userId } }));
     expect(rows.map((r) => ({ type: r.type, title: r.title, body: r.body, data: r.data, isRead: r.isRead, readAt: r.readAt }))).toEqual([{
@@ -296,7 +298,7 @@ describe('GOLD-5 · NOTIF-01 — push register and inbox', () => {
     expect(payload).not.toHaveProperty('audience');
     const destination = await call('GET', `/api/v1/customer/orders/${payload['orderId'] as string}`, alice.token);
     expect(destination.statusCode, destination.body).toBe(200);
-    expect({ id: destination.json().data.id, status: destination.json().data.status }).toEqual({ id: order.orderId, status: 'ACCEPTED' });
+    expect({ id: destination.json().data.id, status: destination.json().data.status }).toEqual({ id: order.orderId, status: 'PREPARING' }); // [O-3]
   });
 
   it('another account can neither see, read, read-all nor silence it, and its tap destination is refused', async () => {
@@ -347,12 +349,17 @@ describe('GOLD-5 · NOTIF-01 — push register and inbox', () => {
     const logout = await call('DELETE', '/api/v1/customer/notifications/devices', alice.token, { token: aliceToken });
     expect(logout.statusCode).toBe(200);
     expect((await sys(() => app.prisma.deviceToken.findUniqueOrThrow({ where: { token: aliceToken } }))).isActive).toBe(false);
+    // [O-3] Accept already started preparation: an older build's "Start preparing" tap is a 200 no-op that tells
+    // nobody anything. The next real event is "ready".
     const preparing = await call('PUT', `/api/v1/vendor/orders/${order.orderId}/preparing`, owner.token, {});
     expect(preparing.statusCode, preparing.body).toBe(200);
+    expect(await sys(() => app.prisma.notification.count({ where: { userId: alice.userId } }))).toBe(1);
+    const ready = await call('PUT', `/api/v1/vendor/orders/${order.orderId}/ready`, owner.token, {});
+    expect(ready.statusCode, ready.body).toBe(200);
     const rows = await sys(() => app.prisma.notification.findMany({ where: { userId: alice.userId }, orderBy: { createdAt: 'asc' } }));
     expect(rows.map((r) => ({ title: r.title, data: r.data, isRead: r.isRead }))).toEqual([
       { title: 'Order Accepted!', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'ACCEPTED' }, isRead: true },
-      { title: 'Being Prepared', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'PREPARING' }, isRead: false },
+      { title: 'Food Ready!', data: { orderId: order.orderId, orderNumber: order.orderNumber, status: 'READY_FOR_PICKUP' }, isRead: false },
     ]);
     expect(pushesTo(aliceToken).map((p) => p.title)).toEqual(['Order Accepted!']);
   });
@@ -455,10 +462,15 @@ describe('GOLD-5 · NOTIF-02 — SMS fallback and escalation', () => {
     expect(ladderJobs(o2.orderId)).toEqual([armed[0], { level: 1, delay: 60_000 }]);
 
     // RUNG 1 — still unread: the SMS fallback, exactly once, to the owner's phone.
+    // [STORE-ALERT · owner ruling 18 Oct] It names the store and the whole
+    // minutes left until the auto-cancel (rounded down, read at send time).
+    const left = Math.floor((Date.parse(respondBy) - Date.now()) / 60_000);
     expect(await runLadderJob(o2.orderId, 1)).toBe('sms_sent');
-    expect(smsTo(owner.phone).map((s) => s.body)).toEqual([
-      `Swift: order ${o2.orderNumber} is still waiting for your response. Open your dashboard now.`,
-    ]);
+    const texts = smsTo(owner.phone).map((s) => s.body);
+    expect(texts).toHaveLength(1);
+    expect([left, left - 1].map((n) =>
+      `Swift: new order ${o2.orderNumber} at Gold5 Ladder Kitchen is waiting. Open the Swift app to accept or decline. It cancels by itself in ${n} min.`,
+    )).toContain(texts[0]);
     expect(pushesTo(vendorDevice)).toHaveLength(2);
     expect((await alertRow(o2.orderId)).isRead).toBe(false);
   });

@@ -11,6 +11,7 @@ import { registerErrorHandler } from '../middleware/error-handler';
 import { registerEmptyJsonBodyParser } from '../plugins/empty-json';
 import { grantStepUp } from './helpers/step-up';
 import { STAFF_INVITE_KIND, staffAddDailyCap, spendStaffAddAllowance } from '../modules/vendor/staff-invites';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Row 55 follow-up. Until STAFF_INVITE_ACCEPT is on, adding a known number
@@ -28,7 +29,7 @@ const userIds: string[] = [];
 const vendorIds: string[] = [];
 const vendorOwnerIds: string[] = [];
 
-const phone = () => `+59246${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = () => testPhone();
 
 async function makeUser(roles: UserRole[], activeRole: UserRole) {
   const user = await app.prisma.user.create({
@@ -53,7 +54,7 @@ async function makeOwnerWithStore() {
   vendorOwnerIds.push(vo.id);
   const vendor = await app.prisma.vendor.create({
     data: {
-      ownerId: vo.id, name: `Cap Bistro ${nanoid(4)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
+      ownerId: vo.id, name: `Cap Bistro ${wordFreeTag(8)}`, slug: `cap-bistro-${nanoid(6).toLowerCase()}`, vendorType: 'RESTAURANT',
       phone: phone(), addressLine1: '6 Crew Street', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: 6.8, longitude: -58.15,
       status: 'ACTIVE', acceptingOrders: true, isCurrentlyOpen: true, isVerified: true,
     },

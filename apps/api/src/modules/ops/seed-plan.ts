@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { targetFingerprint, type TargetFingerprint } from './purge-plan';
 import { seedPlanCounter } from '../../plugins/observability';
+import { rescueIncentiveRefusal } from '../dispatch/rescue-incentive-guard';
 import {
   approvalRequest, consumeApprovals, parseApproverKeys, promotionSubject, SOLO_DEFAULT_LIFETIME_MS, SOLO_SHOW_LINE, verifyApprovals, verifySoloApproval,
   type RequestFacts, type SignedApproval, type VerifiedApproval,
@@ -139,7 +140,17 @@ export async function diffDesired(prisma: PrismaClient, desired: DesiredConfig):
 }
 
 /** Plan: the target, the desired data's digest, the diff — digested together. */
+/** [Row 208 guard] The installer never writes a rescue incentive: it stays 0
+ *  until a payout path and a deletion block ship. Checked before anything else. */
+function refuseLockedDials(desired: DesiredConfig): void {
+  for (const a of desired.algoConfig) {
+    const why = rescueIncentiveRefusal(a.key, a.value);
+    if (why) throw new SeedRefused('RESCUE_INCENTIVE_LOCKED', why);
+  }
+}
+
 export async function buildSeedPlan(prisma: PrismaClient, databaseUrl: string, desired: DesiredConfig, now = new Date()): Promise<SeedPlan> {
+  refuseLockedDials(desired);
   const target = await targetFingerprint(prisma, databaseUrl);
   const changes = await diffDesired(prisma, desired);
   const body = { version: 1 as const, configVersion: desired.version, configDigest: sha256(canonical(desired)), createdAt: now.toISOString(), target, changes };
@@ -249,6 +260,7 @@ const audit = (tx: Prisma.TransactionClient | PrismaClient, plan: SeedPlan, even
  * one transaction with the audit row, or nothing does.
  */
 export async function applySeedPlan(prisma: PrismaClient, databaseUrl: string, desired: DesiredConfig, plan: SeedPlan, opts: ApplyOptions = {}): Promise<ApplyResult> {
+  refuseLockedDials(desired);
   const { digest: carried, ...body } = plan;
   if (seedPlanDigest(body) !== carried) { seedPlanCounter.labels('refused_tampered').inc(); throw new SeedRefused('PLAN_TAMPERED', 'the plan body does not match its digest'); }
   if (plan.configDigest !== sha256(canonical(desired))) { seedPlanCounter.labels('refused_config_mismatch').inc(); throw new SeedRefused('CONFIG_MISMATCH', `the plan was built for configuration ${plan.configVersion}; the code now holds different desired data — plan again`); }

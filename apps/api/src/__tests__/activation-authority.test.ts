@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { SubscriptionService } from '../modules/subscription/subscription.service';
 import { ownedVerificationFixture } from './helpers/verification-object';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
@@ -17,7 +18,9 @@ import { getKycProvider } from '../providers/kyc/kyc-provider';
 import { loginWithOtp } from './helpers/otp';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
-import { readDunningClock } from '../modules/billing/dunning-clock';
+import { lockBillingAuthority, readDunningClock } from '../modules/billing/dunning-clock';
+import { restoreBillingAccess } from '../modules/billing/billing-access';
+import { lockIdentityAuthority } from '../modules/integrity/identity-review';
 
 // ---------------------------------------------------------------------------
 // [ACTIVATION AUTHORITY — task #2 slice 1] Document truth drives activation:
@@ -195,6 +198,168 @@ describe('STRAND-1 — checklist completion IS vendor activation, atomically', (
     await svc.approveDocument(again.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
     const fresh = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } });
     expect(fresh.isVerified).toBe(false); // purged evidence no longer counts
+  });
+});
+
+describe('[#1541] a store awaiting approval whose weekly fee billing holds goes live UNDER that hold', () => {
+  const DAY = 86_400_000;
+  const HELD_TITLE = 'Documents approved';
+  /** A pending store that already holds a fee subscription in `status`, its three documents approved and,
+   *  when `awaiting`, a fourth (a second storefront photo) awaiting review: approving that one is the
+   *  activation edge. Without it the checklist is complete and nothing has projected it yet. */
+  async function pendingStoreWithFee(status: 'SUSPENDED' | 'CHURNED' | 'ACTIVE', tag: string, awaiting = true) {
+    const owner = await makeUser(`Fee${status}`);
+    const vendor = await makePendingVendor(owner.id);
+    const paidThrough = status === 'ACTIVE' ? new Date(Date.now() + 5 * DAY) : new Date(Date.now() - 3 * DAY);
+    const sub = await app.prisma.subscription.create({
+      data: {
+        vendorId: vendor.id, type: 'SUPERMARKET', status, suspendedAt: status === 'ACTIVE' ? null : new Date(Date.now() - DAY),
+        weeklyRate: 2100, billingMethod: 'CASH',
+        currentPeriodStart: new Date(paidThrough.getTime() - 7 * DAY), currentPeriodEnd: paidThrough, nextBillingDate: paidThrough,
+      },
+    });
+    for (const docType of SUPERMARKET_DOCS) await approvedDoc(owner.id, docType);
+    const last = awaiting ? await app.prisma.verificationDocument.create({
+      data: { userId: owner.id, role: 'VENDOR_OWNER' as never, docType: 'storefront_photo', fileUrl: `test/${marker}/fee-${tag}`, status: 'PENDING' },
+    }) : null;
+    return { owner, vendor, sub, last: last! };
+  }
+  const notices = (userId: string) => app.prisma.notification.findMany({ where: { userId }, select: { title: true, body: true, data: true } });
+  /** A confirmed fee payment, as settlement runs it: payer + subscription locked, the fee in good standing, the one restore. */
+  const pay = (subId: string, vendorId: string) => app.prisma.$transaction(async (tx) => {
+    await lockBillingAuthority(tx, subId);
+    await tx.subscription.update({ where: { id: subId }, data: { status: 'ACTIVE', suspendedAt: null } });
+    return restoreBillingAccess(tx, vendorId);
+  });
+
+  it.each(['SUSPENDED', 'CHURNED'] as const)('document path: completing its documents makes it live under billing\'s hold (fee %s), tells the owner once, and the payment opens it', async (status) => {
+    const { owner, vendor, sub, last } = await pendingStoreWithFee(status, `doc-${status}`);
+
+    await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * DAY));
+
+    // Its documents count (verified), but it is held exactly as billing holds a live store whose fee went unpaid.
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ isVerified: true, status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false });
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe(status);
+    const told = (await notices(owner.id)).filter((n) => n.title === HELD_TITLE);
+    expect(told).toHaveLength(1);
+    expect(told[0]!.body).toContain('Pay the weekly fee to open');
+    expect(told[0]!.data).toEqual({ vendorId: vendor.id });
+
+    // The daily belt re-projects it (the same per-owner projection): it stays held, and the owner is not told again.
+    await svc.reprojectVendorActivation(owner.id);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false });
+    expect((await notices(owner.id)).filter((n) => n.title === HELD_TITLE)).toHaveLength(1);
+
+    // The one restore a fee payment runs lifts it like any billing hold.
+    expect(await pay(sub.id, vendor.id)).toBe(true);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true, isVerified: true });
+  });
+
+  it.each(['SUSPENDED', 'CHURNED'] as const)('console approve: the store goes live under the unpaid %s hold, the reply says so, one notice, and approving again is refused until the fee is paid', async (status) => {
+    const { owner, vendor, sub } = await pendingStoreWithFee(status, `admin-${status}`, false);
+    // Every document approved, the projection not run yet: the console's button is the activation edge.
+    expect((await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } })).status).toBe('PENDING_APPROVAL');
+
+    const approve = () => app.inject({
+      method: 'PUT', url: `/api/v1/admin/vendors/${vendor.id}/approve`,
+      headers: { 'x-swift-reason': TEST_ADMIN_REASON, authorization: `Bearer ${adminToken}` }, payload: {},
+    });
+    const res = await approve();
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data).toMatchObject({ status: 'SUSPENDED', suspensionSource: 'BILLING', acceptingOrders: false, isVerified: true });
+    expect((await app.prisma.subscription.findUniqueOrThrow({ where: { id: sub.id } })).status).toBe(status);
+    const titles = (await notices(owner.id)).map((n) => n.title);
+    expect(titles.filter((t) => t === HELD_TITLE)).toHaveLength(1);
+    expect(titles).not.toContain('Vendor Approved!');
+
+    // Billing owns it now: the console cannot reopen it over the unpaid fee.
+    const again = await approve();
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error?.code ?? again.json().code).toBe('FEE_UNPAID');
+
+    expect(await pay(sub.id, vendor.id)).toBe(true);
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
+  });
+
+  // Where the activation meets the settling payer depends on its entry. The daily belt's own projection
+  // transaction reads the person's row FOR SHARE first (#1905's deletion barrier, account-closure.ts), so it
+  // waits there, before any fee read. A projection run inside a caller's transaction takes no barrier (a
+  // transaction client has no $transaction): there the projection's own payer lock
+  // (lockVendorActivationBilling) is the first lock on the person's row. Every caller in the service today
+  // locks that row itself before it projects; the 'caller-tx' entry pins that the projection does not rely
+  // on it.
+  const ENTRIES = {
+    belt: { wait: 'activation-deletion-barrier', run: (userId: string) => svc.reprojectVendorActivation(userId) },
+    'caller-tx': {
+      wait: 'vendor-activation-fee-payer',
+      run: (userId: string) => app.prisma.$transaction(async (tx) => {
+        await lockIdentityAuthority(tx);
+        await (svc as unknown as { projectVendorActivation: (db: unknown, u: string) => Promise<void> }).projectVendorActivation(tx, userId);
+      }, { timeout: 20_000 }),
+    },
+  } as const;
+  it.each([
+    ['settled', 'belt'], ['payer-only', 'belt'], ['settled', 'caller-tx'], ['payer-only', 'caller-tx'],
+  ] as const)('the activation waits for a settling payer before it reads the fee or writes the store (%s, %s entry), and ends open', async (stage, entry) => {
+    const { owner, vendor, sub } = await pendingStoreWithFee('SUSPENDED', `lock-${stage}-${entry}`, false);
+    let releasePayment!: () => void;
+    const release = new Promise<void>((resolve) => { releasePayment = resolve; });
+    let paymentReady!: () => void;
+    const ready = new Promise<void>((resolve) => { paymentReady = resolve; });
+    // Settlement, holding exactly its own locks. 'payer-only' stops after the payer: an activation that took
+    // a subscription before its payer would deadlock here when settlement moves on to the subscription.
+    const payment = app.prisma.$transaction(async (tx) => {
+      if (stage === 'payer-only') {
+        await tx.$queryRaw`SELECT "id" FROM "users" WHERE "id" = ${owner.id} FOR UPDATE`;
+        paymentReady();
+        await release;
+      }
+      await lockBillingAuthority(tx, sub.id);
+      await tx.subscription.update({ where: { id: sub.id }, data: { status: 'ACTIVE', suspendedAt: null } });
+      // The store is still pending: settlement has no billing hold to lift.
+      const lifted = await restoreBillingAccess(tx, vendor.id);
+      if (stage === 'settled') {
+        paymentReady();
+        await release;
+      }
+      return lifted;
+    }, { timeout: 20_000 });
+    await ready;
+    const activation = ENTRIES[entry].run(owner.id);
+    const waitAt = `%${ENTRIES[entry].wait}%`;
+    let blocked = false;
+    try {
+      const deadline = Date.now() + 8000;
+      while (!blocked && Date.now() < deadline) {
+        const rows = await app.prisma.$queryRaw<Array<{ n: number }>>`
+          SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND query LIKE ${waitAt} AND query NOT LIKE '%pg_stat_activity%'`;
+        blocked = rows[0]!.n > 0;
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      releasePayment();
+    }
+    const outcomes = await Promise.allSettled([payment, activation]);
+    expect(outcomes.map((o) => o.status), 'settlement and activation both commit, no lock-order deadlock').toEqual(['fulfilled', 'fulfilled']);
+    expect(blocked, `the activation waited at its first lock on the payer (${ENTRIES[entry].wait})`).toBe(true);
+    expect((outcomes[0] as PromiseFulfilledResult<boolean>).value).toBe(false);
+    // The activation ran after the payment committed: it saw the fee paid and opened the store itself.
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ status: 'ACTIVE', isVerified: true, suspensionSource: null, acceptingOrders: true });
+    expect((await notices(owner.id)).filter((n) => n.title === HELD_TITLE)).toHaveLength(0);
+  });
+
+  it('a pending store whose fee is in good standing goes live as before, with no fee notice', async () => {
+    const { owner, vendor, last } = await pendingStoreWithFee('ACTIVE', 'good');
+    await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * DAY));
+    expect(await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendor.id } }))
+      .toMatchObject({ isVerified: true, status: 'ACTIVE', suspensionSource: null, acceptingOrders: true });
+    expect((await notices(owner.id)).filter((n) => n.title === HELD_TITLE)).toHaveLength(0);
   });
 });
 
@@ -408,6 +573,39 @@ describe('EV-ACT-15 — admin mover verify is checklist-gated; rejection revokes
     });
     expect(ok.statusCode).toBe(200);
     expect((await app.prisma.rider.findUniqueOrThrow({ where: { id: rider.id } })).documentsVerified).toBe(true);
+  });
+
+  // [S2-29 · KYC-DECISION-ATOMIC] The trial decision must follow the reviewer-typed identity capture
+  // (system login, own transaction), so the approval commits an outbox row that owes it. A failed
+  // trial start never fails the committed approval; the sweep starts the trial exactly once.
+  it('[S2-29] a failed trial start never fails the approval: the decision owes it, and the sweep starts it once', async () => {
+    const user = await makeUser('Owed');
+    const rider = await app.prisma.rider.create({
+      data: { userId: user.id, riderType: 'DELIVERY', vehicleType: 'MOTORCYCLE', documentsVerified: false },
+    });
+    for (const docType of MOTORCYCLE_DOCS.filter((d) => d !== 'drivers_licence')) await approvedDoc(user.id, docType);
+    const last = await app.prisma.verificationDocument.create({
+      data: { userId: user.id, role: 'VENDOR_OWNER' as never, docType: 'drivers_licence', fileUrl: `test/${marker}/licence-owed`, status: 'PENDING' },
+    });
+    const fault = vi.spyOn(SubscriptionService.prototype, 'startTrialForRider').mockRejectedValueOnce(new Error('synthetic fault: the trial start fails after the decision'));
+    let hit = 0;
+    try {
+      await svc.approveDocument(last.id, 'admin-test', new Date(Date.now() + 365 * 24 * 3600 * 1000));
+      hit = fault.mock.calls.length;
+    } finally { fault.mockRestore(); }
+    expect(hit).toBe(1);
+    // The approval stands and owes its trial: decided, no subscription yet, one row still owed.
+    expect((await app.prisma.verificationDocument.findUniqueOrThrow({ where: { id: last.id } })).status).toBe('APPROVED');
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(0);
+    const owed = await app.prisma.verificationDecisionOutbox.findUniqueOrThrow({ where: { documentId_command: { documentId: last.id, command: 'APPROVAL_TAIL' } } });
+    expect(owed).toMatchObject({ processedAt: null, attempts: 1, userId: user.id });
+    expect(owed.lastError).toMatch(/synthetic fault/);
+    // The sweep (after the backoff) finishes it once; a second pass starts nothing.
+    const later = new Date(Date.now() + 2 * 3600_000);
+    expect(await svc.processDecisionOutbox({ documentId: last.id, now: later })).toEqual({ processed: 1, failed: 0 });
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(1);
+    expect(await svc.processDecisionOutbox({ documentId: last.id, now: later })).toEqual({ processed: 0, failed: 0 });
+    expect(await app.prisma.subscription.count({ where: { riderId: rider.id } })).toBe(1);
   });
 
   it('a negative decision forces an online rider offline in the same write', async () => {

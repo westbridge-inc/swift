@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { nanoid } from 'nanoid';
 import { prismaPlugin, runWithoutTenant } from '../plugins/prisma';
@@ -14,6 +14,7 @@ import {
 } from '../modules/admin/admin-approval';
 import { ADMIN_ACTION_CLASSES, ADMIN_ROUTE_AUTHORITY } from '../modules/admin/admin-authority';
 import { ACCESS_COOKIE, BROWSER_CLIENT_HEADER, resetBrowserOriginsForTests } from '../modules/auth/browser-session';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [ADM-005] A SETTLEMENT WAS ONE PERSON'S SAY-SO.
@@ -37,7 +38,7 @@ const userIds: string[] = [];
 const REASON = 'Bank confirmed the transfer cleared on the 3rd, reference GY-88213';
 
 async function makeAdmin(permissions: string[]): Promise<{ token: string; userId: string }> {
-  const phone = `+59274${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const phone = testPhone();
   const user = await app.prisma.user.create({
     data: {
       phone, firstName: 'Approver', lastName: `A${RUN}${userIds.length}`, roles: ['SUPER_ADMIN', 'CUSTOMER'],
@@ -99,6 +100,18 @@ afterAll(async () => {
     await app.prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
   }, 'test-cleanup:admin-approval');
   await app.close();
+});
+
+// [U06] One ask per act while it stands: an ask left PENDING or APPROVED by
+// one case would (rightly) refuse the next case's ask on the same key with 409
+// APPROVAL_ALREADY_OPEN. Each case is its own act, so each starts with no
+// standing ask on the shared key, as if the earlier one had been withdrawn.
+// admin-approval-duplicate.test.ts proves the refusal itself.
+beforeEach(async () => {
+  await runWithoutTenant(() => app.prisma.privilegedApproval.updateMany({
+    where: { entityId: CONFIG_KEY, status: { in: ['PENDING', 'APPROVED'] } },
+    data: { status: 'CANCELLED' },
+  }), 'test-reset:admin-approval');
 });
 
 describe('[ADM-005] one person cannot move money alone', () => {

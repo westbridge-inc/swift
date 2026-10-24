@@ -8,6 +8,7 @@ import { authPlugin } from '../plugins/auth';
 import { socketPlugin } from '../plugins/socket';
 import { vendorRoutes } from '../modules/vendor/vendor.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Busy-hours analytics (master plan §4.1): orders bucket by GUYANA-local hour
@@ -92,7 +93,7 @@ beforeAll(async () => {
   const vendor = await app.prisma.vendor.create({
     data: {
       ownerId: vo.id,
-      name: `Busy Bar ${nanoid(4)}`,
+      name: `Busy Bar ${wordFreeTag(8)}`,
       slug: `busy-bar-${nanoid(6)}`,
       vendorType: 'RESTAURANT',
       phone: '+5920035900',

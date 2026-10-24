@@ -1,11 +1,12 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { FlatList, View } from 'react-native';
+import { FlatList, RefreshControl, View } from 'react-native';
 import { useNavigation, type NavigationProp, type ParamListBase } from '@react-navigation/native';
 import { color, space } from '@swift/ui';
 import { useNotifications } from '../../../hooks/customer';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, EmptyState, ErrorState, Header, IconChip, LoadingBlock, PressableScale, Screen, T } from '../../../kit';
-import { destinationFor } from '../../../services/notification-router';
+import { destinationFor, HOME_SCREEN } from '../../../services/notification-router';
 import { safeNavigate } from '../../../navigation/navigationRef';
 import { TeamInviteCards } from '../components/TeamInviteCards';
 
@@ -26,6 +27,7 @@ const EARNER_KINDS = new Set([
   'verification_rejected',
   'verification_expired',
   'verification_expiry_reminder',
+  'verification_application_abandoned',
   'verification_forced_offline',
 ]);
 
@@ -44,9 +46,18 @@ function canReach(navigation: NavigationProp<ParamListBase> | undefined, screen:
   return false;
 }
 
+/** The route this screen is mounted as (CustomerStack). */
+const INBOX_SCREEN = 'Notifications';
+function opensThisInbox(dest: { screen: string; params?: Record<string, unknown> }): boolean {
+  const nested = dest.params?.['screen'];
+  return (typeof nested === 'string' ? nested : dest.screen) === INBOX_SCREEN;
+}
+
 export function NotificationsScreen() {
   const navigation = useNavigation<NavigationProp<ParamListBase>>();
   const notifications = useNotifications<any>();
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => notifications.refetch());
   const all: any[] = Array.isArray(notifications.data)
     ? notifications.data
     : (notifications.data?.notifications ?? []);
@@ -72,6 +83,7 @@ export function NotificationsScreen() {
         <FlatList
           data={rows}
           keyExtractor={(n, i) => n.id ?? String(i)}
+          refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}
           contentContainerStyle={{ padding: space['2xl'], gap: space.md }}
           renderItem={({ item: n }) => {
             const card = (
@@ -97,8 +109,15 @@ export function NotificationsScreen() {
             // that this screen can reach. A row with no destination, or one
             // that lives in another role's stack, stays a plain card, because
             // a button that goes nowhere is the defect this fixes.
+            // [PUSH-ROUTING] A push that opens HOME on purpose (the notice is
+            // the whole message) moves nothing from inside the app, so its
+            // row is a plain card too.
             const dest = destinationFor(n?.data);
-            if (!dest || !canReach(navigation, dest.screen)) return card;
+            if (!dest || dest.screen === HOME_SCREEN || !canReach(navigation, dest.screen)) return card;
+            // [UI-SWEEP U31] A push that opens THIS inbox (a store team invite:
+            // its Accept / Decline card is right here) is a plain card too; as a
+            // button it stacked a second, identical inbox.
+            if (opensThisInbox(dest)) return card;
             return (
               <PressableScale accessibilityRole="button" onPress={() => safeNavigate(dest.screen, dest.params)}>
                 {card}

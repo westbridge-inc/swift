@@ -277,7 +277,9 @@ describe('[MMG-RETURN-PATH] Next serves every /pay/mmg depth privately', () => {
       const ignore = (nextConfig.logging && nextConfig.logging.incomingRequests && typeof nextConfig.logging.incomingRequests === 'object')
         ? nextConfig.logging.incomingRequests.ignore ?? []
         : [];
-      expect(ignore.some((pattern) => pattern.test(path)), `${channel} ${label}`).toBe(true);
+      // [M013] `logging: false` switches Next's dev request logger off for
+      // every path (next-dev-server gates logRequests on it), MMG's included.
+      expect(nextConfig.logging === false || ignore.some((pattern) => pattern.test(path)), `${channel} ${label}`).toBe(true);
     }
     const disallow = [[robots().rules].flat()[0]?.disallow ?? []].flat();
     expect(disallow.some((prefix) => path.startsWith(prefix) && prefix.startsWith('/pay/mmg'))).toBe(true);
