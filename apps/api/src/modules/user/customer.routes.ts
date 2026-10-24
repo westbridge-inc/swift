@@ -1,4 +1,7 @@
+import { servedPhotoAddress } from '../../utils/photo-address';
 import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { shownRatingFor, shownSurface } from '../rating/rating-groups';
+import { ownerWallSystem } from '../../lib/owner-rls';
 import { publicVendorReviewId, resolveVendorReviewId } from '../rating/vendor-review-visibility';
 import { readFeePause } from '../billing/mmg-pause';
 import { assertOrderSchedulingAvailable } from '../order/scheduled-orders';
@@ -7,7 +10,9 @@ import { requireRecentOtpOrStepUp } from '../auth/step-up';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
 import { requireIdentityAuthority, lockIdentityAuthority } from '../integrity/identity-review';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { velocityGuard } from '../integrity/velocity';
 import { computeRefund } from '../../utils/refund';
 import { isDuplicateOn } from '../money/evidence';
@@ -15,7 +20,7 @@ import { refundBasisCounter, refundInferenceDeltaCounter, checkoutIdempotencyCou
 import { promoDiscount } from '../../utils/order-total';
 import { z } from 'zod';
 import { getTenantContext, getTenantId, enterPublicBrowse } from '../../plugins/tenant-context';
-import { Prisma, VendorType, OrderStatus, NotificationType } from '@prisma/client';
+import { VendorType, OrderStatus, NotificationType } from '@prisma/client';
 import { deliveryFeeFromRates, type DeliveryRates } from '../../utils/markup';
 import { customerPoint } from '../discovery/customer-point';
 import { CountryConfigService } from '../country/country-config.service';
@@ -44,10 +49,12 @@ import { RATING_MAX_TAGS } from '../rating/rating-math';
 import { ratingSurfaces, NEW_ACTOR_SURFACE } from '../rating/rating-surface';
 import { notProhibitedStore, visibleVendorRelForCaller, visibleVendorForCaller, vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { compilePublicStorefrontDisclosure } from '../verification/storefront-disclosure';
+import { publicStorefrontSeller } from '../verification/storefront-seller';
 import { customerIdCheck } from '../verification/customer-id';
 import { createHash, randomInt } from 'node:crypto';
 import { OrderService, TERMINAL_ORDER_STATUSES, MMG_MONEY_MOVED, type CheckoutCommit } from '../order/order.service';
 import { PickingService } from '../order/picking.service';
+import { isRemovalQuestion, legacySwapItemFields, lineOptionsAsMade, onlyItemLeft, substitutionView } from '../order/substitution-view';
 import { dispatchSearchesCounter } from '../../plugins/observability';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip, type VendorPlan } from '../order/cart-plans';
 import { lineOptionsIssue, normalizeItemNote, OptionSelectionError, selectionKey, validateSelectedOptions, type OptionSelection } from '../order/options';
@@ -61,21 +68,26 @@ import { SupportService } from '../support/support.service';
 import { AccountService, closesByRequest } from './account.service';
 import { updateCustomerProfile } from './profile-update';
 import { transitionUserRoleAuthority } from '../mover-authority';
-import { safeMmgPayUrl, validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgAcceptedPayBy, mmgAcceptExpiryNotice, mmgOrderNoun, mmgPayByCustomerLine } from '../order/mmg-accept-expiry';
+import { displayMmgNumber, safeMmgNumber } from '../../utils/mmg-number';
+import { formatMoney } from '../../utils/currency-amount';
+import { validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { resolveAvatarUrl, resolveAvatarUrls } from '../../utils/avatar-url';
-import {
-  currentConsentDetailed, recordConsent, publishLegalDocumentOnce, type ConsentAction,
-} from '../legal/consent.service';
-import { LEGAL_VERSION, MARKETING_CONSENT } from '../legal/legal.routes';
+import { currentConsentDetailed } from '../legal/consent.service';
+import { LEGAL_VERSION } from '../legal/legal.routes';
 import { consentSurfaceOf } from '../legal/consent-surface';
+import { setMarketingConsent } from '../legal/marketing-consent';
 import { liveLocationVisible, riderCounterpartySelect } from '../../utils/counterparty';
 import { vendorCardView } from '../../utils/vendor-card';
 import { promiseView } from '../eta/promise';
 import { publishedStorePhone } from '../../utils/vendor-public-phone';
 import { CHECKOUT_CLAIM_TTL_S, CheckoutOutcomeUnknownError, checkoutRequestHash, checkoutUnknownSettleSeconds, drainCheckoutOutbox, findCheckoutReceipt, isCheckoutClaim, newCheckoutClaim, releaseCheckoutClaim, settleCheckoutClaim } from '../order/checkout-outbox';
 import { shapeStoredCheckoutResult } from '../order/checkout-answer';
+import { decideStaffInvite, listMyStaffInvites, staffInviteAcceptEnabled } from '../vendor/staff-invites';
 import { assertOrderableNow, hiddenAmong, prohibitedStoreIds, storeHiddenFromCustomers } from '../compliance/prohibited-gate';
 import { classifyCategory, classifyText } from '../compliance/prohibited-items';
+import { ownRiderNotice } from '../order/own-rider-notice';
 
 // ---------------------------------------------------------------------------
 // Input schemas
@@ -173,6 +185,8 @@ const fulfillmentSelectionsSchema = z.record(z.enum(['DELIVERY', 'PICKUP']));
 
 const checkoutSchema = z.object({
   paymentMethod: z.string().max(30).optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY to the store's MMG number (build 12+, web).
+  mmgPayTo: z.enum(['STORE_NUMBER']).optional(),
   deliveryInstructions: z.string().max(500).optional(),
   tipAmount: zMoneyWhole.max(MAX_TIP_GYD).optional(),
   scheduledFor: z.string().max(40).optional(),
@@ -293,6 +307,12 @@ const notificationPrefsSchema = z.object({
 const deviceTokenSchema = z.object({
   token: z.string().min(8).max(512),
   platform: z.enum(['ios', 'android']),
+  /** [RINGER · continues #1367] What the installed app can ring with
+   *  (DeviceToken.alertsVersion): builds 9-11 send none, so absent = 0. A
+   *  malformed value also reads 0 rather than refusing the registration: a
+   *  refused registration is a phone that silently gets no pushes at all,
+   *  and 0 is exactly what every build can show. */
+  alertsVersion: z.number().int().min(0).max(1000).optional().catch(undefined),
 });
 
 const switchRoleSchema = z.object({
@@ -407,23 +427,35 @@ async function buildCartResponse(
   const paymentVendorIds = [...new Set(cart.items.map((item) => item.item.vendorId))].sort();
   const paymentVendors = await app.prisma.vendor.findMany({
     where: { id: { in: paymentVendorIds } },
-    select: { id: true, mmgPayUrl: true },
+    select: { id: true, mmgPayUrl: true, mmgNumber: true },
     orderBy: { id: 'asc' },
   });
   const singlePaymentVendor = paymentVendorIds.length === 1 && paymentVendors.length === 1
     ? paymentVendors[0]!
     : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] `mmg` is the OLD pay-LINK rail (the only one
+  // builds 9-11 know): offered only while STORE_MMG_PAY_LINK is on, so those builds show
+  // cash only. `mmgStoreNumber` is the rail build 12 and the web read: the customer pays
+  // the store's MMG NUMBER directly, shown on the order once the store accepts.
   const mmgValidation = singlePaymentVendor
-    ? validateMmgPayUrl(singlePaymentVendor.mmgPayUrl)
+    ? validateOfferedStoreMmgPayUrl(singlePaymentVendor.mmgPayUrl)
     : null;
   const mmgAvailable = mmgValidation?.valid === true;
   const mmgUnavailableReason = paymentVendorIds.length !== 1
     ? 'MULTI_VENDOR_UNSUPPORTED' as const
-    : !singlePaymentVendor?.mmgPayUrl
-      ? 'VENDOR_NOT_CONFIGURED' as const
-      : mmgAvailable
-        ? null
-        : 'VENDOR_LINK_INVALID' as const;
+    : mmgValidation && !mmgValidation.valid && mmgValidation.reason === 'PAY_LINKS_OFF'
+      ? 'PAY_LINKS_OFF' as const
+      : !singlePaymentVendor?.mmgPayUrl
+        ? 'VENDOR_NOT_CONFIGURED' as const
+        : mmgAvailable
+          ? null
+          : 'VENDOR_LINK_INVALID' as const;
+  const storeNumber = singlePaymentVendor ? safeMmgNumber(singlePaymentVendor.mmgNumber) : null;
+  const mmgNumberUnavailableReason = paymentVendorIds.length !== 1
+    ? 'MULTI_VENDOR_UNSUPPORTED' as const
+    : storeNumber
+      ? null
+      : 'VENDOR_NOT_CONFIGURED' as const;
   // Opaque, non-secret scope: a method selection is valid only for this exact
   // vendor set + destination state. A previous cart's MMG choice cannot revive
   // when another MMG-capable vendor appears.
@@ -431,8 +463,9 @@ async function buildCartResponse(
     .update(JSON.stringify({
       cartId: cart.id,
       vendors: paymentVendors.map((vendor) => {
-        const checked = validateMmgPayUrl(vendor.mmgPayUrl);
-        return [vendor.id, checked.valid ? checked.url : checked.reason];
+        const checked = validateOfferedStoreMmgPayUrl(vendor.mmgPayUrl);
+        // The number is part of the scope too: a choice made for one number never survives a change.
+        return [vendor.id, checked.valid ? checked.url : checked.reason, safeMmgNumber(vendor.mmgNumber) ?? 'NO_NUMBER'];
       }),
       expectedVendorIds: paymentVendorIds,
     }))
@@ -511,7 +544,7 @@ async function buildCartResponse(
       id: ci.id,
       itemId: ci.itemId,
       name: ci.item.name,
-      imageUrl: ci.item.imageUrl,
+      imageUrl: servedPhotoAddress(ci.item.imageUrl), // [IMAGES-E2E PR4] never an outside host
       basePrice: line.basePrice,
       customerPrice: line.unitPrice,
       quantity: ci.quantity,
@@ -662,6 +695,15 @@ async function buildCartResponse(
         fundsFlow: 'DIRECT_TO_VENDOR' as const,
         unavailableReason: mmgUnavailableReason,
       },
+      // The number itself is never in the cart: it is shown only on the accepted order.
+      mmgStoreNumber: {
+        available: storeNumber !== null,
+        provider: 'MMG' as const,
+        fundsFlow: 'DIRECT_TO_VENDOR' as const,
+        payTo: 'STORE_NUMBER' as const,
+        shownWhen: 'STORE_ACCEPTS' as const,
+        unavailableReason: mmgNumberUnavailableReason,
+      },
     },
   };
 }
@@ -725,7 +767,8 @@ export async function customerRoutes(app: FastifyInstance) {
     undefined,
     // §2 checkout gate reads the SAME supply dispatch would search — including
     // the cash-float requirement, so the probe and the real dispatch agree.
-    (point, floatRequired) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired),
+    // [owner #20] …and, for an order too big for a bike, only the movers whose vehicle can carry it.
+    (point, floatRequired, packageSize) => dispatchForAvailability.getAvailability('RIDER', point, floatRequired, undefined, packageSize),
     app.redis,
   );
   const picking = new PickingService(app.prisma, app.io);
@@ -806,10 +849,15 @@ export async function customerRoutes(app: FastifyInstance) {
       }
     }
 
-    const referrer = await app.prisma.customer.findFirst({
-      where: { referralCode: { equals: code, mode: 'insensitive' } },
+    // [B-1] A code belongs to one operator: the referrer is looked up inside the
+    // caller's own tenant only (the caller's account says which). A code from
+    // another tenant reads exactly like an unknown one — nobody named, nothing
+    // linked, no count raised.
+    const caller = await app.prisma.user.findUnique({ where: { id: userId }, select: { tenantId: true } });
+    const referrer = caller ? await app.prisma.customer.findFirst({
+      where: { referralCode: { equals: code, mode: 'insensitive' }, user: { tenantId: caller.tenantId } },
       include: { user: { select: { firstName: true } } },
-    });
+    }) : null;
     if (!referrer) {
       throw new AppError(404, 'INVALID_REFERRAL', 'That referral code wasn’t found');
     }
@@ -847,8 +895,9 @@ export async function customerRoutes(app: FastifyInstance) {
    *  and riders rate them too; respect runs both ways). Aggregate only —
    *  never per-rating rows, never who said what. */
   app.get('/rating', async (request: AuthRequest) => {
-    const surface = (await ratingSurfaces(app.prisma, 'CUSTOMER', [request.user.userId])).get(request.user.userId) ?? NEW_ACTOR_SURFACE;
-    return { success: true, data: surface };
+    // [COORD 18 Oct, option S] A customer's own star is shown from whole groups of 5 only (rating-groups.ts).
+    const { displayRating, ratingBucket, ratingCount, topRated } = await shownRatingFor(app.prisma, 'CUSTOMER', request.user.userId);
+    return { success: true, data: { displayRating, ratingBucket, ratingCount, topRated } };
   });
 
   app.get('/profile', async (request: AuthRequest) => {
@@ -909,6 +958,11 @@ export async function customerRoutes(app: FastifyInstance) {
   app.put('/profile', async (request: AuthRequest, _reply: FastifyReply) => {
     const { userId } = request.user;
     const body = updateProfileSchema.parse(request.body);
+    if (body.firstName !== undefined) {
+      // [MC-PR3] "TEST-" names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
+      const me = await app.prisma.user.findUnique({ where: { id: userId }, select: { phone: true, firstName: true } });
+      assertNameNotReserved(body.firstName, me?.phone, me?.firstName);
+    }
     // [OWNER #13 · Opus S2] An admin account's email change takes a fresh
     // sign-in code and tells the old address; every change is dated.
     const user = await updateCustomerProfile(app, userId, request.authSessionId, body);
@@ -918,7 +972,8 @@ export async function customerRoutes(app: FastifyInstance) {
 
   /** GET /account/export — DPA right of access + portability: the customer's own
    *  data as portable JSON. Documents' contents are never exported. */
-  app.get('/account/export', async (request: AuthRequest) => {
+  // [Row 331 · REVIEW-G S3-1] ~60 reads per export: a few an hour is plenty for a person, and keeps it from being a load lever.
+  app.get('/account/export', { config: { rateLimit: { max: 3, timeWindow: '1 hour' } } }, async (request: AuthRequest) => {
     const data = await account.exportData(request.user.userId);
     return { success: true, data };
   });
@@ -974,6 +1029,13 @@ export async function customerRoutes(app: FastifyInstance) {
               status: result.status,
               pendingDocuments: result.pendingDocuments,
               pendingAvatarObjects: result.pendingAvatarObjects,
+              pendingUploads: result.pendingUploads,
+            }),
+            // [Row 331] What a legal hold keeps is recorded as kept, never silently skipped.
+            ...(result.status === 'PENDING_LEGAL_HOLD' && {
+              heldDocuments: result.heldDocuments,
+              heldMoverObjects: result.heldMoverObjects,
+              heldUploads: result.heldUploads,
             }),
           },
         },
@@ -1207,7 +1269,7 @@ export async function customerRoutes(app: FastifyInstance) {
         return {
           ...enrichVendor(card, lat, lng, homeDeliveryRates),
           // [GUARDRAILS §8 · Opus S3-8] A section named for banned goods ("Beers & Wines") is not on a card either.
-          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: c.imageUrl })),
+          categories: (v.categories ?? []).filter((c) => !classifyText(c.name)).map((c) => ({ id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) })),
           isFavorite: favoriteIds.has(v.id),
           ...(homeSurfaces.get(v.id) ?? NEW_ACTOR_SURFACE),
         };
@@ -1224,7 +1286,7 @@ export async function customerRoutes(app: FastifyInstance) {
         for (const c of (v.categories ?? [])) {
           // [GUARDRAILS §8] A section named for banned goods is not a Home chip.
           if (classifyText(c.name)) continue;
-          if (!categorySet.has(c.id)) categorySet.set(c.id, c);
+          if (!categorySet.has(c.id)) categorySet.set(c.id, { id: c.id, name: c.name, imageUrl: servedPhotoAddress(c.imageUrl) });
         }
       }
 
@@ -1233,7 +1295,7 @@ export async function customerRoutes(app: FastifyInstance) {
       const popularItems = popularItemRows.filter((it) => !hiddenPopular.has(it.id)).map((it) => ({
         id: it.id,
         name: it.name,
-        imageUrl: it.imageUrl,
+        imageUrl: servedPhotoAddress(it.imageUrl),
         price: Number(it.basePrice),
         vendorId: it.vendorId,
         vendorName: it.vendor?.name ?? '',
@@ -1601,7 +1663,9 @@ export async function customerRoutes(app: FastifyInstance) {
     if (await storeHiddenFromCustomers(app.prisma, vendor.id)) throw new NotFoundError('Vendor', id);
 
     // Live promotions the store is running (§4.2) — shown on the storefront.
-    const activePromos = await app.prisma.promoCode.findMany({
+    // [Row 272] A code that has reached its usage limit is not advertised: it
+    // could only be refused at checkout. The counters never leave the server.
+    const activePromos = (await app.prisma.promoCode.findMany({
       where: {
         vendorId: id,
         isActive: true,
@@ -1611,10 +1675,18 @@ export async function customerRoutes(app: FastifyInstance) {
       select: {
         code: true, description: true, discountType: true,
         discountValue: true, minOrderAmount: true, validUntil: true,
+        maxUses: true, currentUses: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+      take: 20,
+    }))
+      .filter((p) => p.maxUses == null || p.currentUses < p.maxUses)
+      .slice(0, 5)
+      .map((p) => ({
+        code: p.code, description: p.description, discountType: p.discountType,
+        discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null,
+        validUntil: p.validUntil,
+      }));
 
     // Check if favorited (guests have none)
     const isFavorite = request.user?.userId
@@ -1659,6 +1731,9 @@ export async function customerRoutes(app: FastifyInstance) {
 
     // R8: storefront header star + bucket (same mapper as every card).
     const ratingSurface = (await ratingSurfaces(app.prisma, 'VENDOR', [id])).get(id) ?? NEW_ACTOR_SURFACE;
+    // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
+    // records on every read — never hand-written prose; incomplete blocks say what is missing.
+    const disclosure = await compilePublicStorefrontDisclosure(app.prisma, id);
 
     return {
       success: true,
@@ -1701,13 +1776,17 @@ export async function customerRoutes(app: FastifyInstance) {
         operatingHours: vendor.operatingHours.map(publicOperatingHours),
         categories,
         isFavorite,
-        // [DOC-1 Part XIX · DOC-INV-27] The supplier-information block, compiled from VALID document
-        // records on every read — never hand-written prose; incomplete blocks say what is missing.
-        disclosure: await compilePublicStorefrontDisclosure(app.prisma, id),
+        disclosure,
+        // [R3 · CAA s.70] The seller block the store screen shows: who sells, how payment works, the
+        // store's refund rule and the statutory-rights sentence (null = withheld with the block above).
+        seller: await publicStorefrontSeller(app.prisma, id, disclosure),
         distanceKm,
         deliveryFee,
         etaMin,
-        promos: activePromos.map((p) => ({ ...p, discountValue: Number(p.discountValue), minOrderAmount: p.minOrderAmount ? Number(p.minOrderAmount) : null })),
+        promos: activePromos,
+        // [Row 272] The field every phone build from 9 on reads (RestaurantScreen: the
+        // "N promos available" row). Same list as `promos`, kept for older readers.
+        activePromos,
       },
     };
   });
@@ -2349,6 +2428,7 @@ export async function customerRoutes(app: FastifyInstance) {
       result = await orderService.checkout({
         userId,
         paymentMethod,
+        ...(body.mmgPayTo && paymentMethod === 'MOBILE_MONEY' ? { mmgPayTo: body.mmgPayTo } : {}),
         deliveryInstructions: body.deliveryInstructions,
         tipAmount: body.tipAmount,
         scheduledFor: scheduledForCanonical,
@@ -2576,7 +2656,7 @@ export async function customerRoutes(app: FastifyInstance) {
       include: {
         vendor: { select: { name: true, addressLine1: true, city: true, phone: true } },
         customer: { select: { firstName: true, lastName: true } },
-        items: { select: { name: true, quantity: true, totalCustomer: true } },
+        items: { select: { name: true, quantity: true, totalCustomer: true, subStatus: true } },
       },
     });
     if (!order) throw new NotFoundError('Order', id);
@@ -2588,13 +2668,28 @@ export async function customerRoutes(app: FastifyInstance) {
     // [TAXI waiting charge] A ride whose waiting charge was frozen itemises it.
     const { readFareBreakdown } = await import('../rides/taxi-waiting');
     const fareBreakdown = order.orderType === 'TAXI' ? await readFareBreakdown(app.prisma, order) : null;
+    // [TAXI multi-stop 8/8] A ride with stops names them, in order.
+    const { readReceiptStops } = await import('../rides/taxi-stops-read');
+    const stops = order.orderType === 'TAXI' ? await readReceiptStops(app.prisma, order) : null;
+    // [Triage row 248 · R3] The receipt names who sold, from the ONE seller block the store page shows.
+    const { publicStorefrontSeller } = await import('../verification/storefront-seller');
+    const block = order.vendorId ? await publicStorefrontSeller(app.prisma, order.vendorId) : null;
+    const seller = block ? { legalName: block.legalName, address: block.address, phone: block.phone } : null;
     reply.type('text/html; charset=utf-8');
-    return renderReceiptHtml((fareBreakdown ? { ...order, fareBreakdown } : order) as never);
+    return renderReceiptHtml({ ...order, seller, ...(fareBreakdown ? { fareBreakdown } : {}), ...(stops ? { stops } : {}) } as never);
   });
 
   app.get('/orders/:id', async (request: AuthRequest) => {
     const { id } = request.params as { id: string };
     const { userId } = request.user;
+    // Only clients that render server decision permissions opt in. Build 9 /
+    // Android vc5 omit this capability and retain the pre-feature item shape.
+    const swapDecisionsLevel = (request.query as { swapDecisions?: unknown }).swapDecisions;
+    // [O-4 · REVIEW-G S4-1 on #2043] v2 = a client that renders the pre-accept REMOVAL question (its
+    // own card). A v1 client (store builds 11/12) has only the swap card, which would read "suggests
+    // (nothing) instead": for it a removal question is served in the truthful legacy shape below.
+    const supportsSwapDecisions = swapDecisionsLevel === 'v1' || swapDecisionsLevel === 'v2';
+    const supportsRemovalQuestion = swapDecisionsLevel === 'v2';
 
     const order = await app.prisma.order.findFirst({
       where: { id, customerId: userId },
@@ -2665,10 +2760,43 @@ export async function customerRoutes(app: FastifyInstance) {
         }
       : null;
 
-    // R8.4: the live-order card shows "{Rider} · {display}★" from the ONE mapper.
-    const riderSurface = order.rider?.userId
-      ? (await ratingSurfaces(app.prisma, 'RIDER', [order.rider.userId])).get(order.rider.userId)
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] Pay-to-number. The store's MMG number and the exact
+    // order total (goods + delivery fee) are shown ONLY to this order's customer (the query is
+    // scoped to customerId) and ONLY once the store has ACCEPTED, while the payment still waits
+    // for the store's "Paid by MMG". Never before acceptance, never after the store confirms,
+    // never on a closed order or a rejected attempt, and never the store's live profile number:
+    // only the number committed under the vendor row lock at checkout.
+    const shownMmgNumber = order.paymentMethod === 'MOBILE_MONEY'
+      && order.paymentStatus === 'PENDING'
+      && order.acceptedAt != null
+      && !(TERMINAL_ORDER_STATUSES as readonly string[]).includes(order.status)
+      && !isRejectedMmgAttempt(order)
+      ? safeMmgNumber(order.mmgNumberSnapshot)
       : null;
+    const payBy = mmgAcceptedPayBy(order);
+    const mmgPayment = shownMmgNumber
+      ? (() => {
+          const recipientName = order.mmgRecipientNameSnapshot ?? order.vendor?.name ?? 'the store';
+          const amount = Number(order.totalAmount);
+          const numberDisplay = displayMmgNumber(shownMmgNumber);
+          return {
+            payTo: 'STORE_NUMBER' as const,
+            provider: 'MMG' as const,
+            fundsFlow: 'DIRECT_TO_VENDOR' as const,
+            recipientName,
+            number: shownMmgNumber,
+            numberDisplay,
+            amount,
+            currencyCode: order.currencyCode,
+            instruction: `Pay ${formatMoney(amount, order.currencyCode, { whole: true })} by MMG to ${recipientName}'s MMG number ${numberDisplay}.`,
+            // [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled.
+            ...(payBy ? { payBy: payBy.toISOString(), deadline: mmgPayByCustomerLine(payBy, order.vendor?.name ?? 'the store', mmgOrderNoun(order.fulfillment)) } : {}),
+          };
+        })()
+      : null;
+
+    // R8.4: the live-order card shows "{Rider} · {display}★" — [COORD 18 Oct, option S] from whole groups of 5 only.
+    const riderSurface = order.rider?.userId ? shownSurface(await shownRatingFor(app.prisma, 'RIDER', order.rider.userId)) : null;
 
     // Delivery progress info
     const hasBeenRated = orderRatings.length > 0;
@@ -2694,7 +2822,7 @@ export async function customerRoutes(app: FastifyInstance) {
     const previewNow = new Date();
     // THE one policy predicate, shared with the charge path [cancel-policy.ts]
     // — the outcome shown here and the one the locked cancel commits can never
-    // drift again. The hold, the five-minute window, the store rule (owner
+    // drift again. The hold, the one-minute window, the store rule (owner
     // #46), the ride/parcel/booking rule (#50) and the very-late exits (#52)
     // all live inside it; this file restates none of them.
     // [Item 64] The dispatch journal's "no mover found" fact, and [owner #46]
@@ -2759,6 +2887,18 @@ export async function customerRoutes(app: FastifyInstance) {
           customerPrice: Number(i.markedUpPrice),
           lineTotal: Number(i.totalCustomer),
           specialInstructions: i.specialInstructions,
+          // Additions only for a permission-aware client. The flat subStatus
+          // field activates the swap card older binaries already carry, so for
+          // them it is switched on only when every word of that card is true
+          // (legacySwapItemFields); otherwise the line's name says what is
+          // happening [SUBSTITUTION · owner 17 Oct: the customer is always told].
+          ...(supportsSwapDecisions && (supportsRemovalQuestion || !isRemovalQuestion(i)) ? {
+            options: lineOptionsAsMade(i),
+            subStatus: i.subStatus,
+            substituteName: i.substituteName,
+            substitutePrice: i.substitutePrice == null ? null : Number(i.substitutePrice),
+            substitution: substitutionView(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) }),
+          } : legacySwapItemFields(i, order, { onlyItemLeft: onlyItemLeft(i, order.items, order.status) })),
         })),
         itemCount: order.items.reduce((sum, i) => sum + i.quantity, 0),
         subtotalBase: Number(order.subtotalBase),
@@ -2773,6 +2913,7 @@ export async function customerRoutes(app: FastifyInstance) {
         // the pay/track screen can flip from Awaiting to Paid.
         paymentStatus: order.paymentStatus,
         paymentAction,
+        mmgPayment,
         // [S1-6] What each party said about a direct-MMG payment, whether the
         // order is held on a disagreement, and whether a claim may be made now.
         mmgClaim: mmgClaimView(order),
@@ -2796,6 +2937,9 @@ export async function customerRoutes(app: FastifyInstance) {
           && ['PICKED_UP', 'EN_ROUTE_DELIVERY', 'ARRIVED'].includes(order.status)
           ? order.ridePin
           : null,
+        // [R14 · legal research D12] The store delivers this order with its own rider: the order screen says so,
+        // verbatim (null on every other order). The server's reading of this order's current fulfilment mode.
+        ownRiderNotice: ownRiderNotice(order),
         // [B9] The SENDER's copy of the public tracking token. Minted at
         // courier checkout since launch and returned once in the create
         // response — which the app discards on navigation — so "Share
@@ -2851,6 +2995,8 @@ export async function customerRoutes(app: FastifyInstance) {
         deliveredAt: order.deliveredAt,
         cancelledAt: order.cancelledAt,
         cancellationReason: order.cancellationReason,
+        // [owner 18 Oct 2026] Why an unpaid MMG order closed, in the customer's words (null otherwise).
+        cancellationNotice: mmgAcceptExpiryNotice(order, order.vendor?.name ?? 'The store'),
         scheduledFor: order.scheduledFor,
         hasBeenRated,
         canCancel,
@@ -2861,7 +3007,7 @@ export async function customerRoutes(app: FastifyInstance) {
         cancellationFee: 0,
         holdExpiresAt: order.holdExpiresAt,
         // ONE implementation, shared with the predicate [cancel-policy.ts]:
-        // the moment the five-minute window of a ride, parcel or booking
+        // the moment the one-minute window of a ride, parcel or booking
         // closes; null when there is no countdown (refused, or free for as
         // long as nobody accepts / nobody was found / the order stays late).
         freeCancellationExpiresAt: cancelView?.freeCancellationExpiresAt ?? null,
@@ -3364,6 +3510,30 @@ export async function customerRoutes(app: FastifyInstance) {
     return { success: true, ...paginatedResponse(notifications, total, { page, limit, skip }) };
   });
 
+  /** [Row 55] GET /team-invites — the caller's own live store-team invites.
+   *  The person invited is not on a store team yet, so these live here, under
+   *  the inbox, not under the /vendor prefix. */
+  app.get('/team-invites', async (request: AuthRequest) => {
+    return { success: true, data: await listMyStaffInvites(app.prisma, request.user.userId, new Date()) };
+  });
+
+  /** [Row 55] POST /team-invites/:id/accept | /decline — answer one invite. */
+  app.post('/team-invites/:id/accept', async (request: AuthRequest) => {
+    if (!staffInviteAcceptEnabled()) throw new AppError(404, 'NOT_FOUND', 'Invite not found');
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'ACCEPT', now: new Date(),
+    }, notificationService);
+    return { success: true, data: result };
+  });
+  app.post('/team-invites/:id/decline', async (request: AuthRequest) => {
+    const { id } = request.params as { id: string };
+    const result = await decideStaffInvite(app.prisma, {
+      inviteId: id, userId: request.user.userId, decision: 'DECLINE', now: new Date(),
+    });
+    return { success: true, data: result };
+  });
+
   /** PUT /notifications/prefs — per-user channel switches. */
   app.put('/notifications/prefs', async (request: AuthRequest) => {
     const body = notificationPrefsSchema.parse(request.body);
@@ -3409,43 +3579,28 @@ export async function customerRoutes(app: FastifyInstance) {
    *  [F-021-02]. */
   app.post('/consent/marketing', async (request: AuthRequest) => {
     const { granted } = z.object({ granted: z.boolean() }).parse(request.body);
-    const userId = request.user.userId;
-    await publishLegalDocumentOnce(app.prisma, {
-      documentType: 'marketing_consent', version: LEGAL_VERSION, renderedText: MARKETING_CONSENT,
-    });
-    const outcome = await app.prisma.$transaction(async (tx) => {
-      await tx.$executeRaw(Prisma.sql`
-        SELECT pg_advisory_xact_lock(hashtextextended(${`consent:marketing:${userId}`}, 0))`);
-      const prior = await currentConsentDetailed(tx, 'customer', userId, 'marketing_consent');
-      const effectiveAtCurrent = !!prior
-        && (prior.action === 'granted' || prior.action === 're_granted')
-        && prior.version === LEGAL_VERSION;
-      const effectiveAtAny = !!prior && (prior.action === 'granted' || prior.action === 're_granted');
-      if (granted === effectiveAtCurrent && (granted || !effectiveAtAny)) {
-        return { marketing: effectiveAtCurrent, changed: false };
-      }
-      const action: ConsentAction = granted ? (prior ? 're_granted' : 'granted') : 'withdrawn';
-      await recordConsent(tx, {
-        subjectType: 'customer', subjectId: userId,
-        documentType: 'marketing_consent', version: LEGAL_VERSION,
-        action, surface: consentSurfaceOf(request), ip: request.ip,
-        evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
-      });
-      return { marketing: granted, changed: true };
+    const outcome = await setMarketingConsent(app.prisma, {
+      userId: request.user.userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+      evidence: { control: 'marketing_toggle', path: 'consent/marketing' },
     });
     return { success: true, data: outcome };
   });
 
   /** POST /notifications/devices — register this device for push. Upsert on
    *  the token: re-registering reassigns it to the CURRENT user (one phone,
-   *  new login) and reactivates it. */
+   *  new login) and reactivates it. [RINGER] It also records what the
+   *  installed app can ring with (alertsVersion, absent = 0), rewritten on
+   *  every registration: an app that reports nothing is sent only what
+   *  builds 9-11 can show. */
   app.post('/notifications/devices', async (request: AuthRequest) => {
-    const { token, platform } = deviceTokenSchema.parse(request.body);
-    await app.prisma.deviceToken.upsert({
+    const { token, platform, alertsVersion = 0 } = deviceTokenSchema.parse(request.body);
+    // [item 20] The token may still belong to the account last signed in on
+    // this device: moving it is a write on someone else's row (owner wall).
+    await ownerWallSystem('device:register', () => app.prisma.deviceToken.upsert({
       where: { token },
-      create: { userId: request.user.userId, token, platform, isActive: true },
-      update: { userId: request.user.userId, platform, isActive: true },
-    });
+      create: { userId: request.user.userId, token, platform, isActive: true, alertsVersion },
+      update: { userId: request.user.userId, platform, isActive: true, alertsVersion },
+    }));
     return { success: true, data: { message: 'Device registered' } };
   });
 
@@ -3569,9 +3724,8 @@ export async function customerRoutes(app: FastifyInstance) {
     }
 
     // Check user-specific usage
-    const userUsage = await app.prisma.order.count({
-      where: { customerId: { in: authority.memberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+    const userUsage = await app.prisma.order.count({ where: promoUsesByPersonWhere(authority.memberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'ALREADY_USED', 'You have already used this promo code the maximum number of times');
     }

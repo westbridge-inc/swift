@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, onTestFinished, vi } from 'vitest';
 import Fastify, { type FastifyInstance, type LightMyRequestResponse } from 'fastify';
 import { nanoid } from 'nanoid';
 import { Prisma, type Order, type UserRole } from '@prisma/client';
@@ -329,7 +329,7 @@ describe('taxi — quote = booked = driver offer = receipt = earning', () => {
     expect(await sys(() => app.prisma.order.count({ where: { customerId: customer.userId } }))).toBe(0);
   });
 
-  it.todo('waiting: 500 per FULL 10 minutes, summed over every wait, itemised on the receipt — NOT on main; built only in #1443 (behind TAXI_WAITING_CHARGE, conflicting)');
+  it.todo('waiting: 300 per FULL 10 minutes, summed over every wait, itemised on the receipt — NOT on main; built only in #1443 (behind TAXI_WAITING_CHARGE, conflicting)');
 });
 
 // ===========================================================================
@@ -411,6 +411,9 @@ describe('courier — estimate = job = rider offer = receipt', () => {
     ['8 km extra large (+2,000), rush ×2', 8, 'EXTRA_LARGE', 'RUSH', 7520],
     ['2.37 km small (1,084.40 → 1,084)', 2.37, 'SMALL', 'STANDARD', 1084],
   ] as const)('%s → %s', async (_label, km, packageSize, speed, fee) => {
+    // [Owner ruling 15 Oct 2026] TRANSFORMED: an extra-large parcel is carried only by a car or the heavy fleet, so
+    // its row runs with CAR_DELIVERIES=1 (the re-enable path); with the switch off it is refused: PARCEL_TOO_BIG.
+    if (packageSize === 'EXTRA_LARGE') { vi.stubEnv('CAR_DELIVERIES', '1'); onTestFinished(() => { vi.unstubAllEnvs(); }); }
     const dropoff = at({ lat: 6.775 - Math.round(km * 100) * 0.00001, lng: -58.05 - (speed === 'STANDARD' ? 0 : 0.001) }, km);
     const sender = await makeUser(['CUSTOMER'], 'CUSTOMER');
     const est = await call('POST', '/api/v1/courier/estimate', sender.token, { pickup: STABROEK, dropoff, packageSize, speed });

@@ -114,11 +114,15 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       // acknowledgement with a deadline; unacknowledged, it escalates.
       const page = await openOpsAlert(prisma, notifications, {
         kind: 'SOS', tenantId: alert.tenantId, sosAlertId: alert.id,
-        title: '🚨 SOS ACTIVE — respond now',
+        title: 'URGENT: SOS ACTIVE — respond now',
         body: `${alert.actorRole} raised an SOS${alert.orderId ? ` on order ${alert.orderId}` : alert.serviceJobId ? ' on a service job (home visit)' : ''}. Open the war room now.`,
         data: { kind: 'sos_active', sosAlertId: alert.id, orderId: alert.orderId, serviceJobId: alert.serviceJobId },
       });
-      return { status: 'SENT', receipt: { opsPaged: page.delivered, opsAlertId: page.opsAlertId, recipients: page.recipients } };
+      // [AUD-L8b-008 · AUD-G7-003] opsPaged is what REACHED a person: pushes
+      // the provider accepted plus on-call texts the provider accepted. Inbox
+      // rows are kept apart (opsInbox) and prove nothing. A page that reached
+      // nobody is already due for escalation (openOpsAlert); its receipt says 0.
+      return { status: 'SENT', receipt: { opsPaged: page.reached, opsPushed: page.pushed, oncallTexted: page.oncallTexted, opsInbox: page.inboxed, opsAlertId: page.opsAlertId, recipients: page.recipients } };
     }
     case 'WAR_ROOM': {
       if (TERMINAL.has(alert.status)) return { status: 'SKIPPED', receipt: { skipped: `alert-${alert.status.toLowerCase()}` } };
@@ -158,7 +162,7 @@ async function deliver(prisma: PrismaClient, io: Server, notifications: Notifica
       const where = alert.triggerLat != null && alert.triggerLng != null ? ` Last known location: https://maps.google.com/?q=${alert.triggerLat},${alert.triggerLng}.` : '';
       // [REVIEW-PARTNER] Declared on behalf of the alert's tenant: the outbound seal stops a fiction's text.
       const { sendOnBehalfOf } = await import('../../providers/notifications/review-seal');
-      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `🚨 ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
+      await sendOnBehalfOf(alert.tenantId, () => getChannels().sms.sendSms(contact.phoneE164, `URGENT: ${who} triggered an emergency SOS on Swift and may need help.${where} Please check on them and contact local emergency services if you cannot reach them.`));
       return { status: 'SENT', receipt: { id: contact.id, ok: true, ...(authority.fromEscrow ? { source: 'safety-escrow' } : {}) } };
     }
     case 'EVIDENCE': {
@@ -180,7 +184,12 @@ async function refreshReceipts(prisma: PrismaClient, sosAlertId: string): Promis
   const alert = await prisma.sosAlert.findUnique({ where: { id: sosAlertId }, select: { deliveryReceipts: true } });
   const receipts: Record<string, unknown> = { ...((alert?.deliveryReceipts as Record<string, unknown> | null) ?? {}) };
   const ops = rows.find((r) => r.channel === 'OPS_PAGE' && r.status === 'SENT');
-  if (ops) receipts['opsPaged'] = (ops.receipt as Record<string, unknown> | null)?.['opsPaged'] ?? 0;
+  if (ops) {
+    // [AUD-L8b-008] opsPaged = people actually reached; opsInbox = inbox rows (a record, never evidence).
+    const r = (ops.receipt as Record<string, unknown> | null) ?? {};
+    receipts['opsPaged'] = r['opsPaged'] ?? 0;
+    if (r['opsInbox'] !== undefined) receipts['opsInbox'] = r['opsInbox'];
+  }
   const room = rows.find((r) => r.channel === 'WAR_ROOM' && r.status === 'SENT');
   if (room) receipts['socketListeners'] = (room.receipt as Record<string, unknown> | null)?.['socketListeners'] ?? 0;
   const repages = rows.filter((r) => r.channel === 'OPS_PAGE' && r.targetKey.startsWith('ops:repage:')).length;
@@ -320,15 +329,15 @@ export const FAILURE_PAGE_LEASE_SECONDS = 120;
  *  on-call phones verbatim. */
 const FAILURE_PAGE_WORDS: Record<SosEscalationChannel, { title: string; body: (sosAlertId: string) => string }> = {
   CONTACT_SMS: {
-    title: '🚨 SOS contact text failed — call the person now',
+    title: 'URGENT: SOS contact text failed — call the person now',
     body: (id) => `The emergency text to the contact of the person who raised SOS alert ${id} did not go through (number hidden). Call the person who raised it now.`,
   },
   OPS_PAGE: {
-    title: '🚨 SOS page failed — open the war room now',
+    title: 'URGENT: SOS page failed — open the war room now',
     body: (id) => `The page for SOS alert ${id} did not go through. Open the war room and respond now.`,
   },
   WAR_ROOM: {
-    title: '🚨 SOS live board update failed — open the war room now',
+    title: 'URGENT: SOS live board update failed — open the war room now',
     body: (id) => `The live war-room update for SOS alert ${id} did not go through. Open the alert and respond now.`,
   },
   EVIDENCE: {
@@ -419,7 +428,7 @@ export async function pageFailedSosEscalations(
       await prisma.sosEscalation.update({ where: { id: row.id }, data: { failurePageOpsAlertId: page.opsAlertId } });
       paged.push(row.id);
       sosEscalationCounter.labels('failure_paged').inc();
-      log().error({ sosAlertId: alert.id, escalationId: row.id, channel: row.channel, rowStatus: row.status, opsAlertId: page.opsAlertId, recipients: page.recipients, oncallTexted: page.oncallTexted }, '[AUD-L4-016] an SOS delivery failed — on-call operations paged');
+      log().error({ sosAlertId: alert.id, escalationId: row.id, channel: row.channel, rowStatus: row.status, opsAlertId: page.opsAlertId, recipients: page.recipients, reached: page.reached, pushed: page.pushed, oncallTexted: page.oncallTexted }, '[AUD-L4-016] an SOS delivery failed — on-call operations paged');
     } catch (err) {
       await prisma.sosEscalation.updateMany({ where: { id: row.id, failurePageOpsAlertId: null }, data: { failurePageClaimedAt: null } }).catch(() => {});
       sosEscalationCounter.labels('failure_page_failed').inc();

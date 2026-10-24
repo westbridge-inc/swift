@@ -652,8 +652,11 @@ async function main() {
   // Universal signup selfie (master plan §3): seeded QA accounts get a profile
   // photo so demo flows don't dead-end at the selfie gate. Real signups capture
   // theirs in-app with the camera. Deterministic per-phone portrait for dev.
+  // [PLAT-3] Selected by the seed's own marker, never by the +592600 range: that
+  // is a live carrier range, and a real person's number in it must not be given
+  // a fake photo or a passed selfie gate.
   const selfieless = await prisma.user.findMany({
-    where: { phone: { startsWith: '+592600' }, selfieCapturedAt: null },
+    where: { syntheticRunId: 'seed-demo', selfieCapturedAt: null },
     select: { id: true, phone: true },
   });
   for (const u of selfieless) {

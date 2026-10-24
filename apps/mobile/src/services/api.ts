@@ -1,4 +1,8 @@
 import axios, { type AxiosRequestConfig } from 'axios';
+import {
+  SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER,
+  SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+} from '@swift/types';
 import Constants from 'expo-constants';
 import { Platform, TurboModuleRegistry } from 'react-native';
 import {
@@ -8,13 +12,14 @@ import {
 } from '../stores/authStore';
 import { useStoreSwitcher } from '../stores/storeSwitcher';
 import { isVendorScopedUrl, VENDOR_STORE_HEADER } from '../lib/vendorScope';
-import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthSessionSnapshot } from '../lib/authSession';
-import { explainSessionEnded } from '../lib/accountBlockedAlert';
+import { AuthRefreshCoordinator, authSessionForPrincipal, type AuthRefreshOutcome, type AuthSessionSnapshot } from '../lib/authSession';
+import { noticeSessionEnded } from '../lib/sessionEndedNotice';
 import { CARD_CONSENT_VERSION } from '../lib/cardFee';
 import {
   getReactNativeBundleScriptUrl,
   resolveApiOrigin,
 } from './apiOrigin';
+import { explainDemoEnded, isReviewSessionClosed } from '../lib/reviewSessionClosed';
 
 // Build-time override (set per EAS build profile, e.g. preview→staging,
 // production→prod). Development follows the current Expo/Metro bundle host so
@@ -157,6 +162,9 @@ api.interceptors.request.use((config) => {
   return config;
 }, undefined, { synchronous: true });
 
+/** [Row 3] "Sign in" on the you-were-signed-out notice: straight to sign-in. */
+const signInAgain = () => useAuthStore.getState().promptLogin();
+
 // Response interceptor for token refresh. The coordinator single-flights an
 // exact session, but lets a newly logged-in account start its own flight. Every
 // rotate/logout is compare-and-swap bound to the user + generation + refresh
@@ -182,8 +190,14 @@ const refreshCoordinator = new AuthRefreshCoordinator(
   },
   (error) => axios.isAxiosError(error)
     && (error.response?.status === 401 || error.response?.status === 403),
-  explainSessionEnded,
+  (error) => noticeSessionEnded(error, signInAgain),
 );
+
+/** [PERF #9] The same one refresh the 401 path below uses, started before
+ *  the access token lapses (lib/sessionRefreshAhead.ts). */
+export function refreshSessionAhead(session: AuthSessionSnapshot): Promise<AuthRefreshOutcome | null> {
+  return refreshCoordinator.resolve(session);
+}
 
 api.interceptors.response.use(
   (response) => response,
@@ -197,6 +211,13 @@ api.interceptors.response.use(
     const captured = originalRequest
       ? requestAuthBindings.get(originalRequest)?.session
       : undefined;
+    // [Row 353 · DL-9] The store-review demo's session is over: sign that exact
+    // demo session out once and say why. Never a refresh, never a retry.
+    if (isReviewSessionClosed(error)) {
+      if (captured && useAuthStore.getState().logoutIfCurrent(captured)) explainDemoEnded();
+      return Promise.reject(error);
+    }
+
     if (
       error.response?.status === 401
       && originalRequest
@@ -205,7 +226,7 @@ api.interceptors.response.use(
       if (authRefreshRetries.has(originalRequest)) {
         // A refreshed credential was authoritatively rejected. End only the
         // exact replay session; a newer login/rotation must remain untouched.
-        useAuthStore.getState().logoutIfCurrent(captured);
+        if (useAuthStore.getState().logoutIfCurrent(captured)) noticeSessionEnded(error, signInAgain);
         return Promise.reject(error);
       }
       const outcome = await refreshCoordinator.resolve(captured);
@@ -245,8 +266,37 @@ export async function revokeAuthSession(refreshToken: string, pushToken: string 
   );
 }
 
+export const UPLOAD_TIMEOUT_MS = 90_000;
+
+/** Retry only standalone file uploads, never custody/identity decisions.
+ * Each attempt uses the original account boundary and the same captured file. */
+async function uploadPhoto(url: string, form: FormData, session?: AuthSessionSnapshot) {
+  const owner = session ?? getAuthSessionSnapshot();
+  const send = (retry = false) => {
+    const current = retry ? owner && authSessionForPrincipal(getAuthSessionSnapshot(), owner) : owner;
+    if (retry && !current) throw new Error('Your session changed. Please select the photo again.');
+    return api.post(url, form, capturedAuthConfig(current ?? undefined, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }));
+  };
+  try {
+    return await send();
+  } catch (error) {
+    if (!axios.isAxiosError(error) || error.response ||
+        !['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT'].includes(error.code ?? '') ||
+        !owner || !authSessionForPrincipal(getAuthSessionSnapshot(), owner)) throw error;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    return send(true);
+  }
+}
+
 // Auth
 export const authApi = {
+  /** [R26 · research G2] Whether the signed-in person must accept the served legal texts again, and what changed. */
+  legalAcceptance: () => api.get('/auth/legal-acceptance'),
+  /** [R26] The fresh tick, for the version the person read. */
+  acceptLegal: (version: string) => api.post('/auth/legal-acceptance', { version, accept: true }),
   sendOtp: (phone: string) => api.post('/auth/send-otp', { phone }),
   verifyOtp: (phone: string, code: string) => api.post('/auth/verify-otp', { phone, code }),
   // [ALG-34] Step-up for an existing session — a money surface answers 403
@@ -266,14 +316,14 @@ export const authApi = {
     countryCode?: string;
     /** Server records consent + the legal version it covered [SWIFT-AUD-D9-03]. */
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" — recorded in the consent ledger. */
+    ageConfirmed?: boolean;
   }) => api.post('/auth/register', data),
   refresh: (refreshToken: string) => api.post('/auth/refresh', { refreshToken }),
   logout: () => api.post('/auth/logout'),
   // Mandatory signup selfie — multipart camera capture; becomes the public photo.
   uploadSelfie: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/auth/selfie', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/auth/selfie', form, session),
 };
 
 // Customer
@@ -440,7 +490,8 @@ export const customerApi = {
   // without it and checkout stops sending it. (The web cart cannot remove a
   // promotion yet; the phone can.)
   removeCartPromo: (session?: AuthSessionSnapshot) => api.delete('/customer/cart/promo', capturedAuthConfig(session)),
-  getOrder: (id: string) => api.get(`/customer/orders/${id}`),
+  // This client renders the server's swap permissions and refusal guidance.
+  getOrder: (id: string) => api.get(`/customer/orders/${id}`, { params: { swapDecisions: 'v2' } }), // [O-4] v2 = renders the removal question
   // [REPORT-012 F-012-03] Unwrap the API envelope AT THE SEAM: the server
   // returns { success, data: { message } } inside the axios body — reading one
   // level short silently discarded the authoritative cancellation outcome.
@@ -453,6 +504,8 @@ export const customerApi = {
   // /customer/orders had no backend route.)
   placeOrder: (data: {
     paymentMethod?: string;
+    /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY to the store's MMG number. */
+    mmgPayTo?: 'STORE_NUMBER';
     deliveryInstructions?: string;
     tipAmount?: number;
     scheduledFor?: string;
@@ -478,6 +531,10 @@ export const customerApi = {
   checkoutReceipt: (idempotencyKey: string, session?: AuthSessionSnapshot) =>
     api.get(`/customer/checkout/receipts/${encodeURIComponent(idempotencyKey)}`, capturedAuthConfig(session)),
   getNotifications: () => api.get('/customer/notifications'),
+  // [Row 55] Store team invites this signed-in person has received
+  teamInvites: () => api.get('/customer/team-invites'),
+  acceptTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/accept`, {}),
+  declineTeamInvite: (id: string) => api.post(`/customer/team-invites/${id}/decline`, {}),
   reorder: (id: string, session?: AuthSessionSnapshot) => api.post(`/customer/orders/${id}/reorder`, {}, capturedAuthConfig(session)),
   ratingTags: () => api.get('/customer/rating-tags'),
   itemFeedback: (id: string, body: { itemId: string; verdict: 'UP' | 'DOWN' }) =>
@@ -591,8 +648,12 @@ export const safetyApi = {
   revokeAllTripShares: (orderId: string) => api.delete(`/safety/trips/${orderId}/shares`),
   revokeTripShare: (token: string) => api.delete(`/safety/share/${token}`),
   /** §5.1 — the "extra safety check-ins on my trips" toggle. The caller's OWN row. */
-  monitoringPreference: () => api.get('/safety/monitoring-preference'),
-  setMonitoringPreference: (enabled: boolean) => api.put('/safety/monitoring-preference', { enabled }),
+  monitoringPreference: (session?: AuthSessionSnapshot) => api.get('/safety/monitoring-preference', capturedAuthConfig(session)),
+  setMonitoringPreference: (enabled: boolean, session?: AuthSessionSnapshot) => api.put('/safety/monitoring-preference', { enabled }, capturedAuthConfig(session)),
+  /** [73] The caller's own live alerts (recovered after a restart), one alert, and "I'm safe now". */
+  ownedActiveSos: (cursor: string | null, session?: AuthSessionSnapshot) => api.get('/safety/sos/owned-active', capturedAuthConfig(session, { params: cursor ? { cursor } : {} })),
+  getSos: (id: string, session?: AuthSessionSnapshot) => api.get(`/safety/sos/${id}`, capturedAuthConfig(session)),
+  markSafeSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/mark-safe`, {}, capturedAuthConfig(session)),
   listEmergencyContacts: () => api.get('/safety/emergency-contacts'),
   addEmergencyContact: (data: { name: string; phoneE164: string; relationship?: string; priority?: number }) =>
     api.post('/safety/emergency-contacts', data),
@@ -611,10 +672,11 @@ export const safetyApi = {
    * sweep prompts random online movers the same way. This client call is what
    * makes both of those answerable — the endpoint existed with no caller.
    */
-  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER') =>
-    api.post(`/safety/liveness-check?profile=${profile}`, form, {
+  livenessCheck: (form: FormData, profile: 'DRIVER' | 'RIDER', session?: AuthSessionSnapshot) =>
+    api.post(`/safety/liveness-check?profile=${profile}`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
-    }),
+    })),
   /** Trip Guardian check-in response (prompted via the guardian:checkin
    *  socket event on the order room, or by the outstanding read below). */
   guardianCheckin: (response: 'OK' | 'NEED_HELP') => api.post('/safety/guardian/checkin', { response }),
@@ -659,13 +721,13 @@ export const safetyApi = {
     lng?: number;
     accuracyM?: number;
     clientIdempotencyKey: string;
-  }) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }),
+  }, session?: AuthSessionSnapshot) => api.post('/safety/sos', { ...input, source: 'BUTTON' as const, clientCreatedAt: new Date().toISOString() }, capturedAuthConfig(session)),
   /** [REPORT-035 F-035-01] TRIGGER_PENDING → ACTIVE now — "I need help NOW".
    *  The raise opens a short server-side cancel grace; this is the owner's way
    *  to skip the wait instead of depending on the promotion worker. */
-  confirmSos: (id: string) => api.post(`/safety/sos/${id}/confirm`, {}),
+  confirmSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/confirm`, {}, capturedAuthConfig(session)),
   /** Slide-to-cancel during the grace window only; 409 after. */
-  cancelSos: (id: string) => api.post(`/safety/sos/${id}/cancel`, {}),
+  cancelSos: (id: string, session?: AuthSessionSnapshot) => api.post(`/safety/sos/${id}/cancel`, {}, capturedAuthConfig(session)),
 };
 
 /** [B15/STORE-001] In-app UGC reporting — Apple 1.2 / Google UGC+CSAE launch
@@ -711,6 +773,8 @@ export const rideApi = {
     dropoffAddress: string;
     passengerCount?: number;
     rideClass?: RideClass;
+    /** [PRICE-LOCK · row 448] The fare on screen: the queue books the ride only at it. */
+    expectedFare?: number;
   }) => api.post('/rides/queue/join', data),
   queueLeave: () => api.post('/rides/queue/leave', {}),
   queueStatus: () => api.get('/rides/queue'),
@@ -726,8 +790,8 @@ export const rideApi = {
   cancel: (id: string, reason?: string) => api.post(`/rides/${id}/cancel`, { reason }),
   /** [E19] The passenger's own eyes override the driver-arrival GPS gate. */
   confirmDriverArrival: (id: string) => api.post(`/rides/${id}/confirm-driver-arrival`, {}),
-  sos: (id: string, coords?: { lat: number; lng: number }) =>
-    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}),
+  sos: (id: string, coords?: { lat: number; lng: number }, session?: AuthSessionSnapshot) =>
+    api.post(`/rides/${id}/sos`, coords ? { lat: coords.lat, lng: coords.lng } : {}, capturedAuthConfig(session)),
 };
 
 // Places (mounted at /api/v1/places) — "Where to?" search behind the server-side
@@ -773,15 +837,17 @@ export const courierApi = {
     /** [PRICE-LOCK] The fee on screen (estimate totalFee): the server creates
      *  the job only at it (409 PRICE_CHANGED otherwise). */
     expectedFee?: number;
-  }) => api.post('/courier/order', data),
+  }, idempotencyKey: string, session?: AuthSessionSnapshot) =>
+    // [UI-SWEEP U01] The parcel intent's key (lib/courierRequestAttemptStore):
+    // the same on every retry of this parcel, so the server replays the parcel
+    // it already made instead of booking a second one.
+    api.post('/courier/order', data, capturedAuthConfig(session, { headers: { 'Idempotency-Key': idempotencyKey } })),
   orders: () => api.get('/courier/orders'),
   get: (id: string) => api.get(`/courier/order/${id}`),
   cancel: (id: string, reason?: string) => api.post(`/courier/order/${id}/cancel`, { reason }),
   // Proof of delivery (D8-02): upload the photo → get a url → confirm handoff.
   uploadProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/proof-photo`, form, session),
   // [M-28] The proof carries the cash outcome when the RECIPIENT pays: the
   // server refuses a bare proof on an unpaid cash job (a proof never implies
   // money). The GPS is the claim's evidence when the recipient did not pay.
@@ -807,14 +873,13 @@ export const courierApi = {
   ) => api.post(`/courier/order/${id}/return`, body, capturedAuthConfig(session)),
   returnProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/courier/order/${id}/return-proof`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // E16: pickup custody proof — upload the captured pickup photo, then confirm
   // pickup with the returned URL + GPS. The server refuses the bare pickup tap.
   uploadPickupProof: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/courier/order/${id}/pickup-proof-photo`, form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto(`/courier/order/${id}/pickup-proof-photo`, form, session),
   pickupProof: (
     id: string,
     body: { proofPhotoUrl: string; gps: { lat: number; lng: number } },
@@ -823,6 +888,14 @@ export const courierApi = {
 };
 
 // Services (mounted at /api/v1/services)
+function serviceJobLifecycleConfig(): AxiosRequestConfig {
+  return {
+    headers: {
+      [SERVICE_JOB_LIFECYCLE_CONTRACT_HEADER]: SERVICE_JOB_LIFECYCLE_CONTRACT_VERSION,
+    },
+  };
+}
+
 export const servicesApi = {
   providers: (trade: string) => api.get('/services/providers', { params: { trade } }),
   providerMe: (session?: AuthSessionSnapshot) =>
@@ -831,6 +904,14 @@ export const servicesApi = {
     data: { trade: string; bio?: string; portfolioPhotos?: string[] },
     session?: AuthSessionSnapshot,
   ) => api.post('/services/providers', data, capturedAuthConfig(session)),
+  // [IMAGES-E2E] Photos of the provider's own work: uploaded (the server scans each one and
+  // redraws it without location or camera data), or taken down by file name.
+  uploadPortfolioPhoto: (form: FormData) =>
+    api.post('/services/providers/me/portfolio', form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removePortfolioPhoto: (file: string) => api.delete(`/services/providers/me/portfolio/${encodeURIComponent(file)}`),
   addQualification: (
     data: {
       type: 'GEI_LICENCE' | 'CVQ' | 'GTEE' | 'CITY_AND_GUILDS' | 'OTHER';
@@ -843,17 +924,25 @@ export const servicesApi = {
   jobs: () => api.get('/services/jobs'),
   job: (id: string) => api.get(`/services/jobs/${id}`),
   // Customer accepts the provider's quote by scheduling the job.
-  scheduleJob: (id: string, scheduledFor: string) => api.post(`/services/jobs/${id}/schedule`, { scheduledFor }),
-  cancelJob: (id: string) => api.post(`/services/jobs/${id}/cancel`, {}),
+  scheduleJob: (id: string, input: { scheduledFor: string; expectedUpdatedAt: string; expectedQuoteAmount: number }) =>
+    api.post(`/services/jobs/${id}/schedule`, input, serviceJobLifecycleConfig()),
+  cancelJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/cancel`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
   rateJob: (id: string, score: number, comment?: string) => api.post(`/services/jobs/${id}/rate`, { score, comment }),
   // Provider side: send the quote, then accept/decline the customer's slot (§4.3),
   // then close the job out when the work is done (SWIFT-AUD-D8-04: the complete
   // endpoint existed server-side but was never wired, so a ServiceJob stalled
   // forever at SCHEDULED — no completion, no rating, no reputation).
-  quoteJob: (id: string, amount: number) => api.post(`/services/jobs/${id}/quote`, { amount }),
-  confirmJob: (id: string) => api.post(`/services/jobs/${id}/confirm`, {}),
-  declineSlot: (id: string) => api.post(`/services/jobs/${id}/decline-slot`, {}),
-  completeJob: (id: string) => api.post(`/services/jobs/${id}/complete`, {}),
+  quoteJob: (id: string, amount: number, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/quote`, { amount, expectedUpdatedAt }, serviceJobLifecycleConfig()),
+  confirmJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/confirm`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  declineSlot: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/decline-slot`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  startJob: (id: string, expectedUpdatedAt: string, expectedScheduledFor: string) =>
+    api.post(`/services/jobs/${id}/start`, { expectedUpdatedAt, expectedScheduledFor }, serviceJobLifecycleConfig()),
+  completeJob: (id: string, expectedUpdatedAt: string) =>
+    api.post(`/services/jobs/${id}/complete`, { expectedUpdatedAt }, serviceJobLifecycleConfig()),
 };
 
 // Verification (mounted at /api/v1/verification)
@@ -861,19 +950,19 @@ export const verificationApi = {
   status: (role: string, vehicleType?: string) =>
     api.get('/verification/status', { params: { role, ...(vehicleType ? { vehicleType } : {}) } }),
   upload: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/verification/upload', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/verification/upload', form, session),
   submitDocument: (data: {
     role: string;
     docType: string;
     fileUrl: string;
     consent: true;
     privacyNoticeVersion: string;
+    /** [R17] the tick shown before the upload (recorded in the consent ledger). */
+    consentTick?: 'document_v1';
   }, session?: AuthSessionSnapshot) =>
     api.post('/verification/documents', data, capturedAuthConfig(session)),
   submitIdentity: (
-    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string },
+    data: { idDocumentUrl: string; selfieUrl?: string; consent: true; privacyNoticeVersion: string; consentTick?: 'customer_id_v1' },
     session?: AuthSessionSnapshot,
   ) => api.post('/verification/identity', data, capturedAuthConfig(session)),
 };
@@ -922,6 +1011,10 @@ export const partnerApi = {
     vehicle?: { make: string; model: string; year: number; color: string; licensePlate: string };
   }, session?: AuthSessionSnapshot) =>
     api.put('/partner/vehicle', data, capturedAuthConfig(session)),
+  /** [R18] The answer to the background-location disclosure, for the consent
+   *  ledger. Names the platform so the ledger records where it was given. */
+  recordBackgroundLocationConsent: (granted: boolean) =>
+    api.post('/partner/consent/background-location', { granted }, { headers: { 'x-client-platform': Platform.OS } }),
 };
 
 // Mover ops — Rider (delivery/courier), mounted at /api/v1/rider
@@ -966,7 +1059,7 @@ export const riderApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/rider/orders/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/rider/orders/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/rider/orders/${id}/handover-photo`, form, session),
   // Intermediate delivery-leg transitions. The state machine walks
   // RIDER_ASSIGNED → en-route-pickup → arrived-pickup → picked-up →
   // en-route-delivery → arrived → handover/delivered. Without these the rider
@@ -1000,9 +1093,7 @@ export const riderApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/rider/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/rider/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/rider/vehicle-photo', form, session),
 };
 
 /** Resolve a lost response against the same driver's authority. Offers return
@@ -1091,6 +1182,9 @@ export const driverApi = {
   stopArrived: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/arrived`),
   stopDepart: (id: string, sequence: number) => api.put(`/driver/rides/${id}/stops/${sequence}/depart`),
   stopSkip: (id: string, sequence: number, reason: string) => api.post(`/driver/rides/${id}/stops/${sequence}/skip`, { reason }),
+  // [TAXI route line] The road through the ride's own points, for the map
+  // ({ source: 'road' | 'straight', points }); a server from before it answers 404.
+  rideRoute: (id: string) => api.get(`/driver/rides/${id}/route`),
   // [M-29] The fare outcome at the destination — a cash ride's completion.
   // GPS is mandatory server-side (a guarantee claim stands on it). 'paid'
   // captures the fare and completes the ride in one commit; 'refused' /
@@ -1103,7 +1197,7 @@ export const driverApi = {
     session?: AuthSessionSnapshot,
   ) => api.post(`/driver/rides/${id}/handover`, body, capturedAuthConfig(session)),
   uploadHandoverPhoto: (id: string, form: FormData, session?: AuthSessionSnapshot) =>
-    api.post(`/driver/rides/${id}/handover-photo`, form, capturedAuthConfig(session, { headers: { 'Content-Type': 'multipart/form-data' } })),
+    uploadPhoto(`/driver/rides/${id}/handover-photo`, form, session),
   earningsToday: () => api.get('/driver/earnings/today'),
   earningsSummary: () => api.get('/driver/earnings/summary'),
   earnings: (params?: Record<string, string | number>) => api.get('/driver/earnings', { params }),
@@ -1120,9 +1214,7 @@ export const driverApi = {
   setBillingMethod: (method: 'CASH' | 'MOBILE_MONEY' | 'NONE', mmgPayerMsisdn?: string, session?: AuthSessionSnapshot) =>
     api.put('/driver/subscription/billing-method', { method, ...(mmgPayerMsisdn != null ? { mmgPayerMsisdn } : {}) }, capturedAuthConfig(session)),
   uploadVehiclePhoto: (form: FormData, session?: AuthSessionSnapshot) =>
-    api.post('/driver/vehicle-photo', form, capturedAuthConfig(session, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    })),
+    uploadPhoto('/driver/vehicle-photo', form, session),
 };
 
 // Vendor ops (mounted at /api/v1/vendor)
@@ -1146,8 +1238,9 @@ export const vendorApi = {
   profile: (session?: AuthSessionSnapshot, storeId?: string | null) => api.get('/vendor/profile', capturedVendorAuthConfig(session, storeId)),
   /** [DOC-1 §3.6] The store's tier: caps, usage, what lifts the limits. */
   tier: () => api.get('/vendor/tier'),
-  toggleOpen: () => api.put('/vendor/vendor/toggle-open'),
-  toggleOrders: () => api.put('/vendor/vendor/toggle-orders'),
+  // [owner 21 Oct] Send the state the switch should end in: the server flips only for apps that send none.
+  toggleOpen: (isCurrentlyOpen: boolean) => api.put('/vendor/vendor/toggle-open', { isCurrentlyOpen }),
+  toggleOrders: (acceptingOrders: boolean) => api.put('/vendor/vendor/toggle-orders', { acceptingOrders }),
   orders: (params?: { status?: string; search?: string; page?: number; limit?: number }) =>
     api.get('/vendor/orders', { params }),
   order: (id: string, session?: AuthSessionSnapshot, storeId?: string | null) => api.get(`/vendor/orders/${id}`, capturedVendorAuthConfig(session, storeId)),
@@ -1198,6 +1291,14 @@ export const vendorApi = {
   createCategory: (data: { name: string; description?: string }) => api.post('/vendor/categories', data),
   updateCategory: (id: string, data: { name?: string; description?: string }) => api.put(`/vendor/categories/${id}`, data),
   deleteCategory: (id: string) => api.delete(`/vendor/categories/${id}`),
+  // [IMAGES-E2E PR4] A menu section's own photo: uploaded (the server checks it is a photo,
+  // scans it, redraws it without location or camera data and serves it to customers), or taken down.
+  uploadCategoryPhoto: (id: string, form: FormData) =>
+    api.post(`/vendor/categories/${id}/image`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeCategoryPhoto: (id: string) => api.delete(`/vendor/categories/${id}/image`),
   createItem: (
     data: VendorItemInput,
     session?: AuthSessionSnapshot,
@@ -1218,6 +1319,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post(`/vendor/items/${id}/image`, form, capturedVendorAuthConfig(session, storeId, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   // Modifiers (option groups + options on an item)
@@ -1258,10 +1360,20 @@ export const vendorApi = {
   setHours: (hours: { dayOfWeek: number; openTime: string; closeTime: string; isClosed: boolean }[]) =>
     api.put('/vendor/hours', { hours }),
   // [Q8] latitude/longitude move the store pin: the server takes them together, inside the market, or not at all.
-  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; publicPhone?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
+  updateProfile: (data: { name?: string; phone?: string; description?: string; mmgPayUrl?: string | null; mmgNumber?: string | null; publicPhone?: string | null; refundRule?: string | null; selfDeliveryEnabled?: boolean; latitude?: number; longitude?: number }) =>
     api.put('/vendor/profile', data),
+  // [IMAGES-E2E] The store's own logo and cover: uploaded as a photo (the server scans it,
+  // redraws it without location or camera data, and serves it to customers), or taken down.
+  uploadStorePhoto: (slot: 'logo' | 'cover', form: FormData) =>
+    api.post(`/vendor/profile/${slot}`, form, {
+      timeout: UPLOAD_TIMEOUT_MS,
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  removeStorePhoto: (slot: 'logo' | 'cover') => api.delete(`/vendor/profile/${slot}`),
   // [ALG-34] "This wasn't me": drops a staged MMG link change and signs out every other device.
   cancelPendingMmgLink: () => api.delete('/vendor/profile/mmg-pay-url/pending'),
+  // [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me" for a staged MMG number change.
+  cancelPendingMmgNumber: () => api.delete('/vendor/profile/mmg-number/pending'),
   importItems: (
     csv: string,
     session?: AuthSessionSnapshot,
@@ -1278,6 +1390,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/xlsx', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   importMenuPdf: (
@@ -1285,6 +1398,7 @@ export const vendorApi = {
     session?: AuthSessionSnapshot,
     storeId?: string | null,
   ) => api.post('/vendor/items/import/menu-parse', form, capturedVendorAuthConfig(session, storeId, {
+    timeout: UPLOAD_TIMEOUT_MS,
     headers: { 'Content-Type': 'multipart/form-data' },
   })),
   // Storefront QR (manager+) — short link + printable SVG code + lifecycle
@@ -1312,6 +1426,8 @@ export const vendorApi = {
   addStaff: (data: { phone: string; role: 'MANAGER' | 'STAFF' }) => api.post('/vendor/staff', data),
   updateStaff: (id: string, role: 'MANAGER' | 'STAFF') => api.put(`/vendor/staff/${id}`, { role }),
   removeStaff: (id: string) => api.delete(`/vendor/staff/${id}`),
+  /** [Row 55] Take back every unanswered team invite from this store (none is ever listed). */
+  withdrawStaffInvites: () => api.post('/vendor/staff/invites/withdraw', {}),
 };
 
 // Chat (mounted at /api/v1/chat) — order-scoped rider/customer messaging
@@ -1352,6 +1468,7 @@ export const adsApi = {
   ) => api.post(`/ads/campaigns/${campaignId}/checkout`, { provider }, capturedAuthConfig(session)),
   uploadCreative: (campaignId: string, form: FormData, session?: AuthSessionSnapshot) =>
     api.post(`/ads/campaigns/${campaignId}/creatives`, form, capturedAuthConfig(session, {
+      timeout: UPLOAD_TIMEOUT_MS,
       headers: { 'Content-Type': 'multipart/form-data' },
     })),
   stats: (campaignId: string) => api.get(`/ads/campaigns/${campaignId}/stats`),

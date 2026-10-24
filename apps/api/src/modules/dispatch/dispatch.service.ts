@@ -1,4 +1,4 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { assertDispatchPairEligible, safetyExcludedMovers } from './pair-safety';
 import { assertMoverDocuments, documentDeadlineSql, lockMoverDocuments } from '../verification/mover-document-authority';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -14,6 +14,7 @@ import { NotificationService, notifyAdmins } from '../notification/notification.
 import { getMapsProvider, type MapsProvider } from '../../providers/maps/maps-provider';
 import { classesAtOrAbove } from '../rides/fare.service';
 import { readOfferItinerary } from '../rides/taxi-stops-read';
+import { taxiStopsAppUpdateRequired } from '../rides/taxi-stop-rules';
 import { offerCardAddresses, type CoarseStop } from './board-privacy';
 import { closeOnlineSession } from '../rider/online-hours';
 import { rankCandidates, applyFairnessBand, type DispatchCandidate } from './scoring';
@@ -26,13 +27,14 @@ import { customerTrustSummaries } from '../cash/cash-rules.service';
 import { estimateLoad, requiredPackageSizeForOrder, totalBulkUnits, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
-import { vehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
+import { goodsVehicleTypesForPackageSize, VEHICLE_CLASSES } from '../../config/vehicle-classes';
 import { freshRidePinReset } from '../rides/ride-pin';
+import { hireVehicleTypes, isVehicleOffered, VEHICLE_NOT_OFFERED } from '../../config/vehicle-classes';
 import { log } from '../../utils/logger';
 import { dispatchSearchesCounter, dispatchTimeToAssign } from '../../plugins/observability';
 import { getTenantId } from '../../plugins/tenant-context';
 import { assertMmgFulfilmentAllowed } from '../order/order.service';
-import { mmgDispatchBlocked } from '../order/mmg-claim.service';
+import { mmgDispatchBlocked, mmgDispatchEligibleWhere } from '../order/mmg-claim.service';
 import { FloatService, riderFloatForOrder } from './float.service';
 import { withdrawOfferOfClosedOrder } from './offer-withdrawal';
 import {
@@ -63,6 +65,8 @@ declare module 'fastify' {
   interface FastifyInstance {
     /** Decorated in server.ts when background queues are up */
     dispatchQueue?: Queue;
+    /** [row 266] The offer fast lane: offer timeouts only (jobs/queue.ts QUEUE_NAMES.OFFER). */
+    offerQueue?: Queue;
   }
 }
 
@@ -75,6 +79,11 @@ declare module 'fastify' {
 // ---------------------------------------------------------------------------
 
 export const OFFER_TIMEOUT_SECONDS = 20;
+
+/** [R9] The words a bus (or any vehicle outside the hire seat limit) is refused a ride in. */
+export function hireVehicleRefusal(): AppError {
+  return new AppError(403, VEHICLE_NOT_OFFERED, 'Swift is not taking buses for rides. Change your vehicle to take rides.');
+}
 /** Express really IS faster at the dispatch layer, not just a badge: each
  *  offer expires sooner, so the cascade burns through non-responders and
  *  reaches a willing mover earlier. (The bigger fee is the accept incentive;
@@ -85,11 +94,13 @@ export const EXPRESS_OFFER_TIMEOUT_SECONDS = 12;
 // actually carry it — a bicycle can't take a wardrobe box. Capacity is derived
 // from the vehicle-class taxonomy (config/vehicle-classes) — the single source
 // of truth — so adding a box truck or canter automatically extends dispatch.
-/** Vehicle types that can carry a package of this size (any vehicle if unknown). */
+// [Owner ruling 15 Oct 2026] Goods only: a taxi car (any passenger vehicle) carries no goods while the
+// CAR_DELIVERIES switch is off (config/vehicle-classes `carriesGoods`), whatever its capacity.
+/** Vehicle types that may carry goods of this size today (any goods vehicle if unknown). */
 export function vehiclesForPackageSize(size: string | null | undefined): string[] {
-  return vehicleTypesForPackageSize(size);
+  return goodsVehicleTypesForPackageSize(size);
 }
-/** Can this vehicle carry a parcel of this size? */
+/** Can this vehicle carry goods (a parcel, a store order) of this size today? */
 export function vehicleCanCarry(vehicleType: string, size: string | null | undefined): boolean {
   return vehiclesForPackageSize(size).includes(vehicleType);
 }
@@ -382,6 +393,8 @@ const ORDER_HELD_CLAIM_CODES: ReadonlySet<string> = new Set(['ORDER_NOT_READY', 
 const LOST_RACE_CLAIM_CODES: ReadonlySet<string> = new Set(['ALREADY_TAKEN', 'OFFER_TAKEN', 'ORDER_CANCELLED']);
 const MOVER_INELIGIBLE_CLAIM_CODES: ReadonlySet<string> = new Set([
   'MOVER_INACTIVE', 'CAPACITY_EXCEEDED', 'DRIVER_BUSY', 'FLOAT_EXCEEDED', 'STACK_INELIGIBLE', 'SELF_OWN_ORDER',
+  // [TAXI multi-stop 4/8] this driver's app cannot run a ride's stops; another driver's can.
+  'APP_UPDATE_REQUIRED',
 ]);
 
 export function classifyClaimRefusal(error: unknown): ClaimRefusal {
@@ -1007,6 +1020,22 @@ export class DispatchService {
      *  must pass the queue/order tenant explicitly because they intentionally
      *  run without request-local tenant context. */
     tenantId: string | null = getTenantId(),
+    /** [owner #20] Count only movers whose vehicle can carry an order of this
+     *  size (a food/grocery order's bulk — never parcel work). Omitted = any
+     *  vehicle, exactly as before. */
+    packageSize?: string | null,
+    /** [TAXI-FLOW 22 Oct 2026] The person the supply is FOR. Dispatch never
+     *  offers a ride to its booker (findCandidates' excludeUserId), so a probe
+     *  made on someone's behalf — the ride queue, "drivers are back" — must not
+     *  count that person's own driver profile as supply either. Omitted = the
+     *  anonymous area read, exactly as before. */
+    excludeUserId?: string | null,
+    /** [TAXI-FLOW · REVIEW-G #2022 S4-3] What THIS ride needs of a car — the
+     *  same filters dispatch applies to its offers (class tier, seats, stops).
+     *  A probe made for a particular ride (the queue scan, the request
+     *  pre-check) counts only cars dispatch could actually offer it to.
+     *  Omitted = any car, exactly as before. */
+    ride?: { rideClass?: RideClass | null; passengerCount?: number | null; taxiStops?: boolean } | null,
   ): Promise<{
     level: 'GOOD' | 'LOW' | 'NONE';
     /** Stable client contract: null when no eligible fresh mover exists. */
@@ -1018,8 +1047,14 @@ export class DispatchService {
       BASE_RADIUS_KM,
       pool,
       floatRequired,
-      null,
+      ride?.rideClass ?? null,
       tenantId,
+      packageSize ?? null,
+      excludeUserId ?? undefined,
+      ride?.passengerCount ?? undefined,
+      undefined,
+      false,
+      ride?.taxiStops ?? undefined,
     );
     const level = candidates.length >= 3 ? 'GOOD' : candidates.length >= 1 ? 'LOW' : 'NONE';
     return {
@@ -1050,6 +1085,15 @@ export class DispatchService {
     /** Delivery search-memory generation. Omitted for taxi, availability
      * probes and pre-generation compatibility callers. */
     deliveryAuthorityVersion?: number,
+    /** [owner #20] Whether this is COURIER (parcel) work. Separate from
+     *  `packageSize` since a food or grocery order now carries a required size
+     *  too (its bulk): the size gates the VEHICLE, this gates the rider's
+     *  SERVICE type. Omitted = the historical reading (a size means a parcel). */
+    courierWork?: boolean,
+    /** [TAXI multi-stop 4/8] The ride has stops: DRIVER candidates must be
+     *  on an app that declared it can run them (go-online). Omitted = any
+     *  driver, exactly as before. */
+    taxiStops?: boolean,
   ): Promise<DispatchCandidate[]> {
     // Stacking: the RIDER pool's live capacity (AlgoConfig, cached ~30s;
     // clamped 1..3; 1 = historical behaviour and the kill switch).
@@ -1059,16 +1103,16 @@ export class DispatchService {
 
     // SWIFT-062: a courier parcel only goes to a vehicle that can carry it.
     const capableVehicles = vehiclesForPackageSize(packageSize);
-    const vehicleFilter = packageSize
-      ? Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`
-      : Prisma.empty;
+    // [Owner ruling 15 Oct 2026] Emitted for every goods search, sized or not: a taxi car is never a goods
+    // candidate while car deliveries are off (an unsized order still excludes it).
+    const vehicleFilter = Prisma.sql`AND r."vehicleType"::text = ANY(${capableVehicles})`;
     // [REPORT-014 F-014-08] Service authorization, not just vehicle capability:
     // a COURIER order (packageSize set) may only go to a rider whose riderType
     // serves courier work, and a food/grocery DELIVERY only to a delivery
     // rider — a DELIVERY-only rider must never be offered/claim a parcel and
     // vice versa. BOTH serves either. (Drivers are the taxi pool — N/A here.)
     const riderTypeFilter = pool === 'RIDER'
-      ? (packageSize
+      ? ((courierWork ?? !!packageSize)
           ? Prisma.sql`AND r."riderType"::text = ANY(ARRAY['COURIER','BOTH'])`
           : Prisma.sql`AND r."riderType"::text = ANY(ARRAY['DELIVERY','BOTH'])`)
       : Prisma.empty;
@@ -1112,7 +1156,11 @@ export class DispatchService {
             ${tenantFilter}
             ${selfFilter}
             AND d."rideClass"::text = ANY(${eligibleClasses})
+            -- [R9] Only a vehicle a hire may use: a bus driver online from before
+            -- buses were hidden is never offered a ride.
+            AND d."vehicleType"::text = ANY(${hireVehicleTypes()})
             ${passengerCount != null ? Prisma.sql`AND d."vehicleCapacity" >= ${passengerCount}` : Prisma.empty}
+            ${taxiStops ? Prisma.sql`AND d."taxiStopsCapable" = true` : Prisma.empty}
             AND d."currentLat" IS NOT NULL
             AND d."currentLng" IS NOT NULL
             AND ST_DWithin(
@@ -1382,21 +1430,14 @@ export class DispatchService {
       await this.journalOpenSearch(order, round, radius);
       // D.3 — a rider must have enough free float to front this order's vendor-cash (CASH deliveries only).
       const floatRequired = pool === 'RIDER' ? riderFloatForOrder(order) : 0;
-      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, order.courierPackageSize, order.customerId, order.taxiPassengerCount, searchVersion);
-
-      // [G1 SHADOW] What a load gate WOULD demand, and what it WOULD cost.
-      //
-      // Changes nothing. It exists to answer the one question that decides
-      // whether this may ever be enforced: how much of the rider pool would the
-      // gate remove, and would it have removed riders from jobs that completed
-      // perfectly well? Turning the filter on without that evidence trades a
-      // visible failure (a rider who cannot carry it) for an invisible one
-      // (nothing dispatches, and nobody is paged) — which is worse.
-      //
-      // Wrapped, and deliberately so: a classification bug must never stop a
-      // dispatch. A shadow that can take the cascade down is not a shadow, it
-      // is an outage.
-      this.logLoadGateShadow(order, candidates.length);
+      // [owner #20 · G1 ENFORCED] The size of vehicle this order needs — a
+      // parcel's declared size, or a food/grocery order's bulk (a bulky line
+      // means a car or van) — gates the candidate pool, exactly as the parcel
+      // gate always has. The visible half of the rule is checkout, which
+      // tells the customer before placing when no such vehicle is near.
+      const requiredSize = pool === 'RIDER' ? requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS) : null;
+      const candidates = await this.findCandidates(orderId, { lat: order.pickupLat, lng: order.pickupLng }, radius, pool, floatRequired, order.rideClass, order.tenantId, requiredSize, order.customerId, order.taxiPassengerCount, searchVersion, order.orderType === 'COURIER', order.taxiStopCount != null);
+      this.logLoadGate(order, requiredSize, candidates.length);
 
       const timeoutSeconds = order.isExpress ? EXPRESS_OFFER_TIMEOUT_SECONDS : OFFER_TIMEOUT_SECONDS;
       // [F-014-05] Walk the ranked candidates: the FIRST who can atomically
@@ -1871,46 +1912,28 @@ export class DispatchService {
    *  (wave/radius), resolving a prior EXHAUSTED row as RETRIED when a fresh
    *  search begins. Never throws — the journal is beside the machine. */
   /**
-   * [G1 SHADOW] Record what a vehicle-capacity gate would have demanded of this
-   * order, and how much of the candidate pool it would have cost.
-   *
-   * READ BY NOBODY IN DISPATCH. The only consumer is the rollout decision.
-   *
-   * `wouldHaveExcluded: true` on a job that then completes fine is the signal
-   * that the bands are too tight — that single field is what says whether this
-   * may ever be enforced. `poolAfter` against `poolBefore` is the other half:
-   * a gate that removes most of the pool is a misconfiguration wearing the
-   * costume of a safety feature.
-   *
-   * Synchronous and total: it awaits nothing, so it cannot add latency to a
-   * dispatch round, and it swallows everything, so it cannot end one. If this
-   * ever throws into the cascade it has become the outage it was meant to
-   * prevent.
+   * [owner #20 · G1] Record the vehicle-size requirement a goods order was
+   * dispatched under and how many candidates it left — the evidence that the
+   * bands and the bulky rule are not starving the pool. Synchronous and total:
+   * it awaits nothing and swallows everything, so it can never end a round.
    */
-  private logLoadGateShadow(
-    order: { id: string; orderType: string; courierPackageSize: string | null; items: { quantity: number; bulkUnits: number | null }[] },
-    poolBefore: number,
+  private logLoadGate(
+    order: { id: string; orderType: string; items: { quantity: number; bulkUnits: number | null }[] },
+    requiredSize: string | null,
+    poolAfter: number,
   ): void {
     try {
-      const requiredSize = requiredPackageSizeForOrder(order, DEFAULT_LOAD_BANDS);
-      // No requirement means nothing to shadow — a taxi, or a goods order with
-      // no lines. Logging those would bury the rows that carry a decision.
-      if (!requiredSize) return;
-      // COURIER is already gated in production; it is here only as the control
-      // that shows the derivation agrees with the declaration it cannot see.
-      const alreadyGated = order.orderType === 'COURIER';
+      if (!requiredSize || order.orderType === 'COURIER') return;
       log().info({
         orderId: order.id,
         orderType: order.orderType,
         requiredSize,
         bulkUnits: totalBulkUnits(order.items),
         bands: DEFAULT_LOAD_BANDS,
-        alreadyGated,
-        poolBefore,
-      }, 'loadgate:shadow');
+        poolAfter,
+      }, 'loadgate:enforced');
     } catch {
-      // Deliberately silent. A shadow that reports its own failure into the
-      // dispatch path is still in the dispatch path.
+      // Deliberately silent: a log line never ends a dispatch round.
     }
   }
 
@@ -2495,7 +2518,9 @@ export class DispatchService {
       include: {
         // [F-027-07] allow-list, not `include` — see utils/counterparty.
         rider: { select: riderCounterpartySelect({ withPhone: false }) },
-        driver: { include: { user: { select: { firstName: true } } } },
+        // [COORD 18 Oct, option S] The accepting driver is answered with their own row: never its live rating
+        // totals, which move with each single rating (what a person sees is whole groups only, rating-groups.ts).
+        driver: { omit: { averageRating: true, totalRatings: true }, include: { user: { select: { firstName: true } } } },
       },
     });
   }
@@ -2606,8 +2631,10 @@ export class DispatchService {
         fulfillmentMode: 'PLATFORM_RIDER' | 'VENDOR_DELIVERY' | null;
         fulfillmentModeVersion: number;
         cancelledBy: string | null;
+        taxiStopCount: number | null;
       }>>`
         SELECT "customerId", "taxiFareTotal", "mmgClaimMismatchAt", "fulfillmentMode"::text AS "fulfillmentMode",
+               "taxiStopCount",
                "fulfillmentModeVersion", "cancelledBy",
                "status"::text AS "status", "holdExpiresAt",
                "paymentMethod"::text AS "paymentMethod",
@@ -2643,9 +2670,16 @@ export class DispatchService {
       // Re-read this profile after acquiring User and Order: the JOIN used to
       // find its User may have waited behind a vehicle change.
       const driverDocuments = pool === 'DRIVER' ? await lockMoverDocuments(tx, moverAuthority.userId, 'DRIVER') : null;
-      if (driverDocuments) assertMoverDocuments(driverDocuments);
       const currentDriver = pool === 'DRIVER'
-        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true } }) : null;
+        ? await tx.driver.findUniqueOrThrow({ where: { id: moverId }, select: { vehicleType: true, taxiStopsCapable: true } }) : null;
+      // [R9] A hire is claimed only with a vehicle a hire may use (never a bus), read under the profile lock.
+      if (currentDriver && !isVehicleOffered(currentDriver.vehicleType)) throw hireVehicleRefusal();
+      // [TAXI multi-stop 4/8] A ride with stops is claimed only from an app that
+      // declared it can run them: the board and the offer pool already hide it
+      // from the rest, and this locked read is the barrier (a forged or stale
+      // accept, or an app that went online again without the capability).
+      if (currentDriver && lockedOrder.taxiStopCount != null && !currentDriver.taxiStopsCapable) throw taxiStopsAppUpdateRequired();
+      if (driverDocuments) assertMoverDocuments(driverDocuments);
       // [REPORT-014 F-014-01] PHYSICAL capacity is authoritative at the claim:
       // discovery/board filters are conveniences — a 14-passenger GROUP ride
       // must never commit to a 9-seat bus (or a default 4-seat profile that
@@ -2820,7 +2854,7 @@ export class DispatchService {
     try {
       await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', assignedEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', assignedEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', assignedEvent);
       }
     } catch (err) {
       warnAfterClaimCommit({ err, orderId, moverId, pool }, 'dispatch socket publication failed after claim commit');
@@ -3204,8 +3238,9 @@ export class DispatchService {
 /** Route-side construction: timeouts ride the BullMQ queue when it exists. */
 export function makeDispatchService(app: FastifyInstance): DispatchService {
   const scheduler: TimeoutScheduler = async (orderId, riderId, delayMs, attemptId) => {
-    if (!app.dispatchQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
-    await app.dispatchQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
+    // [row 266] Offer timeouts ride their own queue and worker slots, never the sweeps' dispatch queue.
+    if (!app.offerQueue) throw new AppError(503, 'DISPATCH_QUEUE_UNAVAILABLE', 'Offer timeout scheduling is unavailable');
+    await app.offerQueue.add('offer-timeout', { orderId, riderId, attemptId }, {
       delay: delayMs,
       removeOnComplete: 100,
       removeOnFail: 50,
@@ -3230,6 +3265,47 @@ export function makeDispatchService(app: FastifyInstance): DispatchService {
  *  each) forever. The app pings location every 8–25s while online, so
  *  STALE_LOCATION_MINUTES of silence means the app is gone, not slow.
  *  Movers with no location at all are already invisible to findCandidates. */
+/** The rows the stuck-dispatch reconciler may re-drive, as ONE filter (exported so its edges are testable). */
+export function stuckDispatchEligibleWhere(cutoff: Date): Prisma.OrderWhereInput {
+  return {
+      updatedAt: { lt: cutoff },
+      OR: [
+        // Food / grocery / courier: waiting on a rider. A held order
+        // (LIFECYCLE_V2 free-cancel window still open) is NOT stuck —
+        // reconciling it would dispatch inside the customer's window.
+        {
+          orderType: { not: 'TAXI' },
+          fulfillment: 'DELIVERY',
+          riderId: null,
+          // [hold v3 · N-03] A held row is not stuck; it is waiting for a person.
+          foodAgeHeldAt: null,
+          // [F-0026] A self-delivering vendor's order has no rider BY DESIGN —
+          // without this the reconciler re-enqueued it every two minutes forever,
+          // pushing riders offers for food that already left the store.
+          status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
+          AND: [
+            { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] },
+            notSelfDeliveredFilter(),
+            riderDispatchReadinessFilter(),
+            // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] A store may ACCEPT an unpaid MMG
+            // order now; it is not "stuck" — it waits for the store's "Paid by MMG". The
+            // same predicate the dispatch engine and the boards apply (mmg-claim.service).
+            mmgDispatchEligibleWhere(),
+          ],
+        },
+        // Taxi: waiting on a driver. [E02 · DS274 A1] A ride paid by MMG
+        // (legacy only: rides are born CASH) that the slow lane held for a
+        // person is not stuck either; re-driving it would re-offer drivers a
+        // ride past its wait limit, hold it again, and loop every cooldown.
+        // The same predicate as the release CAS in the slow lane.
+        {
+          orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()],
+          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
+        },
+      ],
+  };
+}
+
 /**
  * Recover orders that fell OUT of the dispatch lifecycle — the load-bearing
  * failure this whole design has to survive. The offer key and the delayed
@@ -3251,40 +3327,7 @@ export async function reconcileStuckDispatch(
   enqueue: (orderId: string) => Promise<void>,
   stuckMinutes = RECONCILE_STUCK_MINUTES,
 ): Promise<{ recovered: string[] }> {
-  const cutoff = new Date(Date.now() - stuckMinutes * 60_000);
-  const eligible: Prisma.OrderWhereInput = {
-      updatedAt: { lt: cutoff },
-      OR: [
-        // Food / grocery / courier: waiting on a rider. A held order
-        // (LIFECYCLE_V2 free-cancel window still open) is NOT stuck —
-        // reconciling it would dispatch inside the customer's window.
-        {
-          orderType: { not: 'TAXI' },
-          fulfillment: 'DELIVERY',
-          riderId: null,
-          // [hold v3 · N-03] A held row is not stuck; it is waiting for a person.
-          foodAgeHeldAt: null,
-          // [F-0026] A self-delivering vendor's order has no rider BY DESIGN —
-          // without this the reconciler re-enqueued it every two minutes forever,
-          // pushing riders offers for food that already left the store.
-          status: { in: ['ACCEPTED', 'PREPARING', 'READY_FOR_PICKUP'] },
-          AND: [
-            { OR: [{ holdExpiresAt: null }, { holdExpiresAt: { lte: new Date() } }] },
-            notSelfDeliveredFilter(),
-            riderDispatchReadinessFilter(),
-          ],
-        },
-        // Taxi: waiting on a driver. [E02 · DS274 A1] A ride paid by MMG
-        // (legacy only: rides are born CASH) that the slow lane held for a
-        // person is not stuck either; re-driving it would re-offer drivers a
-        // ride past its wait limit, hold it again, and loop every cooldown.
-        // The same predicate as the release CAS in the slow lane.
-        {
-          orderType: 'TAXI', driverId: null, status: 'PENDING', AND: [dispatchHoldExpiredFilter()],
-          NOT: { paymentMethod: 'MOBILE_MONEY', paymentStatus: { in: ['CAPTURED', 'CLAIMED'] } },
-        },
-      ],
-  };
+  const eligible = stuckDispatchEligibleWhere(new Date(Date.now() - stuckMinutes * 60_000));
   // One bounded page per invocation, with Redis-persisted progress. A fixed
   // upper ID per sweep prevents new arrivals from indefinitely postponing the
   // wrap. This is a scan cursor, not a delivery acknowledgement: failed rows

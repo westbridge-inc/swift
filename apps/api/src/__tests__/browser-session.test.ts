@@ -13,6 +13,7 @@ import {
   ACCESS_COOKIE, ACCESS_COOKIE_PATH, REFRESH_COOKIE, REFRESH_COOKIE_PATH, SIGNUP_CONTINUATION_COOKIE, allowedBrowserOrigins, parseCookies, resetBrowserOriginsForTests, setSessionCookies,
 } from '../modules/auth/browser-session';
 import { browserSessionCounter } from '../plugins/observability';
+import { testPhone } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // [A-01 / W-01] A browser session is credentials a script can never read.
@@ -31,7 +32,7 @@ let app: FastifyInstance;
 const ORIGIN = 'http://localhost:3001';
 const EVIL = 'https://evil.example';
 const RUN = nanoid(6).toLowerCase();
-const phone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+const phone = testPhone();
 const userIds: string[] = [];
 const BROWSER = { 'x-swift-client': 'admin-web', origin: ORIGIN } as const;
 
@@ -181,11 +182,16 @@ describe('[A-01] refresh rotates from the cookie; logout clears and revokes', ()
     expect(await count('cookie_refreshed')).toBe(before + 1);
     const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } });
     expect(me.statusCode).toBe(200);
-    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request): the current cookies are re-issued, nothing rotates
+    // the rotated-away cookie replayed INSIDE the reuse grace (a retried request) is not theft: the session
+    // lives on and the browser receives a FRESH pair — [Row 231] the row holds only digests, so the
+    // pair that answered the first call cannot be re-issued; the earlier pair is superseded, not revoked
+    const superseded = jar[REFRESH_COOKIE]!;
     const graced = await app.inject({ method: 'POST', url: '/api/v1/auth/refresh', headers: { ...BROWSER, cookie: `${REFRESH_COOKIE}=${encodeURIComponent(oldRefresh)}` } });
     expect(graced.statusCode).toBe(200);
-    const regraced: Jar = {}; applySetCookies(regraced, graced);
-    expect(regraced[REFRESH_COOKIE]).toBe(jar[REFRESH_COOKIE]);
+    applySetCookies(jar, graced);
+    expect(jar[REFRESH_COOKIE]).not.toBe(superseded);
+    expect(jar[REFRESH_COOKIE]).not.toBe(oldRefresh);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: { ...BROWSER, cookie: cookieHeader(jar) } })).statusCode).toBe(200);
     // ...and replayed OUTSIDE the grace: refused, and the whole family is revoked — the live cookies stop working too
     const restoreGrace = process.env['REFRESH_REUSE_GRACE_MS'];
     process.env['REFRESH_REUSE_GRACE_MS'] = '0';
@@ -320,7 +326,7 @@ describe('[A-01] the cookie is marked Secure where it travels over the network',
 // Signing up and signing in must hand a browser the same thing.
 // ---------------------------------------------------------------------------
 describe('[W-01] a browser that registers is signed in by cookie, like one that logs in', () => {
-  const newPhone = `+59278${String(Math.floor(Math.random() * 90000) + 10000)}`;
+  const newPhone = testPhone();
   const WEB = { 'x-swift-client': 'web', origin: ORIGIN } as const;
 
   it('register answers a browser with the same HttpOnly cookie pair and no tokens — and the cookies authenticate immediately', async () => {
@@ -337,7 +343,8 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
 
     const res = await app.inject({
       method: 'POST', url: '/api/v1/auth/register', headers: { ...WEB, cookie: cookieHeader(jar) },
-      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true },
+      // [Owner ruling 15 Oct 2026] the website sends the ticked 18+ declaration with the Terms consent.
+      payload: { phone: newPhone, firstName: 'New', lastName: `Web${RUN}`, acceptTerms: true, ageConfirmed: true },
     });
     expect(res.statusCode, res.body).toBe(201);
     expect(res.headers['cache-control']).toContain('no-store');
@@ -373,7 +380,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
   });
 
   it('a native client registering still gets tokens in the body and no cookie — the apps are untouched', async () => {
-    const nativePhone = `+59279${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const nativePhone = testPhone();
     const code = await requestOtp(app, nativePhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: nativePhone, code } });
     expect(verified.headers['cache-control']).toContain('no-store');
@@ -392,7 +399,7 @@ describe('[W-01] a browser that registers is signed in by cookie, like one that 
   });
 
   it('an app that names its platform has its Terms and Privacy consent recorded on that platform', async () => {
-    const iosPhone = `+59277${String(Math.floor(Math.random() * 90000) + 10000)}`;
+    const iosPhone = testPhone();
     const code = await requestOtp(app, iosPhone);
     const verified = await app.inject({ method: 'POST', url: '/api/v1/auth/verify-otp', payload: { phone: iosPhone, code } });
     const res = await app.inject({

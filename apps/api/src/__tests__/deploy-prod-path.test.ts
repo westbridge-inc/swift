@@ -64,6 +64,9 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
         print(json.dumps({"services": routing}))
     else:
         services = {n: {} for n in ("postgres", "redis", "meilisearch", "migrate", "api", "worker")}
+        # [row 324] api and worker render the shared store, as the real Compose does (pilot-up checks it).
+        for _svc in ("api", "worker"):
+            services[_svc] = {"environment": {"STORAGE_DEPLOYMENT": "managed", "STORAGE_PROVIDER": "s3", "STORAGE_ALLOW_LOCAL": "0", "AWS_S3_BUCKET": "synthetic-bucket"}}
         services["caddy"] = {"ports": [{"published": "80", "target": 80, "protocol": "tcp"}, {"published": "443", "target": 443, "protocol": "tcp"}]}
         for profile in ("web", "admin"):
             if "--profile" in argv and profile in [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "--profile"]:
@@ -72,6 +75,11 @@ if argv[:1] == ["compose"] and "config" in argv and "--format" in argv:
     sys.exit(0)
 if argv[:1] == ["run"] and any("photon:2322" in a for a in argv) and os.environ.get("PHOTON_DOWN") == "1":
     sys.exit(1)
+if argv[:1] == ["compose"] and "exec" in argv and "postgres" in argv and any("swift_app_login" in a for a in argv):
+    # [TA-S0-003 · R3] pilot-up's count of the two runtime logins in the
+    # database's cluster: 0 before Phase C (RUNTIME_LOGINS models after).
+    print(os.environ.get("RUNTIME_LOGINS", "0"))
+    sys.exit(0)
 if argv[:1] == ["compose"] and "exec" in argv and "postgres" in argv:
     # [S3-L1] the database's deployment_identity, as psql -tA prints it
     # ("<count>:<environment>"); unset = a database not set up yet.
@@ -148,7 +156,7 @@ function preparePilot() {
   const here = join(tmp, 'repo', 'deploy');
   mkdirSync(join(here, 'routing-data', 'osrm'), { recursive: true });
   writeFileSync(join(here, 'routing-data', 'osrm', 'guyana-latest.osrm'), '');
-  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
+  for (const f of ['pilot-up.sh', 'secret-names.sh', 'wait-for-migration.sh', 'verify-journeys-isolation.py', 'check-upload-storage.py', 'Caddyfile', 'docker-compose.yml', 'docker-compose.routing.yml']) {
     copyFileSync(join(DEPLOY, f), join(here, f));
   }
   // backup.sh --check-key (the owner-key proof, run with real GnuPG in deploy/tests/test_backup_encryption.py)
@@ -460,6 +468,53 @@ describe('[S3-L1] pilot-up.sh: a host deploys only onto a database of its own ki
       expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
       expect(readsIdentity(r.calls)).toBeGreaterThan(-1);
     }
+  });
+});
+
+// [TA-S0-003 · owner ruling 14 Oct] After Phase C production never goes back
+// to the database owner's login: once Postgres is up, before anything is
+// stopped or migrated, a production pilot-up without TENANT_RLS_BIND=1 asks
+// the database's cluster whether the two runtime logins exist.
+describe('[TA-S0-003] production never goes back to the owner login once the runtime logins exist', () => {
+  const PROD_MODES: Array<{ args: string[]; env: Record<string, string> }> = [
+    { args: [SHA], env: {} },
+    { args: ['--data-only', SHA], env: { DNS_MAP: '', API_STOPPED: '1' } },
+    { args: ['--no-public', SHA], env: { DNS_MAP: '', CADDY_STOPPED: '1' } },
+  ];
+  const stoppedOrMigrated = (calls: string[]) => calls.filter((l) => /stop api worker|force-recreate migrate|force-recreate api worker|force-recreate caddy/.test(l));
+  const asksLogins = (calls: string[]) => calls.findIndex((l) => l.includes('exec -T postgres') && l.includes('swift_app_login'));
+
+  it.each(['1', '2'])('refuses a cluster with %s runtime login(s), in every mode, before anything is stopped or migrated', (count) => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: '1:production', RUNTIME_LOGINS: count } });
+      expect(r.status, mode.args.join(' ')).not.toBe(0);
+      expect(r.stderr).toContain("this database's cluster has the least-privilege logins, so Phase C has run, and production never goes back to the database owner's login");
+      expect(stoppedOrMigrated(r.calls), mode.args.join(' ')).toEqual([]);
+    }
+  });
+
+  it.each(['', '3', 'x'])('refuses when the database gives no count (%j), before anything is stopped or migrated', (count) => {
+    writeFileSync(log, '');
+    const r = runPilot(PRODUCTION, { env: { DB_IDENTITY: '1:production', RUNTIME_LOGINS: count } });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain('the database gave no count of the least-privilege logins; refusing to deploy without it');
+    expect(stoppedOrMigrated(r.calls)).toEqual([]);
+  });
+
+  it('goes on before Phase C (no runtime login), having asked first', () => {
+    for (const mode of PROD_MODES) {
+      writeFileSync(log, '');
+      const r = runPilot(PRODUCTION, { args: mode.args, env: { ...mode.env, DB_IDENTITY: '1:production', RUNTIME_LOGINS: '0' } });
+      expect(r.status, `${mode.args.join(' ')}: ${r.stderr}`).toBe(0);
+      expect(asksLogins(r.calls), mode.args.join(' ')).toBeGreaterThan(-1);
+    }
+  });
+
+  it('staging is not asked', () => {
+    const r = runPilot(STAGING, { env: { RUNTIME_LOGINS: '2' } });
+    expect(r.status, r.stderr).toBe(0);
+    expect(asksLogins(r.calls)).toBe(-1);
   });
 });
 
@@ -1342,7 +1397,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
   psql(source, opts.fixture ?? FIXTURE);
   const here = join(tmp, 'deploy');
   mkdirSync(here, { recursive: true });
-  copyFileSync(join(DEPLOY, 'restore.sh'), join(here, 'restore.sh'));
+  // [#1977] restore.sh replays the erasure ledger with the two SQL files that ship next to it.
+  for (const f of ['restore.sh', 'restore-erasure-ledger.sql', 'restore-replay-erasures.sql']) copyFileSync(join(DEPLOY, f), join(here, f));
   writeFileSync(join(here, '.env'), `POSTGRES_DB=${source}\n`);
   const dump = join(tmp, `${id}.dump`);
   execFileSync('pg_dump', ['-Fc', '-d', source, '-f', dump], { env: pgEnv() });
@@ -1356,7 +1412,8 @@ function drill(after: string | null, opts: { args?: string[]; fixture?: string }
     'export POSTGRES_USER="$PG_USER" POSTGRES_PASSWORD_FILE="$PG_PASSFILE" PGPORT="$PG_PORT"',
     'exec "$@"',
   ].join('\n'));
-  const res = spawnSync('bash', [join(here, 'restore.sh'), ...(opts.args ?? ['--compare-source']), dump, scratch], {
+  // [#1977] restore.sh never guesses the Compose project; the stand-in docker ignores it.
+  const res = spawnSync('bash', [join(here, 'restore.sh'), '--project', 'swift-test-restore', ...(opts.args ?? ['--compare-source']), dump, scratch], {
     encoding: 'utf8',
     timeout: 120_000,
     env: { PATH: `${join(tmp, 'bin')}:${process.env['PATH'] ?? ''}`, CALL_LOG: log, PG_USER: PG.user, PG_PASSFILE: join(tmp, 'pgpass'), PG_PORT: PG.port },

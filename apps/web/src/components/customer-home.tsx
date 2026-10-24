@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useState } from 'react';
+import { Suspense, useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { CircleCheck, Search, X } from 'lucide-react';
@@ -17,12 +17,13 @@ import { Modal } from '@/components/modal';
 import { DataUnavailable } from '@/components/data-unavailable';
 import { HomeSkeleton, RAIL } from '@/components/home-skeleton';
 import { EmptyNote, ItemCard, SectionHead, VendorCard, VendorHeroCard, VendorSquareCard, VENDOR_GRID } from '@/components/order-ui';
-import { useOrderingContext } from '@/components/ordering-context';
+import { PRICE_PROMISE_BODY, PRICE_PROMISE_TITLE } from '@/lib/price-promise';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [owner, staging] Home's one place control: delivery or pickup together with
 // where (the phone app's Home has one location pill). Its code loads with the
 // page's other split code, as the app frame's bar does on the other pages.
-const OrderingContextBar = lazy(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
+const OrderingContextBar = lazyRetry(() => import('@/components/ordering-context-bar').then(module => ({ default: module.OrderingContextBar })));
 
 /**
  * [Q7b · WEB-REDESIGN] HOME — what swiftgy.com opens on, in the owner's
@@ -84,7 +85,6 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
   const [locationError, setLocationError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
   const [scanHelp, setScanHelp] = useState(false);
-  const pickup = useOrderingContext().mode === 'PICKUP';
 
   const addresses = useQuery({
     queryKey: ['customer', 'addresses', scope],
@@ -166,7 +166,6 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
         <p className="sr-only">Order food, groceries and more from businesses in {market} — you pay them directly, cash or MMG.</p>
         <Link
           href="/order/search"
-          prefetch={true}
           className={`mt-3 flex h-12 w-full items-center gap-2 rounded-full border border-[var(--swift-border)] bg-[var(--swift-card)] px-4 text-[13px] font-medium leading-[18px] text-[var(--swift-muted-soft)] hover:border-[var(--swift-border-strong)] wide:max-w-[640px] ${PRESS}`}
         >
           <Search size={17} aria-hidden />
@@ -207,7 +206,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
       ) : !data ? (
         <div className="mt-5"><HomeSkeleton /></div>
       ) : (
-        <HomeRails data={data} pickup={pickup} />
+        <HomeRails data={data} />
       )}
 
       {more ? <MoreMenu guest={status === 'guest'} returnPath={() => '/'} onClose={() => setMore(false)} /> : null}
@@ -216,7 +215,7 @@ export function CustomerHome({ market, seed = null }: { market: string; seed?: G
   );
 }
 
-function HomeRails({ data, pickup }: { data: HomeFeed; pickup: boolean }) {
+function HomeRails({ data }: { data: HomeFeed }) {
   const openStores = withoutRepeats(data.nearby, data.openVendors);
   const foodOpen = data.openVendors.filter((v) => v.vendorType === 'RESTAURANT');
   const recommended = (data.featured.length > 0 ? data.featured : foodOpen).filter((v) => v.isCurrentlyOpen).slice(0, 3);
@@ -229,10 +228,9 @@ function HomeRails({ data, pickup }: { data: HomeFeed; pickup: boolean }) {
         <CircleCheck size={16} className="mt-0.5 flex-none text-[var(--swift-success)]" aria-hidden />
         <div className="flex-1">
           {/* The Explore page's promise, true in either mode: a delivery fee is never hidden by it. */}
-          <p className="text-[15px] font-semibold leading-5">0% fees, no markups</p>
-          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{pickup
-            ? 'Prices are the business’s own. Swift adds nothing to your order, and pickup has no delivery fee.'
-            : 'Prices are the business’s own. Swift adds nothing to your order — the delivery fee is shown at checkout.'}</p>
+          {/* [Legal research A12] the research's price promise, true for delivery and pickup alike. */}
+          <p className="text-[15px] font-semibold leading-5">{PRICE_PROMISE_TITLE}</p>
+          <p className="mt-0.5 text-[13px] leading-[18px] text-[var(--swift-muted)]">{PRICE_PROMISE_BODY}</p>
         </div>
       </div>
 

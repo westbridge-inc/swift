@@ -26,6 +26,11 @@
  *   · numbers count when > 0 — EXCEPT `socketListeners`, which counts for
  *     nothing until a real consumer ships (registered follow-on: a socket
  *     client in the desktop war room). Membership is not delivery.
+ *   · [AUD-L8b-008 · AUD-G7-003] `opsPaged` counts people actually REACHED:
+ *     pushes the provider accepted plus on-call texts the provider accepted
+ *     (ops-alert.ts). Inbox rows (`opsInbox`), the responders a page was
+ *     addressed to (`recipients`) and how many re-pages were attempted
+ *     (`repages`) are counts of ATTEMPTS and records, and count for nothing.
  *   · arrays count only if SOME entry succeeded (`ok === true`). Length is
  *     attempt count, not reach.
  *   · strings are reasons ("skipped:guardian-default"), never deliveries.
@@ -33,7 +38,7 @@
  */
 
 /** Receipt keys that are TELEMETRY, not evidence anyone was reached. */
-const NON_EVIDENCE_KEYS = new Set(['socketListeners']);
+const NON_EVIDENCE_KEYS = new Set(['socketListeners', 'opsInbox', 'recipients', 'repages']);
 
 function entrySucceeded(v: unknown): boolean {
   return typeof v === 'object' && v !== null && (v as { ok?: unknown }).ok === true;
@@ -49,8 +54,8 @@ export function channelDelivered(key: string, value: unknown): boolean {
 
 /**
  * True iff at least one channel is POSITIVE evidence a human surface received
- * the emergency: an ops notification row was written, a contact SMS actually
- * sent, or the alert produced persisted notices.
+ * the emergency: an ops page reached a person (an accepted push or on-call
+ * text), a contact SMS actually sent, or the alert produced persisted notices.
  */
 export function sosReachedAnyone(
   receipts: Record<string, unknown> | null | undefined,

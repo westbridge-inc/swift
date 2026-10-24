@@ -13,12 +13,17 @@
  */
 import type { PrismaClient, DocBucket, ValidatorScope, GateEnforcement, DiscoveryCategoryKind, DocImagePolicy } from '@prisma/client';
 import { DEFAULT_DOCUMENT_CHECKLISTS } from '../ops/platform-config';
+import { isProduction } from '../../utils/runtime-mode';
 
 export const REGISTRY_TIER = 'STANDARD';
 /** Provisional. The onboarding spec these checklists were built to is dated 2026-06. */
 export const REGISTRY_EFFECTIVE_FROM = new Date('2026-06-01T00:00:00.000Z');
-/** Provisional (FD-DOC-4: 7 years from relationship end, recorded for BUSINESS; applied to all pending a PERSONAL ruling). */
-export const PROVISIONAL_RETENTION_DAYS = 2555;
+/** [R24 · research C4] A persisted (vehicle / business) image is kept while the relationship is
+ *  active and 90 days after it ends: "7 years has no basis I found". Was 2555 (FD-DOC-4, provisional).
+ *  An AML-classed type still gets its seven years (retention-policy). */
+export const PROVISIONAL_RETENTION_DAYS = 90;
+/** The window provisional rows were seeded with before R24; reconcileImagePolicy moves them. */
+export const LEGACY_PROVISIONAL_RETENTION_DAYS = 2555;
 
 /**
  * [DOC-1 §1.3 · P1-3] The bucket decides what happens to the image: PERSONAL images are
@@ -34,14 +39,23 @@ export const IMAGE_POLICY_OF_BUCKET: Readonly<Record<DocBucket, DocImagePolicy>>
 };
 export const retentionFor = (policy: DocImagePolicy): number | null => (policy === 'PURGE_AFTER_REVIEW' ? null : PROVISIONAL_RETENTION_DAYS);
 
-/** Reconcile provisional rows to the bucket doctrine — never a row whose legal facts were verified. */
+/** Reconcile provisional rows to the bucket doctrine — never a row whose legal facts were verified.
+ *  [R24] A provisional row still on the pre-R24 window (2555 days) takes the current one at the
+ *  next boot (the seed's update never touches the days). Any other value was set on purpose. */
 export async function reconcileImagePolicy(prisma: PrismaClient, countryCode?: string): Promise<number> {
   let changed = 0;
   for (const bucket of Object.keys(IMAGE_POLICY_OF_BUCKET) as DocBucket[]) {
     const imagePolicy = IMAGE_POLICY_OF_BUCKET[bucket];
+    const persistRetentionDays = retentionFor(imagePolicy);
     const r = await prisma.docType.updateMany({
-      where: { ...(countryCode ? { countryCode } : {}), bucket, legalFactsVerifiedAt: null, imagePolicy: { not: imagePolicy } },
-      data: { imagePolicy, persistRetentionDays: retentionFor(imagePolicy) },
+      where: {
+        ...(countryCode ? { countryCode } : {}), bucket, legalFactsVerifiedAt: null,
+        OR: [
+          { imagePolicy: { not: imagePolicy } },
+          ...(persistRetentionDays === null ? [] : [{ imagePolicy, persistRetentionDays: LEGACY_PROVISIONAL_RETENTION_DAYS }]),
+        ],
+      },
+      data: { imagePolicy, persistRetentionDays },
     });
     changed += r.count;
   }
@@ -65,6 +79,10 @@ export const BUCKET_OF: Readonly<Record<string, DocBucket>> = {
   nis_employer_reg: 'BUSINESS', digital_id: 'PERSONAL',
   // [DOC-1 §3.2 · P3-2] the unregistered trader's signed self-declaration (versioned, hashed, consent-ledger row)
   self_declaration_unregistered: 'BUSINESS',
+  // [TRADES · 13 Oct 2026; R15] service-trade documents: a person's licence is PERSONAL; a premises
+  // certificate is BUSINESS and always reviewed by a person (ALWAYS_REVIEW_LEGACY_CODES).
+  pest_control_operator_licence: 'PERSONAL', pesticide_applicator_certificate: 'PERSONAL',
+  eating_house_registration: 'BUSINESS',
 };
 
 /** Auto-approved documents must still LAPSE (the "verified ≠ valid now" rule).
@@ -96,7 +114,32 @@ export const AUTO_APPROVE_EXPIRY_DAYS: Readonly<Record<string, number>> = {
   drivers_licence: 5 * 365,
   // [DOC-1 §3.2 · P3-2] the unregistered trader's self-declaration is valid 365 days from signing
   self_declaration_unregistered: 365,
+  // [TRADES · 13 Oct 2026] service-trade documents. The reviewer keys the printed date; these are
+  // the longest validity each is issued for (a later date is refused as a typo).
+  pesticide_applicator_certificate: 730,  // two years (Pesticides regulations, reg. 89)
+  // [R15 · research A9/D9] The licences and food certificates checked again every January
+  // (CERTIFICATE_YEAR_DOC_TYPES): the reviewer types the certificate's YEAR and the approval lapses
+  // at the start of 16 January after it. These days are only the automatic path's default.
+  pest_control_operator_licence: 365,
+  eating_house_registration: 365,         // calendar year, renewed 1 January (City by-law 63(3))
+  gei_electrical_licence: 365,
 };
+
+/**
+ * [R15 · owner 15 Oct 2026, research A9/D9] The licences and food certificates Swift checks again
+ * every January. A person types the YEAR printed on the certificate (never a guessed expiry), and the
+ * approval lapses at the start of 16 January of the following year, Guyana time: the holder has the
+ * first fortnight of January to bring the new year's certificate (verification.service
+ * certificateYearRecheck), and is reminded from 1 December (renewal-schedule). Every food or licence
+ * document of a service trade or store is here.
+ * [owner 16 Oct 2026] A store's GRA restaurant licence, sanitary certificate and trade licence get the
+ * same January re-check as a business name (R16): reminded from 1 December, lapsed on 16 January if not
+ * renewed — whatever later date is printed or keyed, the approval never outlasts the coming re-check.
+ */
+export const CERTIFICATE_YEAR_DOC_TYPES: ReadonlySet<string> = new Set([
+  'gei_electrical_licence', 'pest_control_operator_licence', 'food_handler_cert', 'eating_house_registration',
+  'gra_restaurant_licence', 'sanitary_certificate', 'trade_licence',
+]);
 const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSONAL: 'PERSON', BUSINESS: 'BUSINESS', VEHICLE: 'VEHICLE' };
 /**
  * [DOC-1 §6.9 · FD-DOC-6] Types in the always-review set by registry FACT (not by bucket rule):
@@ -105,7 +148,11 @@ const SUBJECT_OF: Record<DocBucket, 'PERSON' | 'BUSINESS' | 'VEHICLE'> = { PERSO
  */
 // [VERIFY-DOCS · ruling 8] The certificate of fitness has no fixed length in law: its PRINTED date decides,
 // so a person always reads it (an unreadable one is never given a 365-day guess by an automatic approval).
-export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set(['vehicle_insurance', 'fitness_cert']);
+export const ALWAYS_REVIEW_LEGACY_CODES: ReadonlySet<string> = new Set([
+  'vehicle_insurance', 'fitness_cert',
+  // [TRADES] which council issued a premises certificate, and for which premises, is a person's judgement
+  'eating_house_registration',
+]);
 
 export const registryCode = (countryCode: string, legacyCode: string) => `${countryCode}.${legacyCode}`;
 
@@ -327,6 +374,28 @@ export async function registryCompletenessGaps(
   return gaps;
 }
 
+/**
+ * [DOC-INV-2 · T2] The boot gate server.ts runs after seeding the registry and before it
+ * marks the boot contract complete. An ACTIVE document type the registry cannot validate
+ * is a lie about verification: in production this THROWS, naming the first gaps, so the
+ * boot contract stays incomplete (readiness 503); elsewhere it warns with every gap, so the
+ * seed that closes them can be written, and boot goes on. Returns the gaps.
+ */
+export async function enforceRegistryCompletenessAtBoot(
+  prisma: PrismaClient,
+  log: { warn: (obj: { gaps: RegistryGap[] }, msg: string) => void },
+  resolves: (implRef: string | null) => boolean,
+): Promise<RegistryGap[]> {
+  const gaps = await registryCompletenessGaps(prisma, resolves);
+  if (gaps.length > 0) {
+    if (isProduction()) {
+      throw new Error(`document registry incomplete for active types: ${gaps.slice(0, 8).map((g) => `${g.docTypeCode}:${g.gap}${g.detail ? `(${g.detail})` : ''}`).join(', ')}`);
+    }
+    log.warn({ gaps }, 'documents: registry incomplete for active types — production refuses to boot like this');
+  }
+  return gaps;
+}
+
 /** Idempotent: upserts every document class and requirement set the country checklists describe. */
 export async function seedDocRegistry(prisma: PrismaClient): Promise<RegistrySeedResult> {
   const countries = await prisma.countryConfig.findMany({ select: { code: true, documentChecklists: true } });
@@ -427,6 +496,21 @@ const IDENTITY: FieldRow[] = [
   { fieldCode: 'full_name', dataType: 'text', isPii: true },
   { fieldCode: 'dob', dataType: 'date', isPii: true, validatorRef: 'V_DOB_ADULT' },
   ...DATES(),
+];
+/** [TRADES] A licence or registration a person holds for their trade. */
+const TRADE_LICENCE: FieldRow[] = [
+  { fieldCode: 'licence_number', dataType: 'text', isPii: true, blind: true, identifier: true },
+  { fieldCode: 'holder_name', dataType: 'text', isPii: true },
+  ...DATES(),
+  { fieldCode: 'issuing_body', dataType: 'text' },
+];
+/** [TRADES] A council certificate for premises (an eating-house). */
+const PREMISES_CERTIFICATE: FieldRow[] = [
+  { fieldCode: 'certificate_number', dataType: 'text', blind: true, identifier: true },
+  // a home caterer's premises are their home
+  { fieldCode: 'premises_address', dataType: 'text', isPii: true },
+  ...DATES(),
+  { fieldCode: 'issuing_body', dataType: 'text' },
 ];
 export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
   national_id: IDENTITY,
@@ -554,6 +638,10 @@ export const FIELD_CATALOGUE: Readonly<Record<string, readonly FieldRow[]>> = {
     { fieldCode: 'holder_name', dataType: 'text', isPii: true },
     ...DATES(),
   ],
+  // [TRADES · 13 Oct 2026] the service-trade licences and registrations: who holds it, its number, its dates
+  pest_control_operator_licence: TRADE_LICENCE,
+  pesticide_applicator_certificate: TRADE_LICENCE,
+  eating_house_registration: PREMISES_CERTIFICATE,
 };
 
 /**
@@ -670,6 +758,14 @@ export const ISSUE_DATE_DOC_TYPES: ReadonlySet<string> = new Set(['police_cleara
 /** [DOC-1 Part XIX · P19] Licence-class types disclosed on the storefront while VALID (number when read, else "on file"). Registry text (DOC-INV-2). */
 /** [DOC-1 §3.6 · P3-2] The registration records that promote an UNREGISTERED store, and the declaration that puts it there. */
 export const REGISTRATION_DOC_TYPES: readonly string[] = ['business_registration'];
+/**
+ * [R16 · owner 15 Oct 2026, research D7] What a business registration certificate is, decided by the
+ * reviewer who reads it: a business NAME registered by a sole trader or a partnership (Business Names
+ * Act: renewed every year — recorded by its YEAR and checked again every January, like the certificate-year
+ * documents), or a COMPANY's certificate of incorporation, which never expires.
+ */
+export const REGISTRATION_KINDS = ['BUSINESS_NAME', 'COMPANY'] as const;
+export type RegistrationKind = (typeof REGISTRATION_KINDS)[number];
 export const DECLARATION_DOC_TYPE = 'self_declaration_unregistered';
 /** The motor insurance a passenger-vehicle driver must hold at HIRE class to go online or take work. Registry text (DOC-INV-2). */
 export const VEHICLE_INSURANCE_DOC_TYPE = 'vehicle_insurance';
@@ -681,6 +777,20 @@ export const POLICE_CLEARANCE_DOC_TYPE = 'police_clearance';
 export const HIRE_PERMIT_DOC_TYPE = 'hire_car_permit';
 export const HIRE_DRIVER_LICENCE_DOC_TYPE = 'hire_car_driver_licence';
 export const HIRE_VEHICLE_LICENCE_DOC_TYPE = 'hire_car_vehicle_licence';
+
+/**
+ * [TRADES · 13 Oct 2026] What each service-provider document is, in the provider's own words — the
+ * services catalogue lists these before anyone signs up, so older apps show them too.
+ */
+export const SERVICE_DOCUMENT_WORDS: Readonly<Record<string, string>> = {
+  national_id: 'National ID or Digital ID card',
+  police_clearance: 'Police clearance certificate',
+  pest_control_operator_licence: 'Pest-control operator licence from the Pesticides and Toxic Chemicals Control Board (PTCCB)',
+  pesticide_applicator_certificate: 'Your PTCCB commercial applicator certificate (valid two years)',
+  drivers_licence: 'Driver’s licence for the class of machine you drive on a road',
+  food_handler_cert: 'This year’s food handler’s certificate from the Mayor and City Council of Georgetown',
+  eating_house_registration: 'This year’s eating-house registration from the Town Clerk in Georgetown',
+};
 
 export const LICENCE_DISCLOSURE_TYPES: readonly string[] = ['liquor_licence', 'trade_licence', 'sanitary_certificate', 'food_handler_cert', 'gra_restaurant_licence', 'pharmacy_authorisation'];
 

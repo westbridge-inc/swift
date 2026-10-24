@@ -1,9 +1,12 @@
-import { emitToOrderRoom } from './order-room-emission.service';
+import { persistHandoverNotice, drainHandoverNotices } from '../handover/handover-notice';
+import { authorizeHandover, preflightHandoverDoor, verifyHandoverDecision, type HandoverDecision, type HandoverFailure } from '../handover/handover-decision';
+import { emitToOrderRoom, emitToStoreRoom } from './order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { persistRiderCancellationNotice, drainRiderCancellationNotices } from './rider-cancel-notice';
 import { assertDispatchPairEligible } from '../dispatch/pair-safety';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import { promoBelongsToCallerTenant } from '../promo/promo-tenant';
+import { promoUsesByPersonWhere } from '../promo/promo-uses';
 import { admittedCourierPhoto } from '../cash/handover-evidence';
 import { lockIdentityAuthority } from '../integrity/identity-review';
 import { taxiNotificationData } from '../rides/taxi-notification';
@@ -26,6 +29,8 @@ import { allocateAcrossLines } from '../../utils/order-total';
 import { groupLinesByVendor, planFulfillment, planVendorGroup, priceBasket, priceCartLine, resolveTip } from './cart-plans';
 import { cancellationVerdict, readAssignedAt, readNoMoverFound, MMG_PAID_STORE_CANCELS_MESSAGE } from './cancel-policy';
 import { readTooLateToDeliver } from '../dispatch/rescue';
+import { requiredPackageSizeForOrder, DEFAULT_LOAD_BANDS } from '../../utils/load';
+import { goodsSizeCarriableToday, vehicleTypesForPackageSize } from '../../config/vehicle-classes';
 import { notHeldFilter, cancelledWhileHeld, vendorVisibleFilter } from './hold-visibility';
 import { vendorTenantForCaller } from '../vendor/vendor-visibility';
 import { riderStackingCapacity, reserveRiderLeg, settleRiderLegs } from '../dispatch/concurrency-policy';
@@ -50,7 +55,7 @@ import { isKitchenAtCapacity, KITCHEN_ACTIVE_STATUSES } from '../fulfillment/kit
 import { log } from '../../utils/logger';
 import { dispatchHoldExpired, dispatchHoldExpiredFilter, riderDispatchableStatusesFor, withheldAwaitingReadiness } from '../dispatch/dispatch-trigger';
 import { withdrawOfferOfClosedOrder } from '../dispatch/offer-withdrawal';
-import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
+import { CheckoutOutcomeUnknownError, checkoutQueueTiming, persistCheckoutOutboxInTransaction, persistCheckoutReceiptInTransaction, persistReleaseAlertLadderInTransaction, persistDispatchCommandInTransaction, vendorAlertLadderDelayMs } from './checkout-outbox';
 import { vendorRespondBy, vendorResponseSlaMinutes } from './response-sla';
 import { shapeCheckoutAnswer, type CheckoutAnswer } from './checkout-answer';
 import { FloatService, riderFloatForOrder } from '../dispatch/float.service';
@@ -67,13 +72,16 @@ import {
   hasTaxiPassengerCustody,
   lockTaxiOrderForCustodyDecision,
 } from '../rides/passenger-custody';
-import { validateMmgPayUrl } from '../../utils/mmg-pay-url';
+import { safeMmgNumber } from '../../utils/mmg-number';
+import { MMG_PAY_TO_STORE_NUMBER, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE, validateOfferedStoreMmgPayUrl } from '../../utils/store-mmg';
 import { subscriptionOperability } from '../subscription/operate-gate';
 import { ReviewDemoOrderRefusedError } from '../review/demo-policy';
 import { lockActiveOrderCustomer } from './order-creation-authority';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
 import { syncCaseOnOrderTransition } from '../custody/custody-case';
 import { assertOrderableNow, assertOrderMayProceed, heldAtSeam, hiddenAmong, refusalAudience, storeMayReject, unhideRestocked } from '../compliance/prohibited-gate';
+import { ATTESTABLE_PAYMENT_STATUSES } from '../vendor/mmg-attestation';
+import { isExpiredUnpaidMmgAcceptance, isUnpaidMmgAcceptance, mmgAcceptedClaimedPushCopy, mmgAcceptedPayBy, mmgAcceptedPushCopy, mmgOrderNoun } from './mmg-accept-expiry';
 
 interface CheckoutInput {
   userId: string;
@@ -83,6 +91,10 @@ interface CheckoutInput {
    *  database even if Redis forgot. */
   idempotency?: { key: string; requestHash: string };
   paymentMethod: string;
+  /** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MOBILE_MONEY only: 'STORE_NUMBER' = the customer pays the
+   *  store's MMG number directly, shown on the order once the store accepts (build 12+, web). Absent =
+   *  an app that knows only the old pay link (builds 9-11), refused while STORE_MMG_PAY_LINK is off. */
+  mmgPayTo?: typeof MMG_PAY_TO_STORE_NUMBER;
   deliveryInstructions?: string;
   tipAmount?: number;
   scheduledFor?: string; // ISO date string
@@ -205,8 +217,14 @@ export function assertPricesAsSeen(
 }
 
 function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName: string): string {
-  const checked = validateMmgPayUrl(rawUrl);
+  const checked = validateOfferedStoreMmgPayUrl(rawUrl);
   if (checked.valid) return checked.url;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the store's MMG number.
+  // An app that still asks for the link (builds 9-11) is refused with an MMG_* code — which those
+  // builds already turn into "back to cash" — and a sentence that says what to do.
+  if (checked.reason === 'PAY_LINKS_OFF') {
+    throw new AppError(400, MMG_UPDATE_APP_CODE, MMG_UPDATE_APP_MESSAGE);
+  }
   if (checked.reason === 'MISSING') {
     throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
   }
@@ -214,6 +232,14 @@ function requireCheckoutMmgPayUrl(rawUrl: string | null | undefined, vendorName:
     throw new AppError(503, 'MMG_PAY_LINKS_NOT_CONFIGURED', 'MMG pay links are not configured for this environment yet — choose cash instead.');
   }
   throw new AppError(400, 'MMG_LINK_INVALID', `${vendorName}'s MMG pay link cannot be used safely right now — choose cash instead.`);
+}
+
+/** [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG NUMBER a pay-to-number checkout commits to,
+ *  re-checked from the stored row (never trusted as written). */
+function requireCheckoutMmgNumber(rawNumber: string | null | undefined, vendorName: string): string {
+  const number = safeMmgNumber(rawNumber);
+  if (number) return number;
+  throw new AppError(400, 'MMG_NOT_AVAILABLE', `${vendorName} isn't set up for MMG yet — choose cash instead.`);
 }
 
 /** [REPORT-012 F-012-04] THE post-commit publication policy for cancelling an
@@ -302,11 +328,18 @@ export { TERMINAL_ORDER_STATUSES, LIVE_ORDER_STATUSES, isTerminalOrderStatus };
 // [SPS-F-0016 / LB-015] The MMG payment-first law. An MMG marketplace order is
 // paid customer→store OUTSIDE Swift, and only the store can attest the money
 // landed (vendor confirm-payment → paymentStatus CAPTURED). Until then the
-// order may not move through fulfilment: not accepted, prepared, readied,
+// order may not move through fulfilment: not prepared, readied,
 // claimed/assigned, taken into custody, delivered, self-delivered, or
 // pickup-completed. The negative paths (CANCELLED / REFUNDED / FAILED) stay
 // open, and the store's confirm-payment action never passes through here — it
 // IS the capture. TAXI is out of scope: fares settle driver-direct at the kerb.
+//
+// [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · COORD ruling Q1] ACCEPTED no longer waits
+// for the payment: the store ACCEPTS first ("we have it"), which shows the customer
+// the store's MMG number and the exact amount; the customer pays; the store taps
+// "Paid by MMG". Acceptance moves no goods and no rider — PREPARING onward and
+// every rider claim/assignment stay gated until the store confirms the money. A
+// DISPUTED payment (two claims that disagree) still holds acceptance too.
 // ---------------------------------------------------------------------------
 /** [DOC-1 §31.5 · P31-2] On the store's own wallet, money "moved" is either the provider's capture or the store's claim. */
 export const MMG_MONEY_MOVED: ReadonlySet<string> = new Set(['CAPTURED', 'CLAIMED']);
@@ -359,7 +392,11 @@ export function assertCashDiscountSponsored(args: {
  * compiles, which is a stronger guarantee than any test could give.
  */
 export function assertMmgFulfilmentAllowed(
-  order: { paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null },
+  order: {
+    paymentMethod: string | null; paymentStatus: string; orderType: string | null; mmgClaimMismatchAt: Date | null;
+    /** [PAYMENT-SIMPLIFY · Q1] Read only for ACCEPTED; a caller that does not project it keeps the full gate. */
+    mmgAttestedRef?: string | null;
+  },
   target: OrderStatus,
 ): void {
   if (order.paymentMethod !== 'MOBILE_MONEY') return;
@@ -377,12 +414,51 @@ export function assertMmgFulfilmentAllowed(
     // [NO-DEAD-ENDS] Who resolves it, what happens next, and what not to do.
     throw new AppError(409, 'MMG_CLAIM_MISMATCH', "The store's and the customer's MMG payment reports don't match. This order is paused. Swift support is reviewing it, and the store and the customer will be told when it can move. Don't hand anything over until then.");
   }
+  // [PAYMENT-SIMPLIFY · Q1] The store may accept an unpaid MMG order; nothing after acceptance may move.
+  // Only an order whose payment can still happen: a store claim an operator rejected ("did not pay",
+  // `mmgAttestedRef` kept on a reopened PENDING row) can never be paid on this order, so it is never
+  // accepted unpaid. Not projected (undefined) fails closed: the payment gate below applies.
+  // [REVIEW-G S4-1 on #1848] Literally "still open": a PENDING or AUTHORIZED payment, never FAILED/REFUNDED/UNKNOWN.
+  if (target === 'ACCEPTED' && order.mmgAttestedRef === null && (ATTESTABLE_PAYMENT_STATUSES as readonly string[]).includes(order.paymentStatus)) return;
   if (!MMG_MONEY_MOVED.has(order.paymentStatus)) {
     throw new AppError(
       409,
       'MMG_PAYMENT_PENDING',
       'This MMG order can move only after the store confirms the payment landed in its MMG account.',
     );
+  }
+}
+
+/** [O-3 · REVIEW-F S4-2 on #2024] How close to its time a pre-order's accept may also start its
+ *  preparation. Further ahead, the store accepts now and taps "Start preparing" when it is time. */
+export const SCHEDULED_PREP_LEAD_MINUTES = 60;
+
+/**
+ * [O-3 · owner 22 Oct 2026 · STORE_ACCEPT_PATH] May preparation start now, on a
+ * store order the store has just accepted (or, for MMG, just marked "Paid by
+ * MMG")? Every store type: a restaurant's kitchen and a grocery's pick list
+ * both live inside PREPARING. Never a booking (BOOKING_LAW: it is confirmed,
+ * then completed), never a parcel or a ride (no store), and never an MMG order
+ * the payment-first law still holds (unpaid, or two claims that disagree) —
+ * that order stops at ACCEPTED and "Paid by MMG" starts it. A question, never a
+ * gate: the seam re-decides the next hop with its own gates on the locked row.
+ */
+export function preparationMayStart(
+  order: Pick<Order, 'fulfillment' | 'orderType' | 'paymentMethod' | 'paymentStatus' | 'mmgClaimMismatchAt'> & { scheduledFor?: Date | null },
+  now: Date = new Date(),
+): boolean {
+  if (order.fulfillment === 'APPOINTMENT') return false;
+  if (order.orderType === 'TAXI' || order.orderType === 'COURIER') return false;
+  // [O-3 · REVIEW-F S4-2 on #2024] A pre-order for later (SCHEDULED_ORDERS_ENABLED, off at launch) is
+  // accepted now and prepared near its time: the walk stops at ACCEPTED while the slot is more than
+  // SCHEDULED_PREP_LEAD_MINUTES away, and the store's "Start preparing" starts it.
+  if (order.scheduledFor && order.scheduledFor.getTime() - now.getTime() > SCHEDULED_PREP_LEAD_MINUTES * 60_000) return false;
+  try {
+    assertMmgFulfilmentAllowed(order, 'PREPARING');
+    return true;
+  } catch (error) {
+    if (error instanceof AppError) return false;
+    throw error;
   }
 }
 
@@ -439,8 +515,10 @@ export function holdWindowMs(): number | null {
   // [REPORT-036 F036-03b] Default 5 — the SETTLED value (Total Audit S4; both
   // env examples say 5 since #792). The code defaulting 2 meant an env that
   // omitted the variable quietly broke the documented customer promise: the
-  // free-cancel window (FREE_CANCEL_WINDOW_MIN = 5) outlived the hold, putting
-  // orders on the vendor board while still free to cancel.
+  // free-cancel window (then FREE_CANCEL_WINDOW_MIN = 5) outlived the hold,
+  // putting orders on the vendor board while still free to cancel. The boot
+  // floor is ORDER_HOLD_FLOOR_MIN (boot-config.ts) since the window after
+  // acceptance became one minute (owner 22 Oct 2026); the hold is unchanged.
   const minutes = Number(process.env['ORDER_HOLD_MINUTES'] ?? 5);
   return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : null;
 }
@@ -486,7 +564,7 @@ async function releaseHoldInTransaction(
   tx: Prisma.TransactionClient,
   orderId: string,
   opts: { now?: Date; statusIn?: OrderStatus[] } = {},
-): Promise<{ vendorId: string | null; tenantId: string } | null> {
+): Promise<{ vendorId: string | null; tenantId: string; orderType: string } | null> {
   const now = opts.now ?? new Date();
   const res = await tx.order.updateMany({
     where: {
@@ -500,10 +578,10 @@ async function releaseHoldInTransaction(
   if (res.count === 0) return null;
   const released = await tx.order.findUniqueOrThrow({
     where: { id: orderId },
-    select: { vendorId: true, tenantId: true, items: { select: { itemId: true } } },
+    select: { vendorId: true, tenantId: true, orderType: true, items: { select: { itemId: true } } },
   });
   if (released.vendorId) await countOrderForStore(tx, released.vendorId, released.items.map((i) => i.itemId));
-  return { vendorId: released.vendorId, tenantId: released.tenantId };
+  return { vendorId: released.vendorId, tenantId: released.tenantId, orderType: released.orderType };
 }
 
 /** [Q12 · AX289 F1] The store's first action (accept, reject) on an order
@@ -568,6 +646,7 @@ type EarningNotice = {
 };
 
 export interface CanonicalOrderTransitionInput {
+  handover?: HandoverDecision;
   serializeIdentity?: boolean;
   orderId: string;
   target: OrderStatus;
@@ -595,11 +674,18 @@ export interface CanonicalOrderTransitionInput {
   /** Queue-only guard: the worker may cancel PENDING work only after its
    * checkout hold has elapsed. Revalidated from the locked source row. */
   requireHoldExpired?: boolean;
+  /** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] Queue-only guard: the sweep may
+   * cancel an ACCEPTED MMG order only while it is still unpaid (never marked
+   * "Paid by MMG", no rejected claim, no open disagreement) AND its 30 minutes
+   * from acceptance have run out. Re-decided on the locked source row — the
+   * store's "Paid by MMG" takes the same row lock, so the first commit wins. */
+  requireUnpaidMmgAcceptanceExpired?: boolean;
   /** [REPORT-014 F-014-02] Actor bind ON THE LOCKED ROW: the transition
    * commits only while this rider still owns the order. A route-level
    * ownership pre-read cannot survive a watchdog release or reassignment
    * committing before the lock — this can. */
   expectedRiderId?: string | null;
+  expectedRiderAssignmentVersion?: number;
   /** Optional locked-row custody predicates for role-specific commands. A
    * route pre-read is authorization UX only; physical ownership is proved
    * again here, in the same transaction as the state transition. */
@@ -614,6 +700,14 @@ export interface CanonicalOrderTransitionInput {
    * acceptance). Runs AFTER the status write and cleanup on the same locked
    * row; a throw rolls the whole transition back. Must not publish. */
   withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
+  /** [MMGCLOSE] The ONE exception to the paid-MMG cancel refusal: Swift support
+   * closing a STORE-CLAIMED (CLAIMED, never provider-CAPTURED) MMG order that
+   * cannot be fulfilled, as "refund handled by the store". Record only: the
+   * caller must write the refund rail's CANCELLATION obligation in
+   * `withinTransaction` — the database refuses the commit without it
+   * (orders_paid_mmg_terminal_needs_refund_obligation). Only
+   * `closeMmgOrderAsStoreRefund` (order/mmg-store-close.ts) sets it. */
+  paidMmgStoreRefundClosure?: true;
   /** Admin's explicit action evidence belongs in the same commit as the order
    * state. The generic after-response route audit remains defence in depth. */
   operatorAudit?: {
@@ -630,9 +724,21 @@ export interface CanonicalOrderTransitionInput {
    *  cancel): the one cancellation predicate [cancel-policy.ts] decides on the
    *  LOCKED row, exactly as `cancelOrder` does — free or refused, never a fee. */
   customerCancel?: boolean;
+  /** [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk, taken through THIS
+   *  seam on this lock and in this commit when `when` holds on the row as this
+   *  hop left it — every gate of the next hop applies to it. The hop must be a
+   *  declared forward edge from `target`; both milestones share one instant. */
+  continueTo?: {
+    target: OrderStatus;
+    note?: string;
+    when: (row: Order) => boolean;
+  };
+  /** [O-3] The instant this transition stamps. Set only by a walk's next hop. */
+  at?: Date;
 }
 
 export interface CanonicalOrderTransitionResult {
+  replayed?: boolean;
   order: CanonicalTransitionOrder;
   sourceStatus: OrderStatus;
   cancelledSearches: number;
@@ -656,7 +762,7 @@ export class OrderService {
      *  SAME read dispatch uses, injected so this service stays dispatch-free.
      *  floatRequired mirrors dispatch's cash-float gate so the probe counts only
      *  riders that could actually take THIS order. */
-    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number) => Promise<{ level: string }>,
+    private riderAvailability?: (point: { lat: number; lng: number }, floatRequired?: number, packageSize?: string | null) => Promise<{ level: string }>,
     /** [DISPATCH 1/3 · B4] Where live offer cards are kept. A cancellation
      *  withdraws the card of the order it closes (withdrawLiveOffer). Every
      *  production construction passes it, which offer-withdrawal-census.test.ts
@@ -804,7 +910,7 @@ export class OrderService {
     try {
       await emitToOrderRoom(this.prisma, this.io, order.id, 'order:status_changed', statusEvent);
       if (order.vendorId) {
-        this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
       }
     } catch (err) {
       log().warn({ err, orderId: order.id }, 'rider assignment socket publication failed');
@@ -963,7 +1069,8 @@ export class OrderService {
       // a vendor row lock in the commit transaction, so a concurrent profile
       // edit cannot swap/remove the payment target after this decision.
       if (input.paymentMethod === 'MOBILE_MONEY') {
-        requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) requireCheckoutMmgNumber(vendor.mmgNumber, vendor.name);
+        else requireCheckoutMmgPayUrl(vendor.mmgPayUrl, vendor.name);
       }
 
       // [GUARDRAILS §8] No order carries a prohibited line (banned, or held for a check) —
@@ -1041,6 +1148,19 @@ export class OrderService {
 
       if (fulfillment === 'DELIVERY') {
         if (!address) throw new AppError(400, 'NO_ADDRESS', 'Please set a delivery address');
+        // [owner #20] The vehicle size this delivery needs (a bulky line → the largest class: cars and vans).
+        const requiredSize = requiredPackageSizeForOrder({
+          orderType: vendor.vendorType === 'SUPERMARKET' ? 'GROCERY_DELIVERY' : 'FOOD_DELIVERY',
+          courierPackageSize: null,
+          items: items.map((ci) => ({ quantity: ci.quantity, bulkUnits: ci.item.bulkUnits ?? null })),
+        }, DEFAULT_LOAD_BANDS);
+        // [Owner ruling 15 Oct 2026 · TAXI CARS = PASSENGERS ONLY] When no vehicle Swift takes on today may carry
+        // it (a bulky order while car deliveries are off), it is refused HERE, always, whatever the availability
+        // flag below: never placed, accepted and then stranded with nobody who can carry it.
+        if (requiredSize && !goodsSizeCarriableToday(requiredSize)) {
+          throw new AppError(409, 'DELIVERY_TOO_BIG',
+            'This order is too big for delivery by bike or motorbike, and no vehicle on Swift can carry this right now. Choose Pickup for this order.');
+        }
         // §2 checkout gate (availability spec, flag-gated): zero riders online
         // means an order that would strand food on a counter — honesty beats
         // accepting it. Pickup remains available; appointments never get here.
@@ -1062,6 +1182,25 @@ export class OrderService {
               'DELIVERY_NO_RIDERS',
               'No delivery riders are online right now — you can order for Pickup instead, or try delivery again later.',
             );
+          }
+          // [owner #20] Too big for a bike: the order is offered only to a
+          // vehicle that can carry it (a bulky line → a car or van), so the
+          // customer is told NOW, before anything is placed, when none such is
+          // near — never an order that silently finds nobody.
+          // (requiredSize: computed above, before the flag.)
+          // Only a size a bicycle cannot carry narrows the pool; anything smaller
+          // was already answered by the probe above.
+          if (supply && requiredSize && !vehicleTypesForPackageSize(requiredSize).includes('BICYCLE')) {
+            const fitting = await this.riderAvailability({ lat: vendor.latitude, lng: vendor.longitude }, cashFloat, requiredSize).catch(() => null);
+            if (fitting?.level === 'NONE') {
+              throw new AppError(
+                409,
+                'DELIVERY_TOO_BIG',
+                requiredSize === 'EXTRA_LARGE'
+                  ? 'This order is too big for delivery by bike or motorbike, and no car or van is free nearby right now. Choose Pickup, or try delivery again later.'
+                  : 'This order is too big for delivery by bike, and no bigger vehicle is free nearby right now. Choose Pickup, or try delivery again later.',
+              );
+            }
           }
         }
       }
@@ -1457,15 +1596,22 @@ export class OrderService {
       }
 
       let committedMmgPayUrl: string | null = null;
+      let committedMmgNumber: string | null = null;
       let committedMmgRecipientName: string | null = null;
       if (input.paymentMethod === 'MOBILE_MONEY') {
         const paymentPlan = plans[0]!; // multi-vendor MMG was rejected above
         await tx.$queryRaw`SELECT id FROM "vendors" WHERE id = ${paymentPlan.vendor.id} FOR UPDATE`;
         const currentVendor = await tx.vendor.findUniqueOrThrow({
           where: { id: paymentPlan.vendor.id },
-          select: { name: true, mmgPayUrl: true },
+          select: { name: true, mmgPayUrl: true, mmgNumber: true },
         });
-        committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        // [PAYMENT-SIMPLIFY] The destination is re-read and committed under the vendor row lock:
+        // a concurrent profile edit (or the cool-off applying a new number) cannot swap it.
+        if (input.mmgPayTo === MMG_PAY_TO_STORE_NUMBER) {
+          committedMmgNumber = requireCheckoutMmgNumber(currentVendor.mmgNumber, currentVendor.name);
+        } else {
+          committedMmgPayUrl = requireCheckoutMmgPayUrl(currentVendor.mmgPayUrl, currentVendor.name);
+        }
         committedMmgRecipientName = currentVendor.name;
       }
 
@@ -1491,9 +1637,8 @@ export class OrderService {
         // fresh accounts dies here). Unclustered → [userId] exactly.
         const { clusterMemberIds } = await import('../integrity/identity.service');
         const promoMemberIds = await clusterMemberIds(tx as PrismaClient, input.userId);
-        const userUses = await tx.order.count({
-          where: { customerId: { in: promoMemberIds }, promoCodeId, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-        });
+        // [Row 29] The customer's own cancel uses the code (one predicate: promo/promo-uses.ts).
+        const userUses = await tx.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promoCodeId) });
         if (userUses >= fresh.maxUsesPerUser) {
           throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
         }
@@ -1603,6 +1748,7 @@ export class OrderService {
             // both fields while the vendor row is locked so a later profile
             // edit cannot redirect an already-placed order or relabel its payee.
             mmgPayUrlSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgPayUrl : null,
+            mmgNumberSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgNumber : null,
             mmgRecipientNameSnapshot: input.paymentMethod === 'MOBILE_MONEY' ? committedMmgRecipientName : null,
             estimatedPrepTime: plan.vendor.estimatedPrepTime,
             // Minutes-to-promise for the legacy field; the promise itself is the truth.
@@ -1834,10 +1980,8 @@ export class OrderService {
       // order, by its release [Q12].
       try {
         const held = isHeld(order);
-        if (!held) {
-          this.io
-            .to(`vendor:${order.vendorId}`)
-            .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        if (!held && order.vendorId) {
+          await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         }
         const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor!.ownerId } });
         if (vendorOwner) {
@@ -1923,6 +2067,11 @@ export class OrderService {
       where: { orderId },
       select: { itemId: true, quantity: true, subStatus: true, substituteItemId: true },
     });
+    // [L02 · row 36] The order's tenant, for the ledger row that records a
+    // line whose item the store has since deleted (see ifItemMissing below).
+    const owner = items.length > 0
+      ? await db.order.findUnique({ where: { id: orderId }, select: { tenantId: true } })
+      : null;
     for (const oi of items) {
       // [REPORT-006 F-006-05] Picking already restocked refunded/rejected
       // lines when it closed them — restocking again here doubles stock. An
@@ -1935,12 +2084,16 @@ export class OrderService {
       // [MKT-2] Through the single writer. It no-ops on an untracked item, which
       // preserves the rule this code already had: a vendor may have stopped
       // tracking since the order was placed, and null must stay null.
+      // [L02 · row 36] An item the store deleted while this order held it can
+      // take nothing back: the ledger records the skip and the cancellation
+      // completes, instead of the whole cancellation failing on ITEM_NOT_FOUND.
       const restock = await applyStockMovement(db, {
         itemId: restockItemId,
         delta: oi.quantity,
         reason: 'CANCEL_RESTOCK',
         orderId,
         note: 'Order cancelled before pickup',
+        ...(owner?.tenantId ? { ifItemMissing: { record: true as const, tenantId: owner.tenantId } } : {}),
       });
       if (restock.applied) {
         await unhideRestocked(db, restockItemId); // never a banned item [GUARDRAILS §8 · DS1266 S3]
@@ -2078,15 +2231,16 @@ export class OrderService {
   async stageCanonicalOrderTransition(
     tx: Prisma.TransactionClient,
     input: CanonicalOrderTransitionInput,
-  ): Promise<CanonicalOrderTransitionResult> {
+  ): Promise<CanonicalOrderTransitionResult | HandoverFailure> {
     await bindTenantTransaction(tx);
     await tx.$queryRaw`SELECT id FROM "orders" WHERE id = ${input.orderId} FOR UPDATE`;
     const source = await tx.order.findUnique({ where: { id: input.orderId } });
     if (!source) throw new AppError(404, 'NOT_FOUND', 'Order not found');
-    if (!input.allowedFrom.includes(source.status)) {
+    if (!input.handover && !input.allowedFrom.includes(source.status)) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
+
     // A BOOKING is confirmed, completed or cancelled — never prepared, marked
     // ready, handed to a rider or delivered [order-status.ts BOOKING_LAW]. The
     // kitchen routes refuse it first, but this is the locked seam every caller
@@ -2103,6 +2257,11 @@ export class OrderService {
       throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
         'This job is no longer assigned to you — it was released or reassigned.');
     }
+    if (input.expectedRiderAssignmentVersion !== undefined
+        && source.riderAssignmentVersion !== input.expectedRiderAssignmentVersion) {
+      throw new AppError(409, 'ACTOR_NOT_ASSIGNED',
+        'This assignment changed while the action was in progress. Refresh the order before continuing.');
+    }
     if (input.expectedDriverId !== undefined && source.driverId !== input.expectedDriverId) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
     }
@@ -2111,6 +2270,18 @@ export class OrderService {
     }
     if (input.expectedFulfillmentMode !== undefined && source.fulfillmentMode !== input.expectedFulfillmentMode) {
       throw new AppError(409, 'DELIVERY_AUTHORITY_CHANGED', 'Delivery ownership changed while this action was in progress.');
+    }
+    if (input.handover) {
+      await authorizeHandover(tx, source, input.handover);
+      if (source.status === input.target) {
+        const order = await tx.order.findUniqueOrThrow({ where: { id: input.orderId }, omit: HANDOVER_SECRETS_OMIT, include: CANONICAL_TRANSITION_INCLUDE });
+        return { order, sourceStatus: source.status, cancelledSearches: 0, earningNotices: [], replayed: true };
+      }
+      preflightHandoverDoor(source, input.handover);
+    }
+    if (!input.allowedFrom.includes(source.status)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', `Cannot move order from ${source.status} to ${input.target}`);
     }
     // [SPS-F-0016] Every canonical transition passes this seam (vendor accept/
     // prep/ready/self-deliver/pickup-complete, rider legs, /delivered), so the
@@ -2185,10 +2356,14 @@ export class OrderService {
     // lock — the pair {capture, cancel} is serialized in both commit orders.
     // The store settles a cancellation of paid MMG money with the customer
     // directly; the order then completes or stays live for support.
+    const storeRefundClosure = input.paidMmgStoreRefundClosure === true
+      && input.target === 'CANCELLED'
+      && source.paymentStatus === 'CLAIMED';
     if (
       operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && MMG_MONEY_MOVED.has(source.paymentStatus)
+      && !storeRefundClosure
     ) {
       throw new AppError(
         409,
@@ -2197,10 +2372,18 @@ export class OrderService {
       );
     }
 
-    const now = new Date();
+    const now = input.at ?? new Date();
     if (input.requireHoldExpired && source.holdExpiresAt && source.holdExpiresAt > now) {
       throw input.invalidStatus?.(source.status)
         ?? new AppError(409, 'INVALID_TRANSITION', 'Order is still within its checkout hold');
+    }
+    if (input.requireUnpaidMmgAcceptanceExpired && !isExpiredUnpaidMmgAcceptance(source, now)) {
+      throw input.invalidStatus?.(source.status)
+        ?? new AppError(409, 'INVALID_TRANSITION', 'Order is paid, or still within its MMG payment window');
+    }
+    if (input.handover) {
+      const failure = await verifyHandoverDecision(tx, source, input.handover);
+      if (failure) return failure;
     }
     const data: Prisma.OrderUncheckedUpdateInput = { status: input.target };
     const timestampField: Partial<Record<OrderStatus, keyof Prisma.OrderUncheckedUpdateInput>> = {
@@ -2317,6 +2500,11 @@ export class OrderService {
     const mmgUnattestedTerminal = operationalCancellation
       && source.paymentMethod === 'MOBILE_MONEY'
       && source.paymentStatus === 'PENDING';
+    // [O-3] A walk writes two rows in one commit. Their order must never be a
+    // tie the timeline (and "the newest row names the status") reads by luck:
+    // the first hop's row is stamped at the walk's instant, the next hop's one
+    // millisecond after it. Every other transition keeps the default stamp.
+    const walkLogAt = input.continueTo ? now : input.at ? new Date(input.at.getTime() + 1) : undefined;
     await tx.orderStatusLog.create({
       data: {
         orderId: input.orderId,
@@ -2325,6 +2513,7 @@ export class OrderService {
         note: mmgUnattestedTerminal
           ? `${input.note ?? 'Cancelled'} — MMG payment UNATTESTED at cancellation: if the customer already paid, the store refunds directly`
           : input.note,
+        ...(walkLogAt ? { createdAt: walkLogAt } : {}),
       },
     });
 
@@ -2344,6 +2533,29 @@ export class OrderService {
     }
 
     if (input.withinTransaction) await input.withinTransaction(tx, source);
+
+    // [O-3 · STORE_ACCEPT_PATH] The next hop of a declared walk runs through this
+    // same seam (every gate of that hop: payment-first, booking law, held lines),
+    // on this lock, in this commit — so the two milestones commit or vanish
+    // together, and nothing can observe the order between them.
+    if (input.continueTo) {
+      const next = input.continueTo;
+      if (!ORDER_TRANSITIONS[next.target].includes(input.target)) {
+        throw new Error(`continueTo: ${input.target} -> ${next.target} is not a declared forward edge`);
+      }
+      const reached = await tx.order.findUniqueOrThrow({ where: { id: input.orderId } });
+      if (next.when(reached)) {
+        const hop = await this.stageCanonicalOrderTransition(tx, {
+          orderId: input.orderId,
+          target: next.target,
+          allowedFrom: [input.target],
+          changedBy: input.changedBy,
+          note: next.note,
+          at: now,
+        });
+        if ('handoverFailure' in hop) throw new AppError(hop.handoverFailure.statusCode, hop.handoverFailure.code, hop.handoverFailure.message);
+      }
+    }
 
     const order = await tx.order.findUniqueOrThrow({
       where: { id: input.orderId },
@@ -2393,6 +2605,7 @@ export class OrderService {
         );
       }
     }
+    if (input.handover) await persistHandoverNotice(tx, order);
     return { order, sourceStatus: source.status, cancelledSearches, earningNotices };
   }
 
@@ -2412,7 +2625,7 @@ export class OrderService {
   async transitionOrderAtomically(
     input: CanonicalOrderTransitionInput,
   ): Promise<CanonicalOrderTransitionResult> {
-    let committed: CanonicalOrderTransitionResult | undefined;
+    let committed: CanonicalOrderTransitionResult | HandoverFailure | undefined;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         committed = await this.prisma.$transaction(async (tx) => {
@@ -2429,6 +2642,14 @@ export class OrderService {
       }
     }
     if (!committed) throw new Error('Order transition transaction did not produce a result');
+    if ('handoverFailure' in committed) {
+      const refusal = committed.handoverFailure;
+      throw new AppError(refusal.statusCode, refusal.code, refusal.message);
+    }
+
+
+    if (input.handover) await drainHandoverNotices({ prisma: this.prisma, notifications: this.notifications }, { orderId: input.orderId })
+      .catch((err) => log().warn({ err, orderId: input.orderId }, 'handover notice remains pending after commit'));
 
     // [DISPATCH 1/3 · B4] Every operational cancellation passes here (vendor
     // reject, courier sender cancel, admin cancel, the no-response
@@ -2551,7 +2772,7 @@ export class OrderService {
           };
           const verdict = cancellationVerdict(policyOrder, now);
           // [owner #46/#50] Not the customer's to cancel any more (the store
-          // accepted, or the five-minute window of a ride, parcel or booking
+          // accepted, or the one-minute window of a ride, parcel or booking
           // has passed): refused before anything is written, in the words the
           // apps show as-is.
           if (!verdict.allowed) throw new AppError(409, verdict.code, verdict.message);
@@ -2655,7 +2876,7 @@ export class OrderService {
     // A held order was never shown to the vendor — telling them about a
     // cancellation of something they never saw would only confuse the board.
     if (order.vendorId && !heldNow) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', { orderId, status: 'CANCELLED' });
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', { orderId, status: 'CANCELLED' });
     }
     // [L07] The rider's notice committed with the cancel; this is only its
     // first delivery attempt, started after the emits and never awaited.
@@ -2716,19 +2937,40 @@ export class OrderService {
       .catch((err) => log().warn({ err, orderId }, 'rider cancellation notice awaits retry'));
   }
 
+  /** Rider lifecycle commands must carry the authority and allowed states they observed. */
+  async updateRiderStatus(
+    orderId: string,
+    status: OrderStatus,
+    changedBy: string,
+    note: string,
+    authority: { riderId: string; assignmentVersion: number; allowedFrom: readonly OrderStatus[] },
+  ) {
+    return this.updateStatus(orderId, status, changedBy, note, {
+      expectedRiderId: authority.riderId,
+      expectedRiderAssignmentVersion: authority.assignmentVersion,
+      allowedFrom: authority.allowedFrom,
+    });
+  }
+
   async updateStatus(
     orderId: string,
     status: string,
     changedBy: string,
     note?: string,
     opts?: {
+      handover?: HandoverDecision;
       serializeIdentity?: boolean;
       withinTransaction?: (tx: Prisma.TransactionClient, lockedSource: Order) => Promise<void>;
       allowedFrom?: readonly OrderStatus[];
       expectedRiderId?: string | null;
+      expectedRiderAssignmentVersion?: number;
       expectedDriverId?: string | null;
       expectedFulfillment?: FulfillmentType;
       expectedFulfillmentMode?: FulfillmentMode;
+      /** [O-3] See CanonicalOrderTransitionInput.continueTo. The customer is told
+       *  ONCE, in the words of the transition asked for; the live events carry
+       *  the status the order actually reached. */
+      continueTo?: CanonicalOrderTransitionInput['continueTo'];
     },
   ) {
     const target = status as OrderStatus;
@@ -2739,18 +2981,21 @@ export class OrderService {
 
     // Status, timestamps, terminal mover/float release, stock, earnings, and
     // append-only evidence share one commit. Only sockets/push happen below.
-    const { order } = await this.transitionOrderAtomically({
+    const { order, replayed } = await this.transitionOrderAtomically({
       orderId,
       target,
       allowedFrom,
       changedBy,
       note,
       serializeIdentity: opts?.serializeIdentity,
+      handover: opts?.handover,
       ...(opts?.withinTransaction ? { withinTransaction: opts.withinTransaction } : {}),
       ...(opts?.expectedRiderId !== undefined ? { expectedRiderId: opts.expectedRiderId } : {}),
+      ...(opts?.expectedRiderAssignmentVersion !== undefined ? { expectedRiderAssignmentVersion: opts.expectedRiderAssignmentVersion } : {}),
       ...(opts?.expectedDriverId !== undefined ? { expectedDriverId: opts.expectedDriverId } : {}),
       ...(opts?.expectedFulfillment !== undefined ? { expectedFulfillment: opts.expectedFulfillment } : {}),
       ...(opts?.expectedFulfillmentMode !== undefined ? { expectedFulfillmentMode: opts.expectedFulfillmentMode } : {}),
+      ...(opts?.continueTo ? { continueTo: opts.continueTo } : {}),
       invalidStatus: (current) => new AppError(
         409,
         'INVALID_TRANSITION',
@@ -2758,19 +3003,31 @@ export class OrderService {
       ),
     });
 
-    log().info({ orderId, orderNumber: order.orderNumber, status, changedBy, vendorId: order.vendorId }, 'order: status changed');
-    const statusEvent = { orderId, status, timestamp: new Date().toISOString() };
+    if (replayed) return order;
+
+    // [O-3] A walk may have gone past the transition asked for: the live events
+    // say where the order IS, so a board or a tracking screen never shows a
+    // stage the order already left.
+    const reached = opts?.continueTo ? order.status : status;
+    log().info({ orderId, orderNumber: order.orderNumber, status: reached, changedBy, vendorId: order.vendorId }, 'order: status changed');
+    const statusEvent = { orderId, status: reached, timestamp: new Date().toISOString() };
+    try {
     await emitToOrderRoom(this.prisma, this.io, orderId, 'order:status_changed', statusEvent);
     // The vendor board listens on its own room so it sees every transition
     // live without subscribing to each order individually.
     if (order.vendorId) {
-      this.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', statusEvent);
+      await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:status_changed', statusEvent);
+    }
+
+    } catch (err) {
+      if (!opts?.handover) throw err;
+      log().warn({ err, orderId }, 'handover socket publication failed after commit');
     }
 
     // Send notifications
     const riderName = order.rider?.user?.firstName || 'Your rider';
     switch (status) {
-      case 'ACCEPTED':
+      case 'ACCEPTED': {
         // [ALG-03] Shadow: what the prep-time learner WOULD predict, written beside
         // the accept for the nightly grade. Fire-and-forget; never in the way.
         void shadowPredictAtAccept(this.prisma, orderId);
@@ -2778,12 +3035,32 @@ export class OrderService {
         // the customer's slot inside this transition. Kitchen words on a
         // haircut were the phone's first sign that a SERVICE booking was riding
         // the food order spine.
-        if (order.fulfillment === 'APPOINTMENT') {
+        const mmgPayBy = mmgAcceptedPayBy(order);
+        const mmgClaimedPaid = isUnpaidMmgAcceptance(order) && order.customerMmgClaim === 'PAID';
+        if (mmgPayBy || mmgClaimedPaid) {
+          // [owner 18 Oct 2026 · REVIEW-F S2-1/S3-1b/S4-1] Accepted, not yet paid by MMG (an order or a booking):
+          // nothing goes ahead until "Paid by MMG", and the 30-minute clock starts now — the customer is told to
+          // pay, how much and by when; if they already said "I paid", that it waits for the store. Never the number.
+          const storeName = order.vendor?.name || 'The store';
+          const noun = mmgOrderNoun(order.fulfillment);
+          const payBy = mmgPayBy;
+          const copy = payBy
+            ? mmgAcceptedPushCopy(order.orderNumber, storeName, Number(order.totalAmount), order.currencyCode, payBy, noun)
+            : mmgAcceptedClaimedPushCopy(order.orderNumber, storeName, noun);
+          await this.notifications.send({
+            userId: order.customerId,
+            type: 'ORDER_UPDATE',
+            title: copy.title,
+            body: copy.body,
+            data: { orderId, orderNumber: order.orderNumber, status: 'ACCEPTED', paymentPending: 'MMG' },
+          });
+        } else if (order.fulfillment === 'APPOINTMENT') {
           await this.notifications.bookingConfirmed(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         } else {
           await this.notifications.orderAccepted(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         }
         break;
+      }
       case 'PREPARING':
         await this.notifications.orderPreparing(order.customerId, order.orderNumber, order.vendor?.name || '', orderId);
         break;
@@ -2799,7 +3076,7 @@ export class OrderService {
         break;
       }
       case 'DELIVERED':
-        await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
+        if (!opts?.handover) await this.notifications.orderDelivered(order.customerId, order.orderNumber, orderId, order.orderType);
         break;
     }
 
@@ -2809,6 +3086,10 @@ export class OrderService {
       const account = await this.prisma.user.findUnique({
         where: { id: order.customerId },
         select: { countryCode: true },
+      }).catch((err) => {
+        if (!opts?.handover) throw err;
+        log().warn({ err, orderId }, 'trust promotion deferred after handover');
+        return null;
       });
       if (account) {
         await new CashRulesService(this.prisma, this.notifications, this)
@@ -2833,7 +3114,7 @@ export class OrderService {
    * Courier orders (born READY_FOR_PICKUP, no vendor) start their offer
    * cascade here instead of at creation.
    */
-  async releaseDueHeldOrders(enqueueDispatch: (orderId: string) => Promise<void>, batch = 100) {
+  async releaseDueHeldOrders(enqueueDispatch: (orderId: string, jobId?: string) => Promise<void>, batch = 100) {
     const due = await this.prisma.order.findMany({
       where: { status: { in: ['PENDING', 'READY_FOR_PICKUP'] }, holdExpiresAt: { lte: new Date() } },
       select: { id: true },
@@ -2854,9 +3135,12 @@ export class OrderService {
       // never an enqueue a crash between here and the queue could lose.
       const releasedNow = await this.prisma.$transaction(async (tx) => {
         const store = await releaseHoldInTransaction(tx, id, { statusIn: ['PENDING', 'READY_FOR_PICKUP'] });
-        if (!store) return false; // cancelled or raced — idempotent skip
+        if (!store) return null; // cancelled or raced — idempotent skip
         if (store.vendorId) await persistReleaseAlertLadderInTransaction(tx, { orderId: id, tenantId: store.tenantId, alertDelayMs });
-        return true;
+        const dispatch = store.orderType === 'COURIER'
+          ? await persistDispatchCommandInTransaction(tx, { orderId: id, tenantId: store.tenantId, reason: 'courier-hold-released' })
+          : null;
+        return { dispatchId: dispatch?.id };
       });
       if (!releasedNow) continue;
       await holdReleaseObserver.afterRelease?.({ orderId: id });
@@ -2880,7 +3164,7 @@ export class OrderService {
       // No vendor to notify on a courier job — release = start the cascade.
       if (order.orderType === 'COURIER') {
         try {
-          await enqueueDispatch(id);
+          await enqueueDispatch(id, releasedNow.dispatchId);
         } catch (err) {
           log().error({ err, orderId: id }, 'hold-release: courier dispatch enqueue failed — reconcile will recover');
         }
@@ -2888,9 +3172,7 @@ export class OrderService {
       }
 
       if (order.vendorId && order.vendor) {
-        this.io
-          .to(`vendor:${order.vendorId}`)
-          .emit('order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber });
+        await emitToStoreRoom(this.prisma, this.io, order.vendorId, 'order:new', { orderId: order.id, vendorId: order.vendorId, orderNumber: order.orderNumber }, { onlyWhileActive: true });
         try {
           const vendorOwner = await this.prisma.vendorOwner.findUnique({ where: { id: order.vendor.ownerId } });
           if (vendorOwner) {
@@ -3241,9 +3523,7 @@ export class OrderService {
     // enforcement point inside the checkout transaction (trial-integrity A5).
     const { clusterMemberIds } = await import('../integrity/identity.service');
     const promoMemberIds = await clusterMemberIds(this.prisma, userId);
-    const userUsage = await this.prisma.order.count({
-      where: { customerId: { in: promoMemberIds }, promoCodeId: promo.id, status: { notIn: ['CANCELLED', 'REFUNDED'] } },
-    });
+    const userUsage = await this.prisma.order.count({ where: promoUsesByPersonWhere(promoMemberIds, promo.id) });
     if (userUsage >= promo.maxUsesPerUser) {
       throw new AppError(400, 'USED_PROMO', 'You have already used this promo code');
     }

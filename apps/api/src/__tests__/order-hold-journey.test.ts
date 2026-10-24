@@ -18,6 +18,7 @@ import { drainCheckoutOutbox, vendorAlertLadderDelayMs } from '../modules/order/
 import { getChannels, devChannelLog } from '../providers/notifications/channels';
 import { guyanaDayKey, startOfGuyanaDay } from '../utils/guyana-day';
 import { GUYANA_MIDNIGHT_WAIT_TIMEOUT_MS, waitClearOfGuyanaMidnight } from './helpers/guyana-day-clock';
+import { orderSocketFixture } from './helpers/order-socket-fixture';
 
 // ---------------------------------------------------------------------------
 // Q12 · THE FIVE-MINUTE WINDOW NEVER REACHES THE STORE. The owner, 2026-09-24:
@@ -59,7 +60,7 @@ const foreignUserIds: string[] = [];
 const foreignVendorIds: string[] = [];
 
 type Actor = { userId: string; token: string; phone: string };
-type Store = { owner: Actor; vendorId: string; itemId: string; device: string };
+type Store = { owner: Actor; vendorId: string; itemId: string; device: string; board: string };
 type Placed = { id: string; orderNumber: string; holdExpiresAt: string | null };
 
 // ── Harness: the queues the checkout publishes to, and the socket rooms ─────
@@ -146,7 +147,12 @@ async function makeStore(vendorType: 'RESTAURANT' | 'SUPERMARKET', opts: { stock
   });
   const device = `ExponentPushToken[q12${nanoid(16)}]`;
   await app.prisma.deviceToken.create({ data: { userId: owner.userId, token: device, platform: 'android' } });
-  return { owner, vendorId: vendor.id, itemId: item.id, device };
+  // [Owner ruling #15] The store board: the owner socket seated in the store
+  // room. Store-room events go through its team gate (emitToStoreRoom) and are
+  // addressed to the proven socket ids, so this is what the store hears there.
+  orderSocketFixture(app.io, { id: vendor.id, customerId: owner.userId, tenantId: vendor.tenantId }, () => {}, `vendor:${vendor.id}`);
+  const board = [...(app.io.of('/').adapter.rooms.get(`vendor:${vendor.id}`) ?? [])][0]!;
+  return { owner, vendorId: vendor.id, itemId: item.id, device, board };
 }
 
 function call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', url: string, token: string, payload?: unknown, headers: Record<string, string> = {}) {
@@ -255,7 +261,7 @@ async function storeHeard(store: Store, order: Placed) {
   });
   return {
     sockets: sockets
-      .filter((s) => (s.room === `vendor:${store.vendorId}` || s.room === `user:${store.owner.userId}`) && mentions(s.payload, order.id))
+      .filter((s) => (s.room === store.board || s.room === `user:${store.owner.userId}`) && mentions(s.payload, order.id))
       .map((s) => s.event),
     inbox: inbox.map((n) => ({ title: n.title, kind: (n.data as Record<string, unknown> | null)?.['kind'] ?? null, isRead: n.isRead })),
     deliveries: await app.prisma.alertDelivery.count({ where: { kind: 'VENDOR_ORDER', subjectId: order.id } }),
@@ -380,6 +386,8 @@ beforeAll(async () => {
   process.env['DATABASE_URL'] = process.env['DATABASE_URL'] || 'postgresql://swift:swift@localhost:5434/swift';
   process.env['REDIS_URL'] = process.env['REDIS_URL'] || 'redis://localhost:6382';
   vi.stubEnv('MMG_PAY_URL_ALLOWED_HOSTS', 'pay.example.com');
+  // [PAYMENT-SIMPLIFY] These cases cover the store pay link's ON path, kept dormant behind STORE_MMG_PAY_LINK.
+  vi.stubEnv('STORE_MMG_PAY_LINK', '1');
   // The window under test is the real one: the flag on, the minutes unset
   // (the settled default, five).
   vi.stubEnv('LIFECYCLE_V2', '1');
@@ -815,7 +823,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
     const res = await call('PUT', `/api/v1/vendor/orders/${order.id}/accept`, store.owner.token, {});
     expect(res.statusCode, res.body).toBe(200);
     const row = await orderRow(order.id);
-    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'ACCEPTED', hold: null, released: true });
+    expect({ status: row.status, hold: row.holdExpiresAt, released: row.releasedToVendorAt !== null }).toEqual({ status: 'PREPARING', hold: null, released: true }); // [O-3] one tap: Accept starts preparation
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
 
     // Out of the sweep's reach: nothing released, counted, alerted or armed.
@@ -862,7 +870,7 @@ describe('Q12 · the store acts first on an order whose hold lapsed before the s
       delete holdReleaseObserver[seam];
     }
     expect(accepted?.statusCode, accepted?.body).toBe(200);
-    expect((await orderRow(order.id)).status).toBe('ACCEPTED');
+    expect((await orderRow(order.id)).status).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     expect(await storeDashboard(store)).toMatchObject(COUNTED);
     expect((await storeHeard(store, order)).pushes).toEqual([]);
     // A ladder the release wrote before the acceptance stops at its first rung.

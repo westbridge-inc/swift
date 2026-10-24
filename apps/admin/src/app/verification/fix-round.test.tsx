@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import VerificationPage from './page';
-import { GlobalSearch } from '@/components/layout/GlobalSearch';
+import { SearchLauncher } from '@/components/layout/CommandPalette';
 import { DocumentViewer } from '@/components/verification/DocumentViewer';
 import { mockApi, renderWithQuery, requestsByMethod } from '@/test/test-utils';
 vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
@@ -50,7 +50,7 @@ describe('coordinator screenshot fixes', () => {
     await review(user);
     const pane = screen.getByRole('navigation', { name: 'Applicant documents' }).parentElement!;
     pane.scrollTop = 800;
-    await user.click(screen.getByRole('button', { name: /Driver's licence.*PENDING/ }));
+    await user.click(screen.getByRole('button', { name: /Driver's licence.*Waiting for review/ }));
     expect(pane.scrollTop).toBe(0);
   });
   it('offers a missing-file rejection using the existing unreadable contract and no operator upload instruction', async () => {
@@ -103,9 +103,11 @@ describe('coordinator screenshot fixes', () => {
     expect((check as HTMLInputElement).disabled).toBe(true);
     expect(viewed).not.toHaveBeenCalledWith(true);
   });
-  it('uses a concise global search placeholder with a descriptive accessible label', () => {
-    renderWithQuery(<GlobalSearch />);
-    expect(screen.getByRole('textbox', { name: 'Search orders, users, vendors' }).getAttribute('placeholder')).toBe('Search');
+  it('uses a concise search control with a descriptive accessible label [MC shell: the ⌘K palette]', async () => {
+    const { user } = renderWithQuery(<SearchLauncher />);
+    await user.click(screen.getByRole('button', { name: /Search everything/ }));
+    const box = screen.getByRole('combobox', { name: 'Search everything' });
+    expect(box.getAttribute('placeholder')).toBe('Search orders, people, businesses — or go to a screen');
   });
 });
 function documentGlobal() { return window.document; }

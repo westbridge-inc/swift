@@ -1,7 +1,7 @@
 import type { Prisma, PrismaClient, VehicleType } from '@prisma/client';
 import { evaluatePureRules, DEFAULT_BATCHING_CONFIG, type BatchingConfig, type CandidateOrder, type RunShape } from '../batching/eligibility';
 import { TERMINAL_ORDER_STATUSES } from '../order/order-status';
-import { bandForBulk, totalBulkUnits, DEFAULT_BULK_UNITS } from '../../utils/load';
+import { bandForBulk, totalBulkUnits, requiredPackageSizeForOrder, DEFAULT_BULK_UNITS, DEFAULT_LOAD_BANDS } from '../../utils/load';
 import { log } from '../../utils/logger';
 
 type Tx = Prisma.TransactionClient | PrismaClient;
@@ -87,8 +87,13 @@ function toCandidate(o: OrderRow): CandidateOrder | null {
   const pickupLat = o.pickupLat ?? (o.vendor?.latitude != null ? Number(o.vendor.latitude) : null);
   const pickupLng = o.pickupLng ?? (o.vendor?.longitude != null ? Number(o.vendor.longitude) : null);
   if (pickupLat == null || pickupLng == null) return null;
-  const size = o.courierPackageSize
-    ?? bandForBulk(totalBulkUnits(o.items.map((l) => ({ quantity: l.quantity, bulkUnits: l.bulkUnits ?? DEFAULT_BULK_UNITS }))));
+  // [owner #20 · DS1323 S3] The one size rule (utils/load): a bulky line means a car or van, so a stacked leg is
+  // weighed exactly as dispatch gated it — a bulky order is XL and never batches. An order the rule cannot size
+  // keeps the reading it always had.
+  const lines = o.items.map((l) => ({ quantity: l.quantity, bulkUnits: l.bulkUnits ?? DEFAULT_BULK_UNITS }));
+  const size = requiredPackageSizeForOrder({ orderType: o.orderType, courierPackageSize: o.courierPackageSize, items: lines }, DEFAULT_LOAD_BANDS)
+    ?? o.courierPackageSize
+    ?? bandForBulk(totalBulkUnits(lines));
   return {
     orderId: o.id,
     vertical,

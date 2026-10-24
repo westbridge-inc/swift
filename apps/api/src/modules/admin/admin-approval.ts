@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { ADMIN_ACTION_CLASSES, type AdminActionClass, type AdminRouteAuthority } from './admin-authority';
+import { lockCreditRefundAsks, PAID_ACTION, validatePaidAsk } from '../billing/credit-refund';
 import { SOLO_ROLE, isSoleApprover } from './solo-approval';
 
 /**
@@ -168,7 +169,9 @@ export type ApprovalOutcome =
   | { outcome: 'not-required' }
   | { outcome: 'requested'; approvalId: string; fingerprint: string }
   | { outcome: 'granted'; approvalId: string }
-  | { outcome: 'refused'; code: ApprovalRefusal; approvalId?: string };
+  | { outcome: 'refused'; code: ApprovalRefusal; approvalId?: string }
+  /** [U06] An earlier ask for the same act still stands: nothing new was written. */
+  | { outcome: 'already-open'; approvalId: string; status: OpenApprovalStatus; askedByYou: boolean };
 
 export type ApprovalRefusal =
   | 'unknown-approval'
@@ -181,6 +184,85 @@ export type ApprovalRefusal =
   /** [OWNER #13] Approved in solo mode, but the owner is no longer the only
    *  admin who could approve it: the second admin decides (no grandfathering). */
   | 'solo-ended';
+
+/**
+ * [U06] ONE ASK PER ACT WHILE IT STANDS.
+ *
+ * The console showed the 202 as nothing (or as a failure), the operator
+ * pressed again, and every press wrote another PENDING row for the same act.
+ * Two approvers each approving "their" copy would make it happen twice: a
+ * payment returned twice, a broadcast sent twice.
+ *
+ * An ask still STANDS while it waits for a second admin (PENDING) or is
+ * approved and not yet executed (APPROVED), until it expires. While one
+ * stands, a new ask for the same ACTION on the same TARGET is refused —
+ * whoever asks, whatever the body says (a changed amount is a different
+ * answer to the same question: withdraw the first, then ask again). The
+ * target is the route's params; a route with no params (a broadcast, a new
+ * promo) has no target of its own, so the exact request (its fingerprint)
+ * stands in for one. Executing an approved ask is never refused by this.
+ */
+export const OPEN_APPROVAL_STATUSES = ['PENDING', 'APPROVED'] as const;
+export type OpenApprovalStatus = (typeof OPEN_APPROVAL_STATUSES)[number];
+
+function canonicalParams(params: Record<string, unknown>): string {
+  return JSON.stringify(Object.keys(params).sort().map((key) => [key, params[key] === undefined || params[key] === null ? null : String(params[key])]));
+}
+
+/** The key two asks for one act share: the action plus its target. */
+export function askTargetKey(subject: ApprovalSubject, fingerprint: string): string {
+  const params = subject.params ?? {};
+  const target = Object.keys(params).length > 0 ? `params:${canonicalParams(params)}` : `request:${fingerprint}`;
+  return `${subject.method.toUpperCase()} ${subject.routeUrl} ${target}`;
+}
+
+type StandingAsk = { id: string; status: OpenApprovalStatus; requestedBy: string };
+// What the ask transaction found: the ask already standing, or the one it wrote.
+// `askState` (not `kind`): the notification censuses read `kind:` literals as notification kinds.
+type AskResult = { askState: 'standing'; standing: StandingAsk } | { askState: 'created'; created: { id: string } };
+
+/** The ask for this act that still stands, if any. Call under the ask lock. */
+async function standingAskFor(
+  db: Prisma.TransactionClient,
+  subject: ApprovalSubject,
+  fingerprint: string,
+  now: Date,
+): Promise<StandingAsk | null> {
+  const action = `${subject.method.toUpperCase()} ${subject.routeUrl}`;
+  const params = subject.params ?? {};
+  const hasTarget = Object.keys(params).length > 0;
+  const rows = await db.privilegedApproval.findMany({
+    where: {
+      action,
+      status: { in: [...OPEN_APPROVAL_STATUSES] },
+      expiresAt: { gt: now },
+      ...(hasTarget ? { entityId: entityIdOf(params) } : { fingerprint }),
+    },
+    select: { id: true, status: true, requestedBy: true, bodySnapshot: true },
+    orderBy: { createdAt: 'asc' },
+  });
+  const wanted = canonicalParams(params);
+  const match = rows.find((row) => {
+    if (!hasTarget) return true;
+    const stored = (row.bodySnapshot as { params?: Record<string, unknown> } | null)?.params;
+    return !!stored && typeof stored === 'object' && canonicalParams(stored) === wanted;
+  });
+  return match ? { id: match.id, status: match.status as OpenApprovalStatus, requestedBy: match.requestedBy } : null;
+}
+
+/** [U06] What the operator is told when their ask already stands. */
+export function alreadyOpenMessage(status: OpenApprovalStatus, askedByYou: boolean): string {
+  if (status === 'APPROVED') {
+    // Only the admin who asked can apply it (separation of duties), so a
+    // different admin is told who must act rather than told to apply it.
+    return askedByYou
+      ? 'You already have this approved. Apply it from Approvals. Nothing new was asked.'
+      : 'Another admin already has this approved and waiting to be applied by them from Approvals. Nothing new was asked.';
+  }
+  return askedByYou
+    ? 'This is already waiting for a second admin in Approvals. Nothing new was asked. To ask for something different, cancel that request first.'
+    : 'Another admin already asked for this, and it is waiting in Approvals. Nothing new was asked.';
+}
 
 /** What the operator is told, in the terms of what they were trying to do. */
 export function approvalRefusalMessage(code: ApprovalRefusal): string {
@@ -239,11 +321,31 @@ export async function resolveApproval(
     };
     // `bodySnapshot` enters the generated client with the 20260924140000
     // migration; the assertion keeps this compiling against both generations.
-    const created = await prisma.privilegedApproval.create({
+    const write = (db: Prisma.TransactionClient | PrismaClient) => db.privilegedApproval.create({
       data: data as unknown as Prisma.PrivilegedApprovalUncheckedCreateInput,
       select: { id: true },
     });
-    return { outcome: 'requested', approvalId: created.id, fingerprint };
+    // [DS1122 S1] A refund payout-record ask is the "payout reported" marker:
+    // it is written under that refund's ask lock, so a release applying at the
+    // same moment either sees it or has finished before it.
+    const refundEntity = data.action === PAID_ACTION ? data.entityId : null;
+    const asked: AskResult = await prisma.$transaction(async (tx): Promise<AskResult> => {
+      if (refundEntity) await lockCreditRefundAsks(tx, refundEntity);
+      // [U06] One ask per act: two presses racing both wait here, and the
+      // second sees the first's row.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`privileged-approval-ask:${askTargetKey(subject, fingerprint)}`}, 0))`;
+      const standing = await standingAskFor(tx, subject, fingerprint, now);
+      if (standing) return { askState: 'standing', standing };
+      // [Review S2-1] Checked before it is written: an ask that could never be recorded is
+      // refused now and never becomes a "payout reported" marker.
+      if (refundEntity) await validatePaidAsk(tx, refundEntity, subject.body);
+      return { askState: 'created', created: await write(tx) };
+    });
+    if (asked.askState === 'standing') {
+      const { standing } = asked;
+      return { outcome: 'already-open', approvalId: standing.id, status: standing.status, askedByYou: standing.requestedBy === actor.userId };
+    }
+    return { outcome: 'requested', approvalId: asked.created.id, fingerprint };
   }
 
   const approval = await prisma.privilegedApproval.findUnique({ where: { id: approvalId } });

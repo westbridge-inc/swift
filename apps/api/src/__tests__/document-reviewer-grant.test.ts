@@ -40,6 +40,7 @@ import { adminRoutes } from '../modules/admin/admin.routes';
 import { verificationRoutes } from '../modules/verification/verification.routes';
 import { mintRenderPath, resetKeyProviderForTests } from '../providers/storage/envelope';
 import * as authority from '../modules/admin/admin-authority';
+import { REAL_PNG, uniquePng } from './helpers/real-image';
 
 const GRANT = 'documents.review';
 const REQUIRED = 'DOCUMENT_REVIEWER_REQUIRED';
@@ -50,7 +51,8 @@ const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const REASON = `Document review rota ${RUN}: owner reviews this week`;
 const OTHER_TENANT = `vd3-${RUN.toLowerCase()}`;
-const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from(`vd3-${RUN}`)]);
+// [Row 108] A real photo, unique to this run: the storage seam reads every photo with the real decoder.
+const PNG = uniquePng(`vd3-${RUN}`);
 
 let app: FastifyInstance;
 const users: string[] = [];
@@ -223,7 +225,7 @@ describe('[V3] opening a document', () => {
     expect(new URL(path, 'http://x').searchParams.get('reviewer')).toBe(r.id);
     const first = await render(path);
     expect(first.statusCode).toBe(200);
-    expect(Buffer.from(first.rawPayload).equals(PNG)).toBe(true);
+    expect(Buffer.from(first.rawPayload).equals(REAL_PNG)).toBe(true); // [Row 238] the photo, its metadata note removed
     await system(() => app.prisma.admin.update({ where: { userId: r.id }, data: { permissions: ['*'] } }));
     const after = await render(path);
     expect(after.statusCode).toBe(403);
@@ -265,7 +267,7 @@ describe('[V3] deciding a document', () => {
   it('approve, reject and revoke are refused without the grant and change nothing', async () => {
     const a = await admin(['*'], 'SUPER_ADMIN');
     const pending = await pendingOwnerDoc();
-    const approve = await call(a.token, 'PUT', `/verification/${pending.id}/approve`, {});
+    const approve = await call(a.token, 'PUT', `/verification/${pending.id}/approve`, { registrationKind: 'COMPANY' }); // [R16]
     expect(approve.statusCode).toBe(403);
     expect(approve.json().error.code).toBe(REQUIRED);
     const reject = await call(a.token, 'PUT', `/verification/${pending.id}/reject`, { reason: REASON, reasonCode: 'UNREADABLE' });
@@ -281,7 +283,7 @@ describe('[V3] deciding a document', () => {
   it('with the grant the same admin approves and rejects', async () => {
     const r = await admin(['*', GRANT], 'SUPER_ADMIN');
     const one = await pendingOwnerDoc();
-    expect((await call(r.token, 'PUT', `/verification/${one.id}/approve`, {})).statusCode).toBe(200);
+    expect((await call(r.token, 'PUT', `/verification/${one.id}/approve`, { registrationKind: 'COMPANY' })).statusCode).toBe(200); // [R16]
     expect(await statusOf(one.id)).toBe('APPROVED');
     const two = await pendingOwnerDoc();
     expect((await call(r.token, 'PUT', `/verification/${two.id}/reject`, { reason: REASON, reasonCode: 'UNREADABLE' })).statusCode).toBe(200);

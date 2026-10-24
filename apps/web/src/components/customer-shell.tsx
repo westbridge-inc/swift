@@ -160,7 +160,6 @@ export function SideRail({
             <Link
               key={tab}
               href={href}
-              prefetch={true}
               aria-current={on ? 'page' : undefined}
               className={`flex h-11 items-center gap-3 rounded-xl px-2.5 text-[15px] leading-5 transition-colors hover:bg-[var(--swift-sunken)] ${on ? 'font-semibold text-[var(--swift-ink)]' : 'font-medium text-[var(--swift-muted)]'}`}
             >
@@ -254,10 +253,9 @@ export function TabBar({ activeTab, marketVisible, cartCount }: { activeTab: Cus
             <li key={tab} className="flex-1">
               <Link
                 href={href}
-                prefetch={true}
                 aria-current={active ? 'page' : undefined}
                 className={`relative flex h-full flex-col items-center justify-center gap-0.5 text-[11px] leading-[14px] ${PRESS} ${
-                  active ? 'font-semibold text-[var(--swift-red)]' : 'font-medium text-[var(--swift-muted-soft)]'
+                  active ? 'font-semibold text-[var(--swift-red)]' : 'font-medium text-[var(--swift-muted)]'
                 }`}
               >
                 <TabGlyph name={glyph} on={active} size={25} />

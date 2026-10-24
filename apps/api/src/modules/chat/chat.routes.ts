@@ -1,7 +1,9 @@
 import { emitToChatRoom } from '../order/order-room-emission.service';
+import { scanUpload } from '../../lib/malware-scan';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { detectOffPlatformContact, OFF_PLATFORM_WARNING } from './off-platform';
+import { chatContentFilterEnabled, chatContentReason } from './content-filter';
 import { digitRun, mediaUrlCarriesSecret, redactOrderSecrets, SECRET_REDACTED_WARNING } from './secret-guard';
 import {
   assertRoomAccess, chatMediaFolder, isServerIssuedMediaId, reconcileParticipants, resolveRoomAuthority, rotateLeakedRidePin,
@@ -62,6 +64,13 @@ const messagesQuerySchema = z.object({
 // closed room read-only. Every message leaves through the ONE serializer in
 // chat-authority.ts. There is no default tenant anywhere in this file.
 // ---------------------------------------------------------------------------
+
+/** [Owner ruling 16 Oct 2026 — CUSTOMERS TAKE NO PHOTOS] A customer's photo is never served to the other
+ *  people in a room (the mover, the store): a photo an account holds from before the ruling stays unseen.
+ *  Partner photos are unchanged. */
+function customerPhotoHidden<P extends { role: string; user: { avatar: string | null } }>(p: P): P {
+  return p.role === 'customer' ? { ...p, user: { ...p.user, avatar: null } } : p;
+}
 
 export async function chatRoutes(app: FastifyInstance) {
   const notifications = new NotificationService(app.prisma, app.io);
@@ -152,7 +161,7 @@ export async function chatRoutes(app: FastifyInstance) {
     // Loading/reconciling/signing history yields. A participant removed during
     // that work must not receive the snapshot it loaded before reassignment.
     const current = await assertRoomAccess(app.prisma, room.id, request.user.userId, { tenantId: request.tenantId });
-    return { success: true, data: { ...room, participants: room.participants.filter((p) => current.participants.has(p.userId)), messages } };
+    return { success: true, data: { ...room, participants: room.participants.filter((p) => current.participants.has(p.userId)).map(customerPhotoHidden), messages } };
   });
 
   /**
@@ -175,6 +184,7 @@ export async function chatRoutes(app: FastifyInstance) {
       chatGuardCounter.labels('media', 'media_rejected').inc();
       throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
     }
+    await scanUpload(buffer, { surface: 'chat', log: request.log });
     const { url } = await getStorageProvider().upload({ buffer, filename: file.filename, mimeType: file.mimetype, folder: chatMediaFolder(roomId) });
     if (!isServerIssuedMediaId(url, roomId)) throw new AppError(500, 'MEDIA_ID_UNEXPECTED', 'The storage provider returned an id outside the room folder');
     return { success: true, data: { mediaId: url } };
@@ -212,12 +222,12 @@ export async function chatRoutes(app: FastifyInstance) {
       await assertUsersMayContact(app.prisma, access.tenantId, request.user.userId, other);
     }
 
-    // Off-platform contact detection (spec §2): the message still delivers —
-    // the sender gets a soft nudge and the flag feeds risk signals. Detection,
-    // never censorship.
+    // Retain the nudge/risk signal for allowed off-platform overtures. With the
+    // launch content filter on, admission below also refuses prohibited
+    // contact details and language.
     const offPlatform = detectOffPlatformContact(message);
 
-    // [F-027-12] ...with exactly one exception. The order's pickup/ride code is
+    // [F-027-12] Redact order secrets before content admission. The pickup/ride code is
     // not content to moderate, it is the proof that the driver physically met
     // the customer. Chat puts the driver in the room and copies message text
     // verbatim into the other participants' PUSH bodies, so an unguarded room
@@ -243,6 +253,16 @@ export async function chatRoutes(app: FastifyInstance) {
         await assertUsersMayContact(tx, current.tenantId, request.user.userId, other);
       }
       const guarded = redactOrderSecrets(message, current.secrets, priorDigits);
+      // Content admission judges the exact text that would be stored, under the
+      // same lock: refusing here rolls the write back, so a refused message is
+      // never stored, broadcast or pushed. Off until the launch switch is on.
+      const contentReason = chatContentFilterEnabled() ? chatContentReason(guarded.text) : undefined;
+      if (contentReason) {
+        chatGuardCounter.labels('send', 'content_refused').inc();
+        throw new AppError(400, 'CHAT_CONTENT_NOT_ALLOWED',
+          'This message contains language or contact details that cannot be sent. Use Swift chat or the published support contact.',
+          { reason: contentReason });
+      }
       const mediaBlocked = mediaId !== undefined && mediaUrlCarriesSecret(mediaId, current.secrets);
       const msg = await tx.chatMessage.create({
         data: {
@@ -250,6 +270,9 @@ export async function chatRoutes(app: FastifyInstance) {
           message: guarded.text, messageType,
           mediaUrl: mediaBlocked ? undefined : mediaId,
           offPlatformFlag: offPlatform,
+          // Who it was sent to, proved under this lock: a person later taken
+          // off the order may still report what they received (owner ruling).
+          recipientIds: recipients,
         },
       });
       return { msg, access: current, recipients, guarded, mediaBlocked };
@@ -423,7 +446,7 @@ export async function chatRoutes(app: FastifyInstance) {
         participants: r.participants.filter((p) => current.participants.has(p.userId)).map((p) => ({
           userId: p.user.id,
           name: p.user.firstName,
-          avatar: p.user.avatar,
+          avatar: customerPhotoHidden(p).user.avatar,
           role: p.role,
         })),
         lastMessage,

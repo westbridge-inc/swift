@@ -44,6 +44,7 @@ import { judgedWordsHash, STORE_WAITING_FOR_CHECK, STORE_WAITING_MESSAGE } from 
 import { DispatchService } from '../modules/dispatch/dispatch.service';
 import { HaversineMapsProvider } from '../providers/maps/maps-provider';
 import { lockUserRoleAuthority } from '../modules/mover-authority';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // The index engine is the only thing replaced: what it returns is decided per
 // test, so the signed-in (index) path and the database fallback are both run.
@@ -58,7 +59,7 @@ vi.mock('../modules/search/search.service', () => ({ SearchService: class {
   async searchItems() { if (engine.fail) throw new Error('index down'); return { hits: engine.itemHits, estimatedTotalHits: engine.itemHits.length, processingTimeMs: 1 }; }
 } }));
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const DAY = 86_400_000;
 const TENANT = 'swift-default';
@@ -398,6 +399,36 @@ describe('[§8] a partner saving and editing items', () => {
     const renamed = await inject('PUT', `/api/v1/vendor/items/${legacyBottle.id}`, vendor.token, { name: `Rum cake slice ${RUN}` });
     expect(renamed.statusCode).toBe(200);
     expect(renamed.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', term: 'rum' });
+  });
+
+  // [R4 · owner 15 Oct] The expanded permanent list answers exactly like the old classes, through the real routes.
+  it('the expanded list: goods refused outright in the partner\'s words, a mention held, legal services refused', async () => {
+    const before = await app.prisma.item.count({ where: { vendorId: vendor.id } });
+    for (const [name, words] of [
+      [`${RUN} Fireworks 10 pack`, 'fireworks and explosives'],
+      [`${RUN} Weed killer 1L`, 'pesticides and toxic chemicals'],
+      [`${RUN} Raw gold`, 'raw gold, diamonds and precious stones'],
+      [`${RUN} Toy pistol`, 'firearms, ammunition and replicas'],
+      [`${RUN} Twa twa`, 'protected wildlife'],
+      [`Counterfeit Rolex ${RUN}`, 'counterfeit goods'],
+      [`Prepaid Visa ${RUN}`, 'currency and payment cards'],
+      [`Legal consultation ${RUN}`, 'legal services'],
+    ] as const) {
+      const res = await createItem({ name });
+      expect(res.statusCode, name).toBe(409);
+      expect(res.json().error, name).toMatchObject({ code: 'PROHIBITED_ITEM', message: `Swift doesn't allow this item: ${words}.` });
+    }
+    expect(await app.prisma.item.count({ where: { vendorId: vendor.id } })).toBe(before);
+    const held = await createItem({ name: `Gun ${RUN}` });
+    expect(held.statusCode).toBe(200);
+    expect(held.json().data.catalogueCheck).toMatchObject({ status: 'WAITING_FOR_CHECK', prohibitedClass: 'WEAPONS', term: 'gun' });
+    const tool = await createItem({ name: `Hot glue gun ${RUN}` });
+    expect(tool.statusCode).toBe(200);
+    expect(tool.json().data.catalogueCheck ?? null).toBeNull();
+    // A person can remove a held item as one of the new classes; the partner reads the class in plain words.
+    const removed = await inject('POST', `/api/v1/admin/catalogue-review/${held.json().data.id}/remove`, admin.token, { prohibitedClass: 'WEAPONS' }, { 'x-swift-reason': 'Sells a firearm' });
+    expect(removed.statusCode, removed.body).toBe(200);
+    expect(await app.prisma.item.findUniqueOrThrow({ where: { id: held.json().data.id }, select: { prohibitedClass: true } })).toEqual({ prohibitedClass: 'WEAPONS' });
   });
 
   // [Opus S3-1] The item editor never switches on an item still banned by its own words: the item AFTER the edit is
@@ -854,7 +885,7 @@ describe('[§8] an order already placed with a line Swift no longer allows never
     expect(await statusOf(removed.id)).toBe('CANCELLED');
     const ordinary = await placed('PENDING', [control]);
     expect((await inject('PUT', `/api/v1/vendor/orders/${ordinary.id}/accept`, vendor.token, {})).statusCode).toBe(200);
-    expect(await statusOf(ordinary.id)).toBe('ACCEPTED');
+    expect(await statusOf(ordinary.id)).toBe('PREPARING'); // [O-3] one tap: Accept starts preparation
     // A word a person approved (the catalogue check above approved this rum line's words) goes ahead.
     const approvedWords = await placed('PENDING', [legacy.cake]);
     expect((await inject('PUT', `/api/v1/vendor/orders/${approvedWords.id}/accept`, vendor.token, {})).statusCode).toBe(200);

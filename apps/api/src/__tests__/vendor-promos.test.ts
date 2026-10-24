@@ -162,6 +162,38 @@ describe('Vendor promo CRUD', () => {
     const promos = res.json().data.promos;
     expect(promos.some((p: any) => p.code === CODE)).toBe(true);
   });
+
+  // [Row 272] Every phone build from 9 on reads `activePromos` (RestaurantScreen:
+  // the "N promos available" row and its card: code, description, minimum
+  // order). The payload only ever sent `promos`, so the row never showed.
+  it('sends the live codes as activePromos too, in the shape the phone reads', async () => {
+    const res = await inject('GET', `/api/v1/customer/vendors/${shopA.vendorId}`, undefined, customer.token);
+    expect(res.statusCode).toBe(200);
+    const data = res.json().data;
+    expect(Array.isArray(data.activePromos)).toBe(true);
+    expect(data.activePromos).toEqual(data.promos);
+    const mine = data.activePromos.find((p: any) => p.code === CODE);
+    expect(mine).toBeDefined();
+    expect(typeof mine.description).toBe('string');
+    expect(mine.minOrderAmount === null || typeof mine.minOrderAmount === 'number').toBe(true);
+    // Public fields only: never the usage counters or the id.
+    expect(Object.keys(mine).sort()).toEqual(['code', 'description', 'discountType', 'discountValue', 'minOrderAmount', 'validUntil']);
+  });
+
+  it('a code that has reached its usage limit is not advertised', async () => {
+    const full = `FULL${nanoid(5).replace(/[^A-Za-z0-9]/g, 'X').toUpperCase()}`;
+    await app.prisma.promoCode.create({
+      data: {
+        code: full, description: 'all used', vendorId: shopA.vendorId, funder: 'VENDOR',
+        discountType: 'FIXED_AMOUNT', discountValue: 100, maxUses: 2, currentUses: 2,
+        validFrom: new Date(Date.now() - DAY), validUntil: new Date(Date.now() + DAY),
+      },
+    });
+    const res = await inject('GET', `/api/v1/customer/vendors/${shopA.vendorId}`, undefined, customer.token);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().data.activePromos.some((p: any) => p.code === full)).toBe(false);
+    expect(res.json().data.activePromos.some((p: any) => p.code === CODE)).toBe(true);
+  });
 });
 
 describe('Checkout scoping', () => {

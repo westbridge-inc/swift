@@ -39,7 +39,9 @@ import { FEE_CHECKOUT_PLATFORMS_KEY, resetFeeCheckoutSwitchCache } from '../modu
 import { ensureProviderIdentityBackfill, resetProviderIdentityBackfillCacheForTests } from '../modules/billing/provider-identity-backfill';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { SANDBOX_MERCHANT_ID, SandboxMmgCheckoutProvider, type MmgCheckoutProvider } from '../providers/mmg/mmg-checkout';
-import { lookupDetailFrom, type MmgLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { lookupDetailFrom, type MmgCheckoutLookupClient, type MmgLookupDetail } from '../providers/mmg/mmg-provider';
+import { FakeMmgHistory } from './helpers/mmg-history-fake';
+import { FEE_SELLER } from '../modules/billing/fee-seller';
 
 // ---------------------------------------------------------------------------
 // The MMG weekly-fee checkout ROUTES against the database (MMG-CHECKOUT-API.md
@@ -74,10 +76,15 @@ const startedAt = new Date();
 const lookups = new Map<string, MmgLookupDetail>();
 /** Every transaction MMG's lookup was asked about, in order. */
 const lookedUp: string[] = [];
-const lookup: MmgLookupClient = { transactionLookupDetail: async (id) => {
-  lookedUp.push(id);
-  return lookups.get(id) ?? { outcome: 'not_found' };
-} };
+/** [7 Oct] MMG's Transaction History (helpers/mmg-history-fake.ts): it holds every payment `found` registers, made now. */
+const history = new FakeMmgHistory();
+const lookup: MmgCheckoutLookupClient = {
+  transactionLookupDetail: async (id) => {
+    lookedUp.push(id);
+    return lookups.get(id) ?? { outcome: 'not_found' };
+  },
+  transactionHistoryRows: (query) => history.transactionHistoryRows(query),
+};
 type Found = Extract<MmgLookupDetail, { outcome: 'found' }>;
 /** MMG stamps creationDate as Guyana wall-clock time written with a "Z" (UAT, 1 Oct). */
 const gyStamp = (at: Date) => new Date(at.getTime() - 4 * 3_600_000).toISOString();
@@ -95,11 +102,12 @@ const uatAnswer = (txn: string, amountGyd: number, answer: Record<string, unknow
   descriptionText: null, ...answer,
 });
 /** MMG's lookup of `txn`, read exactly as the live adapter reads it. `answer` patches MMG's own fields; `patch` the reading. */
-function found(txn: string, amountGyd: number, answer: Record<string, unknown> = {}, patch: Partial<Found> = {}) {
+function found(checkout: { merchantTransactionId: string }, txn: string, amountGyd: number, answer: Record<string, unknown> = {}, patch: Partial<Found> = {}) {
   lookups.set(txn, { ...lookupDetailFrom(uatAnswer(txn, amountGyd, answer), txn), ...patch });
+  history.holds(txn, amountGyd, { external_id: checkout.merchantTransactionId });
 }
-const approved = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, {}, patch);
-const declined = (txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(txn, amountGyd, { transactionStatus: 'failed' }, patch);
+const approved = (checkout: { merchantTransactionId: string }, txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(checkout, txn, amountGyd, {}, patch);
+const declined = (checkout: { merchantTransactionId: string }, txn: string, amountGyd: number, patch: Partial<Found> = {}) => found(checkout, txn, amountGyd, { transactionStatus: 'failed' }, patch);
 /** [F1] MMG's answer echoing THIS checkout's reference. MMG's lookup carries no such field (UAT, 1 Oct): an echo
  *  only adds a contradiction check, it never confirms. */
 const echoOf = (row: { merchantTransactionId: string }): Partial<Found> => ({ echoedReferences: [row.merchantTransactionId] });
@@ -508,13 +516,17 @@ describe('live: starting and following a checkout (sections 4-5)', () => {
     const view = await follow(p, data.ref);
     expect(view.statusCode).toBe(200);
     expect(view.json().data).toMatchObject({ ref: data.ref, status: 'OPEN', amountGyd: 1500, currencyCode: 'GYD', confirmedAt: null, subscriptionStatus: 'ACTIVE' });
-    expect(Object.keys(view.json().data).sort()).toEqual(['amountGyd', 'confirmedAt', 'createdAt', 'currencyCode', 'expiresAt', 'mmgTransactionId', 'ref', 'status', 'subscriptionStatus', 'swiftReference']);
+    expect(Object.keys(view.json().data).sort()).toEqual(['amountGyd', 'confirmedAt', 'createdAt', 'currencyCode', 'expiresAt', 'mmgTransactionId', 'ref', 'seller', 'status', 'subscriptionStatus', 'swiftReference']);
+    // [Owner 15 Oct 2026 · ruling #63] every weekly-fee receipt names its seller: Swift's operator, from the one constant.
+    expect(view.json().data.seller).toEqual({ name: 'Westbridge Inc.', tradingAs: 'Swift', registrationNo: '17703', registeredAddress: 'Lot 165 New Trafalgar Building, Waterloo Street, Georgetown, Demerara, Guyana', phone: '+592 716 3534', email: 'support@swiftgy.com' });
     // [support lookup] The receipt references (section 5): ours always, MMG's only once CONFIRMED.
     expect(view.json().data).toMatchObject({ swiftReference: row.merchantTransactionId, mmgTransactionId: null });
 
     const payload = (await subscriptionOf(p)).json().data;
     expect(payload.latestMmgCheckout).toMatchObject({ ref: data.ref, status: 'OPEN', subscriptionStatus: 'ACTIVE' });
     expect(payload.recentCheckouts.map((c: { ref: string }) => c.ref)).toEqual([data.ref]);
+    expect(payload.latestMmgCheckout.seller).toEqual(FEE_SELLER);
+    expect(payload.recentCheckouts[0].seller).toEqual(FEE_SELLER);
     expect(JSON.stringify(payload)).not.toContain('checkoutUrl');
   });
 
@@ -634,7 +646,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
       generateKeyPair('rsa', { modulusLength: 2048 }, (err, publicKey, privateKey) => (err ? rej(err) : res({ publicKey, privateKey })));
     });
     const stranger = new SandboxMmgCheckoutProvider({ request: strangerPair, result: strangerPair });
-    approved(tx('FORGED1'), 1500, echoOf(row));
+    approved(row, tx('FORGED1'), 1500, echoOf(row));
     for (const params of [{ token: 'garbage' }, { token: stranger.sandboxReplyToken({ merchantTransactionId: row.merchantTransactionId, transactionId: tx('FORGED1'), ResultCode: '0' }) }, {}, { a: ['x', 'y'] }]) {
       const res = await ret('success', params);
       expect(res.statusCode).toBe(200);
@@ -650,7 +662,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     // 2 · MMG's own failed answer for THIS checkout, naming a transaction: NOT_PAID at once, the
     // confirmation pause released, the partner told once. The transaction is still looked at later [I8].
     const failed = await started(p);
-    declined(tx('FAIL2'), 1500);
+    declined(failed.row, tx('FAIL2'), 1500);
     let res = await ret('success', { token: officialReply(failed.row, '2', tx('FAIL2')) });
     expect(res.json().data.state).toBe('NOT_PAID');
     expect((await follow(p, failed.ref)).json().data.status).toBe('NOT_PAID');
@@ -661,7 +673,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     // The partner may try again at once (no manual expiry). MMG's ResultCode is a string ("2"): a JSON
     // number is not MMG's documented reply, so it decides nothing; the documented one says not paid.
     const bound = await started(p);
-    declined(tx('FAIL2B'), 1500, echoOf(bound.row));
+    declined(bound.row, tx('FAIL2B'), 1500, echoOf(bound.row));
     res = await ret('success', { token: officialReply(bound.row, 2, tx('FAIL2B')) });
     expect(res.json().data.state).toBe('UNKNOWN');
     expect((await intentOf(bound.ref)).status).toBe('OPEN');
@@ -706,7 +718,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     for (const code of ['3', '4', 5]) {
       const { ref, row } = await started(p);
       const txn = tx(`ALERT${code}`);
-      approved(txn, 1500, echoOf(row)); // would confirm through the lookup; it must never be asked
+      approved(row, txn, 1500, echoOf(row)); // would confirm through the lookup; it must never be asked
       const res = await ret('success', { token: officialReply(row, code, txn, { secretKey: 'must-not-be-stored' }) });
       expect(res.statusCode).toBe(200);
       expect(res.json()).toEqual({ success: true, data: { state: 'UNKNOWN' } });
@@ -741,7 +753,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     const p = await makeStore({ balance: 600, status: 'PAST_DUE' });
     const { ref, row } = await started(p);
     const txn = tx('PAID0');
-    approved(txn, 1500, echoOf(row));
+    approved(row, txn, 1500, echoOf(row));
     const token = officialReply(row, '0', txn);
     const res = await ret('success', { token });
     expect(res.statusCode).toBe(200);
@@ -776,7 +788,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     const p = await makeStore({ balance: 600 });
     const { ref, row } = await started(p);
     const txn = tx('NOTIFY0');
-    approved(txn, 1500, echoOf(row));
+    approved(row, txn, 1500, echoOf(row));
     // A JSON-number code is not MMG's documented reply: it decides nothing.
     expect((await notify({ Token: officialReply(row, 0, txn), noise: 'ignored' })).json()).toEqual({ success: true });
     expect((await follow(p, ref)).json().data.status).toBe('OPEN');
@@ -792,7 +804,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     const p = await makeStore({ balance: 600 });
     const { ref, row } = await started(p);
     const txn = tx('HELD1');
-    approved(txn, 1500); // MMG's lookup: paid in full, to our merchant, inside the checkout's window …
+    approved(row, txn, 1500); // MMG's lookup: paid in full, to our merchant, inside the checkout's window …
     // … but MMG answered "timed out" (7) for this checkout, not success (0): only MMG's success answer ties
     // a payment to a checkout automatically [owner, 1 Oct]. A person decides.
     const res = await ret('success', { token: officialReply(row, '7', txn) });
@@ -828,7 +840,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     expect((await intentOf(ref)).status).toBe('OPEN');
     // Paid, through MMG's success answer; a refused-request code afterwards still pages, once, and moves nothing.
     const txn = tx('DUPPAID0');
-    approved(txn, 1500);
+    approved(row, txn, 1500);
     expect((await ret('success', { token: officialReply(row, '0', txn) })).json().data.state).toBe('CONFIRMED');
     for (const n of [1, 2]) expect((await notify({ token: officialReply(row, '5', txn) })).json(), `notify ${n}`).toEqual({ success: true });
     expect((await alertsOf('mmg-checkout-reply-code')).length).toBe(before + 3);
@@ -844,7 +856,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     expect((await ret('error', { token: officialReply(row, '2', txn) })).json().data.state).toBe('NOT_PAID');
     expect((await subscriptionOf(p)).json().data.payActions[0]).toMatchObject({ state: 'live' });
     // Hours later, MMG's lookup shows that transaction paid in full: a person must decide.
-    approved(txn, 1500);
+    approved(row, txn, 1500);
     await mmgCheckoutRuntimeOf(app).service.pollIntents(new Date(Date.now() + 7 * 3_600_000));
     expect((await follow(p, ref)).json().data.status).toBe('HELD');
     const payload = (await subscriptionOf(p)).json().data;
@@ -860,7 +872,7 @@ describe('the public return: a reply is a pointer, never evidence (section 6)', 
     const p = await makeStore({ balance: 600 });
     const { ref, row } = await started(p);
     const txn = tx('TWICE0');
-    approved(txn, 1500);
+    approved(row, txn, 1500);
     const token = officialReply(row, '0', txn);
     const observed = await app.prisma.mmgCheckoutObservation.count();
     const asked = lookedUp.length;
@@ -958,12 +970,12 @@ describe('[MMG-RETURN-PATH] the reply MMG puts in the address path', () => {
       });
       expect(token).toMatch(/^[A-Za-z0-9_-]+={0,2}$/); // what the web page accepts from the path
       expect(token).toHaveLength(684);
-      found(txn, 1500, { transactionReference: ledger });
+      found(row, txn, 1500, { transactionReference: ledger });
       const res = await app.inject({ method: 'POST', url: RETURN_URL, headers: { 'content-type': 'application/json' }, payload: { outcome, params: { token } } });
       expect(res.statusCode, res.body).toBe(200);
       expect(res.json()).toEqual({ success: true, data: { state: 'CONFIRMED' } });
-      // It reached observeReply: written down as MMG's success answer for this checkout, then MMG's lookup decided.
-      expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['RETURN', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+      // It reached observeReply: written down as MMG's success answer for this checkout, then MMG's lookup and history decided.
+      expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['RETURN', 'MMG_RESULT_0'], ['LOOKUP', txn], ['HISTORY', txn]]);
       expect(await intentOf(ref)).toMatchObject({ status: 'CONFIRMED', mmgTransactionId: txn });
       expect(await creditsOf(p.subId)).toBe(1);
       expect(await identitiesOf(txn)).toBe(1);
@@ -985,14 +997,14 @@ describe('[MMG, 4 Oct] Notify: MMG\'s server sends the same tokenized reply as t
       ResultMessage: 'Transaction Successful', htmlResponse: '<html><body><h1>Transaction Successful</h1></body></html>',
     });
     expect(token).toMatch(/=$/); // padded base64url, as MMG sends it
-    found(txn, 1500);
+    found(row, txn, 1500);
     const res = shape === 'JSON'
       ? await notify({ token })
       : await notify(`token=${shape === 'a form, the token as sent' ? token : encodeURIComponent(token)}`, 'application/x-www-form-urlencoded');
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ success: true });
-    // The same path as /return: written down as MMG's success answer, MMG's lookup decided, one credit.
-    expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['NOTIFY', 'MMG_RESULT_0'], ['LOOKUP', txn]]);
+    // The same path as /return: written down as MMG's success answer, MMG's lookup and history decided, one credit.
+    expect((await observationsOf(ref)).map((o) => [o.source, o.detail])).toEqual([['NOTIFY', 'MMG_RESULT_0'], ['LOOKUP', txn], ['HISTORY', txn]]);
     expect((await follow(p, ref)).json().data.status).toBe('CONFIRMED');
     expect(await creditsOf(p.subId)).toBe(1);
     expect(await identitiesOf(txn)).toBe(1);
@@ -1011,7 +1023,7 @@ describe('the kill switch mid-flight', () => {
     const p = await makeStore({ balance: 600 });
     const { ref, row } = await started(p);
     const txn = tx('KILL0');
-    approved(txn, 1500, echoOf(row));
+    approved(row, txn, 1500, echoOf(row));
     const token = officialReply(row, '0', txn);
     enable(false);
     expect((await follow(p, ref)).statusCode).toBe(404);

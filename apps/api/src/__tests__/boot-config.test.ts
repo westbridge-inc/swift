@@ -1,19 +1,38 @@
 import { describe, it, expect, afterEach, beforeAll, vi } from 'vitest';
 import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 import { spawnSync } from 'node:child_process';
-import { generateKeyPair, type KeyObject } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { generateKeyPair, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertSafeBootConfig, assertProductionData } from '../utils/boot-config';
+import { assertSafeBootConfig, assertProductionData, assertWallLoginConfig, ORDER_HOLD_FLOOR_MIN } from '../utils/boot-config';
 import { PUBLICATION_LEASE_MS, publicationHeartbeatMs, publicationLeaseMs } from '../modules/billing/settlement-publication-lease';
 import { testControlIdentity } from '../modules/ops/test-control';
+import { identitySalt } from '../modules/integrity/normalize';
 
 // SWIFT-AUD-D9-02 / D3-01: production must refuse to boot without the two
 // secrets that keep KYC documents private (envelope KEK + render HMAC), and
 // without the OTP-bypass guard. Non-production is unaffected.
 
 const KEK = Buffer.alloc(32, 7).toString('base64'); // valid 32-byte base64
+// [22 Oct, COORD ruling] Production never sends MMG charge requests, so with MMG live the checkout
+// page is the only MMG way to pay: production refuses MMG_DRIVER=live without MMG_CHECKOUT_ENABLED=1.
+// The valid production base therefore carries a complete checkout configuration. The keys are
+// synthetic, generated here; each PEM is written on one line with a literal \n, as an env file
+// (and the preflight's candidate file) carries it.
+const baseCheckoutKeys = generateKeyPairSync('rsa', { modulusLength: 4096 });
+const oneLinePem = (pem: string) => pem.trim().replace(/\n/g, '\\n');
+const baseCheckout: Record<string, string> = {
+  MMG_CHECKOUT_ENABLED: '1',
+  MMG_CHECKOUT_URL: 'https://checkout.example.test/mmg-pg/web/payments',
+  MMG_CHECKOUT_MERCHANT_ID: '0000001',
+  MMG_CHECKOUT_CLIENT_ID: 'client-test',
+  MMG_CHECKOUT_MERCHANT_NAME: 'Swift Test',
+  MMG_CHECKOUT_RETURN_ORIGIN: 'https://pay.example.test',
+  MMG_CHECKOUT_SECRET_KEY: 'not-a-secret',
+  MMG_CHECKOUT_PUBLIC_KEY: oneLinePem(baseCheckoutKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()),
+  MMG_CHECKOUT_PRIVATE_KEY: oneLinePem(baseCheckoutKeys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()),
+};
 const messagingServiceSid = `MG${'c'.repeat(32)}`;
 const good: Record<string, string | undefined> = {
   NODE_ENV: 'production',
@@ -34,8 +53,7 @@ const good: Record<string, string | undefined> = {
   TWILIO_FROM: '+15550000000',
   PUSH_PROVIDER: 'expo',
   JWT_SECRET: 'test-jwt-secret-at-least-32-characters',
-  KYC_PROVIDER: 'didit',
-  DIDIT_API_KEY: 'didit-live-key',
+  KYC_PROVIDER: 'manual',
   // [LAUNCH-LOCK] Production takes no card payment until an attorney signs
   // off (owner ruling, 13 Oct): the valid production base has cards off. The
   // live Stripe key stays so a case that switches the provider back on still
@@ -51,6 +69,7 @@ const good: Record<string, string | undefined> = {
   MMG_MKEY: 'mmg-mkey',
   MMG_MSECRET: 'mmg-msecret',
   MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1',
+  ...baseCheckout,
   // [PROD-PATH] Production pages a human for every unacknowledged SOS and
   // sends receipts and expiry notices by email: both are required to boot.
   OPS_ONCALL_PHONES: '+5926000001,+15550000002',
@@ -62,6 +81,8 @@ const good: Record<string, string | undefined> = {
   EMAIL_FROM: 'Swift <noreply@example.test>',
   SCAN_IP_SALT: 'synthetic-scan-boot-salt',
   ATTRIB_SALT: 'synthetic-attribution-boot-salt',
+  // [row 331 · CONFIG-GUARDS] The identity-signal HMAC key is a boot guard too.
+  IDENTITY_SALT: 'synthetic-identity-boot-salt',
   // [PROD-PATH] Admin top-ups stay on hold in production (owner ruling, 8 Oct).
   BILLING_TOPUP_HOLD: '1',
 };
@@ -196,11 +217,41 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, JWT_SECRET: undefined, OTP_HASH_SECRET: 'dedicated-otp-secret-at-least-32-chars' })).not.toThrow();
   });
 
+  it.each([undefined, 'didit', 'idanalyzer'])('preflight reports refused KYC %j once and continues to the next missing setting', (provider) => {
+    const result = runPreflight({ ...good, KYC_PROVIDER: provider, PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout.match(/✗ FATAL: KYC_PROVIDER/g)).toHaveLength(1);
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).not.toContain('stubbing changed nothing');
+  });
+
+  it.each(['didit', 'idanalyzer'])('refuses external KYC %s even with credentials in production', (provider) => {
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: provider, DIDIT_API_KEY: 'synthetic-test-key', ID_ANALYZER_API_KEY: 'synthetic-test-key' })).toThrow(/KYC_PROVIDER/);
+  });
+
+  // [GUARDRAILS §8 · owner: face matching OFF, identity checks by a person only] The biometric switch
+  // cannot be turned on in production: the boot guard refuses it, so no face-matching leg can run there.
+  it('refuses production face matching (FEATURE_BIOMETRIC_FACE_MATCH=1) even on the human-review provider', () => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1' })).toThrow(/FEATURE_BIOMETRIC_FACE_MATCH/);
+  });
+
+  it.each([undefined, '', '0'])('boots with face matching off (FEATURE_BIOMETRIC_FACE_MATCH=%j)', (flag) => {
+    expect(() => assertSafeBootConfig({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: flag })).not.toThrow();
+  });
+
+  it('preflight reports production face matching once and continues to the next missing setting', () => {
+    const result = runPreflight({ ...good, FEATURE_BIOMETRIC_FACE_MATCH: '1', PUSH_PROVIDER: undefined });
+    expect(result.status, result.stdout + result.stderr).toBe(1);
+    expect(result.stdout.match(/✗ FATAL: FEATURE_BIOMETRIC_FACE_MATCH/g)).toHaveLength(1);
+    expect(result.stdout).toContain('✗ FATAL: PUSH_PROVIDER is dev');
+    expect(result.stdout).not.toContain('stubbing changed nothing');
+  });
+
   it('refuses sandbox or unconfigured KYC in production', () => {
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: undefined })).toThrow(/KYC_PROVIDER/);
     expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'sandbox' })).toThrow(/KYC_PROVIDER/);
-    expect(() => assertSafeBootConfig({ ...good, DIDIT_API_KEY: undefined })).toThrow(/DIDIT_API_KEY/);
-    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/ID_ANALYZER_API_KEY/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'didit', DIDIT_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
+    expect(() => assertSafeBootConfig({ ...good, KYC_PROVIDER: 'idanalyzer', ID_ANALYZER_API_KEY: undefined })).toThrow(/KYC_PROVIDER/);
   });
 
   it('refuses sandbox/test subscription card processors in production', () => {
@@ -220,9 +271,23 @@ describe('assertSafeBootConfig — fail-closed production secrets', () => {
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: undefined })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
     expect(() => assertSafeBootConfig({ ...good, MMG_MSECRET: undefined })).toThrow(/MMG_MSECRET/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: 'yes' })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
     expect(() => assertSafeBootConfig({ ...good, MMG_API_URL: 'https://mwallet.mmgtest.net/olive/publisher/v1' })).toThrow(/non-UAT/);
+  });
+
+  // [S1 · SWITCHES 21 Oct, Option A] Live MMG in production is the checkout page, its lookup and
+  // reversals; the reference round-trip flag only proves the push rail, which production refuses.
+  it.each([undefined, '', '0', 'yes', '1'])('boots live MMG whatever the round-trip flag says (%j): it is not a condition of the checkout', (verified) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified })).not.toThrow();
+  });
+
+  it.each(['1', 'true', 'yes', 'on', ' 1', '01'])('refuses the MMG push rail switch in production (MMG_PUSH_RAIL_ON=%j), whatever the driver', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+    expect(() => assertSafeBootConfig({ ...cardOff, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: undefined, MMG_API_URL: undefined, MMG_API_KEY: undefined, MMG_MERCHANT_ID: undefined, MMG_PASSWORD: undefined, MMG_MKEY: undefined, MMG_MSECRET: undefined, MMG_PUSH_RAIL_ON: value })).toThrow(/MMG_PUSH_RAIL_ON/);
+  });
+
+  it.each([undefined, '', '0'])('boots with the MMG push rail switch off (%j)', (value) => {
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: value })).not.toThrow();
   });
 
   it('SWIFT-012: refuses the dev (console) notification provider in production — OTP would never send', () => {
@@ -472,16 +537,19 @@ describe('[ledger E08] production must be explicit about the order hold', () => 
     expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1' })).not.toThrow();
   });
 
-  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '2', '4.99'])(
-    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the free-cancel window',
+  // [CANCEL-WINDOW · owner 22 Oct 2026] '1' joins the list: the free-cancel window after acceptance is now one
+  // minute, but the hold floor stays the settled five minutes (ORDER_HOLD_FLOOR_MIN) — the guard is never relaxed.
+  it.each(['abc', '0', '', '-1', 'Infinity', '  ', '0.05', '1', '2', '4.99'])(
+    'refuses ORDER_HOLD_MINUTES=%j when LIFECYCLE_V2=1 — no hold, or a hold shorter than the settled five-minute hold',
     (minutes) => {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }))
         .toThrow(/ORDER_HOLD_MINUTES/);
     },
   );
 
-  it('accepts the unset default and any hold at least as long as the free-cancel window (DS214 D1)', () => {
-    expect(FREE_CANCEL_WINDOW_MIN).toBe(5);
+  it('accepts the unset default and any hold at least the settled five minutes (DS214 D1) — not the one-minute window', () => {
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(ORDER_HOLD_FLOOR_MIN).toBe(5);
     for (const minutes of [undefined, '5', '7', '10']) {
       expect(() => assertSafeBootConfig({ ...good, LIFECYCLE_V2: '1', ORDER_HOLD_MINUTES: minutes }), String(minutes))
         .not.toThrow();
@@ -630,6 +698,85 @@ describe('test-control lease secret [C2]', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] IDENTITY_SALT keys every identity-signal hash (phone,
+// document number, plate, device). Production used to find it missing only at
+// the first identity capture, mid-signup, as a thrown 500. Now it refuses to
+// start, in the qr-config salts' style: one contract for the boot guard and the
+// hasher, and the value is never echoed.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] IDENTITY_SALT is checked at boot, not at the first identity capture', () => {
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['blank', ' \t '],
+  ] as const)('production refuses to start with IDENTITY_SALT %s', (_label, value) => {
+    expect(() => assertSafeBootConfig({ ...good, IDENTITY_SALT: value })).toThrow(/FATAL: IDENTITY_SALT .*Refusing to start/);
+  });
+
+  it('production refuses the development default printed in this public repository, without echoing it', () => {
+    let message = '';
+    try {
+      assertSafeBootConfig({ ...good, IDENTITY_SALT: 'dev-identity-salt' });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/FATAL: IDENTITY_SALT .*Refusing to start/);
+    expect(message).not.toContain('dev-identity-salt');
+  });
+
+  it('a configured salt boots, and development and test keep their fixed fallback', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+    for (const mode of ['development', 'test']) {
+      expect(() => assertSafeBootConfig({ NODE_ENV: mode })).not.toThrow();
+      expect(identitySalt({ NODE_ENV: mode })).toBe('dev-identity-salt');
+      expect(identitySalt({ NODE_ENV: mode, IDENTITY_SALT: ' ' })).toBe('dev-identity-salt');
+    }
+  });
+
+  it('the hasher keeps the same contract as the boot guard', () => {
+    expect(identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: 'synthetic-identity-boot-salt' })).toBe('synthetic-identity-boot-salt');
+    for (const value of [undefined, '', ' \t ', 'dev-identity-salt']) {
+      expect(() => identitySalt({ NODE_ENV: 'production', IDENTITY_SALT: value }), String(value)).toThrow(/IDENTITY_SALT/);
+    }
+  });
+
+  it('the value-free preflight refuses a production file without it, and lists it by name only', () => {
+    const missing = runPreflight({ ...good, IDENTITY_SALT: undefined });
+    expect(missing.status, missing.stderr).toBe(1);
+    expect(missing.stdout).toContain('MISSING  IDENTITY_SALT');
+    expect(missing.stdout).toMatch(/REFUSED[\s\S]*IDENTITY_SALT/);
+    const present = runPreflight(good);
+    expect(present.status, present.stderr).toBe(0);
+    expect(present.stdout).toContain('PRESENT  IDENTITY_SALT');
+    expect(present.stdout).not.toContain('synthetic-identity-boot-salt');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [row 331 · CONFIG-GUARDS] A kill switch left ON is printed by the preflight
+// before a deploy, in the SWITCHED OFF register, like any other capability that
+// starts fine while off. The SOS escalation worker is the case that matters.
+// ---------------------------------------------------------------------------
+describe('[row 331 · CONFIG-GUARDS] the preflight names every kill switch left on', () => {
+  const switchedOff = (stdout: string) => stdout.slice(stdout.indexOf('SWITCHED OFF'), stdout.indexOf('VERDICT'));
+
+  it('SOS_ESCALATION_WORKER_KILL=1 is printed under SWITCHED OFF, and the file still passes', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '1', OPS_ALERT_ESCALATION_KILL: '1' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).toContain('[SOS_ESCALATION_WORKER_KILL=1]');
+    expect(switchedOff(result.stdout)).toContain('[OPS_ALERT_ESCALATION_KILL=1]');
+  });
+
+  it('a kill switch at 0 or unset is not listed; the launch card lock (CARD_RAIL_KILL=1) always is', () => {
+    const result = runPreflight({ ...good, SOS_ESCALATION_WORKER_KILL: '0' });
+    expect(result.status, result.stderr).toBe(0);
+    expect(switchedOff(result.stdout)).not.toContain('SOS_ESCALATION_WORKER_KILL');
+    expect(switchedOff(result.stdout)).not.toContain('OPS_ALERT_ESCALATION_KILL');
+    expect(switchedOff(result.stdout)).toContain('[CARD_RAIL_KILL=1]');
+  });
+});
+
 // [V8] CONSENT_IP_PEPPER degrades silently (hashIp → null, attribution just
 // stops). Boot must at least be LOUD about it — a warning, not a refusal,
 // because the ledger's core evidence still writes without it.
@@ -660,51 +807,52 @@ describe('CONSENT_IP_PEPPER visibility [V8]', () => {
 });
 
 // ---------------------------------------------------------------------------
-// [R13 on current main] Two production boot rules meet here. #1272 lets a
-// cash-only launch start with the card rail declared OFF; R13 keeps live MMG
-// collection off until sandbox UAT proves the merchant reference round-trips
-// (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1). The merged configuration must keep
-// both: cards OFF is not a way past the MMG gate, and the MMG gate does not
-// stop a cash-only launch. Checked everywhere a booting server consults it:
-// the boot guard, the value-free preflight, and the two provider factories
-// the billing workers construct.
+// [R13 on current main → S1 · SWITCHES 21 Oct, Option A] #1272 lets a
+// cash-only launch start with the card rail declared OFF. R13 used to keep
+// live MMG off entirely until sandbox UAT proved the merchant reference round
+// trip (MMG_REFERENCE_ROUNDTRIP_VERIFIED=1), but that same flag ARMED the
+// unproven push rail. Now: live MMG boots for the checkout, its lookup and
+// reversals without the flag; the push rail is a separate switch production
+// refuses; the push factory the billing worker uses refuses in production
+// whatever the flags say. Checked everywhere a booting server consults it:
+// the boot guard, the value-free preflight, and the provider factories.
 // ---------------------------------------------------------------------------
-describe('[R13 on current main] cash-only production boot keeps the MMG reference gate', () => {
-  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: '1' };
-  const unverified = [undefined, '', '0', 'true', 'yes', '1 '];
+describe('[R13 → Option A] cash-only production boot: live MMG checkout, never the push rail', () => {
+  const cashOnly: Record<string, string | undefined> = { ...cardOff, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined };
+  const flags = [undefined, '', '0', 'true', 'yes', '1 ', '1'];
 
   afterEach(() => vi.unstubAllEnvs());
 
-  it('boots with cards OFF once the MMG reference round-trip is verified', () => {
-    expect(() => assertSafeBootConfig(cashOnly)).not.toThrow();
+  it.each(flags)('boots with cards OFF and live MMG whatever the round-trip flag says (%s)', (verified) => {
+    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified })).not.toThrow();
   });
 
-  it.each(unverified)('refuses cards OFF while the MMG reference round-trip is unverified (%s)', (verified) => {
-    expect(() => assertSafeBootConfig({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: verified }))
-      .toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
-  });
-
-  it('the value-free preflight gives the same two verdicts', () => {
+  it('the value-free preflight gives the same verdicts: live boots without the flag, the push switch is held', () => {
     const pass = runPreflight(cashOnly);
     expect(pass.status, pass.stdout + pass.stderr).toBe(0);
-    const held = runPreflight({ ...cashOnly, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined });
+    const held = runPreflight({ ...cashOnly, MMG_PUSH_RAIL_ON: '1' });
     expect(held.status, held.stdout + held.stderr).toBe(1);
-    expect(held.stdout).toContain('MMG_REFERENCE_ROUNDTRIP_VERIFIED');
+    expect(held.stdout).toContain('MMG_PUSH_RAIL_ON');
   });
 
-  it('the workers get a card rail that refuses locally and live MMG only once verified', async () => {
+  it('the workers get a card rail that refuses locally, live MMG for the checkout lookup and reversals, and NO push rail', async () => {
     const { getPaymentProvider } = await import('../providers/payment/payment-provider');
-    const { getMmgProvider, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
+    const { getMmgProvider, getMmgLookupProvider, getMmgReversalClient, mmgPushRailOn, LiveMmgProvider } = await import('../providers/mmg/mmg-provider');
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('a boot check never contacts a provider'));
     try {
       for (const [name, value] of Object.entries(cashOnly)) vi.stubEnv(name, value);
       const cards = getPaymentProvider();
       await expect(cards.chargeToken({ token: 'synthetic', amount: 1, currencyCode: 'GYD', idempotencyKey: 'boot-check', description: 'boot check' }))
         .resolves.toMatchObject({ status: 'failed', code: 'CARD_RAIL_DISABLED' });
-      expect(getMmgProvider()).toBeInstanceOf(LiveMmgProvider);
-      for (const verified of unverified) {
-        vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
-        expect(() => getMmgProvider(), String(verified)).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+      expect(getMmgLookupProvider()).toBeInstanceOf(LiveMmgProvider);
+      expect(getMmgReversalClient()).toBeInstanceOf(LiveMmgProvider);
+      for (const verified of flags) {
+        for (const push of [undefined, '1']) {
+          vi.stubEnv('MMG_REFERENCE_ROUNDTRIP_VERIFIED', verified);
+          vi.stubEnv('MMG_PUSH_RAIL_ON', push);
+          expect(mmgPushRailOn(), `${verified}/${push}`).toBe(false);
+          expect(() => getMmgProvider(), `${verified}/${push}`).toThrow(/MMG_PUSH_RAIL_ON|MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+        }
       }
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -738,9 +886,11 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     MMG_CHECKOUT_PRIVATE_KEY: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
   });
 
-  it('off — unset or exactly 0 — changes nothing', () => {
+  it('off — unset or exactly 0 — changes nothing (with MMG off in production, and outside production)', () => {
     expect(() => assertSafeBootConfig(good)).not.toThrow();
-    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    // [22 Oct] Live MMG in production now needs the checkout on (its own describe below); with MMG off, off changes nothing.
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: '0' })).not.toThrow();
+    expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'disabled', MMG_CHECKOUT_ENABLED: undefined })).not.toThrow();
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development' })).not.toThrow();
   });
 
@@ -752,7 +902,7 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
   it('enabled on the live driver without its configuration refuses to start — development (staging) included', () => {
     expect(() => assertSafeBootConfig({ NODE_ENV: 'development', MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '1' }))
       .toThrow(/MMG_CHECKOUT_MERCHANT_ID is required/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: '1' })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_CHECKOUT_URL: undefined })).toThrow(/MMG_CHECKOUT_URL must be set explicitly in production/);
   });
 
   it('[DS632] MMG_CHECKOUT_CREATION_ZONE is exactly GUYANA_WALL_CLOCK or UTC, or unset: anything else refuses to start, in production and outside it, the checkout on or off', () => {
@@ -771,6 +921,53 @@ describe('MMG hosted checkout — the boot guard, in every mode', () => {
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn() })).not.toThrow();
     expect(() => assertSafeBootConfig({ ...good, ...checkoutOn(), MMG_CHECKOUT_URL: 'https://mmgpg.mmgtest.net/mmg-pg/web/payments' }))
       .toThrow(/non-UAT MMG_CHECKOUT_URL/);
+  });
+});
+
+// [22 Oct, COORD ruling on REVIEW-M's note] Production never sends MMG charge
+// requests (MMG_PUSH_RAIL_ON is refused), so with MMG live the checkout page is
+// the only MMG way to pay. Live MMG with the checkout off would leave partners
+// no way to pay with MMG: production refuses to boot it. (The fee pause holds
+// in that state too: fee-pause-pay-path.test.ts.) Nothing else changes: MMG off
+// boots with the checkout off, and outside production nothing new is refused.
+// ---------------------------------------------------------------------------
+describe('[22 Oct] production refuses live MMG without the MMG checkout', () => {
+  const refusal = /MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1/;
+
+  it.each([undefined, '', '0'])('refuses MMG_DRIVER=live with MMG_CHECKOUT_ENABLED=%j, and names the way out', (flag) => {
+    let message = '';
+    try {
+      assertSafeBootConfig({ ...good, MMG_CHECKOUT_ENABLED: flag });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(refusal);
+    expect(message).toContain('MMG_DRIVER=disabled');
+    expect(message).toMatch(/Refusing to start\.$/);
+  });
+
+  it('the control: the same base with the checkout on boots', () => {
+    expect(() => assertSafeBootConfig(good)).not.toThrow();
+  });
+
+  it('outside production, live MMG without the checkout is not refused by this rule', () => {
+    for (const mode of ['development', 'test']) {
+      let message = '';
+      try {
+        assertSafeBootConfig({ NODE_ENV: mode, MMG_DRIVER: 'live', MMG_CHECKOUT_ENABLED: '0' });
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, mode).not.toMatch(refusal);
+    }
+  });
+
+  it('the value-free preflight gives the same verdict', () => {
+    const refused = runPreflight({ ...good, MMG_CHECKOUT_ENABLED: '0' });
+    expect(refused.status, refused.stdout + refused.stderr).toBe(1);
+    expect(refused.stdout).toContain('MMG_DRIVER=live in production needs MMG_CHECKOUT_ENABLED=1');
+    const pass = runPreflight(good);
+    expect(pass.status, pass.stdout + pass.stderr).toBe(0);
   });
 });
 
@@ -912,6 +1109,7 @@ describe('[PT-1 · PT-4] card rail v2 in production: only the real provider set 
 describe('[PROD-PATH] production with MMG fully off', () => {
   const mmgOff: Record<string, string | undefined> = {
     ...cardOff,
+    ...Object.fromEntries(Object.keys(baseCheckout).map((name) => [name, undefined])),
     MMG_DRIVER: 'disabled',
     MMG_API_URL: undefined,
     MMG_API_KEY: undefined,
@@ -935,9 +1133,9 @@ describe('[PROD-PATH] production with MMG fully off', () => {
     expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: driver })).toThrow(/MMG_DRIVER/);
   });
 
-  it('keeps every live gate: live is still refused without its credentials or round-trip proof', () => {
+  it('keeps every live gate: live is still refused without its credentials, and the push rail switch is refused', () => {
     expect(() => assertSafeBootConfig({ ...mmgOff, MMG_DRIVER: 'live' })).toThrow(/MMG_/);
-    expect(() => assertSafeBootConfig({ ...good, MMG_REFERENCE_ROUNDTRIP_VERIFIED: undefined })).toThrow(/MMG_REFERENCE_ROUNDTRIP_VERIFIED/);
+    expect(() => assertSafeBootConfig({ ...good, MMG_PUSH_RAIL_ON: '1' })).toThrow(/MMG_PUSH_RAIL_ON/);
     expect(() => assertSafeBootConfig({ ...good, MMG_DRIVER: 'sandbox' })).toThrow(/MMG_DRIVER/);
   });
 
@@ -1136,4 +1334,89 @@ describe('[LAUNCH-LOCK] production refuses to boot with card payments or ads on'
     expect(result.stdout).toContain('CARD_RAIL_ENROLL must be unset or 0');
     expect(result.stdout).toContain('ADS_ENABLED must be unset or 0');
   });
+});
+
+describe('[TA-S0-003 · R3] the contract posture runs on the two least-privilege logins only', () => {
+  const APP_URL = 'postgresql://swift_app_login:app-fixture-secret@postgres:5432/swift';
+  const SYSTEM_URL = 'postgresql://swift_system_login:system-fixture-secret@postgres:5432/swift';
+  const walled: Record<string, string | undefined> = {
+    ...good, TENANT_RLS_BIND: '1', TENANT_UNSCOPED_ACCESS: 'deny', DATABASE_URL: APP_URL, SYSTEM_DATABASE_URL: SYSTEM_URL,
+  };
+  const refusal = (env: Record<string, string | undefined>) => {
+    try {
+      assertSafeBootConfig(env);
+      return null;
+    } catch (error) {
+      return (error as Error).message;
+    }
+  };
+
+  it('boots on swift_app_login + swift_system_login with unscoped access denied', () => {
+    expect(refusal(walled)).toBeNull();
+  });
+
+  it.each([
+    ['unscoped access only counted', { TENANT_UNSCOPED_ACCESS: 'log' }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['unscoped access unset', { TENANT_UNSCOPED_ACCESS: undefined }, /TENANT_UNSCOPED_ACCESS is not deny/],
+    ['the expand declaration riding along', { TENANT_WALL_EXPAND_ATTESTED: '1' }, /TENANT_WALL_EXPAND_ATTESTED is set/],
+    ["the owner's password in the process", { POSTGRES_PASSWORD: 'owner-fixture-secret' }, /owner's password/],
+    ['no request URL', { DATABASE_URL: undefined }, /DATABASE_URL is missing/],
+    ['a request URL that is not a postgres URL', { DATABASE_URL: 'mysql://swift_app_login:x@postgres/swift' }, /DATABASE_URL is missing or not/],
+    ['no system URL', { SYSTEM_DATABASE_URL: undefined }, /SYSTEM_DATABASE_URL is missing/],
+    ['the owner as the request login', { DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /DATABASE_URL does not sign in as swift_app_login/],
+    ['postgres as the request login', { DATABASE_URL: 'postgresql://postgres:owner-fixture-secret@postgres:5432/swift' }, /does not sign in as swift_app_login/],
+    ['the system login as the request login', { DATABASE_URL: SYSTEM_URL }, /does not sign in as swift_app_login/],
+    ['the owner as the system login', { SYSTEM_DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' }, /SYSTEM_DATABASE_URL does not sign in as swift_system_login/],
+    ['one login for both', { SYSTEM_DATABASE_URL: APP_URL }, /does not sign in as swift_system_login/],
+    ['another database', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/swift', ':5432/other') }, /different databases/],
+    ['another host', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace('@postgres:', '@elsewhere:') }, /different databases/],
+    ['another port', { SYSTEM_DATABASE_URL: SYSTEM_URL.replace(':5432/', ':5433/') }, /different databases/],
+  ])('refuses %s, naming no value', (_label, change, pattern) => {
+    const message = refusal({ ...walled, ...change });
+    expect(message).toMatch(/^FATAL: TENANT_RLS_BIND=1 in production/);
+    expect(message).toMatch(pattern);
+    for (const value of ['fixture-secret', 'elsewhere', 'mysql://', '5433']) expect(message).not.toContain(value);
+  });
+
+  it('touches nothing without TENANT_RLS_BIND=1, and nothing outside production', () => {
+    // Today's expand posture (staging, production before Phase C) is unchanged.
+    expect(refusal({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', DATABASE_URL: 'postgresql://swift:owner-fixture-secret@postgres:5432/swift' })).toBeNull();
+    expect(refusal({ ...good, TENANT_RLS_BIND: '0', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).toBeNull();
+    for (const NODE_ENV of ['development', 'test']) {
+      expect(() => assertWallLoginConfig({ NODE_ENV, TENANT_RLS_BIND: '1', DATABASE_URL: 'postgresql://swift:o@postgres:5432/swift' })).not.toThrow();
+    }
+  });
+
+  it('the deploy preflight mirrors the compose overlay when it reads the store', () => {
+    // The store after Phase C holds the owner's password (postgres and migrate
+    // still use it) AND the two runtime URLs. The overlay hands the API only the
+    // URLs; without it the API gets only the owner's parts.
+    const directory = mkdtempSync(join(tmpdir(), 'swift-wall-preflight-'));
+    try {
+      const secrets = join(directory, 'secrets');
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, 'POSTGRES_PASSWORD'), 'owner-fixture-secret');
+      writeFileSync(join(secrets, 'DATABASE_URL'), APP_URL);
+      writeFileSync(join(secrets, 'SYSTEM_DATABASE_URL'), SYSTEM_URL);
+      const run = (candidate: Record<string, string | undefined>) => {
+        const file = join(directory, 'candidate.txt');
+        writeFileSync(file, Object.entries(candidate).filter((e): e is [string, string] => e[1] !== undefined)
+          .map(([name, value]) => `${name}=${value}`).join('\n'));
+        return spawnSync(join(process.cwd(), 'node_modules/.bin/tsx'), [join(process.cwd(), '../../deploy/preflight.ts'), file, '--secrets-dir', secrets],
+          { encoding: 'utf8', env: { PATH: process.env['PATH'] ?? '' } });
+      };
+      // The overlay hands the two URLs over as files from the store, never as settings.
+      const walledSettings = Object.fromEntries(Object.entries(walled)
+        .filter(([name]) => name !== 'DATABASE_URL' && name !== 'SYSTEM_DATABASE_URL'));
+      const contract = run(walledSettings);
+      expect(contract.stdout + contract.stderr).not.toMatch(/both set/);
+      expect(contract.stdout).toMatch(/PASS/);
+      const expand = run({ ...good, TENANT_WALL_EXPAND_ATTESTED: '1', POSTGRES_HOST: 'postgres', POSTGRES_USER: 'swift', POSTGRES_DB: 'swift' });
+      expect(expand.stdout + expand.stderr).not.toMatch(/both set/);
+      expect(expand.stdout).toMatch(/PASS/);
+      for (const output of [contract, expand]) expect(output.stdout + output.stderr).not.toContain('fixture-secret');
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  }, 60_000);
 });

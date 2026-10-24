@@ -1,10 +1,12 @@
 import { PrismaClient } from '@prisma/client';
 import { unscopedAccessPolicy, rlsBindEnabled } from '../lib/rls-attestation';
 export { unscopedAccessPolicy, rlsBindEnabled };
-import { destructiveGuardExtension, isTestRuntime } from '../lib/test-target-lock';
+import { destructiveGuardExtension, isTestRuntime, refuseNonTestDatabaseInVitest } from '../lib/test-target-lock';
+import { sessionCredentialDigestExtension } from '../lib/session-credential';
 import fp from 'fastify-plugin';
 import type { FastifyInstance } from 'fastify';
-import { getTenantContext, tenantContext, type TenantMode } from './tenant-context';
+import { getOwnerUserId, getTenantContext, tenantContext, type TenantMode } from './tenant-context';
+import { ownerRlsBindEnabled } from '../lib/owner-rls';
 import { tenantUnscopedAccessCounter, tenantBindCounter } from './observability';
 import { poolRoleForApiProcess, resolveDatabaseUrl } from '../utils/db-pool';
 import { isDevelopment } from '../utils/runtime-mode';
@@ -96,6 +98,8 @@ const TENANT_QUERY_EXTENSIONS = {
   providerPayment: scoped,
   // [MMG checkout 2/6] A partner's MMG checkout and every observation of it.
   mmgCheckoutIntent: scoped, mmgCheckoutKey: scoped, mmgCheckoutObservation: scoped,
+  // [MMG REVERSAL] A fee payment returned to the payer: their operator's money.
+  mmgFeeReversal: scoped,
   billingDunningClock: scoped, billingObligationTransition: scoped, paymentConfirmationHold: scoped, billingFeeNotice: scoped, billingNoticeHandoff: scoped,
   tenantBillingCurrency: scoped, trialGrant: scoped,
   moverFeeAuthority: scoped, moverFeeSubscription: scoped,
@@ -151,6 +155,7 @@ const TENANT_QUERY_EXTENSIONS = {
   mmgRefundObligation: scoped,
   mmgRefundSend: scoped,
   ratingOutbox: scoped,
+  verificationDecisionOutbox: scoped,
   privilegedApproval: scoped,
   sensitiveReadLog: scoped,
   // [MKT-2] The stock ledger is tenant-owned: one operator's inventory
@@ -231,7 +236,10 @@ let systemClient: PrismaClient | null = null;
 export function systemPrismaClient(): PrismaClient | null {
   const url = process.env['SYSTEM_DATABASE_URL'];
   if (!url) return null;
-  if (!systemClient) systemClient = systemConnection(new PrismaClient({ datasourceUrl: url }));
+  if (!systemClient) {
+    refuseNonTestDatabaseInVitest('SYSTEM_DATABASE_URL', url); // [AUD-G7-040] no-op outside vitest
+    systemClient = systemConnection(new PrismaClient({ datasourceUrl: url }));
+  }
   return systemClient;
 }
 /** Test seam: route system work to a given client (a raw client on the system
@@ -242,6 +250,14 @@ export function setSystemPrismaClient(client: PrismaClient | null): void { syste
  *  connection — the append-only evidence rule, the tenant predicate for any
  *  tenant-bound query run on it, and (in tests) the destructive guard — because
  *  a system transaction now runs every one of its queries there. */
+/* SESSION_DIGEST_INNERMOST — [Row 231] Session credentials at rest are digests
+ * (lib/session-credential.ts). The digest extension is the LAST `$extends` of
+ * every client — the process client, the system connection and the probe
+ * client — so it is the innermost layer: the layers above it (the test guard,
+ * the tenant scoping, the bindings that may re-issue a query on the system
+ * connection) all see the plaintext the caller passed, and whichever
+ * connection finally runs the query digests it exactly once. Installed any
+ * higher, a re-issued session query would be digested twice and match nothing. */
 /** The test-mode destructive guard (a no-op extension outside tests). Installed FIRST, so it is the outermost layer. */
 const testGuardOutermost = () => (isTestRuntime() ? destructiveGuardExtension() : { name: 'testTargetLockInactive' });
 
@@ -252,7 +268,9 @@ function systemConnection(raw: PrismaClient): PrismaClient {
   // is the engine's own), so tests exercise production's transaction routing.
     .$extends(testGuardOutermost())
     .$extends(orderStatusLogAppendOnly)
-    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS }) as unknown as PrismaClient;
+    .$extends({ name: 'tenantScope', query: SYSTEM_TENANT_QUERY_EXTENSIONS as typeof TENANT_QUERY_EXTENSIONS })
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension()) as unknown as PrismaClient;
 }
 
 /** [MASTER-019] A system query that could only run by leaving the caller's
@@ -314,6 +332,17 @@ type ScopeParams = {
 /** Which connection a scoping extension is installed on. */
 type Connection = 'request' | 'system';
 type BatchClient = { $transaction: (q: never[]) => Promise<unknown[]>; $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => unknown };
+
+/** [TEN-03 · item 20] THE binding statement, issued wherever a tenant is bound
+ *  (a query's batch, a transaction's first statement): the tenant, and with
+ *  OWNER_RLS_BIND=1 the person the request acts for beside it — '' when it
+ *  acts for none, so an owner-walled table then shows nothing (fail closed).
+ *  Off, it is exactly the tenant binding it always was. */
+function bindingStatement<R>(client: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => R }, tenantId: string): R {
+  if (!ownerRlsBindEnabled()) return client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+  const userId = getOwnerUserId() ?? '';
+  return client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true), set_config('app.current_user', ${userId}, true)`;
+}
 /** The clients one scoping extension works with: the client whose batch binds
  *  the tenant, and the system connection for system work outside a transaction. */
 interface ScopeWiring { batch: () => BatchClient; system: () => PrismaClient | null }
@@ -498,30 +527,103 @@ function rawTenantBindingExtension(wiring: ScopeWiring) {
  *  for exactly this statement. Inside a caller's own interactive transaction
  *  the batch cannot be formed; the query then runs on that transaction,
  *  which must have been bound with `bindTenantTransaction` — under a
- *  NOBYPASSRLS login an unbound transaction sees ZERO rows (fail closed). */
-async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient): Promise<unknown> {
+ *  NOBYPASSRLS login an unbound transaction sees ZERO rows (fail closed).
+ *  `label` names the counter label: a tenant model, or [W0] a model without a
+ *  tenantId bound only so its walled relations are read in the tenant. */
+type BindLabel = 'tenant' | 'nontenant';
+/** The counter label of a query re-issued on the system client. */
+type SystemLabel = 'system' | 'nontenant_system';
+async function bindTenant(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, tenantId: string, client: BatchClient, label: BindLabel = 'tenant'): Promise<unknown> {
   try {
-    const bind = client.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)` as unknown as Record<symbol, boolean>;
+    const bind = bindingStatement(client, tenantId) as unknown as Record<symbol, boolean>;
     bind[TENANT_BIND_STATEMENT] = true;
     const [, result] = await client.$transaction([bind as never, query(args) as never]);
-    tenantBindCounter.labels('tenant').inc();
+    tenantBindCounter.labels(label).inc();
     return result;
   } catch (err) {
     if (err instanceof Error && /transaction/i.test(err.message) && /(PrismaPromise|same client|batch)/i.test(err.message)) {
-      tenantBindCounter.labels('tenant_fallback_in_tx').inc();
+      tenantBindCounter.labels(`${label}_fallback_in_tx`).inc();
       return query(args);
     }
     throw err;
   }
+}
+
+/**
+ * [W0 · SCOPE-299 S1-A] A model WITHOUT a tenantId is bound too — never scoped.
+ *
+ * The 95 models without a tenantId carry no tenant predicate and no stamp: their
+ * rows are not walled. But their nested includes, selects and relation filters
+ * reach walled tables (Driver → user, VendorOwner → vendors, Cart → vendor,
+ * Rider counted through its account…), and Prisma runs those as separate
+ * statements of the same query. Under the contract posture a statement without
+ * `app.current_tenant` sees ZERO rows of a walled table: a required relation
+ * then throws, a relation filter matches nothing, an include comes back empty.
+ * So every such query runs on a connection that can see its walled relations:
+ *  - a request (or job) bound to a tenant: the same `[set_config, query]` batch
+ *    a tenant model gets, so its relations are read IN THAT TENANT (another
+ *    tenant's rows stay invisible — the wall holds);
+ *  - inside a transaction that began bound: there, on the bound connection —
+ *    or refused by name if this flow now asks for a different tenant;
+ *  - audited system work outside a transaction: re-issued on the system client;
+ *  - everything else (a pre-auth session read, a transaction that began
+ *    unbound, system work inside a caller's transaction, binding off, the
+ *    system connection itself): exactly as before.
+ * Off unless TENANT_RLS_BIND=1, like every other binding.
+ */
+function bindNonTenantModel(params: ScopeParams, wiring: ScopeWiring): Promise<unknown> {
+  const { model, operation, args, query } = params;
+  if (!model || !rlsBindEnabled()) return query(args);
+  const ctx = getTenantContext();
+  if (ctx.tenantId) {
+    const txTenant = boundTransactionTenant(params);
+    if (txTenant !== undefined) {
+      if (txTenant !== ctx.tenantId) {
+        tenantBindCounter.labels('tenant_switch_refused').inc();
+        return Promise.reject(new TenantSwitchInTransactionError(`${model}.${operation}`));
+      }
+      return query(args);
+    }
+    // A transaction that began unbound cannot be bound from outside it (a batch
+    // would run on another connection): unchanged, and counted.
+    if (inCallerTransaction(params)) {
+      tenantBindCounter.labels('nontenant_in_unbound_tx').inc();
+      return query(args);
+    }
+    return bindTenant(query, args, ctx.tenantId, wiring.batch(), 'nontenant');
+  }
+  if (ctx.mode === 'system') {
+    // [MASTER-019] A transaction's queries never move connection: unchanged, and counted.
+    if (inCallerTransaction(params)) {
+      tenantBindCounter.labels('nontenant_system_in_tx').inc();
+      return query(args);
+    }
+    return onSystemClient(query, args, model, operation, wiring.system(), 'nontenant_system');
+  }
+  return query(args);
+}
+/** [W0] The binding of every model without a tenantId, as one extension. A
+ *  tenant model passes straight through: tenantScope binds (and scopes) it. */
+function nonTenantBindingExtension(wiring: ScopeWiring) {
+  return {
+    name: 'nonTenantBinding',
+    query: {
+      $allModels: {
+        $allOperations: (params: ScopeParams) => (params.model && TENANT_MODELS.has(params.model.toLowerCase())
+          ? params.query(params.args)
+          : bindNonTenantModel(params, wiring)),
+      },
+    },
+  } as never;
 }
 /** [TEN-03] System work under binding: the same operation, re-issued on the
  *  system client (its own login). Without one, the walled login runs it
  *  unbound and the database shows ZERO rows — fail closed, never a leak.
  *  [MASTER-019] Only for a query that is NOT part of a transaction: a
  *  transaction's queries never move connection (see tenantScope). */
-async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, model: string, operation: string, sys: PrismaClient | null): Promise<unknown> {
+async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unknown>, args: Record<string, unknown>, model: string, operation: string, sys: PrismaClient | null, label: SystemLabel = 'system'): Promise<unknown> {
   if (!sys) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
-  tenantBindCounter.labels('system').inc();
+  tenantBindCounter.labels(label).inc();
   const delegate = (sys as unknown as Record<string, Record<string, (a: Record<string, unknown>) => Promise<unknown>>>)[model.charAt(0).toLowerCase() + model.slice(1)];
   const op = delegate?.[operation];
   if (!op) { tenantBindCounter.labels('system_no_client').inc(); return query(args); }
@@ -532,7 +634,7 @@ async function onSystemClient(query: (a: Record<string, unknown>) => Promise<unk
  *  context: the tenant, or the bypass role for system work. Idempotent. */
 export async function bindTenantTransaction(tx: { $executeRaw: (q: TemplateStringsArray, ...v: unknown[]) => Promise<unknown> }): Promise<void> {
   const ctx = getTenantContext();
-  if (ctx.tenantId) await tx.$executeRaw`SELECT set_config('app.current_tenant', ${ctx.tenantId}, true)`;
+  if (ctx.tenantId) await bindingStatement(tx, ctx.tenantId);
   // system work has no binding on the walled login: it belongs on the system client
 }
 
@@ -611,14 +713,14 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
           if (id === undefined || id === null) throw new Error('[R5] a tenant-bound transaction could not be identified');
           txId = String(id);
           boundInteractiveTransactions.set(txId, tenantId);
-          await tx.$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+          await bindingStatement(tx, tenantId);
           return fn(tx);
         }, options) as Promise<unknown>;
         return run.finally(() => { if (txId !== undefined) boundInteractiveTransactions.delete(txId); });
       }
       if (Array.isArray(input)) {
         tenantBindCounter.labels('tenant_tx').inc();
-        const bindFirst = (client as unknown as BatchClient).$executeRaw`SELECT set_config('app.current_tenant', ${tenantId}, true)`;
+        const bindFirst = bindingStatement(client as unknown as BatchClient, tenantId);
         return tenantContext.run({ ...current, batchTenant: tenantId }, async () => ((await own([bindFirst, ...input], options)) as unknown[]).slice(1));
       }
     }
@@ -659,6 +761,7 @@ function routeSystemTransactions<C extends object>(client: C, system: () => Pris
  *  identically. Only the pool sizing differs, through the URL the caller
  *  resolves for its role. */
 export function createScopedProcessClient(options: { datasourceUrl: string | undefined }): PrismaClient {
+  refuseNonTestDatabaseInVitest('DATABASE_URL', options.datasourceUrl); // [AUD-G7-040] no-op outside vitest
   let self: PrismaClient | undefined;
   const wiring: ScopeWiring = { batch: () => self as unknown as BatchClient, system: () => systemPrismaClient() };
   const scoping = Object.fromEntries(
@@ -679,7 +782,9 @@ export function createScopedProcessClient(options: { datasourceUrl: string | und
     .$extends(orderStatusLogAppendOnly).$extends({
       name: 'tenantScope',
       query: scoping,
-    }).$extends(rawTenantBindingExtension(wiring));
+    }).$extends(nonTenantBindingExtension(wiring)).$extends(rawTenantBindingExtension(wiring))
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension());
   self = routeSystemTransactions(extended, systemPrismaClient) as unknown as PrismaClient;
   return self;
 }
@@ -719,9 +824,13 @@ export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | nul
   // scoping layers inside it then see exactly what production sees (their inner query
   // is the engine's own), so tests exercise production's transaction routing.
   const guarded = raw.$extends(testGuardOutermost()).$extends(orderStatusLogAppendOnly) as unknown as PrismaClient;
+  const wiring: ScopeWiring = { batch: () => guarded as unknown as BatchClient, system: () => system };
   const extended = guarded
     .$extends(tenantScopeExtensionFor(guarded, system))
-    .$extends(rawTenantBindingExtension({ batch: () => guarded as unknown as BatchClient, system: () => system })) as unknown as PrismaClient;
+    .$extends(nonTenantBindingExtension(wiring))
+    .$extends(rawTenantBindingExtension(wiring))
+    // [Row 231] innermost: see SESSION_DIGEST_INNERMOST above
+    .$extends(sessionCredentialDigestExtension()) as unknown as PrismaClient;
   return routeSystemTransactions(extended, () => system);
 }
 
@@ -730,7 +839,7 @@ export function scopedClientFor(raw: PrismaClient, systemRaw: PrismaClient | nul
 // callers (auth, tests) that set the tenant through these re-exports are then
 // guaranteed to touch the SAME AsyncLocalStorage instance the extension reads —
 // immune to a test runner or bundler loading tenant-context twice.
-export { enterTenant, beginRequestTenantContext, runWithTenant, runWithoutTenant, getTenantId } from './tenant-context';
+export { enterTenant, enterOwner, beginRequestTenantContext, runWithTenant, runWithoutTenant, getTenantId } from './tenant-context';
 
 // $extends changes the client's TS type but not its runtime surface (create,
 // findMany, $transaction, $connect, $disconnect all remain). Consumers only need

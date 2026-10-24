@@ -5,6 +5,7 @@ import { issueReceipt, cashJournalCsv } from '../modules/billing/receipts';
 import { parseCsv } from '../utils/csv';
 import { runBillingInvariants } from '../modules/billing/invariants';
 import { cleanupBillingClocks } from './helpers/billing-clock-cleanup';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // Scenario R (gapless receipts under concurrency) + the nightly invariants
 // [san spec 24.2/16.3]: balance provability, the wrongful-suspension
@@ -87,13 +88,14 @@ describe('scenario R — gapless sequential receipts', () => {
 
   it('the cash journal CSV carries receipt, SAN, account, amount', async () => {
     const csv = await cashJournalCsv(prisma, new Date(Date.now() - 3_600_000), new Date(Date.now() + 3_600_000));
-    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref');
+    // [owner Q-1654-BOOKS B] a status column marks a returned payment's receipt
+    expect(csv.split('\n')[0]).toBe('date,receipt_no,san,account,type,channel,amount_gyd,mmg_ref,status');
     expect(csv).toContain('Receipt Vendor');
     expect(csv).toContain('2100.00');
   });
 
   it('[security review: csv-formula-injection] a vendor name, channel or reference shaped like a formula reaches the journal as text', async () => {
-    const name = `=HYPERLINK("http://evil.example/${nanoid(6)}","open")`;
+    const name = `=HYPERLINK("http://evil.example/${wordFreeTag(8)}","open")`;
     const { sub } = await makeVendorSub({}, name);
     const e = await topupEvent(sub.id, 2100);
     const { receiptNumber } = await issueReceipt(prisma, { subscriptionId: sub.id, billingEventId: e.id, amount: 2100, channel: '@SUM(A1)', mmgRef: '+1+1', tenantId: TENANT });

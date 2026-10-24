@@ -5,10 +5,19 @@ export const PROHIBITED_CLASS_LABELS: Record<ProhibitedClass, string> = {
   ALCOHOL: 'alcohol',
   TOBACCO: 'tobacco and cigarettes',
   VAPES: 'vapes',
+  DRUGS: 'cannabis and illegal drugs',
   MEDICINE: 'medicines',
   AGE_RESTRICTED: '18+ items',
   LPG: 'cooking gas (LPG)',
   FUEL: 'fuel',
+  EXPLOSIVES: 'fireworks and explosives',
+  PESTICIDES: 'pesticides and toxic chemicals',
+  PRECIOUS_MINERALS: 'raw gold, diamonds and precious stones',
+  WEAPONS: 'firearms, ammunition and replicas',
+  WILDLIFE: 'protected wildlife',
+  COUNTERFEIT: 'counterfeit goods',
+  CURRENCY: 'currency and payment cards',
+  LEGAL_SERVICES: 'legal services',
 };
 
 /** Where in the partner's own text a banned word was found. */

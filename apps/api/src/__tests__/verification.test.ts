@@ -47,7 +47,9 @@ const TAXI_MOVER_PHONE = `+${runBase + 6}`;
 const BICYCLE_MOVER_PHONE = `+${runBase + 7}`;
 const PREVIEW_MOVER_PHONE = `+${runBase + 8}`;
 const FACE_MATCH_PHONE = `+${runBase + 9}`;
-const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE];
+const CONSENT_ID_PHONE = `+${runBase + 10}`;
+const CONSENT_DOC_PHONE = `+${runBase + 11}`;
+const ALL_PHONES = [MOVER_PHONE, VENDOR_PHONE, L2_AUTO_PHONE, L2_MANUAL_PHONE, ADMIN_PHONE, TAXI_MOVER_PHONE, BICYCLE_MOVER_PHONE, PREVIEW_MOVER_PHONE, FACE_MATCH_PHONE, CONSENT_ID_PHONE, CONSENT_DOC_PHONE];
 
 // [VERIFY-DOCS · owner rulings 6 Oct 2026] A motorbike courier's REQUIRED documents are the motor
 // documents; the licence is their photo ID, so the national ID — and, for every mover, the police
@@ -339,6 +341,8 @@ describe('Manual review queue — submit, reject, resubmit, approve', () => {
         ...(docTypeExpires(doc.docType) ? { expiresAt: new Date(Date.now() + 200 * 24 * 60 * 60 * 1000).toISOString() } : {}),
         // [VERIFY-DOCS] …and types the ID/licence number or the clearance's issue date.
         ...reviewerTyped(doc.docType, doc.id),
+        // [R13] …and, for any motor vehicle's insurance, records the hire-or-reward (commercial use) decision.
+        ...(doc.docType === 'vehicle_insurance' ? { insurance: { insurerName: 'Synthetic Mutual', policyNumber: `SYN-${doc.id.slice(-6)}`, coverageClass: 'HIRE', hireClassConfirmed: true, plateCrossChecked: true } } : {}),
       };
       const res = await inject('PUT', `/api/v1/admin/verification/${doc.id}/approve`, body, adminToken);
       expect(res.statusCode, doc.docType).toBe(200);
@@ -1162,5 +1166,62 @@ describe('[A-19] the reviewer can see what they are asked to cross-check', () =>
       const routes = readFileSync(join(__dirname, '../modules/admin/admin.routes.ts'), 'utf8');
       expect(routes).toMatch(/driver: \{ select: \{ licensePlate: true/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [R17 · legal research D2/B1/G4, in-app ¶15] The tick before an upload is recorded in the consent ledger,
+// anchored to the tick's exact words, only when the client says it showed it (website, phone build 12). Builds
+// 9-11 send consent: true with no tick: their document is accepted as today and no ledger row is fabricated.
+// ---------------------------------------------------------------------------
+describe('[R17] upload consent ticks are recorded in the consent ledger', () => {
+  const consentRows = (userId: string, documentType: string) => app.prisma.consentRecord.findMany({
+    where: { subjectId: userId, documentType }, select: { documentVersion: true, action: true, subjectType: true, evidence: true },
+  });
+
+  it('a partner document sent with the tick writes a document_processing_consent row; one without writes none; a wrong tick is refused', async () => {
+    const mover = await signup(CONSENT_DOC_PHONE, 'MOVER');
+    const moverUserId = mover.user.id as string;
+    const moverToken = mover.tokens.accessToken as string;
+    const before = (await consentRows(moverUserId, 'document_processing_consent')).length;
+    const plain = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-plain'), consent: true, privacyNoticeVersion: 'v1',
+    }, moverToken);
+    expect(plain.statusCode, plain.body).toBe(201);
+    expect(await consentRows(moverUserId, 'document_processing_consent')).toHaveLength(before);
+
+    const wrong = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-wrong'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, moverToken);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error.code).toBe('CONSENT_TICK_MISMATCH');
+
+    const ticked = await inject('POST', '/api/v1/verification/documents', {
+      role: 'MOVER', docType: MOVER_DOCS[0], fileUrl: await ownedVerificationFixture(app.prisma, moverUserId, 'r17-ticked'), consent: true, privacyNoticeVersion: 'v1', consentTick: 'document_v1',
+    }, moverToken);
+    expect(ticked.statusCode, ticked.body).toBe(201);
+    const rows = await consentRows(moverUserId, 'document_processing_consent');
+    expect(rows).toHaveLength(before + 1);
+    expect(rows[rows.length - 1]).toMatchObject({ documentVersion: 'v1', action: 'granted', subjectType: 'driver', evidence: { control: 'upload_consent_checkbox', docType: MOVER_DOCS[0] } });
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'document_processing_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I consent to Swift processing this document for verification, per the privacy notice. It is stored encrypted and shared only as the Privacy Policy explains.');
+  });
+
+  it('a customer ID sent with the tick writes a customer_id_consent row (the in-app ¶15 words)', async () => {
+    const customer = await signup(CONSENT_ID_PHONE, 'CUSTOMER');
+    const res = await inject('POST', '/api/v1/verification/identity', {
+      idDocumentUrl: await ownedVerificationFixture(app.prisma, customer.user.id, 'r17-id'),
+      consent: true, privacyNoticeVersion: 'v1', consentTick: 'customer_id_v1',
+    }, customer.tokens.accessToken);
+    expect(res.statusCode, res.body).toBe(201);
+    expect(await consentRows(customer.user.id, 'customer_id_consent')).toEqual([
+      expect.objectContaining({ documentVersion: 'v1', action: 'granted', subjectType: 'customer' }),
+    ]);
+    const doc = await app.prisma.legalDocument.findUniqueOrThrow({
+      where: { documentType_version_locale: { documentType: 'customer_id_consent', version: 'v1', locale: 'en-GY' } },
+    });
+    expect(doc.renderedText).toBe('I agree Swift may keep this ID photo to unlock taxi rides and larger orders, as the Privacy Policy explains.');
   });
 });

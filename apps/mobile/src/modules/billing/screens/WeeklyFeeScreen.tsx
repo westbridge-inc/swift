@@ -10,7 +10,7 @@ import { Card, ErrorState, Header, LoadingBlock, PillButton, Screen, T } from '.
 import { weeklyFeeApi } from '../../../services/api';
 import { getAuthSessionSnapshot, useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
-import { checkoutReferences, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
+import { checkoutReferences, checkoutSeller, checkoutWords, dueLine, feeDate, feeMoney, FeeCheckoutSession, liveMmg, subscriptionWords, type CheckoutView, type FeeFamily, type FeeSubscription } from '../../../lib/weeklyFee';
 import { liveCard } from '../../../lib/cardFee';
 import { CardPaySection, cardContextKey, hasCardSession } from '../components/CardPaySection';
 
@@ -111,8 +111,20 @@ export function WeeklyFeeScreen({ family, sub, loading, error, refresh, checkout
               <T variant="body">{checkoutWords(shown, c.ref === view.checkout?.ref && view.returned)}</T>
               {/* The references support finds this payment by: ours always, MMG's once confirmed. */}
               {checkoutReferences(shown).map((r) => <T key={r.label} variant="caption" tone="muted" selectable>{r.label}: {r.value}</T>)}
+              {/* [Owner 15 Oct 2026 · ruling #63] who sold the weekly fee, as the API states it */}
+              {checkoutSeller(shown) ? <T variant="caption" tone="muted" selectable testID="fee-seller">{checkoutSeller(shown)}</T> : null}
             </Card>;
           }) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No recent checkouts.</T>}
+        </View>
+        <View>
+          <T variant="heading">Receipts</T>
+          {/* [owner legal plan R12; OWNER-SESSIONS 22 Oct] Printed by the API, line by line: the same
+              receipt support and the accountant see, and the web console shows (components/weekly-fee.tsx):
+              the seller's company details, the receipt number, the week's amount and "Not a VAT invoice".
+              The phone never showed it. Nothing here is worded or computed on the phone. */}
+          {sub.feeReceipts?.length ? sub.feeReceipts.map((r) => <Card key={r.receiptNumber} testID={`fee-receipt-${r.receiptNumber}`} style={{ marginTop: space.md, gap: space.xs }}>
+            {r.lines.map((line, i) => <T key={i} variant="label" weight={i === 0 ? 'semibold' : undefined} selectable>{line}</T>)}
+          </Card>) : <T variant="caption" tone="muted" style={{ marginTop: space.md }}>No receipts yet.</T>}
         </View>
       </ScrollView>}
   </Screen>;

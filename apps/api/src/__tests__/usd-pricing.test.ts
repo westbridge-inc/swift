@@ -148,16 +148,44 @@ describe('rate governance over HTTP (Part 12/20)', () => {
     expect((rows.json().data as unknown[]).length).toBeGreaterThanOrEqual(2);
   });
 
-  it('price-book set keeps history (deactivate + create) and fx-preview computes the plan table purely', async () => {
+  it('[F2 · GUARDRAILS §7] a price is never set to change at once: no sooner than 14 days, and the price in force stays until then', async () => {
     const admin = await makeAdmin();
     const tier = `FXTEST-${nanoid(4)}`;
-    await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 25 }, admin.token);
-    await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 30 }, admin.token);
+    const day = 86_400_000;
+    // No date, or a date sooner than 14 days: refused, nothing written.
+    const undated = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 25 }, admin.token);
+    expect(undated.statusCode).toBe(400);
+    const soon = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 25, effectiveFrom: new Date(Date.now() + 13 * day).toISOString() }, admin.token);
+    expect(soon.statusCode).toBe(400);
+    expect(soon.json().error.code).toBe('PRICE_CHANGE_TOO_SOON');
+    expect(await app.prisma.priceBookEntry.count({ where: { tier } })).toBe(0);
+    // 14 days or more: scheduled; every row is kept, none replaced.
+    const first = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 25, effectiveFrom: new Date(Date.now() + 15 * day).toISOString() }, admin.token);
+    expect(first.statusCode, first.body).toBe(200);
+    await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 30, effectiveFrom: new Date(Date.now() + 22 * day).toISOString() }, admin.token);
     const book = await get('/api/v1/admin/billing/price-book', admin.token);
     const mine = (book.json().data as Array<{ tier: string | null; active: boolean; amountUsd: number }>).filter((e) => e.tier === tier);
     expect(mine).toHaveLength(2); // history preserved
-    expect(mine.filter((e) => e.active)).toHaveLength(1);
-    expect(mine.find((e) => e.active)!.amountUsd).toBe(30);
+    expect(mine.filter((e) => e.active).map((e) => e.amountUsd).sort()).toEqual([25, 30]); // both scheduled, neither in force yet
+  });
+
+  it('[F2 · coordinator ruling 15 Oct] a LOWER price may start now (the next billing week); a higher one still waits 14 days', async () => {
+    const admin = await makeAdmin();
+    const tier = `FXTEST-${nanoid(4)}`;
+    await app.prisma.priceBookEntry.create({ data: { role: 'VENDOR', tier, amountUsd: 30, effectiveFrom: new Date(Date.now() - 86_400_000) } });
+    const lower = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 25, effectiveFrom: new Date(Date.now() + 60_000).toISOString() }, admin.token);
+    expect(lower.statusCode, lower.body).toBe(200);
+    const higher = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 35, effectiveFrom: new Date(Date.now() + 2 * 86_400_000).toISOString() }, admin.token);
+    expect(higher.statusCode).toBe(400);
+    expect(higher.json().error.code).toBe('PRICE_CHANGE_TOO_SOON');
+    const past = await put('/api/v1/admin/billing/price-book', { role: 'VENDOR', tier, amountUsd: 20, effectiveFrom: new Date(Date.now() - 2 * 86_400_000).toISOString() }, admin.token);
+    expect(past.statusCode).toBe(400);
+  });
+
+  it('fx-preview computes the plan table purely from the prices in force', async () => {
+    const admin = await makeAdmin();
+    const tier = `FXTEST-${nanoid(4)}`;
+    await app.prisma.priceBookEntry.create({ data: { role: 'VENDOR', tier, amountUsd: 30, effectiveFrom: new Date(Date.now() - 86_400_000) } });
 
     const preview = await get('/api/v1/admin/billing/fx-preview?quote=TTD&rate=6.79', admin.token);
     expect(preview.statusCode).toBe(200);

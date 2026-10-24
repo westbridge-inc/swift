@@ -28,10 +28,19 @@
 # keys in the store; no unfilled site details; and, for the whole stack, every
 # served name must already resolve to THIS host (Caddy obtains certificates
 # for them, and the public names stay on the old host until DNS moves).
+#
+# [DEPLOY-FIX · staging #14, 23 Oct] Once the checkout is at the requested SHA,
+# the rest of the deploy is THAT revision's pilot-up.sh: when it differs from
+# the script already running, it is started again from its first line (once;
+# see "the requested revision's own steps" below).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# The arguments exactly as given and the running script's own text, kept before
+# anything moves, for the restart after the checkout (below).
+PILOT_UP_ARGS=("$@")
+PILOT_UP_SELF="$HERE/${0##*/}"
 DATA_ONLY=0
 NO_PUBLIC=0
 PLACES_PHOTON=0
@@ -42,6 +51,7 @@ COMPOSE=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.yml
 ROUTING=(docker compose --project-directory "$HERE" -f "$HERE/docker-compose.routing.yml")
 
 die() { echo "FATAL: $*" >&2; exit 1; }
+PILOT_UP_SELF_TEXT="$(< "$PILOT_UP_SELF")" || die "cannot read the running deploy script $PILOT_UP_SELF"
 env_value() {
   grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true
 }
@@ -52,6 +62,15 @@ env_setting() {
 }
 
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "pass a full 40-character git commit SHA"
+# [DEPLOY-FIX] The stage this run deploys, and, in a restarted run (below), the
+# proof that it is the same stage and SHA the first run was asked for: a
+# restart that lost `--no-public` or `--data-only` would stand up the public
+# stack, so any mismatch refuses before anything else happens.
+PILOT_UP_MODE=full
+[ "$DATA_ONLY" -eq 0 ] || PILOT_UP_MODE=data-only
+[ "$NO_PUBLIC" -eq 0 ] || PILOT_UP_MODE=no-public
+[ -z "${PILOT_UP_REEXEC+set}" ] || [ "$PILOT_UP_REEXEC" = "$PILOT_UP_MODE $SHA" ] ||
+  die "PILOT_UP_REEXEC is set but does not name this stage and SHA ($PILOT_UP_MODE); a restarted deploy must keep the first run's arguments. Unset it, or run from a clean shell"
 [ "$(id -u)" -ne 0 ] || die "run as the non-root deploy user"
 [ -f "$HERE/.env" ] || die "deploy/.env is missing"
 # [PROD-PATH] One reading of deploy/.env. Compose takes the LAST of two lines
@@ -89,6 +108,32 @@ case "$PILOT_ENV" in
 esac
 [ "$NO_PUBLIC" -eq 0 ] || [ "$PILOT_ENV" = production ] ||
   die "--no-public is for the production host (the first boot before its DNS moves); a staging host deploys the whole stack"
+# [TA-S0-003 · R3] TENANT_RLS_BIND=1 is the business wall's contract posture:
+# every Compose command below also reads deploy/docker-compose.wall.yml, so the
+# API and the worker run on the two least-privilege logins (deploy/rls-logins.sh)
+# and never see the database owner's password. Without the line, nothing here
+# changes. The overlay owns the database wiring, so deploy/.env names none of it.
+WALL=0
+case "$(env_setting TENANT_RLS_BIND)" in
+  1) WALL=1; COMPOSE+=(-f "$HERE/docker-compose.wall.yml") ;;
+  "" | 0) ;;
+  *) [ "$PILOT_ENV" != production ] || die "PILOT_ENV=production needs TENANT_RLS_BIND to be exactly 1 (the wall's contract posture) or unset" ;;
+esac
+if [ "$WALL" -eq 1 ]; then
+  [ "$(env_setting TENANT_UNSCOPED_ACCESS)" = deny ] ||
+    die "TENANT_RLS_BIND=1 needs TENANT_UNSCOPED_ACCESS=deny: a request that never bound its tenant is refused, never counted"
+  [ -z "$(env_setting TENANT_WALL_EXPAND_ATTESTED)" ] ||
+    die "TENANT_RLS_BIND=1 refuses TENANT_WALL_EXPAND_ATTESTED: the wall-less declaration never rides along with the contract posture; remove the line"
+  for wall_name in DATABASE_URL_FILE SYSTEM_DATABASE_URL_FILE POSTGRES_PASSWORD_FILE; do
+    [ -z "$(env_value "$wall_name")" ] ||
+      die "TENANT_RLS_BIND=1: deploy/.env must not set $wall_name; deploy/docker-compose.wall.yml wires the two runtime logins and keeps the owner's password away from the API and the worker"
+  done
+fi
+# [item 20] The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is a separate,
+# later switch with its own staging journey run; Phase C switches the business
+# wall only. Production refuses the line until that switch is approved.
+[ "$PILOT_ENV" != production ] || [ -z "$(env_value OWNER_RLS_BIND)" ] ||
+  die "PILOT_ENV=production: deploy/.env sets OWNER_RLS_BIND, but the owner wall is switched separately (after its own staging journey run), never with Phase C; remove the line"
 API_HOST="$(env_value API_HOST)"
 [[ "$API_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*\.[a-zA-Z]{2,}$ ]] ||
   die "API_HOST must be a DNS hostname for $PILOT_ENV HTTPS"
@@ -313,6 +358,13 @@ if [ "$PILOT_ENV" = production ]; then
       *) die "PILOT_ENV=production refuses $locked_name unless it is unset or 0: no card payment and no ads until an attorney signs off (owner ruling, 13 Oct)" ;;
     esac
   done
+  # [Row 312] MALWARE_SCAN: every upload is scanned by the private clamd
+  # service on production (owner, 21 Oct: on for launch). Compose defaults it
+  # to clamd; deploy/.env may only leave it unset or say clamd.
+  case "$(env_setting MALWARE_SCAN)" in
+    "" | clamd) ;;
+    *) die "PILOT_ENV=production needs MALWARE_SCAN unset or exactly clamd: every upload is scanned by the private clamd service (owner ruling, 21 Oct)" ;;
+  esac
   # Address search (the API refuses to boot in production without a provider,
   # #1563): osm, the private Photon service this script then starts, or
   # google, the owner's key in the encrypted store. Which one is the owner's
@@ -406,6 +458,28 @@ git merge-base --is-ancestor "$SHA" origin/main ||
   die "the requested SHA is not on current origin/main"
 git switch --detach "$SHA"
 [ "$(git rev-parse HEAD)" = "$SHA" ] || die "checkout differs from requested SHA"
+# [DEPLOY-FIX · staging #14, 23 Oct] The requested revision's own steps. Bash
+# reads a script while it runs, and the switch above replaced this file with
+# the requested revision's: without this, every step below would be the
+# PREVIOUS revision's (staging #14 so skipped the new upload-scanner start and
+# its EICAR proof, and uploads failed closed until clamd was started by hand).
+# So when the checked-out script differs from the one running, it is started
+# again with the same arguments, in this same process (exec: same PID, same
+# log): every check above runs again under the requested revision's rules
+# (each only reads; nothing but the checkout has changed), its switch is then
+# a no-op, and the rest is that revision's. The marker names the stage and
+# the SHA: the restarted run refuses at its top unless both match, and a
+# restarted script that still differs refuses here instead of looping.
+PILOT_UP_CHECKED_OUT="$(< "$PILOT_UP_SELF")" ||
+  die "cannot read the checked-out deploy script at $SHA; the checkout moved, nothing else changed"
+if [ "$PILOT_UP_CHECKED_OUT" != "$PILOT_UP_SELF_TEXT" ]; then
+  [ -z "${PILOT_UP_REEXEC+set}" ] ||
+    die "the deploy script still differs from the checked-out one after restarting at $SHA; refusing to run another revision's steps (the checkout moved, nothing else changed)"
+  echo "pilot-up: $SHA has its own pilot-up.sh; restarting it ($PILOT_UP_MODE; its checks run again, then its steps)"
+  export PILOT_UP_REEXEC="$PILOT_UP_MODE $SHA"
+  exec "$BASH" "$PILOT_UP_SELF" ${PILOT_UP_ARGS[@]+"${PILOT_UP_ARGS[@]}"}
+fi
+unset PILOT_UP_REEXEC
 export SWIFT_TAG="$SHA"
 # [PROD-PATH] The website's build channel follows the host: the staging site
 # calls the staging API, the production site the production API, and the
@@ -435,10 +509,22 @@ STORE_BIN="$(command -v swift-secrets || true)"
 # default), so the list runs through sudo like the restart below; an unreadable
 # store fails loudly rather than reading as empty.
 STORED="$(sudo -n "$STORE_BIN" list)" || die "swift-secrets list failed (it reads the root-only credential store through sudo -n)"
+# [TA-S0-003 · owner ruling, 14 Oct] After Phase C the production host never
+# goes back to the database owner's login or the wall-less expand posture:
+# once deploy/rls-logins.sh has journaled or published the runtime logins, a
+# production deploy without TENANT_RLS_BIND=1 is refused. Staging is unchanged.
+if [ "${PILOT_ENV:-}" = production ] && [ "${WALL:-0}" -ne 1 ]; then
+  for wall_name in RLS_LOGIN_SWIFT_APP_LOGIN RLS_LOGIN_SWIFT_SYSTEM_LOGIN DATABASE_URL SYSTEM_DATABASE_URL; do
+    if grep -qx "$wall_name" <<< "$STORED"; then
+      die "PILOT_ENV=production: the encrypted store holds $wall_name, so Phase C (the least-privilege logins) has run on this host, and production never goes back to the database owner's login or the expand posture (owner ruling, 14 Oct). Set TENANT_RLS_BIND=1 and TENANT_UNSCOPED_ACCESS=deny and remove TENANT_WALL_EXPAND_ATTESTED (PILOT-RUNBOOK section 13)"
+    fi
+  done
+fi
 # Everything wired as NAME_FILE — hardwired in Compose or switched on in .env —
 # must be in the store, or the app refuses to boot after the old one is stopped.
 WIRED="$({
   grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]*_FILE: /run/secrets/[A-Z][A-Z0-9_]*' "$HERE/docker-compose.yml" || true
+  [ "${WALL:-0}" -ne 1 ] || grep -oE '^[[:space:]]+[A-Z][A-Z0-9_]*_FILE: /run/secrets/[A-Z][A-Z0-9_]*' "$HERE/docker-compose.wall.yml" || true
   grep -oE '^[A-Z][A-Z0-9_]*_FILE=/run/secrets/[A-Z][A-Z0-9_]*' "$HERE/.env" || true
 } | sed -E 's#.*/run/secrets/##' | sort -u)"
 for name in $WIRED; do
@@ -513,6 +599,16 @@ if "osrm" not in s or any(x.get("ports") for x in s.values()):
 }
 verify_private_ports
 
+# [Row 324] Uploads outlive the application: the API and the worker must declare ONE
+# durable store (the same bucket, or one external shared volume), never a container
+# disk. Checked on the rendered configuration before anything is pulled, built or
+# stopped. The checker prints a fixed verdict only, never a configuration value.
+verify_upload_storage() {
+  "${COMPOSE[@]}" config --format json | python3 "$HERE/check-upload-storage.py" >/dev/null ||
+    die "upload storage topology refused: the API and the worker must share one durable store (one bucket, or one external volume)"
+}
+verify_upload_storage
+
 # [PROD-PATH] The database-only stage never runs under a serving API: a
 # migration under a live old binary is exactly what the full deploy stops
 # the API to avoid. Refused before anything is pulled or built.
@@ -535,7 +631,7 @@ if [ "$NO_PUBLIC" -eq 1 ]; then
 fi
 
 # Pull versioned infrastructure images, then build the exact checked-out API.
-"${COMPOSE[@]}" pull postgres redis meilisearch caddy
+"${COMPOSE[@]}" pull postgres redis meilisearch clamd caddy
 "${ROUTING[@]}" pull osrm
 [ "$PLACES_PHOTON" -eq 0 ] || "${ROUTING[@]}" pull photon
 "${COMPOSE[@]}" build api
@@ -567,6 +663,24 @@ else
   [ "$DB_IDENTITY_ENV" != production ] ||
     die "PILOT_ENV=$PILOT_ENV, but this database's deployment_identity says production: a staging host never deploys onto the production database. Nothing was stopped or migrated"
 fi
+# [TA-S0-003 · owner ruling, 14 Oct] The database's own word on Phase C: the
+# runtime logins exist in its cluster. A production deploy in the owner/expand
+# posture is refused once they do (even if the store were wiped), and the
+# contract posture needs both. Asked before anything is stopped or migrated.
+if [ "$PILOT_ENV" = production ] || [ "$WALL" -eq 1 ]; then
+  RUNTIME_LOGINS="$("${COMPOSE[@]}" exec -T postgres sh -c \
+    'export PGPASSWORD="$(cat "$POSTGRES_PASSWORD_FILE")"; exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -tAc "$1"' \
+    sh "SELECT count(*) FROM pg_roles WHERE rolname IN ('swift_app_login', 'swift_system_login')" 2>/dev/null)" ||
+    die "could not ask the database whether the least-privilege logins exist; refusing to deploy without that answer. Nothing was stopped or migrated"
+  case "$RUNTIME_LOGINS" in
+    0 | 1 | 2) ;;
+    *) die "the database gave no count of the least-privilege logins; refusing to deploy without it. Nothing was stopped or migrated" ;;
+  esac
+  [ "$WALL" -eq 1 ] || [ "$RUNTIME_LOGINS" = 0 ] ||
+    die "PILOT_ENV=production: this database's cluster has the least-privilege logins, so Phase C has run, and production never goes back to the database owner's login or the expand posture (owner ruling, 14 Oct). Set TENANT_RLS_BIND=1 and TENANT_UNSCOPED_ACCESS=deny and remove TENANT_WALL_EXPAND_ATTESTED. Nothing was stopped or migrated"
+  [ "$WALL" -ne 1 ] || [ "$RUNTIME_LOGINS" = 2 ] ||
+    die "TENANT_RLS_BIND=1, but the two least-privilege logins do not both exist in this database's cluster: run deploy/rls-logins.sh plan, apply and verify first (PILOT-RUNBOOK section 13). Nothing was stopped or migrated"
+fi
 # [PROD-PATH] Photon only with PLACES_PROVIDER=osm on production; never
 # Nominatim (the geocoding profile's other, heavy member).
 if [ "$PLACES_PHOTON" -eq 1 ]; then
@@ -597,12 +711,45 @@ if [ "$PLACES_PHOTON" -eq 1 ]; then
     die "address search is not ready: Photon does not answer a Georgetown search yet (its first start downloads and imports a ~6.7 GB index). The running API and the database were not changed; rerun once docker compose -f deploy/docker-compose.routing.yml --profile geocoding logs photon shows it serving"
 fi
 
+# [Row 312] The upload malware scanner, before the running API is stopped:
+# healthy (its signatures loaded; a first start on a new volume can take a few
+# minutes), then proven from the API image on the private network with the
+# API's own gate: the EICAR test string (assembled in the process, harmless by
+# design) must be refused and ordinary bytes passed. Until both hold, nothing
+# was stopped or migrated. The data-only stage starts no API and needs none.
+if [ "$DATA_ONLY" -eq 0 ]; then
+  "${COMPOSE[@]}" up -d --wait --wait-timeout 900 clamd ||
+    die "the upload malware scanner (clamd) did not become healthy with its signatures loaded; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
+  # SCANNER_PROOF
+  docker run --rm --network swift-pilot-private --entrypoint node "swift-api:$SHA" -e "
+    const { scanUpload } = require('./dist/lib/malware-scan.js');
+    const env = { MALWARE_SCAN: 'clamd', CLAMD_HOST: 'clamd', CLAMD_PORT: '3310' };
+    const eicar = Buffer.from('X5O!P%@AP[4\\\\PZX54(P^)7CC)7}\$' + 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!\$H+H*');
+    (async () => {
+      if (await scanUpload(Buffer.from('an ordinary file'), { surface: 'admin' }, env) !== 'CLEAN') process.exit(1);
+      try { await scanUpload(eicar, { surface: 'admin' }, env); process.exit(1); }
+      catch (e) { process.exit(e && e.code === 'UPLOAD_REJECTED' ? 0 : 1); }
+    })().catch(() => process.exit(1));" >/dev/null 2>&1 ||
+    die "the upload malware scanner did not refuse the EICAR test string (or did not pass ordinary bytes) through the API's own gate on the private network; the running API and the database were not changed; inspect: docker compose -f deploy/docker-compose.yml logs --tail=100 clamd"
+  echo "upload malware scanner ready: signatures loaded, EICAR refused through the API's gate"
+fi
 [ "${DATA_ONLY:-0}" -eq 1 ] || "${COMPOSE[@]}" stop api worker
 "${COMPOSE[@]}" up -d --force-recreate migrate
 MIGRATE_ID="$("${COMPOSE[@]}" ps -a -q migrate)"
 [ -n "$MIGRATE_ID" ] || die "migration container was not created"
 . "$HERE/wait-for-migration.sh"
 wait_for_migration "$MIGRATE_ID" || die "migration did not complete successfully"
+# [TA-S0-003 · R3] On the migrated database, before the API or the worker can
+# start on it: the two runtime logins still hold their contract (attributes,
+# memberships, no ownership) and so does the catalogue around them (row
+# security forced, the private schema closed, the revocations in place). This
+# is the read-only check later deploys run; `verify` is pinned to the apply
+# window (PILOT-RUNBOOK section 13). One JSON line of reason codes, no value.
+if [ "${WALL:-0}" -eq 1 ]; then
+  WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)" ||
+    die "the least-privilege logins or the catalogue around them do not hold their contract on the migrated database ($WALL_ROLES); the API and worker were not started. Report it; never repair a role by hand"
+  echo "least-privilege logins hold their contract on the migrated database"
+fi
 if [ "${DATA_ONLY:-0}" -eq 1 ]; then
   echo "DATABASE READY at exact SHA $SHA ($PILOT_ENV; migrations applied; the API, worker and Caddy were not started)"
   exit 0

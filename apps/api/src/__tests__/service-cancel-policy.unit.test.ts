@@ -24,7 +24,7 @@ import {
 //
 // [owner #50, 14 Oct] That decision is now made: a booking nobody has accepted
 // is free at any time (no clock — nobody to contact); once the provider
-// accepts it, it is free only inside the five-minute window, then refused
+// accepts it, it is free only inside the window (one minute, owner 22 Oct 2026), then refused
 // (contact the provider). Never a fee.
 // ---------------------------------------------------------------------------
 
@@ -63,7 +63,7 @@ describe('an appointment slot is the moment the work happens', () => {
 
   // [owner #50, 14 Oct] The slot no longer closes an UNACCEPTED booking (the
   // provider has not committed — there is no one to contact); an accepted one
-  // past the five-minute window is refused.
+  // past the one-minute window is refused.
   it('a slot about to start: free while the provider has not accepted, refused once it has', () => {
     // NOW (14:00Z) is 10:00 local; a slot three minutes away is 14:03Z.
     const soon = booking({ appointmentSlot: new Date('2026-09-23T14:03:00.000Z') });
@@ -79,7 +79,7 @@ describe('an appointment slot is the moment the work happens', () => {
 
   // [owner #50 · owner ruling 14 Oct] Before anyone accepts, cancelling is
   // free with no clock; a held order counts down to its hold (and stays free
-  // after it, until someone accepts). The five minutes count from acceptance.
+  // after it, until someone accepts). The one minute counts from acceptance.
   it('the checkout hold still wins while it runs, and the window it promises is the hold', () => {
     const held = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 7 * MINUTE) });
     expect(isFreeCancellation(held, NOW)).toBe(true);
@@ -87,7 +87,7 @@ describe('an appointment slot is the moment the work happens', () => {
     const shortHold = booking({ placedAt: new Date(NOW.getTime() - MINUTE), holdExpiresAt: new Date(NOW.getTime() + 2 * MINUTE) });
     expect(freeCancellationExpiresAt(shortHold, NOW)?.getTime()).toBe(shortHold.holdExpiresAt!.getTime());
     expect(isFreeCancellation(booking({ placedAt: new Date(NOW.getTime() - 60 * MINUTE), holdExpiresAt: new Date(NOW.getTime() - 50 * MINUTE) }), NOW)).toBe(true);
-    // Once the provider accepts, the window is the five minutes from that acceptance.
+    // Once the provider accepts, the window is the minute from that acceptance (FREE_CANCEL_WINDOW_MIN).
     const accepted = booking({ status: 'ACCEPTED', placedAt: new Date(NOW.getTime() - 60 * MINUTE), acceptedAt: new Date(NOW.getTime() - MINUTE) });
     expect(freeCancellationExpiresAt(accepted, NOW)?.getTime()).toBe(NOW.getTime() - MINUTE + FREE_CANCEL_WINDOW_MIN * MINUTE);
   });

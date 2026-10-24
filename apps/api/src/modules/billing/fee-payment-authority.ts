@@ -1,6 +1,6 @@
 import type { Prisma, PrismaClient } from '@prisma/client';
 import { billingEffectsReady } from './billing-cutover';
-import { ACTIVE_CONFIRMATION_STATES, confirmationSources, currentDunningClock, lateCardApprovalHeldInTx, type ConfirmationSource } from './dunning-clock';
+import { ACTIVE_CONFIRMATION_STATES, confirmationSources, currentDunningClock, feeReversalOpenInTx, lateCardApprovalHeldInTx, type ConfirmationSource } from './dunning-clock';
 import { lockFeeCollectionAuthority, readFeeCollectionAuthority } from '../subscription/mover-fee-authority';
 
 export type FeePaymentDecision =
@@ -23,6 +23,8 @@ export async function lockFeePaymentDecision(
   if (clock.dueAt.getTime() !== sub.nextBillingDate.getTime()) return blocked('BILLING_REVIEW_REQUIRED');
   const holds = await tx.paymentConfirmationHold.findMany({ where: { clockId: clock.id, status: { in: ACTIVE_CONFIRMATION_STATES } } });
   if (await lateCardApprovalHeldInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
+  // [MMG REVERSAL] A payment being returned: no new payment beside it until MMG settles it.
+  if (await feeReversalOpenInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
   if (!replay) return holds.length || clock.pausedAt ? blocked('PAYMENT_CONFIRMING') : allow;
   const own = holds.find((hold) => Object.entries(replay).every(([field, id]) => hold[field as keyof typeof hold] === id));
   if (!own || own.subscriptionId !== subscriptionId || own.sourceEpoch !== clock.epoch || own.status !== 'ACTIVE'
@@ -51,6 +53,7 @@ export async function readFeePaymentDecision(db: PrismaClient, subscriptionId: s
       const hold = await tx.paymentConfirmationHold.findFirst({ where: source.source });
       if (source.reason === 'LATE_PROVIDER_APPROVAL' || !hold || hold.clockId !== clock.id || ACTIVE_CONFIRMATION_STATES.includes(hold.status)) return blocked('PAYMENT_CONFIRMING');
     }
+    if (await feeReversalOpenInTx(tx, authority.mover?.sourceSubscriptionIds ?? [subscriptionId])) return blocked('PAYMENT_CONFIRMING');
     return allow;
   });
 }

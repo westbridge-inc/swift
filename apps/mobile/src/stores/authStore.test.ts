@@ -37,6 +37,7 @@ vi.mock('./storeSwitcher', () => ({
 import {
   AuthSessionBoundaryError,
   getAuthSessionSnapshot,
+  getLastSignedOutUserId,
   requireAuthSessionForPrincipal,
   useAuthStore,
 } from './authStore';
@@ -523,10 +524,14 @@ describe('[MOB-007 / TST-008] corrupt persisted auth normalizes SIGNED OUT befor
     const src = readFileSync(new URL('../navigation/RootNavigator.tsx', import.meta.url), 'utf8');
     expect(src).toContain('const needsSelfie = isAuthenticated && !user?.selfieCapturedAt;');
     expect(src).not.toContain('isAuthenticated && !!user && !user.selfieCapturedAt');
-    // an authenticated state with no user can only reach 'selfie', never 'main'
-    // ([E27] customers skip the selfie only when a user is actually present)
+    // an authenticated state with no user can only reach a hold, never 'main':
+    // an earner the selfie screen, a customer the sign-out hold ([owner 16 Oct]
+    // customers take no photos, so a customer is never sent to the camera)
     expect(src).toContain('hasUser: !!user');
-    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('selfie');
+    expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent: 'customer', countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).toBe('hold');
+    for (const intent of ['customer', 'mover', 'vendor', 'advertiser'] as const) {
+      expect(rootEntryGate({ isAuthenticated: true, wantsAuth: false, intent, countryCode: 'GY', anyPreview: false, needsSelfie: true, hasUser: false })).not.toBe('main');
+    }
   });
 });
 
@@ -647,5 +652,40 @@ describe('business-entry state never crosses a principal boundary', () => {
 
     expect(drafts.getState().draft).toMatchObject(typedForm);
     expect(useVendorPreview.getState()).toMatchObject({ preview: true, previewType: null });
+  });
+});
+
+// [row 205 · DS256 F2] A notification tapped while signed out replays after
+// sign-in only for the account whose session ended last on this device. The
+// store records that account at every real session end, and nothing else.
+describe('the account whose session ended last (owner of a tap made while signed out)', () => {
+  // Each case lets its one session's lazy teardown (GPS, socket, server
+  // revoke) finish inside the test, so no import outlives the file.
+  const teardownFinished = () => vi.waitFor(() => {
+    expect(stopMoverLocation).toHaveBeenCalledOnce();
+    expect(disconnectSocket).toHaveBeenCalledOnce();
+    expect(revokeAuthSession).toHaveBeenCalledOnce();
+  });
+
+  it('is the account a logout ended; signing in, a stale 401 and a repeat logout change nothing', async () => {
+    useAuthStore.getState().setAuth(user('a'), 'access-a', 'refresh-a');
+    const a = getAuthSessionSnapshot()!;
+    useAuthStore.getState().logout();
+    expect(getLastSignedOutUserId()).toBe('a');
+    useAuthStore.getState().logout(); // already signed out: no session ends
+    expect(getLastSignedOutUserId()).toBe('a');
+
+    useAuthStore.getState().setAuth(user('b'), 'access-b', 'refresh-b');
+    expect(getLastSignedOutUserId()).toBe('a'); // signing in is not a session end
+    expect(useAuthStore.getState().logoutIfCurrent(a)).toBe(false);
+    expect(getLastSignedOutUserId()).toBe('a'); // A's stale 401 ends nothing
+    await teardownFinished();
+  });
+
+  it('is the account a 401 logout ended', async () => {
+    useAuthStore.getState().setAuth(user('c'), 'access-c', 'refresh-c');
+    expect(useAuthStore.getState().logoutIfCurrent(getAuthSessionSnapshot()!)).toBe(true);
+    expect(getLastSignedOutUserId()).toBe('c');
+    await teardownFinished();
   });
 });

@@ -62,6 +62,7 @@ import { stageMmgLinkChange, clearMmgLink, cancelMmgLinkChange, applyDueMmgLinkC
 import { sendStepUpOtp, verifyStepUp, stepUpKey } from '../modules/auth/step-up';
 import { REVIEW_DEMO_NO_NEW_ROLES } from '../modules/review/demo-policy';
 import { CountryConfigService } from '../modules/country/country-config.service';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 /** Advertising is closed at launch (ADS_ENABLED); the demo's own refusal sits
  *  behind that switch, so it is graded with advertising switched on. */
@@ -73,7 +74,7 @@ async function withAdsOn<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0').toLowerCase();
+const RUN = wordFreeTag(8);
 const REVIEW = `review-partner-${RUN}`;
 const PRODUCTION = 'swift-default';
 const UPLOAD_DIR = `/tmp/review-partner-test-uploads-${RUN}`;
@@ -83,7 +84,7 @@ const SPOT = { lat: 6.3107, lng: -57.5321 };
 const NEAR = { lat: SPOT.lat + 0.0027, lng: SPOT.lng };
 const DAY = 86_400_000;
 /** Production fixture phones: +59200064 + 4 digits of this run (a range no other suite uses). */
-const prodPhoneBase = `+59200064${String(Math.floor(Math.random() * 90) + 10)}`;
+const prodPhoneBase = testPhone();
 
 let app: FastifyInstance;
 let dispatch: DispatchService;

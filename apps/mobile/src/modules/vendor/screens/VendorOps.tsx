@@ -18,8 +18,10 @@ import {
   TonePill,
 } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
+import { openMenuList } from '../menuDoor';
 import { rejectReasonsFor } from '../rejectReasons';
 import { renewalBannerCopy } from '../renewal-banner';
+import { paymentMethodWords, qrStatusWords, subscriptionPillWords } from '../storeWords';
 import {
   BoardFirstRun,
   BoardFirstRunRow,
@@ -37,6 +39,7 @@ import {
   type VendorOrderActionKind,
 } from '../shared';
 import { docLabel } from '../../../components/onboarding/DocumentUploadCard';
+import { PushOffStrip } from '../../../components/PushOffStrip';
 import { useVerificationStatus } from '../../../hooks/verification';
 import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import {
@@ -47,6 +50,7 @@ import {
   useToggleOrders,
   useSetSelfDelivery,
   useOrderAction,
+  usePendingOrderIds,
   useVendorMenu,
   useVendorQr,
   useVendorSubscription,
@@ -55,12 +59,15 @@ import {
   useVendorOps,
   useVendorHours,
 } from '../../../hooks/vendorops';
+import { cardTapFor } from '../boardTaps';
+import { OUT_OF_STOCK_WORDS, customerDeciding, nothingToAccept } from '../storeOrderRules';
 import { useAuthStore } from '../../../stores/authStore';
 import { useStoreSwitcher } from '../../../stores/storeSwitcher';
 import { useVendorPreview } from '../../../stores/vendorPreview';
 import { money } from '../../../lib/money';
 import { canAttestPayment, paymentAttestBlockedReason } from '../../../lib/orderStatus';
 import { vendorSurfaceForRole } from '../../../lib/vendorRbac';
+import { shownStoreOpen } from '../../../lib/storeOpenSwitch';
 import { Switch as AvailabilitySwitch } from '../../../kit/switch';
 import {
   TYPES,
@@ -151,7 +158,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         <T variant="caption" tone="muted">
           {fmtWhen(order.placedAt)}
           {items ? ` · ${items} item${items === 1 ? '' : 's'}` : ''}
-          {` · ${order.paymentMethod === 'CASH' ? 'Cash' : order.paymentMethod ?? ''}`}
+          {paymentMethodWords(order.paymentMethod) ? ` · ${paymentMethodWords(order.paymentMethod)}` : ''}
         </T>
       </View>
       {/* What to make — the kitchen reads this off the card */}
@@ -241,8 +248,19 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
                 placeholder="From MMG’s payment message"
                 style={{ marginTop: space.sm }}
               />
+              {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] One plainly worded button: tap it when the
+                  money is in the store's own MMG account. Swift never checks the money itself. */}
+              <T variant="caption" tone="muted" style={{ marginTop: space.sm }}>
+                Tap when {money(order.totalAmount ?? order.total)} is in your MMG account.
+              </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {typeof order.mmgPayByLine === 'string' && order.mmgPayByLine.trim() ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {order.mmgPayByLine}
+                </T>
+              ) : null}
               <PillButton
-                label={`${money(order.totalAmount ?? order.total)} received in my MMG`}
+                label="Paid by MMG"
                 size="md"
                 icon="check"
                 style={{ marginTop: space.sm }}
@@ -262,6 +280,12 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
         </View>
       ) : null}
       <MmgDisputeNotice order={order} />
+      {/* [STORE-DASH · O-4] Why there is no Accept: the customer is answering, or nothing is left. */}
+      {customerDeciding(order) || nothingToAccept(order) ? (
+        <T variant="label" weight="semibold" style={{ marginTop: space.sm, color: color.warning }}>
+          {customerDeciding(order) ? OUT_OF_STOCK_WORDS.deciding : OUT_OF_STOCK_WORDS.nothing}
+        </T>
+      ) : null}
       {actions.length > 0 ? (
         <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
           {actions.map((a) => (
@@ -272,6 +296,7 @@ const VendorOrderCard = React.memo(function VendorOrderCard({
               size="md"
               style={{ flex: 1 }}
               disabled={busy}
+              loading={busy && a.action !== 'reject'}
               onPress={() => onAction(a.action)}
             />
           ))}
@@ -346,14 +371,14 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
           index={1}
           label={menuQ.isError ? 'Menu status unavailable' : 'Checking your menu'}
           detail={menuQ.isError ? 'Open the menu to check its items' : 'Loading your menu details'}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage && items.length === 0 ? (
         <BoardFirstRunRow
           index={1}
           label="Add your first item"
           detail={`Your ${catalogueMeta(store.vendorType).label.toLowerCase()} is empty — nothing to order yet`}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : canManage ? (
         <BoardFirstRunRow
@@ -366,7 +391,7 @@ function VendorBoardEmpty({ store, navigation, reachable, canManage }: any) {
               ? `All ${items.length} items have a photo`
               : `Photos missing on ${missingPhotos} of ${items.length} items`
           }
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       ) : null}
       <BoardFirstRunRow
@@ -725,7 +750,7 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           detail={menuDetail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
         <ManageTile
           icon="chart-bar"
@@ -745,8 +770,8 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           icon="qrcode-scan"
           label={isOwner ? 'My QR & number' : 'My QR'}
           detail={qrDetail}
-          badge={qrQ.data?.status ? <TonePill label={String(qrQ.data.status).replace(/_/g, ' ')} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
-          badgeLabel={qrQ.data?.status ? `QR ${String(qrQ.data.status).replace(/_/g, ' ').toLowerCase()}` : undefined}
+          badge={qrQ.data?.status ? <TonePill label={qrStatusWords(qrQ.data.status)} tone={qrQ.data.status === 'ACTIVE' ? 'success' : 'neutral'} /> : undefined}
+          badgeLabel={qrQ.data?.status ? `QR: ${qrStatusWords(qrQ.data.status)}` : undefined}
           onPress={() => (isOwner ? setShareOpen(true) : navigation.navigate('VendorMyQr'))}
         />
         <ManageTile
@@ -759,8 +784,8 @@ function VendorManagerManageGrid({ navigation, store, myRole, analytics, analyti
           icon={isOwner ? 'cash-check' : 'account-cog-outline'}
           label={isOwner ? 'Billing' : 'Account'}
           detail={isOwner ? (subQ.isError && !sub ? 'Billing unavailable' : `${billingSummary(sub)}${subStale ? ' · last loaded' : ''}`) : 'Store settings & promos'}
-          badge={isOwner && sub ? <TonePill label={String(sub.status ?? 'Subscription').replace(/_/g, ' ')} tone={subscriptionTone(sub)} /> : undefined}
-          badgeLabel={isOwner && sub ? `Subscription ${String(sub.status ?? '').replace(/_/g, ' ').toLowerCase()}` : undefined}
+          badge={isOwner && sub ? <TonePill label={subscriptionPillWords(sub.status)} tone={subscriptionTone(sub)} /> : undefined}
+          badgeLabel={isOwner && sub ? `Subscription: ${subscriptionPillWords(sub.status)}` : undefined}
           onPress={() => navigation.navigate('Account')}
         />
       </View>
@@ -818,7 +843,7 @@ function VendorStaffAvailability({ navigation }: any) {
           detail={detail}
           badge={soldOut > 0 ? <TonePill label={`${soldOut} SOLD OUT`} tone="warning" /> : undefined}
           badgeLabel={soldOut > 0 ? `${soldOut} sold out` : undefined}
-          onPress={() => navigation.navigate('Menu', { screen: 'VendorMenu' })}
+          onPress={() => openMenuList(navigation)}
         />
       </View>
     </View>
@@ -826,7 +851,10 @@ function VendorStaffAvailability({ navigation }: any) {
 }
 
 export function VendorOps({ store, navigation }: any) {
-  const [queueOpen, setQueueOpen] = useState(false);
+  // [STORE-DASH · owner 22 Oct] The whole live queue is on the board from the
+  // start, as on the web board: every order's next step is one tap away, never
+  // behind "Open loaded queue". The store can still collapse it.
+  const [queueOpen, setQueueOpen] = useState(true);
   // [E10 · DS200 D1] The board's Reject/Decline opens the same reason chooser
   // as the order screen: the API refuses a rejection without a reason, so a
   // bare tap used to fail with nothing on screen.
@@ -880,10 +908,21 @@ export function VendorOps({ store, navigation }: any) {
   const fetched: any[] = ordersQ.data ?? [];
   const boardLoading = ordersQ.isLoading && !ordersQ.data;
   const boardUnavailable = ordersQ.isError && !ordersQ.data;
-  const open = !!store.isCurrentlyOpen;
+  // [PERF row 562] The switch (and everything that reads it here) shows the
+  // state just tapped while its request is out — lib/storeOpenSwitch.
+  const open = shownStoreOpen(!!store.isCurrentlyOpen, toggleOpen.isPending, toggleOpen.variables);
   const accepting = !!store.acceptingOrders;
   const selfDelivery = !!store.selfDeliveryEnabled;
-  const busy = orderAction.isPending;
+  // [STORE-DASH] Only the order that was tapped waits for the server's answer
+  // (boardTaps): a slow answer for one order never freezes the others.
+  const pendingIds = usePendingOrderIds();
+  const openOrder = (o: any) => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber });
+  const onCardAction = (o: any, action: VendorOrderActionKind, code?: string) => {
+    const tap = cardTapFor(action);
+    if (tap === 'reject') setRejecting({ id: o.id, fulfillment: o.fulfillment });
+    else if (tap === 'open') openOrder(o);
+    else orderAction.mutate({ id: o.id, action, code });
+  };
 
   // The live board works the open queue; finished orders live in History.
   const TERMINAL = ['DELIVERED', 'COMPLETED', 'CANCELLED', 'REFUNDED', 'FAILED'];
@@ -902,7 +941,7 @@ export function VendorOps({ store, navigation }: any) {
   };
   const newOrders = orders.filter((o) => isNew(o.status)).sort(expressFirst);
   const inProgress = orders.filter((o) => !isNew(o.status)).sort(expressFirst);
-  const status = storeStatusEyebrow(store, inPreview);
+  const status = storeStatusEyebrow({ ...store, isCurrentlyOpen: open }, inPreview);
   const storeStatusText = (
     <View style={{ flex: 1, paddingRight: space.md }}>
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
@@ -938,6 +977,8 @@ export function VendorOps({ store, navigation }: any) {
           />
         }
       >
+        {/* [STORE-ALERT] Says so when this phone cannot ring for new orders. */}
+        {!inPreview ? <PushOffStrip audience="store" style={{ marginBottom: space.lg }} /> : null}
         {/* Multi-store switcher — only when the owner has more than one store. */}
         {stores.length > 1 ? (
           <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: space.lg }} contentContainerStyle={{ gap: space.md }}>
@@ -1102,9 +1143,9 @@ export function VendorOps({ store, navigation }: any) {
               <VendorOrderCard
                 key={o.id}
                 order={o}
-                busy={busy}
-                onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
-                onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+                busy={pendingIds.has(o.id)}
+                onAction={(action, code) => onCardAction(o, action, code)}
+                onOpen={() => openOrder(o)}
               />
             ))}
             {inProgress.length > 0 ? (
@@ -1116,9 +1157,9 @@ export function VendorOps({ store, navigation }: any) {
                   <VendorOrderCard
                     key={o.id}
                     order={o}
-                    busy={busy}
-                    onAction={(action, code) => (action === 'reject' ? setRejecting({ id: o.id, fulfillment: o.fulfillment }) : orderAction.mutate({ id: o.id, action, code }))}
-                    onOpen={() => navigation.navigate('VendorOrderDetail', { orderId: o.id, orderNumber: o.orderNumber })}
+                    busy={pendingIds.has(o.id)}
+                    onAction={(action, code) => onCardAction(o, action, code)}
+                    onOpen={() => openOrder(o)}
                   />
                 ))}
               </>
@@ -1131,16 +1172,9 @@ export function VendorOps({ store, navigation }: any) {
             </T>
             <VendorOrderCard
               order={newOrders[0] ?? inProgress[0]}
-              busy={busy}
-              onAction={(action, code) => {
-                const target = newOrders[0] ?? inProgress[0];
-                if (action === 'reject') setRejecting({ id: target.id, fulfillment: target.fulfillment });
-                else orderAction.mutate({ id: target.id, action, code });
-              }}
-              onOpen={() => {
-                const order = newOrders[0] ?? inProgress[0];
-                navigation.navigate('VendorOrderDetail', { orderId: order.id, orderNumber: order.orderNumber });
-              }}
+              busy={pendingIds.has((newOrders[0] ?? inProgress[0]).id)}
+              onAction={(action, code) => onCardAction(newOrders[0] ?? inProgress[0], action, code)}
+              onOpen={() => openOrder(newOrders[0] ?? inProgress[0])}
             />
           </>
         )}
@@ -1176,7 +1210,7 @@ export function VendorOps({ store, navigation }: any) {
           {surface.canToggleOpen ? (
             <Pressable
               disabled={inPreview || toggleOpen.isPending}
-              onPress={() => toggleOpen.mutate()}
+              onPress={() => toggleOpen.mutate(!open)}
               accessibilityRole="switch"
               accessibilityLabel="Store open to customers"
               accessibilityHint={open ? 'Close the store to new customers' : 'Open the store to new customers'}
@@ -1194,7 +1228,7 @@ export function VendorOps({ store, navigation }: any) {
           )}
           {toggleOpen.isError ? (
             <T variant="caption" tone="error" style={{ marginTop: space.sm }}>
-              Store status didn’t update — check your connection and try again.
+              {(toggleOpen.error as any)?.response?.data?.error?.message ?? 'Store status didn’t update — check your connection and try again.'}
             </T>
           ) : null}
           {!inPreview && canManage ? (
@@ -1204,7 +1238,7 @@ export function VendorOps({ store, navigation }: any) {
               size="md"
               style={{ marginTop: space.md }}
               loading={toggleOrders.isPending}
-              onPress={() => toggleOrders.mutate()}
+              onPress={() => toggleOrders.mutate(!accepting)}
             />
           ) : null}
           {toggleOrders.isError ? (
@@ -1270,7 +1304,7 @@ export function VendorOps({ store, navigation }: any) {
             label={why}
             variant="outline"
             style={{ alignSelf: 'stretch', marginTop: space.md }}
-            disabled={busy}
+            disabled={rejecting != null && pendingIds.has(rejecting.id)}
             onPress={() => {
               const target = rejecting;
               setRejecting(null);

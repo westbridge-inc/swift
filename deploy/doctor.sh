@@ -86,6 +86,13 @@ else
         *'"redis":"ok"'*) ok "redis answering" ;;
         *) bad "redis check not ok: $HEALTH" ;;
       esac
+      # [Row 312] The upload malware scanner, as the API itself sees it.
+      case "$HEALTH" in
+        *'"malwareScanner":"ok"'*) ok "upload malware scanner answering (uploads are scanned)" ;;
+        *'"malwareScanner":"off"'*) warn "upload malware scanner is OFF (MALWARE_SCAN dark): uploads are stored unscanned" ;;
+        *'"malwareScanner":"down"'*) bad "upload malware scanner is DOWN: every upload is refused until clamd answers (docker compose -f deploy/docker-compose.yml logs --tail=100 clamd)" ;;
+        *) warn "upload malware scanner state not reported (an API older than the scanner deployment)" ;;
+      esac
       ;;
     # No token, or a rejected one: the API hides the per-check detail and the
     # only thing a 200 tells us is the aggregate status. That is not a FAIL.
@@ -152,7 +159,7 @@ if command -v docker >/dev/null 2>&1; then
   # A wedged docker CLI is itself a known failure state — bound the wait where
   # the platform allows it.
   if bounded "${COMPOSE[@]}" ps >/dev/null 2>&1; then
-    for c in postgres redis; do
+    for c in postgres redis clamd; do
       ID="$(bounded "${COMPOSE[@]}" ps -q "$c" 2>/dev/null || true)"
       if [ -n "$ID" ] && [ "$(docker inspect -f '{{.State.Status}}' "$ID" 2>/dev/null || true)" = running ]; then
         POLICY=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$ID" 2>/dev/null || echo '?')
@@ -200,7 +207,7 @@ if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q po
   RS=$(db_query \
     "SELECT value FROM platform_config WHERE key='last_restore_rehearsal_seconds';" 2>/dev/null | tr -d '"' || true)
   if [ -z "$RH" ]; then
-    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
+    warn "restore never rehearsed here — the recovery time is unknown. Run: ./deploy/backup.sh && ./deploy/restore.sh --project swift deploy/backups/<latest>.dump (production dumps are encrypted: the owner runs deploy/backup-drill.sh from his own computer)"
   else
     ok "last restore rehearsal: $RH — took ${RS:-?}s (that is the recovery time for this data)"
   fi
@@ -215,6 +222,61 @@ if [ -f "$HERE/.env" ] && [ "$(grep -E '^PILOT_ENV=' "$HERE/.env" | head -1 | cu
   else
     bad "production's hourly backup timer (swift-backup-hourly.timer) is not enabled and active: sudo systemctl enable --now swift-backup-hourly.timer (PILOT-RUNBOOK §4)"
   fi
+fi
+
+# [TA-S0-003 · R3] The business wall's contract posture (TENANT_RLS_BIND=1 in
+# deploy/.env, which adds deploy/docker-compose.wall.yml): the API and the
+# worker run on the two least-privilege logins, never on the owner. Read-only:
+# the role contract through deploy/rls-logins.sh roles (reason codes only),
+# and each container's settings by NAME (a value is never printed).
+env_line() { [ -f "$HERE/.env" ] && grep -E "^$1=" "$HERE/.env" | head -1 | cut -d= -f2- || true; }
+if [ "$(env_line TENANT_RLS_BIND)" = 1 ]; then
+  WALL_ROLES="$("$HERE/rls-logins.sh" roles 2>/dev/null | tail -1)"
+  case "$WALL_ROLES" in
+    *'"status": "roles_hold"'*) ok "the least-privilege logins hold their contract (rls-logins roles)" ;;
+    *) bad "the least-privilege logins do not hold their contract: ${WALL_ROLES:-no answer} (deploy/rls-logins.sh roles; never repair a role by hand)" ;;
+  esac
+  if command -v docker >/dev/null 2>&1; then
+    for c in api worker; do
+      ID="$(bounded "${COMPOSE[@]}" ps -q "$c" 2>/dev/null || true)"
+      if [ -z "$ID" ]; then warn "$c is not running; its database login was not checked"; continue; fi
+      # Names whose value is set; the values themselves never leave awk.
+      SET_NAMES=" $(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$ID" 2>/dev/null |
+        awk -F= 'index($0, "=") > 1 && substr($0, index($0, "=") + 1) != "" { print $1 }' | tr '\n' ' ')"
+      has_name() { case "$SET_NAMES" in *" $1 "*) return 0 ;; esac; return 1; }
+      if has_name POSTGRES_PASSWORD_FILE || has_name POSTGRES_PASSWORD; then
+        bad "$c still carries the database owner's password setting under TENANT_RLS_BIND=1 (deploy/docker-compose.wall.yml removes it): redeploy with ./deploy/pilot-up.sh"
+      elif has_name DATABASE_URL_FILE && has_name SYSTEM_DATABASE_URL_FILE; then
+        ok "$c runs on the least-privilege logins (DATABASE_URL_FILE, SYSTEM_DATABASE_URL_FILE; no owner password)"
+      else
+        bad "$c does not carry DATABASE_URL_FILE and SYSTEM_DATABASE_URL_FILE under TENANT_RLS_BIND=1: redeploy with ./deploy/pilot-up.sh"
+      fi
+    done
+  fi
+elif [ "$(env_line PILOT_ENV)" = production ] && command -v docker >/dev/null 2>&1 &&
+     [ -n "$(bounded "${COMPOSE[@]}" ps -q postgres 2>/dev/null || true)" ]; then
+  # After Phase C production never runs on the owner again (owner ruling, 14 Oct).
+  WALL_LOGINS="$(db_query "SELECT count(*) FROM pg_roles WHERE rolname IN ('swift_app_login', 'swift_system_login');" 2>/dev/null || true)"
+  if [ -n "$WALL_LOGINS" ] && [ "$WALL_LOGINS" != 0 ]; then
+    bad "the least-privilege logins exist (Phase C has run) but deploy/.env does not set TENANT_RLS_BIND=1: production never goes back to the owner's login (owner ruling, 14 Oct)"
+  fi
+fi
+
+# [item 20] The owner wall (swift_owner_wall + OWNER_RLS_BIND=1) is switched
+# separately, after its own staging journey run — never with Phase C. Until
+# then deploy/.env names no OWNER_RLS_BIND and no role is a member of
+# swift_owner_wall: either half alone makes the API refuse to boot or every
+# owner-walled read come back empty. Read-only; a count, never a name.
+if [ -n "$(env_line OWNER_RLS_BIND)" ]; then
+  bad "deploy/.env sets OWNER_RLS_BIND: the owner wall is switched separately, after its own staging journey run (not with Phase C); remove the line"
+fi
+if command -v docker >/dev/null 2>&1 && [ -n "$(bounded "${COMPOSE[@]}" ps -q postgres 2>/dev/null || true)" ]; then
+  OWNER_WALL_MEMBERS="$(db_query "SELECT count(*) FROM pg_auth_members m JOIN pg_roles w ON w.oid = m.roleid WHERE w.rolname = 'swift_owner_wall';" 2>/dev/null || true)"
+  case "$OWNER_WALL_MEMBERS" in
+    "") ;;
+    0) ok "no database role is a member of swift_owner_wall (the owner wall stays off)" ;;
+    *) bad "$OWNER_WALL_MEMBERS database role(s) are members of swift_owner_wall: the owner wall is switched separately, after its own staging journey run; revoke the grant before any deploy" ;;
+  esac
 fi
 
 # ── 5. The disk — the quietest killer on this machine's record ──────────────

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { LEGAL_VERSION, TERMS, PRIVACY, DRIVER_AGREEMENT, VENDOR_AGREEMENT } from '../modules/legal/legal.routes';
+import { FREE_CANCEL_WINDOW_MIN } from '../modules/order/cancel-policy';
 
 // ---------------------------------------------------------------------------
 // [REPORT-035 F-035-08 · S1] Every served legal text is BOUND to its version.
@@ -168,6 +169,57 @@ const PUBLISHED: Record<
     driver_agreement: 'b148daa56ef00e9325cd364e90b7c5f19bc262ee260c557237bcd4d517c3b4d8',
     vendor_agreement: '89b9d5525e22546b9102b56421436bb7970e66ae63192bc5e31a5886de3e8c99',
   },
+  // [V1b batch · owner 15 Oct 2026 · legal research Part 4] the operator named (reg. 17703, address, phone; one constant),
+  // the research's Terms/Privacy/Mover/Business/Child Safety wording, letters or documents never carried, the 18+ box.
+  '2026-10-16': {
+    terms: 'f9edd1cd9c5d4818226af3cb3500d200b90b0205466a69a10be5ce6db0b2a5a9',
+    privacy: '5abf3fc0bc88d5c2ea39df75b61384f6b3d3940c5c7d05081412a14388b729ed',
+    driver_agreement: 'ec16841b718b6469eb4fcc980bf7a913c1ba32f6449580a87001a3cf9efaa35a',
+    vendor_agreement: 'c3e89ace0ff86e0101462ed5df0a6805e7643b5330d550113b6a58fe081b30ae',
+  },
+  // [Owner rulings: identity checks by a person only + face matching off; customers take no photos (16 Oct);
+  // R28] Privacy: no outside identity-verification company and no automated document-reading or face
+  // matching (production refuses both), how partner documents and customer IDs are handled, partners-only
+  // registration selfie, a customer is never shown by photo, "confirmation records"; Terms: the taxi
+  // profile-photo sentence gone. The two agreements' words are unchanged: putting 16 October back
+  // reproduces both 2026-10-16 agreement pins exactly. The date re-pins them.
+  '2026-10-17': {
+    terms: 'd738ef0158cb94f532552ca86ee5720f981503f799fc032f7f7bfdd810ecf96d',
+    privacy: '4dfb9d4e5bff08df9a8f11a9c50a05255f8f2c650f757ad9fe99a220e1465c46',
+    driver_agreement: 'fc950f5bafa0e6f108f2681dd31fb5b0e2d924d72cb47deca842abb3fb72dee0',
+    vendor_agreement: '46876ae2bb41d822b5be2b631aa80c1d40070f036423de247703db1529aeb583',
+  },
+  // [#1614 leftover, COORD 17 Oct] Privacy s.6: a customer's own ID is kept while the account is open and
+  // deleted when the account is deleted (it is not on the partner purge schedule). Nothing else changed:
+  // putting 17 October back and removing that one sentence reproduces all four 2026-10-17 pins exactly.
+  // The date re-pins Terms and the two agreements.
+  '2026-10-18': {
+    terms: '7cdf29225b5e5ab6378389ef5a40d805195ef1621fe250efac2b771aee17e65e',
+    privacy: '45a9fa92f2e17c4599fd5e39c78c4551353fde75928a412e5372b3d68c118cdc',
+    driver_agreement: '3d8a81a22b9e4d4606f62a63c3bd8e9636cc14763b313cbdfedcdece56cbd7cb',
+    vendor_agreement: '5830eabd8bed0e94940765c26fe7f7b6920b52c601a9c45d26f0d084842484ed',
+  },
+  // [Owner rulings 21 Oct 2026 · research E4 + B8 · MATERIAL] Terms s.4: the taxi waiting charge paragraph
+  // (GY$300 per full 10 minutes, as rides/taxi-waiting.ts applies it). Privacy: s.1 diagnostics line, s.5 the
+  // phone app's crash reports to Swift's own GlitchTip, s.6 crash and error reports kept 90 days. Nothing else
+  // changed: putting 18 October back and removing those words reproduces all four 2026-10-18 pins exactly.
+  // The date re-pins the two agreements.
+  '2026-10-21': {
+    terms: 'a189ecbea42b30e2a7e116154073298a934c6f591a665b77d051f38d2236355c',
+    privacy: '131bbf6e1c2e9b2f9a2b0062fc1a6e3bc126358e0e59885776cbb31da165ad08',
+    driver_agreement: 'b368004247c5635c9ad085e93e92ce42db23f98b598b385e873b1619689e0fb8',
+    vendor_agreement: 'd44c0a24a7ede15d0288aa2f4553cc6689c13ded8e95c6d6c2595ce2bce18185',
+  },
+  // [Owner ruling 22 Oct 2026 · NON-material pre-launch (COORD 23:14Z)] Terms s.7: a ride, a parcel or a booking
+  // cancels free for one minute after a driver, rider or provider accepts it (was five minutes), as
+  // order/cancel-policy.ts FREE_CANCEL_WINDOW_MIN applies it. Nothing else changed: putting "five minutes" and
+  // 21 October back reproduces all four 2026-10-21 pins exactly. The date re-pins Privacy and the two agreements.
+  '2026-10-22': {
+    terms: '91d885a2cdf2e907d7017ee23f56fb0d14a1321b1128578e3be64efbde60bf7e',
+    privacy: 'ebd6a47d17bdebd135068b1284d48893e1f3d306085e4c04a5e68a90afbe01da',
+    driver_agreement: '77ba8953b63491aa88492edc5ec4fb815466a19c27ac6b5eea69a942102ed69b',
+    vendor_agreement: 'bb12da4f86083b13050cafa99a2282ac7473c1b8c273d49da4c7dfac4d736910',
+  },
 };
 
 describe('legal version binding [F-035-08]', () => {
@@ -186,7 +238,7 @@ describe('legal version binding [F-035-08]', () => {
   ])('%s states one week at a time (no paying ahead) and the refund of an unstarted week at closing [owner #62, 14 Oct]', (_name, agreement) => {
     const feeParagraph = /<p>You pay Swift a flat weekly subscription[\s\S]*?<\/p>/.exec(agreement)?.[0];
     expect(feeParagraph).toContain('You pay the weekly fee one week at a time: while a week runs you may pay for the coming week, and no further. Money received beyond that is returned to you.');
-    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, records the refund, and then deletes the account; a week that has started is not refunded.');
+    expect(feeParagraph).toContain('If you close your account, Swift refunds to you any weekly fee you paid for a week that has not started, within 14 days, to the account you paid from, records the refund, and then deletes the account; a week that has started is not refunded.');
     expect(feeParagraph, 'the four-week limit is gone [owner #62]').not.toMatch(/four weeks|paid ahead|pay ahead/i);
   });
 
@@ -201,6 +253,13 @@ describe('legal version binding [F-035-08]', () => {
     // The app offers a customer Cancel on a service job only while it is a request (REQUESTED/QUOTED), not once booked.
     expect(TERMS).toContain('A service job request can be cancelled free in the app until the job is booked; once it is booked, contact the provider to change or cancel it.');
     expect(TERMS).not.toMatch(/service job can be cancelled free until the provider starts/i);
+  });
+
+  it('[owner 22 Oct 2026] the Terms state the free cancel window the server applies: one minute after acceptance', () => {
+    // FREE_CANCEL_WINDOW_MIN is the window cancellationVerdict enforces; the Terms must name that number, never another.
+    expect(FREE_CANCEL_WINDOW_MIN).toBe(1);
+    expect(TERMS).toContain('A ride, a parcel or a booking can be cancelled free at any time while nobody has accepted it, and for one minute after a driver, rider or provider accepts it; after that, contact your driver, rider or provider.');
+    expect(TERMS).not.toMatch(/five minutes after a driver|5 minutes after a driver/i);
   });
 
   it('the served version is a version this file has pinned', () => {

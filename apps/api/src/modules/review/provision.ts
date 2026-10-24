@@ -9,7 +9,8 @@
  * salted hash (DL-6: no SMS is ever sent to any of them; each code is accepted
  * only for its own identifier, and only inside this tenant).
  * `review:rotate` mints new codes (run before every resubmission);
- * `review:expire` forces DL-9; `review:status` says what exists.
+ * `review:expire` forces DL-9; `review:extend` moves a live session's expiry
+ * later (row 349); `review:status` says what exists.
  *
  * The CONTENT PACK (Part 6: fictional vendors, catalogue, images with licence
  * provenance, NAME-DENYLIST) and the rider's and driver's partner profiles
@@ -200,6 +201,46 @@ export async function expireReviewSession(prisma: PrismaClient, sessionId: strin
   if (s.status === 'EXPIRED' || s.status === 'REVOKED') return 'ALREADY_CLOSED';
   await prisma.reviewSession.update({ where: { id: sessionId }, data: { status: 'EXPIRED' } });
   return 'EXPIRED';
+}
+
+/** [Row 349] The furthest an extension may reach, counted from now. */
+export const MAX_REVIEW_EXTENSION_DAYS = 60;
+
+export type ReviewExtendResult =
+  | { verdict: 'EXTENDED'; from: Date; to: Date }
+  | { verdict: 'NOT_FOUND' | 'ALREADY_CLOSED' | 'LAPSED' | 'NOT_LATER' | 'TOO_FAR' | 'RACED' };
+
+/**
+ * [Row 349] Moves a LIVE review session's expiry later, in place. The
+ * reviewer's login and code do not change, and nothing is minted or printed,
+ * so the store-review notes stay true (only their "valid until" date moves).
+ *
+ * Refused, and named: an unknown session; a closed one (EXPIRED / REVOKED);
+ * one whose time has already run out (the gate closes it on its next request
+ * — provision a new session instead of reviving it); a date that is not later
+ * than the current expiry (shortening is `expire`); and a date more than
+ * MAX_REVIEW_EXTENSION_DAYS from now. One compare-and-set UPDATE on the expiry
+ * that was read: a concurrent expire, revoke or extend wins, and this reports
+ * RACED.
+ */
+export async function extendReviewSession(
+  prisma: Pick<PrismaClient, 'reviewSession'>,
+  sessionId: string,
+  until: Date,
+  now = new Date(),
+): Promise<ReviewExtendResult> {
+  if (!Number.isFinite(until.getTime())) return { verdict: 'NOT_LATER' };
+  const s = await prisma.reviewSession.findUnique({ where: { id: sessionId }, select: { status: true, expiresAt: true } });
+  if (!s) return { verdict: 'NOT_FOUND' };
+  if (s.status === 'EXPIRED' || s.status === 'REVOKED') return { verdict: 'ALREADY_CLOSED' };
+  if (s.expiresAt.getTime() <= now.getTime()) return { verdict: 'LAPSED' };
+  if (until.getTime() <= s.expiresAt.getTime()) return { verdict: 'NOT_LATER' };
+  if (until.getTime() > now.getTime() + MAX_REVIEW_EXTENSION_DAYS * 86_400_000) return { verdict: 'TOO_FAR' };
+  const took = await prisma.reviewSession.updateMany({
+    where: { id: sessionId, status: { in: ['PROVISIONED', 'ANCHORED'] }, expiresAt: s.expiresAt },
+    data: { expiresAt: until },
+  });
+  return took.count === 1 ? { verdict: 'EXTENDED', from: s.expiresAt, to: until } : { verdict: 'RACED' };
 }
 
 export interface ReviewStatus {

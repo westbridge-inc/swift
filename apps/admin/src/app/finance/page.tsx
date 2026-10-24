@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchRevenue,
   fetchCashSettlements,
@@ -10,8 +10,8 @@ import {
   processSettlement,
   type CashSettlementRow,
 } from '@/lib/api';
-import { askReason } from '@/lib/ask-reason';
-import { MutationError } from '@/components/MutationError';
+import { QueryFailed } from '@/components/mc/QueryFailed';
+import { useActionRunner } from '@/components/mc/useActionRunner';
 
 /**
  * `Number(n || 0)` rendered a MISSING amount as `$0` — and on a finance page a
@@ -89,6 +89,8 @@ function MmgSection() {
           <p className="text-[var(--muted)] text-sm">Payment mix (30d, completed)</p>
           {mixQ.isLoading ? (
             <p className="text-3xl font-bold mt-1">—</p>
+          ) : mixQ.isError ? (
+            <QueryFailed error={mixQ.error} what="the payment mix" onRetry={() => void mixQ.refetch()} retrying={mixQ.isFetching} className="mt-2" />
           ) : (
             <div className="mt-2 space-y-1">
               {(mix?.byMethod ?? []).map((m) => (
@@ -105,12 +107,14 @@ function MmgSection() {
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Store → rider fees outstanding</p>
-          <p className="text-3xl font-bold mt-1">{ledgerQ.isLoading ? '—' : gyd(outstanding.total)}</p>
-          <p className="text-[var(--muted)] text-xs mt-1">{outstanding.count} unsettled handovers (MMG orders)</p>
+          <p className="text-3xl font-bold mt-1">{ledgerQ.isLoading || ledgerQ.isError ? '—' : gyd(outstanding.total)}</p>
+          <p className="text-[var(--muted)] text-xs mt-1">
+            {ledgerQ.isError ? 'Not loaded — see the ledger below' : `${ledgerQ.isLoading ? '—' : outstanding.count} unsettled handovers (MMG orders)`}
+          </p>
         </div>
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">MMG deliveries unconfirmed</p>
-          <p className="text-3xl font-bold mt-1">{mixQ.isLoading ? '—' : Number(mix?.mmgUnconfirmed ?? 0).toLocaleString()}</p>
+          <p className="text-3xl font-bold mt-1">{mixQ.isLoading || mixQ.isError ? '—' : Number(mix?.mmgUnconfirmed ?? 0).toLocaleString()}</p>
           <p className="text-[var(--muted)] text-xs mt-1">delivered, vendor never marked the payment received</p>
         </div>
       </div>
@@ -122,7 +126,9 @@ function MmgSection() {
             {LEDGER_FILTERS.map((f) => (
               <button
                 key={f}
+                type="button"
                 onClick={() => setFilter(f)}
+                aria-pressed={filter === f}
                 className={`px-2.5 py-1 rounded-lg text-xs ${
                   filter === f ? 'bg-white text-black font-semibold' : 'bg-white/5 text-[var(--muted)] hover:bg-white/10'
                 }`}
@@ -138,6 +144,8 @@ function MmgSection() {
         </p>
         {ledgerQ.isLoading ? (
           <p className="text-[var(--muted)] text-sm">Loading…</p>
+        ) : ledgerQ.isError ? (
+          <QueryFailed error={ledgerQ.error} what="the MMG cash ledger" onRetry={() => void ledgerQ.refetch()} retrying={ledgerQ.isFetching} />
         ) : rows.length === 0 ? (
           <p className="text-[var(--muted)] text-sm">Nothing here — no {filter === 'ALL' ? '' : `${LEDGER_STATUS[filter as CashSettlementRow['status']].label.toLowerCase()} `}entries.</p>
         ) : (
@@ -167,13 +175,22 @@ function MmgSection() {
  *  is acknowledged as reviewed — it is a record, never a payout. */
 function SettlementsSection() {
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
-  const process = useMutation({
-    mutationFn: ({ id, reference, reason }: { id: string; reference?: string; reason: string }) => processSettlement(id, reference, reason),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['settlements'] }),
-  });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['settlements'], queryFn: () => fetchSettlements('limit=50&status=PENDING') });
+  // [U28] Acknowledging is classified C4: its first answer can be a second
+  // admin's approval, which used to print as "Settlement update failed".
+  const actions = useActionRunner(() => qc.invalidateQueries({ queryKey: ['settlements'] }));
+  const [queuedRows, setQueuedRows] = useState<Record<string, true>>({});
+  const acknowledge = (s: any) => void actions.run({
+    title: `Acknowledge the sales digest for ${s.vendor?.name ?? 'this vendor'}?`,
+    body: <p>Swift moves no money: this records that you reviewed it.</p>,
+    confirmLabel: 'Acknowledge',
+    fields: [{ kind: 'text', name: 'note', label: 'Note', hint: 'Optional: a reference to the report you checked it against' }],
+    submit: ({ reason, values }) => processSettlement(s.id, String(values['note'] ?? '') || undefined, reason),
+    success: () => 'Digest acknowledged.',
+  }).then((outcome) => { if (outcome?.tone === 'queued') setQueuedRows((all) => ({ ...all, [s.id]: true })); });
   const rows: any[] = data?.data ?? [];
-  if (!isLoading && rows.length === 0) return null; // nothing pending → no noise
+  // Nothing pending → no noise. A failed read is not "nothing pending": it shows below.
+  if (!isLoading && !isError && rows.length === 0) return null;
 
   return (
     <div className="bg-[var(--panel)] rounded-xl border border-[var(--border)] p-6 mb-6">
@@ -181,13 +198,11 @@ function SettlementsSection() {
       <p className="text-[var(--muted)] text-xs mb-4">
         Each vendor’s own completed sales for the week. Swift takes no cut and pays nothing out — acknowledge a digest once you have reviewed it.
       </p>
-      {process.error && (
-        <div className="mb-3">
-          <MutationError error={process.error} label="Settlement update failed" />
-        </div>
-      )}
+      {actions.banner}
       {isLoading ? (
         <p className="text-sm text-[var(--muted)]">Loading…</p>
+      ) : isError ? (
+        <QueryFailed error={error} what="the sales digests" onRetry={() => void refetch()} retrying={isFetching} />
       ) : (
         <div className="space-y-2">
           {rows.map((s: any) => (
@@ -199,17 +214,12 @@ function SettlementsSection() {
               </span>
               <span className="ml-auto font-semibold">{gyd(s.netSales ?? s.totalBase ?? s.amount)}</span>
               <button
-                onClick={() => {
-                  const ref = window.prompt(`Note for ${s.vendor?.name ?? 'this digest'} (optional):`) ?? undefined;
-                  if (window.confirm(`Acknowledge this sales digest? Swift moves no money — this records that you reviewed it.`)) {
-                    const reason = askReason({ action: 'acknowledge this sales digest', subject: s.vendor?.name ?? 'this digest' });
-                    if (reason) process.mutate({ id: s.id, reference: ref || undefined, reason });
-                  }
-                }}
-                disabled={process.isPending}
+                type="button"
+                onClick={() => acknowledge(s)}
+                disabled={queuedRows[s.id] === true}
                 className="px-3 py-1 rounded-lg text-xs bg-[var(--accent)] hover:bg-[var(--accent)]/80 disabled:opacity-50"
               >
-                Acknowledge
+                {queuedRows[s.id] ? 'Waiting for approval' : 'Acknowledge'}
               </button>
             </div>
           ))}
@@ -220,7 +230,7 @@ function SettlementsSection() {
 }
 
 export default function FinancePage() {
-  const { data, isLoading } = useQuery({ queryKey: ['revenue'], queryFn: fetchRevenue });
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({ queryKey: ['revenue'], queryFn: fetchRevenue });
   const summary = data?.data?.summary;
   const daily = data?.data?.dailyRevenue ?? [];
 
@@ -232,6 +242,9 @@ export default function FinancePage() {
         commission, no markup, no customer fees.
       </p>
 
+      {isError ? (
+        <QueryFailed error={error} what="the revenue figures" onRetry={() => void refetch()} retrying={isFetching} className="mb-6" />
+      ) : (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
         <div className="bg-[var(--panel)] rounded-xl p-6 border border-[var(--border)]">
           <p className="text-[var(--muted)] text-sm">Weekly Subscription Revenue</p>
@@ -249,6 +262,7 @@ export default function FinancePage() {
           <p className="text-[var(--muted)] text-xs mt-1">paying participants</p>
         </div>
       </div>
+      )}
 
       {/* Manual vendor payouts awaiting a transfer reference */}
       <SettlementsSection />
@@ -265,7 +279,7 @@ export default function FinancePage() {
         </p>
         <div className="flex items-center justify-between p-3 rounded-lg bg-white/5">
           <span className="text-sm">Delivery fees (mover earnings, 30d)</span>
-          <span className="text-sm font-semibold">{isLoading ? '—' : `${gyd(summary?.thirtyDayDeliveryFees)} GYD`}</span>
+          <span className="text-sm font-semibold">{isLoading || isError ? '—' : `${gyd(summary?.thirtyDayDeliveryFees)} GYD`}</span>
         </div>
       </div>
 
@@ -277,6 +291,8 @@ export default function FinancePage() {
         </p>
         {isLoading ? (
           <p className="text-[var(--muted)] text-sm">Loading…</p>
+        ) : isError ? (
+          <p className="text-[var(--muted)] text-sm">Not loaded — the revenue read failed (see above).</p>
         ) : daily.length === 0 ? (
           <p className="text-[var(--muted)] text-sm">No completed orders in the last 30 days.</p>
         ) : (

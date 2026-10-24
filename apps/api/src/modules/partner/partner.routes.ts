@@ -1,6 +1,7 @@
 import { assertHirePlate } from '../verification/hire-plate';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../utils/errors';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { z } from 'zod';
 import { VehicleType } from '@prisma/client';
 import { PartnerService } from './partner.service';
@@ -14,6 +15,8 @@ import { consentSurfaceOf } from '../legal/consent-surface';
 import { VerificationService } from '../verification/verification.service';
 import { getKycProvider } from '../../providers/kyc/kyc-provider';
 import { ReviewDemoRoleRefusedError } from '../review/demo-policy';
+import { recordBackgroundLocationConsent } from './location-consent';
+import { assertWeeklyFeeAck, weeklyFeeAckRequired } from './weekly-fee-ack';
 
 const vehicleSchema = z.object({
   make: z.string().trim().min(1).max(60),
@@ -45,6 +48,13 @@ const becomeSchema = z.object({
   // No released build predates the control, so the API now refuses without it (below); the
   // consent row is still written exactly as ticked, never fabricated.
   acceptAgreement: z.boolean().optional(),
+  // [Row 628] "I understand the weekly fee": the words' version and the fee the client showed. Required from
+  // the website and from any client that sends it; phone builds 9-12 send none (partner/weekly-fee-ack.ts).
+  weeklyFeeAck: z.object({
+    version: z.string().trim().min(1).max(20),
+    amount: z.number().int().positive(),
+    currencyCode: z.string().trim().length(3),
+  }).strict().optional(),
 });
 export const AGREEMENT_REQUIRED = 'AGREEMENT_REQUIRED';
 
@@ -60,12 +70,36 @@ export async function partnerRoutes(app: FastifyInstance) {
   const service = new PartnerService(app.prisma, notifications);
   const verification = new VerificationService(app.prisma, notifications, getKycProvider());
 
+  /** [R18] POST /consent/background-location { granted } — the mover's answer to
+   *  the background-location disclosure, in the consent ledger (location-consent).
+   *  The phone sends yes only when the disclosure was accepted AND the system
+   *  sheet granted access. Movers only: nobody else is asked for it. */
+  app.post('/consent/background-location', auth, async (request) => {
+    const userId = request.user.userId;
+    const user = await app.prisma.user.findUnique({ where: { id: userId }, select: { roles: true } });
+    if (!user?.roles.some((r) => r === 'RIDER' || r === 'DRIVER' || r === 'MOVER')) {
+      throw new AppError(403, 'NOT_A_MOVER', 'Background location is asked of riders and drivers only.');
+    }
+    const { granted } = z.object({ granted: z.boolean() }).strict().parse(request.body);
+    const outcome = await recordBackgroundLocationConsent(app.prisma, {
+      userId, granted, surface: consentSurfaceOf(request), ip: request.ip,
+    });
+    return { success: true, data: outcome };
+  });
+
   /** POST /become — self-serve provisioning of a Rider/Driver/Vendor entity. */
   app.post('/become', auth, async (request, reply) => {
     const body = becomeSchema.parse(request.body);
     // [TA-S1-008] Acceptance is a precondition of the authority, not a courtesy of the client.
     if (body.acceptAgreement !== true) {
       throw new AppError(400, AGREEMENT_REQUIRED, `Accept the ${body.role === 'VENDOR' ? 'vendor' : 'driver'} agreement to continue — Swift records that you agreed, and cannot record what you did not.`);
+    }
+    // [Row 628] The weekly fee was shown and ticked — before any provisioning, role change or row.
+    assertWeeklyFeeAck(weeklyFeeAckRequired(request, body), body.weeklyFeeAck);
+    if (body.business?.name) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only.
+      const me = await app.prisma.user.findUnique({ where: { id: request.user.userId }, select: { phone: true } });
+      assertNameNotReserved(body.business.name, me?.phone);
     }
     const { result, authorityCleanup } = await service.becomePartnerWithAuthority(
       request.user.userId,
@@ -77,7 +111,7 @@ export async function partnerRoutes(app: FastifyInstance) {
       ),
       // [DCR-1] Ledger context for the role-agreement consent row: the surface is the
       // client's own (the web app's clickwrap is the web, not the app).
-      { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request) },
+      { accepted: body.acceptAgreement === true, ip: request.ip, surface: consentSurfaceOf(request), weeklyFeeAck: body.weeklyFeeAck },
     );
     await completeUserRoleAuthorityTransition(app, authorityCleanup);
     reply.code(result.created ? 201 : 200);

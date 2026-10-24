@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mockApi } from '@/test/test-utils';
 import { mapPixel, pixelPoint } from '@/lib/store-pin';
@@ -73,9 +73,52 @@ async function pinDropoff() {
 }
 
 describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
+  // [review S3-1] Location is asked for only when the sender taps for it, as
+  // in the pin picker: a prompt on page load is a surprise, and an early
+  // "Block" would also refuse every later "Use my location".
+  it('opening the page never asks for the device location; a tap does', async () => {
+    device('ok');
+    const geolocation = navigator.geolocation as unknown as { getCurrentPosition: ReturnType<typeof vi.fn> };
+    render(<CourierPage />);
+    expect(await screen.findByRole('button', { name: 'Use my location as the pickup' })).toBeTruthy();
+    await new Promise((settle) => setTimeout(settle, 30));
+    expect(geolocation.getCurrentPosition).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+    fireEvent.click(button('Use my location as the pickup'));
+    expect(await screen.findByDisplayValue('Current location')).toBeTruthy();
+    expect(geolocation.getCurrentPosition).toHaveBeenCalledTimes(1);
+  });
+
+  it('a location that arrives after the sender chose another pickup does not replace it', async () => {
+    let answer: PositionCallback = () => undefined;
+    vi.spyOn(navigator, 'geolocation', 'get').mockReturnValue({ getCurrentPosition: vi.fn((success: PositionCallback) => { answer = success; }) } as unknown as Geolocation);
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    // While the device is still answering, the sender types the pickup themselves.
+    const pickupBox = screen.getAllByPlaceholderText('Search address…')[0]!;
+    fireEvent.change(pickupBox, { target: { value: 'Sample Market' } });
+    await act(async () => { answer({ coords: DEVICE as unknown as GeolocationCoordinates, timestamp: Date.now() } as GeolocationPosition); });
+    expect((pickupBox as HTMLInputElement).value).toBe('Sample Market');
+    expect(screen.queryByDisplayValue('Current location')).toBeNull();
+    expect(button('Use my location as the pickup').disabled).toBe(false);
+  });
+
+  it('a location refusal that arrives after the sender chose another pickup neither wipes it nor shows an error', async () => {
+    let refuse: PositionErrorCallback = () => undefined;
+    vi.spyOn(navigator, 'geolocation', 'get').mockReturnValue({ getCurrentPosition: vi.fn((_ok: PositionCallback, fail?: PositionErrorCallback | null) => { refuse = fail!; }) } as unknown as Geolocation);
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    const pickupBox = screen.getAllByPlaceholderText('Search address…')[0]!;
+    fireEvent.change(pickupBox, { target: { value: 'Sample Market' } });
+    await act(async () => { refuse({ code: 3, PERMISSION_DENIED: 1, TIMEOUT: 3 } as GeolocationPositionError); });
+    expect((pickupBox as HTMLInputElement).value).toBe('Sample Market');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('pins the drop-off: the estimate and the order carry the pinned point and its name', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     // Start the drop-off from a saved address, then nudge it by keyboard to the door.
     await pinDropoff();
@@ -100,7 +143,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
 
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
     fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'Documents' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'What’s inside? (optional)' }), { target: { value: 'A phone charger' } });
     declare();
     await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
     fireEvent.click(button('Request courier · $1,160'));
@@ -113,7 +156,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
       packageSize: 'SMALL',
       recipientName: 'Test Recipient',
       recipientPhone: '+592 600 0000',
-      packageDescription: 'Documents',
+      packageDescription: 'A phone charger',
       declaresNoProhibitedItems: true,
     });
     expect(order.dropoff.lat).toBeCloseTo(pin.latitude, 9);
@@ -142,6 +185,8 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     });
     device('ok');
     render(<CourierPage />);
+    // The pickup comes from the device only when the sender taps for it (row 413).
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
     await screen.findByDisplayValue('Current location');
     await pinDropoff();
     fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
@@ -163,12 +208,17 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
     fireEvent.click(button('Request courier · $1,280'));
     await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-2'));
     expect(calls('POST', '/api/v1/courier/order').map((c) => bodyOf(c).expectedFee)).toEqual([1160, 1280]);
+    // [UI-SWEEP U65] A parcel at a new fee is a new intent: a new request key.
+    const keys = calls('POST', '/api/v1/courier/order').map((c) => new Headers((c[1] as RequestInit).headers).get('Idempotency-Key'));
+    expect(keys.every((k) => typeof k === 'string' && /^[A-Za-z0-9._~-]{1,200}$/.test(k!))).toBe(true);
+    expect(keys[0]).not.toBe(keys[1]);
   });
 
   it('pins the pickup when the device location is refused; an unnamed spot is sent as "Dropped pin"', async () => {
     device('denied');
     reverseLabel = null;
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     expect(await screen.findByText(/allow location access and try again/)).toBeTruthy();
     fireEvent.click(button('Pin pickup on the map'));
     const map = await screen.findByRole('application', { name: 'Pickup pin map' });
@@ -187,6 +237,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('will not request a courier without the recipient the server requires', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     const map = await pinDropoff();
     fireEvent.keyDown(map, { key: 'ArrowDown' });
@@ -209,6 +260,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('a rough device fix is not taken as the pickup: the sender pins or searches it', async () => {
     device('rough');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     expect(await screen.findByText(/only within about 4800 m/)).toBeTruthy();
     expect(screen.queryByDisplayValue('Current location')).toBeNull();
     fireEvent.click(button('Pin pickup on the map'));
@@ -221,6 +273,7 @@ describe('[WEB-PIN] send a parcel: pin either end on the map', () => {
   it('a pin outside Guyana cannot be used', async () => {
     device('ok');
     render(<CourierPage />);
+    fireEvent.click(button('Use my location as the pickup'));
     await screen.findByDisplayValue('Current location');
     const map = await pinDropoff();
     for (let i = 0; i < 12; i += 1) fireEvent.click(button('Zoom out'));
@@ -245,6 +298,8 @@ describe('[owner #67] a parcel with no prohibited items', () => {
   async function readyParcel() {
     device('ok');
     render(<CourierPage />);
+    // The pickup comes from the device only when the sender taps for it (row 413).
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
     await screen.findByDisplayValue('Current location');
     await pinDropoff();
     fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
@@ -261,7 +316,7 @@ describe('[owner #67] a parcel with no prohibited items', () => {
   it('no courier is requested until the sender ticks the box; the order carries the tick', async () => {
     await readyParcel();
     // The list the tick refers to is on screen, in the server's own words.
-    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel or 18\+ items\./)).toBeTruthy();
+    expect(screen.getByText(/Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas \(LPG\), fuel, 18\+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail\./)).toBeTruthy();
     const box = screen.getByRole('checkbox', { name: 'This parcel has no prohibited items' }) as HTMLInputElement;
     expect(box.checked).toBe(false);
     expect(button('Tick “no prohibited items” to send').disabled).toBe(true);
@@ -299,5 +354,53 @@ describe('[owner #67] a parcel with no prohibited items', () => {
     fireEvent.click(button('Request courier · $1,160'));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', refusal);
     expect(state.push).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [UI-SWEEP U65] The web parcel send carried no Idempotency-Key: a lost answer
+// and a second press booked a second parcel. One key per parcel intent, kept
+// across retries; the server replays the first booking for the same key.
+// ---------------------------------------------------------------------------
+describe('[U65] pressing send again never books a second parcel', () => {
+  it('a lost answer and a second press resend the SAME request key', async () => {
+    let orders = 0;
+    fetchMock = mockApi(({ url, method }) => {
+      if (url.pathname === '/api/v1/customer/addresses' && method === 'GET') return ok([SAVED]);
+      if (url.pathname === '/api/v1/places/reverse') return ok({ address: reverseLabel });
+      if (url.pathname === '/api/v1/places/autocomplete') return ok([]);
+      if (url.pathname === '/api/v1/courier/estimate' && method === 'POST') return ok(ESTIMATE);
+      if (url.pathname === '/api/v1/courier/order' && method === 'POST') {
+        orders += 1;
+        if (orders === 1) return { status: 504, body: { success: false, error: { message: 'The answer was lost on the way back.' } } };
+        return ok({ orderId: 'co-1', orderNumber: 'SW-3001', fee: 1160, distanceKm: 3, trackingToken: 't', trackingUrl: 'https://example.test/t', expiresAt: null }, 201);
+      }
+      return { status: 404, body: { success: false, error: { message: `unmocked ${method} ${url.pathname}` } } };
+    });
+    device('ok');
+    render(<CourierPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my location as the pickup' }));
+    await screen.findByDisplayValue('Current location');
+    await pinDropoff();
+    fireEvent.click(await screen.findByRole('button', { name: 'Work — 3 Example Avenue' }));
+    loadMap();
+    fireEvent.keyDown(screen.getByRole('application', { name: 'Drop-off pin map' }), { key: 'ArrowRight' });
+    loadMap();
+    await screen.findByText(`Near ${reverseLabel}`);
+    fireEvent.click(button('Use this pin'));
+    expect(await screen.findByText('$1,160')).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient name' }), { target: { value: 'Test Recipient' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Recipient phone' }), { target: { value: '+592 600 0000' } });
+    declare();
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fireEvent.click(button('Request courier · $1,160'));
+    expect(await screen.findByText(/The answer was lost on the way back/)).toBeTruthy();
+    await waitFor(() => expect(button('Request courier · $1,160').disabled).toBe(false));
+    fireEvent.click(button('Request courier · $1,160'));
+    await waitFor(() => expect(state.push).toHaveBeenCalledWith('/orders/co-1'));
+    const keys = calls('POST', '/api/v1/courier/order').map((c) => new Headers((c[1] as RequestInit).headers).get('Idempotency-Key'));
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBeTruthy();
+    expect(keys[1]).toBe(keys[0]);
   });
 });

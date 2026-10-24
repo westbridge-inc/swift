@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { DashboardShell } from './dashboard-shell';
+import { LegalAcceptanceGate } from '@/components/legal-acceptance-gate';
 
 /**
  * [DS273 F3] The vendor console (today, orders, inventory, import, settings) is
@@ -13,5 +14,6 @@ export const metadata: Metadata = {
 };
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  return <DashboardShell>{children}</DashboardShell>;
+  // [Legal research G2 · R26] a material change to the Terms is accepted with a fresh tick
+  return <><DashboardShell>{children}</DashboardShell><LegalAcceptanceGate /></>;
 }

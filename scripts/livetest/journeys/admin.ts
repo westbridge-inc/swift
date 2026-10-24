@@ -111,7 +111,7 @@ export const ADMIN_02: Journey<Ctx> = {
       const C5 = ctx.roster.customers.C5!;
       await handoverPaid(mover(ctx, got.moverId).session, id, { lat: C5.lat, lng: C5.lng }, await doorPin(C5.session, id));
     }
-    rec.skipAll('the defining case — a food-age hold and its release — cannot be produced here: a hold needs a platform-rider delivery paid by MMG (captured or claimed) whose ready time passes the 45-minute food-age limit, and MMG orders need a vendor pay link (SMS step-up). The redispatch and rider-accept parts above ran for real');
+    rec.skipAll('the defining case — a food-age hold and its release — cannot be produced here: a hold needs a platform-rider delivery paid by MMG (captured or claimed) whose ready time passes the 45-minute food-age limit, and MMG orders need a store MMG number (set with an SMS step-up). The redispatch and rider-accept parts above ran for real');
   },
 };
 

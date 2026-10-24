@@ -13,6 +13,7 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { looksLikeDocument } from '../utils/images';
 import { resetKeyProviderForTests } from '../providers/storage/envelope';
 import { getStorageProvider } from '../providers/storage/storage-provider';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // Security-spec gaps (task #16): uploads sniff content, checkout is idempotent.
@@ -24,7 +25,7 @@ let userId: string;
 let ownerUserId: string;
 let vendorId: string;
 let itemId: string;
-const marker = nanoid(6).toLowerCase();
+const marker = wordFreeTag(8);
 const createdOrderIds: string[] = [];
 const previousMasterKek = process.env['MASTER_KEK'];
 
@@ -50,7 +51,7 @@ beforeAll(async () => {
 
   const user = await app.prisma.user.create({
     data: {
-      phone: `+59265${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Sec', lastName: 'Gap',
       roles: ['CUSTOMER'] as never[], activeRole: 'CUSTOMER' as never,
       isPhoneVerified: true, selfieCapturedAt: new Date(),
@@ -73,7 +74,7 @@ beforeAll(async () => {
   // rows = always open; cheap item stays under the L2 ID gate.
   const ownerUser = await app.prisma.user.create({
     data: {
-      phone: `+59264${String(Math.floor(Math.random() * 90000) + 10000)}`,
+      phone: testPhone(),
       firstName: 'Sec', lastName: 'Vendor',
       roles: ['VENDOR_OWNER'] as never[], activeRole: 'VENDOR_OWNER' as never,
       isPhoneVerified: true,

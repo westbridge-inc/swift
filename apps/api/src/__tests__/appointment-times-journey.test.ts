@@ -430,9 +430,9 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
   // [owner #50, 14 Oct] A booking nobody has confirmed is free until the
   // provider confirms it; the countdown the app shows is the five-minute
   // window from placing (free whatever happens inside it).
-  // [owner ruling 14 Oct] Before the provider accepts, the cancel is free with no clock to count down to; the five
-  // minutes start at the provider's acceptance (next case).
-  it('a booking the provider has not confirmed cancels free, with no countdown — the five minutes start at acceptance', async () => {
+  // [owner ruling 14 Oct · 22 Oct] Before the provider accepts, the cancel is free with no clock to count down to; the
+  // window (one minute since 22 Oct 2026) starts at the provider's acceptance (next case).
+  it('a booking the provider has not confirmed cancels free, with no countdown — the window starts at acceptance', async () => {
     const slot = gy(gyDay(2), 11, 0);
     const customer = await makeUser('Joy', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
@@ -448,7 +448,7 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
   });
 
   // [owner #50, 14 Oct] No marker any more: a confirmed booking cancels free
-  // inside the five-minute window (and its slot sells again); past it the
+  // inside the window (one minute, owner 22 Oct 2026) (and its slot sells again); past it the
   // customer contacts the provider and the slot stays booked.
   it('a confirmed booking cancels free inside the window, and the slot sells again', async () => {
     const slot = gy(gyDay(2), 12, 0);
@@ -475,7 +475,7 @@ describe('Q12 · B5 — the cancel windows and the reschedule behave as document
     const customer = await makeUser('Lena', ['CUSTOMER'], 'CUSTOMER');
     const order = await booked(customer, cutId, slot);
     expect((await accept(order.id)).statusCode).toBe(200);
-    // [owner ruling 14 Oct] Past the window = more than five minutes after the provider ACCEPTED.
+    // [owner ruling 14 Oct · 22 Oct] Past the window = more than one minute after the provider ACCEPTED.
     await app.prisma.order.update({ where: { id: order.id }, data: { placedAt: new Date(Date.now() - 12 * MINUTE), acceptedAt: new Date(Date.now() - 10 * MINUTE) } });
     const mine = await call('GET', `/api/v1/customer/orders/${order.id}`, customer.token);
     expect(mine.json().data).toMatchObject({

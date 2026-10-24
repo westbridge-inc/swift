@@ -1,8 +1,9 @@
 /** @jsxImportSource react */
 import React from 'react';
-import { ScrollView, View } from 'react-native';
+import { RefreshControl, ScrollView, View } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { color, fontSize, space } from '@swift/ui';
+import { usePullToRefresh } from '../../../hooks/usePullToRefresh';
 import { Card, EmptyState, ErrorState, Header, LinkText, LoadingBlock, Screen, T, TonePill } from '../../../kit';
 import { useMoverClaims, useMoverKind } from '../../../hooks';
 import { money } from '../../../lib/money';
@@ -19,10 +20,12 @@ export function ClaimsScreen({ navigation }: { navigation?: { navigate?: (s: str
   const { kind } = useMoverKind();
   const q = useMoverClaims<{ claims: ClaimView[]; suspended: boolean; suspendedAt: string | null }>(kind);
   const data = q.data as { claims: ClaimView[]; suspended: boolean; suspendedAt: string | null } | undefined;
+  // [UI-SWEEP U33] Pull to refresh like the sibling lists; the spinner follows the pull only (hooks/usePullToRefresh).
+  const pull = usePullToRefresh(() => q.refetch());
   return (
     <Screen>
       <Header title="Guarantee claims" />
-      <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.md }}>
+      <ScrollView contentContainerStyle={{ padding: space.lg, gap: space.md }} refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={() => { void pull.onRefresh(); }} tintColor={color.brand[500]} />}>
         {q.isLoading ? <LoadingBlock /> : null}
         {q.isError ? <ErrorState onRetry={() => void q.refetch()} message="Couldn't load your claims." /> : null}
         {data?.suspended ? (

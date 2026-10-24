@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { catalogueCheckLine, importCheckSummary } from './catalogueCheck';
+import { catalogueCheckLine, importCheckSummary, importPhotoNotesLine } from './catalogueCheck';
 
 const SRC = process.cwd().endsWith('apps/mobile')
   ? join(process.cwd(), 'src')
@@ -37,5 +37,15 @@ describe('the partner reads why Swift hides an item', () => {
     const bulk = readFileSync(join(SRC, 'modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
     // Rendered inside the summary line, not merely called.
     expect(bulk).toMatch(/\{failedCount \? [^\n]*\}\s*\{importCheckSummary\(result\)\}\.\s*<\/T>/);
+  });
+  it('the import names the rows that came in without their photo address [IMAGES-E2E PR4], and the bulk import screen shows it', () => {
+    expect(importPhotoNotesLine({ notes: [{ row: 3 }], notesCount: 1 }))
+      .toBe('1 row was imported without a photo (row 3). Add photos by uploading them on each item.');
+    expect(importPhotoNotesLine({ notes: [{ row: 2 }, { row: 5 }], notesCount: 7 }))
+      .toBe('7 rows were imported without a photo (rows 2, 5…). Add photos by uploading them on each item.');
+    expect(importPhotoNotesLine({ notesCount: 0 })).toBeNull();
+    expect(importPhotoNotesLine({})).toBeNull();
+    const bulk = readFileSync(join(SRC, 'modules/vendor/screens/VendorBulkImportScreen.tsx'), 'utf8');
+    expect(bulk).toMatch(/\{importPhotoNotesLine\(result\) \? \(\s*<T[^>]*>\{importPhotoNotesLine\(result\)\}<\/T>/);
   });
 });

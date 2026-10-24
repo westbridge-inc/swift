@@ -19,8 +19,9 @@ import { runWithTenant, runWithoutTenant } from '../plugins/tenant-context';
 import { NotificationService } from '../modules/notification/notification.service';
 import { DeliveryCashSettlementService } from '../modules/cash/delivery-cash-settlement.service';
 import { reconcileHandoverClaims } from '../modules/cash/handover-claims';
+import { wordFreeTag } from './helpers/fixture-ids';
 
-const RUN = nanoid(8).replace(/[^a-zA-Z0-9]/g, '0');
+const RUN = wordFreeTag(8);
 const NUM = String(Date.now()).slice(-5);
 const HOUR = 3_600_000;
 const system = <T>(fn: () => Promise<T>) => runWithoutTenant(fn, 'doc1-handover-claims-test');

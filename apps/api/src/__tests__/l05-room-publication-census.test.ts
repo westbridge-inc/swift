@@ -30,7 +30,7 @@ function namesSensitiveRoom(arg: ts.Expression, ast: ts.SourceFile): boolean {
 }
 
 describe('sensitive room publication census', () => {
-  it('all 44 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
+  it('all 48 existing order publishers call the current-audience gate; no direct order or chat broadcast remains', () => {
     const bypasses: string[] = []; let orderPublishers = 0;
     for (const file of sources(join(__dirname, '..'))) {
       const text = readFileSync(file, 'utf8');
@@ -40,7 +40,9 @@ describe('sensitive room publication census', () => {
           if (n.expression.getText(ast) === 'emitToOrderRoom') orderPublishers++;
           // A helper that takes the room as an argument (e.g. roomEmit(`order:…`)) is the same bypass.
           const callee = ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : n.expression.getText(ast);
-          if (/emit/i.test(callee) && !['emit', 'emitToOrderRoom', 'emitToChatRoom'].includes(callee)
+          // emitToStoreRoom is the store-room gate (owner ruling #15): its room is
+          // vendor:<id>, and its order: arguments are EVENT names (order:new).
+          if (/emit/i.test(callee) && !['emit', 'emitToOrderRoom', 'emitToChatRoom', 'emitToStoreRoom'].includes(callee)
             && n.arguments.some((arg) => /^[`'"](?:order|chat):/.test(arg.getText(ast)))) {
             bypasses.push(file + ':' + (ast.getLineAndCharacterOfPosition(n.getStart(ast)).line + 1));
           }
@@ -65,7 +67,13 @@ describe('sensitive room publication census', () => {
       visit(ast);
     }
     expect(bypasses).toEqual([]);
-    // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed).
-    expect(orderPublishers).toBe(44);
+    // 43 + the guardian check-in hint (it used a roomEmit(`order:…`) helper the first census missed)
+    // + the admin store-refund close (#1607)
+    // + the swap question withdrawn at its deadline on MMG (#1830, through the gate)
+    // + the MMG acceptance expiry (owner 18 Oct: not marked "Paid by MMG" within 30 minutes of acceptance).
+    // + the taxi stop change (multi-stop part 4: ride:stop_changed, through the gate).
+    // + [O-4] the out-of-stock question asked before acceptance, and the free cancel when the only
+    //   item left gets no answer (picking.service, both through the gate).
+    expect(orderPublishers).toBe(50);
   });
 });

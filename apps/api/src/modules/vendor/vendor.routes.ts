@@ -1,26 +1,32 @@
-import { emitToOrderRoom } from '../order/order-room-emission.service';
+import { closeStoreSilentMmgCase, mmgAcceptedPayBy, mmgPayByStoreLine } from '../order/mmg-accept-expiry';
+import { drainPushesAfterResponse, pushAfterResponse } from '../../lib/push-after-response';
+import { emitToOrderRoom, emitToStoreRoom } from '../order/order-room-emission.service';
 import { readFeePause } from '../billing/mmg-pause';
 import { latestCaseFor, mayHaveCase, partyCaseView } from '../custody/custody-case';
+import { assertHandoverRequestBudget } from '../handover/handover-request-budget';
 import { confirmReturn } from '../custody/custody-recovery';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { assertNameNotReserved } from '../../lib/fixture-filter';
 import { assertPromoTerms, recordPromoTermsVersion, updatePromoTerms } from '../promo/promo-terms';
 import { OrderStatus, OrderType, SettlementStatus } from '@prisma/client';
 import type { FulfillmentMode, Prisma } from '@prisma/client';
-import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, releaseLapsedHoldInTransaction } from '../order/order.service';
-import { STORE_REJECTABLE_STATUSES } from '../order/order-status';
+import { OrderService, assertMmgFulfilmentAllowed, vendorVisibleFilter, cancelledWhileHeld, holdWindowMs, isTerminalOrderStatus, preparationMayStart, releaseLapsedHoldInTransaction } from '../order/order.service';
+import { STORE_ACCEPT_PATH, STORE_REJECTABLE_STATUSES } from '../order/order-status';
 import { vendorResponseSlaMinutes, vendorRespondBy } from '../order/response-sla';
 import { VendorAnalyticsService } from './vendor-analytics.service';
 import { VendorMenuService } from './vendor-menu.service';
 import { PickingService } from '../order/picking.service';
+import { lineOptionsAsMade } from '../order/substitution-view';
 import { makeDispatchService } from '../dispatch/dispatch.service';
 import { dispatchTrigger, enqueueDeliveryDispatch } from '../dispatch/dispatch-trigger';
 import { resolveDeliveryMode } from '../fulfillment/fulfillment-mode';
-import { handoverAttemptState, HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
+import { HANDOVER_SECRETS_OMIT } from '../handover/handover-security';
 import { pickingReadinessCounter, mmgAttestationCounter } from '../../plugins/observability';
 import { assertMmgAttestable, normaliseMmgReference, recordVendorAttestation } from './mmg-attestation';
-import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
+import { completeMmgClaimNotice, decideStoreMmgClaim, mmgClaimLockObserver, mmgDispatchBlocked, stageStoreMmgClaim, type MmgClaimNotice } from '../order/mmg-claim.service';
 import { NotificationService } from '../notification/notification.service';
+import { deliverStaffInvite, staffAddReply, staffInviteAcceptEnabled, lockStaffInviteGrant, closePendingStaffInvites, recordStaffInviteRevocation, staffInviteRevocationVersion, withdrawPendingStaffInvites, spendStaffAddAllowance, staffAddDailyCap } from './staff-invites';
 import { BookingService } from '../booking/booking.service';
 import { fmtSlotTime } from '../booking/availability';
 import { guyanaDayKey, isDateOnly, startOfGuyanaDay } from '../../utils/guyana-day';
@@ -43,14 +49,18 @@ import { extractMenuPdf } from '../../utils/menu-pdf-process';
 import { parsePagination, paginatedResponse } from '../../utils/pagination';
 import { AppError, NotFoundError, ValidationError } from '../../utils/errors';
 import { storeHoldRefusal } from './store-hold';
-import { ReviewDemoMoneyRefusedError, refuseReviewAccountRoleGrant } from '../review/demo-policy';
+import { ReviewDemoMoneyRefusedError, isReviewAccount, refuseReviewAccountRoleGrant } from '../review/demo-policy';
 import { applyStockMovement, recordOpeningBalance } from '../inventory/stock';
 import { DeliveryCashSettlementService, assertSettlementId, settlementAttestationSchema } from '../cash/delivery-cash-settlement.service';
 import { BillingService } from '../billing/billing.service';
 import { getPaymentProvider } from '../../providers/payment/payment-provider';
 import { throwForMissingProfile } from '../../utils/role-gate';
 import { registerPartnerMmgCheckoutRoutes } from '../billing/mmg-checkout.routes';
-import { ALLOWED_IMAGE_TYPES, looksLikeImage } from '../../utils/images';
+import { keepPublicPhoto } from '../../utils/owned-photo-upload';
+import { IMPORT_PHOTO_ADDRESS_NOTE, uploadOnlyPhotoField } from '../../utils/photo-address';
+import { retryStorageOrphan } from '../../lib/storage-orphans';
+import { runAsSystem } from '../../plugins/tenant-context';
+import { queueStorePhotoDeletions } from './store-photos';
 import { scheduleVendorSearchSync } from '../search/search-sync';
 import { assertNotBanned, assertNotBannedGoods, assertStoreAllowed, catalogueChecksFor, partnerStoreView, partnerView, storeCheckOf, unhideRestocked } from '../compliance/prohibited-gate';
 import { certainGoods, notAllowedMessage } from '../compliance/prohibited-items';
@@ -69,10 +79,13 @@ import {
   storeVisibleReview,
 } from '../rating/vendor-review-visibility';
 import { mmgPayUrlForWrite, safeMmgPayUrl } from '../../utils/mmg-pay-url';
+import { mmgNumberForWrite, safeMmgNumber } from '../../utils/mmg-number';
+import { assertStoreMmgPayLinkWritable, storeMmgPayLinkEnabled } from '../../utils/store-mmg';
 import { requireStepUp } from '../auth/step-up';
 import { stageMmgLinkChange, cancelMmgLinkChange, clearMmgLink } from '../integrity/money-surface';
 import { assertVelocity } from '../integrity/velocity';
 import { publicPhoneForWrite, safePublicPhone } from '../../utils/vendor-public-phone';
+import { refundRuleForWrite } from './refund-rule';
 import { awaitingFirstGoLive, goLiveMissing } from './go-live';
 import { vatNumberForWrite } from '../../utils/vendor-vat-number';
 import { BULK_CHOICES, bulkUnitsForChoice, bulkChoiceForUnits, type BulkChoice } from '../../utils/load';
@@ -110,6 +123,8 @@ const updateVendorProfileSchema = z.object({
   maxConcurrentOrders: z.number().int().min(1).max(1000).nullable().optional(),
   // The vendor's own MMG "pay me" link (opt-in). null/empty clears it → cash-only.
   mmgPayUrl: z.string().trim().max(500).nullable().optional(),
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store's MMG number (+592 mobile); '' / null = stop taking MMG.
+  mmgNumber: z.string().trim().max(40).nullable().optional(),
   // The number customers may call before ordering. Opt-in; null/'' takes it
   // down. Shape is enforced by publicPhoneForWrite, not here, so the write
   // and read boundaries cannot drift apart on what a valid number is.
@@ -117,6 +132,9 @@ const updateVendorProfileSchema = z.object({
   // [VERIFY-DOCS · ruling 7] OPTIONAL VAT registration number, owner only; null/'' takes it off.
   // Shape is enforced by vatNumberForWrite (utils/vendor-vat-number).
   vatRegistrationNumber: z.string().trim().max(40).nullable().optional(),
+  // [R3 · CAA s.70(3)] The store's own refund rule, owner only; null/'' takes it down.
+  // Shape is enforced by refundRuleForWrite (vendor/refund-rule).
+  refundRule: z.string().max(2000).nullable().optional(),
 })
   // [Q8] A store pin is one point. Half of one would move the store along a
   // single axis to a spot nobody chose, so the two travel together or not at all.
@@ -323,10 +341,12 @@ const csvRowSchema = z.object({
   imageUrl: z.string().max(2048).optional().default(''),
 });
 
+// [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] No photo column: photos are uploaded, never
+// imported (an imageUrl column in an older file is still read, and refused per row).
 const CSV_TEMPLATE = [
-  'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
-  'Groceries,Basmati Rice 5kg,"Long grain, aged",3500,RICE-5KG,bag,40,true,DELIVERY,',
-  'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT,',
+  'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment',
+  'Groceries,Basmati Rice 5kg,"Long grain, aged",3500,RICE-5KG,bag,40,true,DELIVERY',
+  'Services,Haircut,"30 minute appointment",2000,,,,true,APPOINTMENT',
 ].join('\n');
 
 
@@ -619,6 +639,44 @@ const ORDER_ITEM_MONEY_FIELDS = [
 const ITEM_MONEY_FIELDS = ['basePrice'] as const;
 const OPTION_MONEY_FIELDS = ['additionalPrice'] as const;
 
+/** [L09 · M026] The store makes what the customer chose: every line carries its
+ *  snapshotted options (group, choice, price) on the board and the detail —
+ *  and none once an approved substitute replaced the line, because the swap is
+ *  charged without them (order/substitution-view.ts). */
+const VENDOR_ORDER_ITEMS = {
+  include: { selectedOptions: { select: { optionGroupName: true, optionName: true, markedUpPrice: true } } },
+} as const;
+
+function vendorOrderLine<T extends { subStatus: string; selectedOptions: Array<{ optionGroupName: string; optionName: string; markedUpPrice: unknown }> }>(line: T) {
+  const { selectedOptions, ...rest } = line;
+  return { ...rest, options: lineOptionsAsMade({ subStatus: line.subStatus, selectedOptions }) };
+}
+
+/** [O-4 · owner 22 Oct 2026] An order with an open "Out of stock" question (a swap or a removal
+ *  the customer has not answered yet) is not accepted: the customer agrees to the changed order
+ *  first. The refusal names the item and how long the answer can take. An order whose every line
+ *  came off has nothing to accept: the store rejects it instead (with its reason). */
+export function assertNoOpenCustomerQuestion(
+  lines: ReadonlyArray<{ name: string; subStatus: string; substituteDecideBy?: Date | null }>,
+  now: Date = new Date(),
+): void {
+  const open = lines.find((line) => line.subStatus === 'PENDING');
+  if (!open) {
+    if (lines.length > 0 && lines.every((line) => line.subStatus === 'REFUNDED' || line.subStatus === 'REJECTED')) {
+      throw new AppError(409, 'NOTHING_TO_ACCEPT', 'Every item on this order was removed. Reject the order instead, with the reason.');
+    }
+    return;
+  }
+  const minutes = open.substituteDecideBy
+    ? Math.max(1, Math.ceil((open.substituteDecideBy.getTime() - now.getTime()) / 60_000))
+    : null;
+  throw new AppError(
+    409,
+    'CUSTOMER_DECIDING',
+    `The customer is still deciding about ${open.name}${minutes ? ` (up to ${minutes} more minute${minutes === 1 ? '' : 's'})` : ''}. Accept the order after they answer.`,
+  );
+}
+
 /**
  * Verify that the given order belongs to one of the user's vendors and return it.
  */
@@ -638,9 +696,10 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
     // Do not assert another path is safe; assert it in handover-secrets.test.ts.
     omit: HANDOVER_SECRETS_OMIT,
     include: {
-      items: true,
+      items: VENDOR_ORDER_ITEMS,
       statusHistory: { orderBy: { createdAt: 'desc' } },
-      customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      // [COORD 17 Oct] The store order screen's Call button: first name + phone, never the last name.
+      customer: { select: { id: true, firstName: true, phone: true } },
       // [F-027-07] allow-list, not `include` — see utils/counterparty.
       rider: { select: riderCounterpartySelect({ withPhone: true }) },
       // vendorType drives the pick-list UI (grocery/goods shelf-pick §5.3).
@@ -662,8 +721,66 @@ async function resolveOwnedOrder(app: FastifyInstance, userId: string, orderId: 
 // Route plugin
 // ---------------------------------------------------------------------------
 
+
+/** [ALG-34 · owner 17 Oct 2026 PAYMENT-SIMPLIFY] The store's own view of where MMG money goes.
+ *  The MMG NUMBER (live + staged, each re-checked on read) is what customers pay now. The pay
+ *  LINK is shown only while STORE_MMG_PAY_LINK is on (`mmgPayLinkEnabled`); off, a stored link
+ *  stays dormant and an older app shows an empty card, never a link Swift does not use. */
+function storeMoneySurfaceView(row: {
+  mmgPayUrl: string | null; mmgPayUrlPending: string | null; mmgPayUrlApplyAt: Date | null;
+  mmgNumber: string | null; mmgNumberPending: string | null; mmgNumberApplyAt: Date | null;
+}) {
+  const linkOn = storeMmgPayLinkEnabled();
+  return {
+    mmgPayLinkEnabled: linkOn,
+    mmgPayUrl: linkOn ? safeMmgPayUrl(row.mmgPayUrl) : null,
+    mmgPayUrlPending: linkOn ? safeMmgPayUrl(row.mmgPayUrlPending) : null,
+    mmgPayUrlApplyAt: linkOn ? row.mmgPayUrlApplyAt : null,
+    mmgNumber: safeMmgNumber(row.mmgNumber),
+    mmgNumberPending: safeMmgNumber(row.mmgNumberPending),
+    mmgNumberApplyAt: row.mmgNumberPending ? row.mmgNumberApplyAt : null,
+  };
+}
+
+
+/** [owner 18 Oct 2026 · PAYMENT-SIMPLIFY] An accepted MMG order waiting for "Paid by MMG"
+ *  cancels 30 minutes after acceptance: the store sees when (server clock, the sweep's rule). */
+function storeMmgPayBy(order: Parameters<typeof mmgAcceptedPayBy>[0]): { mmgPayBy: string | null; mmgPayByLine: string | null } {
+  const payBy = mmgAcceptedPayBy(order);
+  return payBy ? { mmgPayBy: payBy.toISOString(), mmgPayByLine: mmgPayByStoreLine(payBy) } : { mmgPayBy: null, mmgPayByLine: null };
+}
+
+/**
+ * [IMAGES-E2E] What PUT /profile may do with the logo and cover addresses. They are
+ * photos the store uploads (POST /profile/logo|cover), so typed text may only take
+ * one down ('' = none) or send back the value already there (a client that echoes
+ * the profile). Anything else (an outside address, another store's key, a path into
+ * another folder) is refused: it would skip the scan and the redraw. undefined =
+ * leave the field as it is.
+ */
+export async function storePhotoFieldsForWrite(
+  app: FastifyInstance,
+  vendorId: string,
+  logoUrl: string | undefined,
+  coverImageUrl: string | undefined,
+): Promise<{ logoUrl?: string | null; coverImageUrl?: string | null }> {
+  if (logoUrl === undefined && coverImageUrl === undefined) return {};
+  const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { logoUrl: true, coverImageUrl: true } });
+  const one = (sent: string | undefined, now: string | null | undefined): string | null | undefined => {
+    if (sent === undefined) return undefined;
+    if (sent.trim() === '') return null;
+    if (sent === (now ?? '')) return undefined;
+    throw new AppError(400, 'STORE_PHOTO_UPLOAD_ONLY', 'Add the store\'s logo or cover by uploading a photo');
+  };
+  return { logoUrl: one(logoUrl, current?.logoUrl), coverImageUrl: one(coverImageUrl, current?.coverImageUrl) };
+}
+
 export async function vendorRoutes(app: FastifyInstance) {
   const auth = { preHandler: [app.authenticate] };
+  // [PERF item 3] A store's order taps answer without waiting for the push to the customer's
+  // phone (lib/push-after-response): the inbox row and socket events stay in the request.
+  const tap = { ...auth, onRequest: pushAfterResponse };
+  app.addHook('onClose', async () => drainPushesAfterResponse());
   const orderService = new OrderService(app.prisma, app.io, undefined, undefined, app.redis);
   const analytics = new VendorAnalyticsService(app.prisma);
   const menu = new VendorMenuService(app.prisma);
@@ -684,6 +801,35 @@ export async function vendorRoutes(app: FastifyInstance) {
     getKycProvider(),
   );
   const storage = getStorageProvider();
+  /** [IMAGES-E2E PR4] After a store photo's pointer change commits: delete each photo now. A
+   *  delete that fails stays owed and the standing retry (retryStorageOrphans) finishes it. */
+  const deleteQueuedPhotos = async (orphanIds: string[]) => {
+    if (orphanIds.length === 0) return;
+    await runAsSystem('public-photo-deletion', async () => {
+      for (const id of orphanIds) await retryStorageOrphan(app.prisma, storage, app.log, id);
+    });
+  };
+  /** A photo just kept that its row could not take (the row went meanwhile) is deleted, not left behind. */
+  const discardKeptPhoto = async (vendorId: string, url: string) => {
+    const ids = await app.prisma.$transaction((tx) => queueStorePhotoDeletions(tx, vendorId, [url])).catch(() => [] as string[]);
+    await deleteQueuedPhotos(ids);
+  };
+  /** [IMAGES-E2E PR4] A menu section's photo set (an upload) or taken down (null), under the
+   *  section's lock; the photo it replaces is queued for deletion in the same transaction. */
+  const setSectionPhoto = async (vendorId: string, id: string, url: string | null) => {
+    const { category, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+        SELECT "imageUrl" FROM "categories" WHERE "id" = ${id} AND "vendorId" = ${vendorId} AND "archivedAt" IS NULL
+        FOR UPDATE /* section-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Category', id);
+      const queued = rows[0].imageUrl !== url ? await queueStorePhotoDeletions(tx, vendorId, [rows[0].imageUrl]) : [];
+      const row = await tx.category.update({ where: { id }, data: { imageUrl: url } });
+      return { category: row, orphanIds: queued };
+    });
+    await deleteQueuedPhotos(orphanIds);
+    return category;
+  };
   const bookingService = new BookingService(app.prisma, app.io);
   const qrService = new QrService(app.prisma);
   const discovery = new DiscoveryService(app.prisma);
@@ -696,7 +842,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   async function startPlatformDeliveryAfterCommit(
     order: { id: string; isExpress: boolean },
     fulfillmentModeVersion: number,
-    reason: 'accept' | 'ready' | 'mode_switch',
+    reason: 'accept' | 'ready' | 'mode_switch' | 'mmg_paid',
   ): Promise<boolean> {
     try {
       const current = await dispatch.prepareForPlatformDelivery(order.id, fulfillmentModeVersion);
@@ -820,46 +966,80 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data: staff };
   });
 
-  /** POST /staff — add an EXISTING Swift account by phone (no ghost invites:
-   *  they must have signed up + done the selfie like everyone else). */
+  /** POST /staff — invite a Swift account to the team by phone. [Row 55]
+   *  Every number gets the SAME reply (staffAddReply): known, unknown, already
+   *  on the team or already invited. With STAFF_INVITE_ACCEPT on, a known
+   *  account gets an invite and joins only when it accepts; with it off (the
+   *  app build without the Accept card) it is added at once, as before. */
   app.post('/staff', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'OWNER');
     await requireStepUp(app, request); // [ALG-34] a grant hands the store's board to a phone
     const body = addStaffSchema.parse(request.body);
+    // [Row 55] A daily allowance per owner account, spent BEFORE the number is
+    // looked up: reaching it reads the same for every number and grants nothing.
+    if (!(await spendStaffAddAllowance(app.redis, request.user.userId))) {
+      throw new AppError(429, 'STAFF_ADD_DAILY_LIMIT', `You can add up to ${staffAddDailyCap()} team members a day. Try again tomorrow.`);
+    }
 
     const target = await app.prisma.user.findUnique({
       where: { phone: body.phone },
-      select: { id: true, firstName: true, lastName: true },
+      select: { id: true, status: true },
     });
-    if (!target) {
-      throw new AppError(404, 'USER_NOT_FOUND', 'No Swift account with that phone — ask them to download Swift and sign up first');
-    }
-    if (target.id === request.user.userId) {
+    // The owner's own number tells them nothing they do not know.
+    if (target && target.id === request.user.userId) {
       throw new AppError(400, 'SELF_STAFF', 'You already own this store');
     }
-    // [REVIEW-PARTNER] No store membership is granted by, or to, a demo account.
-    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId, target.id);
+    // [REVIEW-PARTNER] No store membership is granted by a demo account. This
+    // answers about the caller alone, so it says nothing about the number.
+    await refuseReviewAccountRoleGrant(app.prisma, request.user.userId);
+    const reply = staffAddReply(body.role);
+    // The same read runs for every number. Capture authority before scheduling
+    // delivery, without waiting for invitation persistence or publication.
+    const revocationVersion = staffInviteAcceptEnabled()
+      ? await staffInviteRevocationVersion(app.prisma, vendorId, target?.id ?? 'unresolved-recipient') : 0;
+    if (!target || target.status !== 'ACTIVE') return reply;
+
+    if (staffInviteAcceptEnabled()) {
+      // Off the request path: the reply never waits on whether an invite was due
+      // (deliverStaffInvite also sends nothing to a demo account).
+      void deliverStaffInvite(app.prisma, notifications, {
+        vendorId, targetUserId: target.id, role: body.role, inviterId: request.user.userId, now: new Date(), revocationVersion,
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, '[row 55] staff invite not delivered'));
+      return reply;
+    }
+    // [REVIEW-PARTNER] ...nor granted to one: the same reply as any number, nothing granted.
+    if (await isReviewAccount(app.prisma, target.id)) return reply;
+
     const existing = await app.prisma.vendorStaff.findUnique({
       where: { vendorId_userId: { vendorId, userId: target.id } },
+      select: { id: true },
     });
-    if (existing) {
-      throw new AppError(409, 'ALREADY_STAFF', `${target.firstName} is already on this store's team`);
+    if (!existing) {
+      await app.prisma.vendorStaff.create({
+        data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
+      });
+      void notifications.send({
+        userId: target.id,
+        type: 'SYSTEM_ANNOUNCEMENT',
+        title: 'You joined a store team',
+        body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
+        data: { kind: 'staff_added', vendorId },
+      }).catch((err: unknown) => request.log.error({ err, vendorId }, 'staff added notice failed'));
     }
+    return reply;
+  });
 
-    const member = await app.prisma.vendorStaff.create({
-      data: { vendorId, userId: target.id, role: body.role, invitedBy: request.user.userId },
-      include: { user: { select: { id: true, firstName: true, lastName: true, phone: true, avatar: true } } },
-    });
+  // The person invited answers under /customer/team-invites (customer.routes):
+  // they are not on a store team yet, so the /vendor prefix is not theirs.
 
-    await notifications.send({
-      userId: target.id,
-      type: 'SYSTEM_ANNOUNCEMENT',
-      title: 'You joined a store team',
-      body: `You've been added as ${body.role === 'MANAGER' ? 'a manager' : 'staff'} — open Swift and choose "Business" to start.`,
-      data: { kind: 'staff_added', vendorId },
-    });
-
-    return { success: true, data: member };
+  /** POST /staff/invites/withdraw — take back every unanswered invite from
+   *  this store. [Row 55] Nothing pending is listed to the owner, so a mistyped
+   *  number is withdrawn with all the others; the reply is the same however
+   *  many there were, so it never counts which numbers are Swift accounts. */
+  app.post('/staff/invites/withdraw', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    await withdrawPendingStaffInvites(app.prisma, { vendorId, actorId: request.user.userId, now: new Date() });
+    return { success: true, data: { withdrawn: true, message: 'Any invites from this store that were not answered yet have been withdrawn.' } };
   });
 
   /** PUT /staff/:id — change a member's role. */
@@ -886,7 +1066,18 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.vendorStaff.findUnique({ where: { id: request.params.id } });
     if (!existing || existing.vendorId !== vendorId) throw new NotFoundError('StaffMember', request.params.id);
 
-    await app.prisma.vendorStaff.delete({ where: { id: request.params.id } });
+    await app.prisma.$transaction(async (tx) => {
+      await lockStaffInviteGrant(tx, vendorId, existing.userId);
+      const current = await tx.vendorStaff.findFirst({ where: { id: request.params.id, vendorId, userId: existing.userId } });
+      if (!current) throw new NotFoundError('StaffMember', request.params.id);
+      await recordStaffInviteRevocation(tx, vendorId, current.userId, request.user.userId);
+      await closePendingStaffInvites(tx, vendorId, current.userId, new Date());
+      await tx.vendorStaff.delete({ where: { id: current.id } });
+    });
+    // [Owner ruling #15] Out of the live room of the store at once, on every
+    // API node: a removed member stops hearing it now, not at the next event
+    // (the store-room gate would refuse them then anyway).
+    app.io?.in(`user:${existing.userId}`).socketsLeave(`vendor:${vendorId}`);
     return { success: true, data: { deleted: true } };
   });
 
@@ -1041,8 +1232,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // invalid stored value back into an app where it could be opened.
     const safeVendors = vendors.map((vendor) => ({
       ...vendor,
-      mmgPayUrl: safeMmgPayUrl(vendor.mmgPayUrl),
-      mmgPayUrlPending: safeMmgPayUrl(vendor.mmgPayUrlPending),
+      ...storeMoneySurfaceView(vendor),
       publicPhone: safePublicPhone(vendor.publicPhone),
       // [owner #51] What still stands between a never-live store and going
       // live, besides its documents (additive; older apps ignore it).
@@ -1167,6 +1357,11 @@ export async function vendorRoutes(app: FastifyInstance) {
       attestationVersion: z.literal(DECLARATION_VERSION),
       privacyNoticeVersion: z.string().min(1).max(20).default(LEGAL_VERSION),
     }).parse(request.body ?? {});
+    // [R15 · owner 15 Oct 2026, research D9] Home cooks are held: a home kitchen needs the council's
+    // registration, and whether one can be registered is not confirmed yet. Refused before anything is written.
+    if (body.activityClass === 'home_cook') {
+      throw new AppError(409, 'HOME_COOK_HELD', 'Swift can’t take home cooks yet: a home kitchen needs a council registration that is still being confirmed. We’ll tell you when it opens.');
+    }
     const [vendor, user, registered, existing] = await Promise.all([
       app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId }, select: { id: true, name: true, tier: true, vendorType: true } }),
       app.prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { firstName: true, lastName: true, countryCode: true } }),
@@ -1262,9 +1457,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     const access = await requireVendor(app, request, 'MANAGER');
     const { vendorId } = access;
     const body = updateVendorProfileSchema.parse(request.body);
+    if (body.name !== undefined) {
+      // [MC-PR3] "TEST-" store names belong to test accounts (+5920…) only; an unchanged name is never re-judged.
+      const current = await app.prisma.vendor.findUnique({ where: { id: vendorId }, select: { name: true, owner: { select: { user: { select: { phone: true } } } } } });
+      assertNameNotReserved(body.name, current?.owner.user.phone, current?.name);
+    }
     // [REVIEW-PARTNER · DL-5] The store-review fiction moves no money: an MMG pay link is
     // refused before it is even read, and before any step-up, write or owner notice.
-    if (body.mmgPayUrl !== undefined && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    if ((body.mmgPayUrl !== undefined || body.mmgNumber !== undefined) && request.tenantKind === 'REVIEW') throw new ReviewDemoMoneyRefusedError();
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The pay link is replaced by the MMG number: while
+    // STORE_MMG_PAY_LINK is off a NEW link is refused before step-up or any money-surface write.
+    if (body.mmgPayUrl !== undefined) assertStoreMmgPayLinkWritable(body.mmgPayUrl);
     // [Q8] A moved pin is held to the same market rule as a new store, before anything is written.
     const pin = body.latitude !== undefined && body.longitude !== undefined ? { latitude: body.latitude, longitude: body.longitude } : null;
     if (pin) assertStorePinInMarket(pin.latitude, pin.longitude);
@@ -1275,7 +1478,13 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Owner only, step-up first; a new link is STAGED behind a cool-off with
     // the old one still live and the owner told (integrity/money-surface.ts).
     // Clearing it is immediate — it redirects nothing.
-    if (mmgPayUrl !== undefined) {
+    // [PAYMENT-SIMPLIFY · ALG-34 parity] The store's MMG number is the same kind of money
+    // destination: owner only, step-up first, the same velocity budget, a new number STAGED
+    // behind the same cool-off with the old one still live and the owner told; clearing is immediate.
+    const mmgNumber = body.mmgNumber === undefined
+      ? undefined
+      : mmgNumberForWrite(body.mmgNumber);
+    if (mmgPayUrl !== undefined || mmgNumber !== undefined) {
       requireRole(access, 'OWNER');
       await requireStepUp(app, request);
       await assertVelocity(app, request, 'money.mmg-link'); // [R048-007] a money surface: fails closed when the control is down
@@ -1290,12 +1499,30 @@ export async function vendorRoutes(app: FastifyInstance) {
       ? undefined
       : vatNumberForWrite(body.vatRegistrationNumber);
     if (vatRegistrationNumber !== undefined) requireRole(access, 'OWNER');
+    // [R3 · CAA s.70(3)] The refund rule is the store's own commitment to its customers: the owner's to give.
+    if (body.refundRule !== undefined) requireRole(access, 'OWNER');
+    const refundRule = refundRuleForWrite(body.refundRule);
+    // [IMAGES-E2E] The logo and cover are photos the store UPLOADS (POST /profile/logo|cover:
+    // scanned, redrawn without metadata, kept where the public door serves them). Typed
+    // text may only take one down ('' = none) or repeat what is already there.
+    const photoFields = await storePhotoFieldsForWrite(app, vendorId, body.logoUrl, body.coverImageUrl);
+    let photoOrphans: string[] = [];
 
     // [DS269 F1] A pin move commits with its record: the row is locked, the pin
     // it replaces is read, and the audit row (and the owner notice, when the
     // mover is not the owner) lands in this same transaction.
     const { vendor, pinNoticeId } = await app.prisma.$transaction(async (tx) => {
       const before = pin ? await lockStorePin(tx, vendorId) : null;
+      // [IMAGES-E2E PR4] A logo or cover this save takes down is deleted, not just unlinked:
+      // read under the row's lock, queued for deletion in this transaction, deleted after.
+      const clearing = (['logoUrl', 'coverImageUrl'] as const).filter((field) => photoFields[field] === null);
+      if (clearing.length > 0) {
+        const rows = await tx.$queryRaw<Array<{ logoUrl: string | null; coverImageUrl: string | null }>>`
+          SELECT "logoUrl", "coverImageUrl" FROM "vendors" WHERE "id" = ${vendorId}
+          FOR UPDATE /* store-photo-authority */
+        `;
+        photoOrphans = await queueStorePhotoDeletions(tx, vendorId, clearing.map((field) => rows[0]?.[field]));
+      }
       const updated = await tx.vendor.update({
         where: { id: vendorId },
         data: {
@@ -1309,8 +1536,8 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.region !== undefined && { region: body.region }),
           ...(body.latitude !== undefined && { latitude: body.latitude }),
           ...(body.longitude !== undefined && { longitude: body.longitude }),
-          ...(body.logoUrl !== undefined && { logoUrl: body.logoUrl }),
-          ...(body.coverImageUrl !== undefined && { coverImageUrl: body.coverImageUrl }),
+          ...(photoFields.logoUrl !== undefined && { logoUrl: photoFields.logoUrl }),
+          ...(photoFields.coverImageUrl !== undefined && { coverImageUrl: photoFields.coverImageUrl }),
           ...(body.cuisineTypes !== undefined && { cuisineTypes: body.cuisineTypes }),
           ...(body.tags !== undefined && { tags: body.tags }),
           ...(body.deliveryRadius !== undefined && { deliveryRadius: body.deliveryRadius }),
@@ -1320,6 +1547,7 @@ export async function vendorRoutes(app: FastifyInstance) {
           ...(body.maxConcurrentOrders !== undefined && { maxConcurrentOrders: body.maxConcurrentOrders }),
           ...(publicPhone !== undefined && { publicPhone }),
           ...(vatRegistrationNumber !== undefined && { vatRegistrationNumber }),
+          ...(refundRule !== undefined && { refundRule }),
         },
         include: { operatingHours: { orderBy: { dayOfWeek: 'asc' } } },
       });
@@ -1330,12 +1558,20 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     // The notice committed with the move; fanning it out afterwards cannot undo either.
     if (pinNoticeId) await notifications.publishPersisted(pinNoticeId);
+    await deleteQueuedPhotos(photoOrphans);
 
     if (mmgPayUrl === null) {
       await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId });
     } else if (mmgPayUrl !== undefined) {
       await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
         actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newUrl: mmgPayUrl,
+      });
+    }
+    if (mmgNumber === null) {
+      await clearMmgLink({ prisma: app.prisma, io: app.io, redis: app.redis }, { actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, field: 'NUMBER' });
+    } else if (mmgNumber !== undefined) {
+      await stageMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+        actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, sessionId: request.authSessionId, newNumber: mmgNumber, field: 'NUMBER',
       });
     }
     // [owner #51] A never-live store whose documents are done waits only for
@@ -1349,7 +1585,12 @@ export async function vendorRoutes(app: FastifyInstance) {
     // The link state is read back AFTER staging so the response says what is
     // live and what is pending — never the value the caller sent.
     const link = await app.prisma.vendor.findUniqueOrThrow({
-      where: { id: vendorId }, select: { mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true, status: true, isVerified: true, acceptingOrders: true },
+      where: { id: vendorId },
+      select: {
+        mmgPayUrl: true, mmgPayUrlPending: true, mmgPayUrlApplyAt: true,
+        mmgNumber: true, mmgNumberPending: true, mmgNumberApplyAt: true,
+        status: true, isVerified: true, acceptingOrders: true,
+      },
     });
 
     // On-write search sync [SWIFT-UG-SRCH-01]: catalog writes schedule a debounced per-vendor reindex.
@@ -1361,8 +1602,7 @@ export async function vendorRoutes(app: FastifyInstance) {
         ...vendor,
         ...(access.role !== 'OWNER' ? { vatRegistrationNumber: undefined } : {}),
         ...link,
-        mmgPayUrl: safeMmgPayUrl(link.mmgPayUrl),
-        mmgPayUrlPending: safeMmgPayUrl(link.mmgPayUrlPending),
+        ...storeMoneySurfaceView(link),
         // [GUARDRAILS §8 · owner 14 Oct, store names] A rename is judged at once: the partner reads whether it waits.
         storeCheck: partnerStoreView(storeCheckOf(vendor)),
         nameReviewApprovedHash: undefined,
@@ -1382,14 +1622,45 @@ export async function vendorRoutes(app: FastifyInstance) {
     return { success: true, data };
   });
 
+  /** DELETE /profile/mmg-number/pending — [PAYMENT-SIMPLIFY · ALG-34 parity] "this wasn't me"
+   *  for the store's MMG number: drop the staged change and sign out every other device.
+   *  Owner only; no step-up — cancelling is always the safe direction. */
+  app.delete('/profile/mmg-number/pending', auth, async (request) => {
+    await assertVelocity(app, request, 'money.mmg-link.cancel'); // [R048-007]
+    const { vendorId } = await requireVendor(app, request, 'OWNER');
+    const data = await cancelMmgLinkChange({ prisma: app.prisma, io: app.io, redis: app.redis }, {
+      actor: 'VENDOR', entityId: vendorId, userId: request.user.userId, keepSessionId: request.authSessionId, field: 'NUMBER',
+    });
+    return { success: true, data };
+  });
+
   // =========================================================================
   // 2. VENDOR MANAGEMENT — Toggle open / accepting orders
   // =========================================================================
 
+  /** [owner 21 Oct · COORD 03:15Z] The state a store switch should END in, when the client says so.
+   *  The switches used to FLIP whatever the server held and ignore the body: with the phone and the
+   *  website open at once, an owner closed the store on the phone and a manager's stale "Close" on the
+   *  website then OPENED it, and it took orders. A client that sends the desired state gets exactly
+   *  that state (asking for the state it is already in changes nothing). An older app that sends no
+   *  body (builds 9 and 11) still flips. */
+  const desiredSwitch = (body: unknown, field: 'isCurrentlyOpen' | 'acceptingOrders'): boolean | undefined => {
+    if (body === null || body === undefined || typeof body !== 'object') return undefined;
+    const value = (body as Record<string, unknown>)[field];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'boolean') throw new AppError(400, 'VALIDATION_ERROR', `${field} must be true or false.`);
+    return value;
+  };
+
   /** PUT /vendor/toggle-open — Toggle isCurrentlyOpen */
   app.put('/vendor/toggle-open', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'isCurrentlyOpen');
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.isCurrentlyOpen) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // [EV-ACT-14] OPENING needs a live store: a suspended/pending business
     // flipping this switch is invisible to customers anyway (public browse
@@ -1434,8 +1705,13 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /vendor/toggle-orders — Toggle acceptingOrders */
   app.put('/vendor/toggle-orders', auth, async (request) => {
+    const desired = desiredSwitch(request.body, 'acceptingOrders');
     const { vendorId } = await resolveVendor(app, request.user.userId, selectedVendorId(request));
     const vendor = await app.prisma.vendor.findUniqueOrThrow({ where: { id: vendorId } });
+    // Already where the client wants it: nothing changes (never the opposite of what was tapped).
+    if (desired === vendor.acceptingOrders) {
+      return { success: true, data: { isCurrentlyOpen: vendor.isCurrentlyOpen, acceptingOrders: vendor.acceptingOrders } };
+    }
 
     // Turning OFF is always allowed and needs no authority — a fast atomic flip.
     if (vendor.acceptingOrders) {
@@ -1601,7 +1877,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       where['OR'] = [
         { orderNumber: { contains: search, mode: 'insensitive' } },
         { customer: { firstName: { contains: search, mode: 'insensitive' } } },
-        { customer: { lastName: { contains: search, mode: 'insensitive' } } },
+        // [COORD 17 Oct] No search by a customer's last name: the store is no longer shown it, and a
+        // search would reveal it one guess at a time.
       ];
     }
 
@@ -1611,8 +1888,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         // HND-003: strip handover secrets from the vendor board too (see resolveOwnedOrder).
         omit: { pickupCode: true, pickupCodeAttempts: true, ridePin: true },
         include: {
-          items: true,
-          customer: { select: { id: true, firstName: true, lastName: true, avatar: true } },
+          items: VENDOR_ORDER_ITEMS,
+          customer: { select: { id: true, firstName: true } }, // [COORD 17 Oct] never the last name
           // [F-027-07] allow-list, not `include` — see utils/counterparty.
           rider: { select: riderCounterpartySelect({ withPhone: true }) },
           // Franchise roll-up: the board aggregates every store the owner has, so each
@@ -1638,8 +1915,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     // live order keeps all of it, which is the only thing a handover needs.
     const data = orders.map((order) => redactCustomerContact({
       ...coerceMoney(order, ORDER_MONEY_FIELDS),
-      items: order.items.map((item) => coerceMoney(item, ORDER_ITEM_MONEY_FIELDS)),
+      items: order.items.map((item) => vendorOrderLine(coerceMoney(item, ORDER_ITEM_MONEY_FIELDS))),
       respondBy: vendorRespondBy(order, respondOpts),
+      ...storeMmgPayBy(order),
       canConfirmPayment: canConfirmPayment(order.vendorId ? roles.get(order.vendorId) : undefined),
     }));
 
@@ -1658,7 +1936,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // back to it, another rider taking over, or support holding it.
     const custodyRecovery = mayHaveCase(order) ? partyCaseView(await latestCaseFor(app.prisma, order.id), 'VENDOR', order) : null;
     const { role } = await orderStoreMember(app, request.user.userId, order.vendorId!);
-    return { success: true, data: { ...redactCustomerContact({ ...order, respondBy, canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
+    return { success: true, data: { ...redactCustomerContact({ ...order, items: order.items.map(vendorOrderLine), respondBy, ...storeMmgPayBy(order), canConfirmPayment: canConfirmPayment(role) }), custodyRecovery } };
   });
 
   /** [AF-MOB-006] POST /orders/:id/recovery/return-received — the store
@@ -1676,7 +1954,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/accept — Accept an incoming order */
-  app.put<{ Params: IdParam }>('/orders/:id/accept', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/accept', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
@@ -1692,6 +1970,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // below is never reserved for an order that cannot proceed; the canonical
     // transition seam re-checks on the locked row.
     assertMmgFulfilmentAllowed(order, 'ACCEPTED');
+    // [O-4 · owner 22 Oct 2026] The store accepts the WHOLE order — after the customer answered every
+    // "Out of stock" question asked before acceptance (early answer; the authority is the locked
+    // re-check inside the transition below).
+    assertNoOpenCustomerQuestion(order.items);
     const body = acceptOrderSchema.parse(request.body ?? {});
 
     // Appointment orders book their slot AT ACCEPTANCE (locked model). If the
@@ -1705,12 +1987,22 @@ export async function vendorRoutes(app: FastifyInstance) {
     const appointmentItemId = order.fulfillment === 'APPOINTMENT' && order.appointmentSlot
       ? order.items[0]?.itemId ?? null
       : null;
-    const updated = await orderService.updateStatus(order.id, 'ACCEPTED', request.user.userId, 'Accepted by vendor', {
+    // [O-3 · owner 22 Oct 2026] Accept IS the start of preparation (STORE_ACCEPT_PATH): one tap,
+    // PENDING -> ACCEPTED -> PREPARING in this one commit, one push to the customer. A booking or an
+    // MMG order still waiting for "Paid by MMG" stops at ACCEPTED (preparationMayStart).
+    const [acceptedStatus, preparingStatus] = STORE_ACCEPT_PATH;
+    const updated = await orderService.updateStatus(order.id, acceptedStatus, request.user.userId, 'Accepted by vendor', {
+      continueTo: { target: preparingStatus, note: 'Preparing: the store accepted the order', when: preparationMayStart },
       withinTransaction: async (tx, lockedOrder) => {
         // [Q12 · AX289 F1] An order whose hold lapsed before the release sweep
         // reached it: accepting takes it out of the sweep's reach, so the
         // acceptance releases it — counted for the store once, here.
         await releaseLapsedHoldInTransaction(tx, order.id);
+        // [O-4] On the locked row: a question asked after the route's read is seen here.
+        assertNoOpenCustomerQuestion(await tx.orderItem.findMany({
+          where: { orderId: order.id },
+          select: { name: true, subStatus: true, substituteDecideBy: true },
+        }));
         if (appointmentItemId && order.appointmentSlot) {
           await bookingService.reserveSlot(appointmentItemId, order.customerId, order.appointmentSlot, order.id, tx);
         }
@@ -1732,7 +2024,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // defers dispatch to the Mark-ready transition below instead.
     if (updated.fulfillmentMode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, updated.fulfillmentModeVersion);
-    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT') {
+    } else if (updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT' && !mmgDispatchBlocked(updated)) {
+      // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] An MMG order the store accepts BEFORE the money
+      // arrives arms no dispatch here: no rider is sought for an unpaid order. The store's
+      // "Paid by MMG" (confirm-payment) arms it instead.
       await startPlatformDeliveryAfterCommit(order, updated.fulfillmentModeVersion, 'accept');
     }
 
@@ -1808,7 +2103,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (alreadyStamped) return row;
     const evt = { orderId: order.id, prep: phase, timestamp: new Date().toISOString() };
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:prep_update', evt);
-    if (order.vendorId) app.io.to(`vendor:${order.vendorId}`).emit('order:prep_update', evt);
+    if (order.vendorId) await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:prep_update', evt);
     // The rider on the FRESH row is the one who needs "it's ready" — never the
     // rider the stale screen read. Re-check after commit and push only while
     // that rider still owns the order, so a cancellation landing right after
@@ -1839,7 +2134,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   }
 
   /** PUT /orders/:id/preparing — Mark order as being prepared */
-  app.put<{ Params: IdParam }>('/orders/:id/preparing', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/preparing', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking has no kitchen: it is confirmed, then completed with
@@ -1853,6 +2148,12 @@ export async function vendorRoutes(app: FastifyInstance) {
       const updated = await orderService.updateStatus(order.id, 'PREPARING', request.user.userId, 'Vendor started preparing');
       return { success: true, data: updated };
     }
+    // [O-3] Accept already started preparation. Store builds 9/11/12 (and a stale web tab) still
+    // show "Start preparing" after an accept: their tap is a 200 no-op that answers with the order
+    // as it is — never an error, never a second status row or push. A closed order still refuses.
+    if (order.preparingAt && !isTerminalOrderStatus(order.status)) {
+      return { success: true, data: order };
+    }
     if (COURIER_ACTIVE.includes(order.status)) {
       if (order.preparingAt) return { success: true, data: order }; // double-tap safe
       const updated = await recordPrepProgress(order, 'PREPARING', request.user.userId);
@@ -1862,7 +2163,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/ready — Mark order as ready for pickup */
-  app.put<{ Params: IdParam }>('/orders/:id/ready', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/ready', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     // A booking is never "ready for pickup" — see /preparing above; a booking
@@ -1878,7 +2179,8 @@ export async function vendorRoutes(app: FastifyInstance) {
       if (v && ['SUPERMARKET', 'STORE'].includes(v.vendorType)) {
         const state = await picking.readiness(order.id);
         if (state.unresolved > 0) {
-          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} line${state.unresolved === 1 ? '' : 's'} still need picking or a substitution decision`);
+          // [O-4] Ticks are optional: only an open customer question holds the bag.
+          throw new AppError(409, 'PICKING_INCOMPLETE', `${state.unresolved} item${state.unresolved === 1 ? ' is' : 's are'} still waiting for the customer's answer`);
         }
         // [W-28] Settled is not fulfilled. If every line was refunded or the
         // customer rejected every substitute, the bag is empty: marking this
@@ -1948,6 +2250,11 @@ export async function vendorRoutes(app: FastifyInstance) {
           fulfillmentMode: true,
           fulfillmentModeVersion: true,
           riderId: true,
+          // [#1875 · REVIEW-G/M S4] the MMG dispatch gate is judged on THIS locked row, not the route's pre-read
+          paymentMethod: true,
+          orderType: true,
+          paymentStatus: true,
+          mmgClaimMismatchAt: true,
         },
       });
       if (live.fulfillment !== 'DELIVERY') {
@@ -1980,7 +2287,10 @@ export async function vendorRoutes(app: FastifyInstance) {
     // on it yet. VENDOR_DELIVERY needs no rider — the vendor's own courier delivers.
     if (mode === 'VENDOR_DELIVERY') {
       await dispatch.retireForVendorDelivery(order.id, committed.fulfillmentModeVersion);
-    } else if (!committed.riderId) {
+    } else if (!committed.riderId && !mmgDispatchBlocked(committed)) {
+      // [#1848 follow-up · REVIEW-M S4-1] Like acceptance: an MMG order not yet "Paid by MMG" arms no
+      // dispatch here — "Paid by MMG" arms it. Decided on the committed row (the locked read, or the row the
+      // switch wrote), so a "Paid by MMG" that landed while the switch waited for the lock is seen.
       await startPlatformDeliveryAfterCommit(order, committed.fulfillmentModeVersion, 'mode_switch');
     }
     return { success: true, data: { orderId: order.id, fulfillmentMode: mode } };
@@ -2001,9 +2311,10 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  the CUSTOMER approves live. Same vendor; same substitutionGroup when set. */
   app.post('/orders/:id/items/:lineId/substitute', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
     const { substituteItemId } = z.object({ substituteItemId: z.string().min(1) }).parse(request.body);
     const line = await picking.proposeSubstitution(id, lineId, substituteItemId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
 
@@ -2011,10 +2322,22 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  comes off the order, totals shrink, stock goes back on the shelf. */
   app.post('/orders/:id/items/:lineId/refund-line', auth, async (request) => {
     const { id, lineId } = request.params as { id: string; lineId: string };
-    await resolveOwnedOrder(app, request.user.userId, id);
+    const order = await resolveOwnedOrder(app, request.user.userId, id);
+    // [O-4] On a waiting order this ASKS the customer (continue without it, or cancel); after the
+    // accept it removes the line at once, as before.
     const line = await picking.refundLine(id, lineId, request.user.userId);
+    await ackPreAcceptQuestion(order, request.user.userId);
     return { success: true, data: line };
   });
+
+  /** [O-4] A store that asked the customer about an item before accepting has answered its new-order
+   *  alert: the "still waiting" ladder stops (the same ack an accept or a reject gives). */
+  async function ackPreAcceptQuestion(order: { id: string; status: OrderStatus }, userId: string) {
+    if (order.status !== 'PENDING') return;
+    const { acknowledgeAlert } = await import('../notification/notification.service');
+    await acknowledgeAlert(app.prisma, 'VENDOR_ORDER', order.id).catch(() => {});
+    await ackVendorAlert(app, userId, order.id);
+  }
 
   /** POST /items/:id/adjust — reasoned stock movement (received/damaged/…),
    *  atomic and logged. The audit trail behind quantity-on-hand. */
@@ -2214,6 +2537,8 @@ export async function vendorRoutes(app: FastifyInstance) {
         // [S1-6] The disagreement's evidence and the durable notice obligation
         // commit with the claim; the customer is told what the STORE said.
         ({ notice, outboxId } = await stageStoreMmgClaim(tx, { facts: fresh, decision, actorId: request.user.userId, reference, now }));
+        // [owner 18 Oct 2026 · REVIEW-G S4] A "customer says paid, store silent" case closes with the store's tap.
+        await closeStoreSilentMmgCase(tx, order.id, 'PAID_BY_MMG', now);
         // Answer with the row as it now stands, attestation evidence included.
         const claimedRow = await tx.order.findUniqueOrThrow({ where: { id: order.id }, omit: HANDOVER_SECRETS_OMIT });
         return { won: true, order: claimedRow, notice, outboxId };
@@ -2222,7 +2547,21 @@ export async function vendorRoutes(app: FastifyInstance) {
     });
     if (!capture.won) return { success: true, data: capture.order };
     mmgAttestationCounter.labels('attested').inc();
-    const updated = capture.order;
+    // [O-3 · STORE_ACCEPT_PATH] An MMG order the store accepted before the money arrived stopped at
+    // ACCEPTED (payment-first). "Paid by MMG" is where its preparation starts: the rest of the
+    // store's one-tap accept, never a separate "Start preparing". After the claim committed, and on
+    // its own: a booking, a disputed claim (the seam re-decides payment-first on the locked row) or
+    // an order that moved on first is left as it is, and the claim stands either way.
+    const startPreparation = capture.order.status === STORE_ACCEPT_PATH[0] && preparationMayStart(capture.order);
+    const prepared = startPreparation
+      ? await orderService.updateStatus(order.id, STORE_ACCEPT_PATH[1], request.user.userId, 'Preparing: the store confirmed the MMG payment', {
+        allowedFrom: [STORE_ACCEPT_PATH[0]],
+      }).catch((err: unknown) => {
+        request.log.warn({ err, orderId: order.id }, '[O-3] preparation did not start with the MMG payment; the store can still start it');
+        return null;
+      })
+      : null;
+    const updated = prepared ?? capture.order;
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', {
       orderId: order.id, status: updated.status, paymentStatus: 'CLAIMED',
       mmgClaimRevision: updated.mmgClaimRevision, mmgDisputed: updated.mmgClaimMismatchAt != null,
@@ -2233,6 +2572,17 @@ export async function vendorRoutes(app: FastifyInstance) {
     if (capture.notice && capture.outboxId) {
       await completeMmgClaimNotice({ prisma: app.prisma, notifications }, { outboxId: capture.outboxId, notice: capture.notice })
         .catch((err: unknown) => request.log.error({ err, orderId: order.id }, '[S1-6] claim notice fast path failed — the outbox sweep will deliver it'));
+    }
+    // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY · Q1] The store accepted this MMG order before the money
+    // arrived, so acceptance armed no dispatch. "Paid by MMG" is that moment: arm the platform
+    // delivery now, exactly as acceptance would have (ON_ACCEPT) — never while a claim is disputed,
+    // and never twice (no rider yet; the dispatch arm is versioned and idempotent).
+    if (
+      updated.fulfillmentMode === 'PLATFORM_RIDER' && dispatchTrigger() === 'ON_ACCEPT'
+      && updated.riderId == null && ['ACCEPTED', 'PREPARING'].includes(updated.status)
+      && !mmgDispatchBlocked(updated)
+    ) {
+      await startPlatformDeliveryAfterCommit(updated, updated.fulfillmentModeVersion, 'mmg_paid');
     }
     return { success: true, data: updated };
   });
@@ -2292,49 +2642,27 @@ export async function vendorRoutes(app: FastifyInstance) {
 
   /** PUT /orders/:id/complete-pickup — Takeaway: customer collected the order.
    *  Vendor verifies the pickup code (if set) and closes it; no rider involved. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-pickup', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'PICKUP') {
       throw new AppError(400, 'NOT_A_PICKUP', 'This order is not a pickup order.');
     }
-    if (order.status !== 'READY_FOR_PICKUP') {
+    if (order.status !== 'READY_FOR_PICKUP' && order.status !== 'COMPLETED') {
       throw new AppError(400, 'INVALID_STATUS', `Cannot complete pickup from ${order.status} status`);
     }
     const { code } = completePickupSchema.parse(request.body ?? {});
-    // HND-003: the shared vendor order object never carries the code (the vendor
-    // is the verifier). Read the secret ONLY here, where it's actually checked.
-    const secret = await app.prisma.order.findUnique({
-      where: { id: order.id },
-      select: { pickupCode: true, pickupCodeAttempts: true },
+    await assertHandoverRequestBudget(app.redis, order.id);
+    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer', {
+      allowedFrom: ['READY_FOR_PICKUP'], expectedFulfillment: 'PICKUP',
+      handover: { purpose: 'pickup', code, vendorUserId: request.user.userId, expectedVendorId: order.vendorId! },
     });
-    // SWIFT-077: when a pickup code is set, it is REQUIRED — it's the only proof
-    // the person collecting is the customer (mirrors the taxi ride PIN). The old
-    // check let a missing code through (`code != null`), so the handover could be
-    // closed without ever verifying it — anyone could claim the order.
-    if (secret?.pickupCode) {
-      if (code == null || code === '') {
-        throw new AppError(400, 'MISSING_PICKUP_CODE', "Enter the customer's pickup code to hand over this order.");
-      }
-      // HND-001: brute-force lockout, parity with the taxi ride PIN. A 6-digit
-      // code is guessable without it. Refuse once the budget is spent, then
-      // count this try BEFORE comparing so a wrong guess always burns an attempt.
-      const { locked, remaining } = handoverAttemptState(secret.pickupCodeAttempts);
-      if (locked) {
-        throw new AppError(400, 'MAX_ATTEMPTS', 'Too many incorrect pickup-code attempts on this order. Please contact support.');
-      }
-      await app.prisma.order.update({ where: { id: order.id }, data: { pickupCodeAttempts: { increment: 1 } } });
-      if (code !== secret.pickupCode) {
-        throw new AppError(400, 'WRONG_PICKUP_CODE', `That pickup code does not match. ${remaining} attempt(s) remaining.`);
-      }
-    }
-    const updated = await orderService.updateStatus(order.id, 'COMPLETED', request.user.userId, 'Picked up by customer');
     return { success: true, data: updated };
   });
 
   /** PUT /orders/:id/complete-appointment — Service: vendor marks the appointment done.
    *  APPOINTMENT orders skip prepare/ready/dispatch; they go ACCEPTED -> COMPLETED. */
-  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/complete-appointment', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillment !== 'APPOINTMENT') {
@@ -2361,7 +2689,7 @@ export async function vendorRoutes(app: FastifyInstance) {
    *  mode check is the barrier that keeps it out of the platform-rider lane:
    *  a PLATFORM_RIDER order must go through the rider's own /delivered, which
    *  carries the cash-capture gate and the PIN check. */
-  app.put<{ Params: IdParam }>('/orders/:id/delivered', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/delivered', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     await assertVendorCanOperate(order.vendorId!, 'IN_FLIGHT');
     if (order.fulfillmentMode !== 'VENDOR_DELIVERY') {
@@ -2383,7 +2711,7 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /orders/:id/reject — Vendor cancels / rejects an order */
-  app.put<{ Params: IdParam }>('/orders/:id/reject', auth, async (request) => {
+  app.put<{ Params: IdParam }>('/orders/:id/reject', tap, async (request) => {
     const order = await resolveOwnedOrder(app, request.user.userId, request.params.id);
     // Alert-delivery ack (§A4): the store ACTED on this order's alert, for
     // every recipient. [Q10] After the ownership check, never before it.
@@ -2424,7 +2752,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     const rejectEvent = { orderId: order.id, status: 'CANCELLED', reason, timestamp: new Date().toISOString() };
     await emitToOrderRoom(app.prisma, app.io, order.id, 'order:status_changed', rejectEvent);
     if (order.vendorId) {
-      app.io.to(`vendor:${order.vendorId}`).emit('order:status_changed', rejectEvent);
+      await emitToStoreRoom(app.prisma, app.io, order.vendorId, 'order:status_changed', rejectEvent);
     }
 
     // Tell the CUSTOMER, with the reason — parity with the admin-cancel path
@@ -2466,7 +2794,9 @@ export async function vendorRoutes(app: FastifyInstance) {
   app.post('/categories', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const body = createCategorySchema.parse(request.body);
-    const category = await menu.createCategory(vendorId, body);
+    // [IMAGES-E2E PR4] A section's photo is uploaded (POST /categories/:id/image), never typed.
+    uploadOnlyPhotoField(body.imageUrl, null, 'the section\'s photo');
+    const category = await menu.createCategory(vendorId, { ...body, imageUrl: undefined });
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
   });
@@ -2474,10 +2804,40 @@ export async function vendorRoutes(app: FastifyInstance) {
   /** PUT /categories/:id — Update a category */
   app.put<{ Params: IdParam }>('/categories/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
-    const body = updateCategorySchema.parse(request.body);
-    const category = await menu.updateCategory(vendorId, request.params.id, body);
+    const { imageUrl, ...fields } = updateCategorySchema.parse(request.body);
+    // [IMAGES-E2E PR4] Typed text may only take the section's photo down ('') or repeat it.
+    const current = imageUrl === undefined ? null
+      : await app.prisma.category.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null }, select: { imageUrl: true } });
+    if (imageUrl !== undefined && !current) throw new NotFoundError('Category', request.params.id);
+    const photo = uploadOnlyPhotoField(imageUrl, current?.imageUrl, 'the section\'s photo');
+    let category = await menu.updateCategory(vendorId, request.params.id, fields);
+    if (photo === null) category = await setSectionPhoto(vendorId, request.params.id, null);
     scheduleVendorSearchSync(app, vendorId);
     return { success: true, data: category };
+  });
+
+  /** [IMAGES-E2E PR4] POST /categories/:id/image — the section's own photo (store managers):
+   *  a photo whose bytes say so, scanned, redrawn without metadata (storeOwnPhoto), kept in the
+   *  store's photo folder, which the public door serves while the section is live. */
+  app.post<{ Params: IdParam }>('/categories/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const section = await app.prisma.category.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null }, select: { id: true } });
+    if (!section) throw new NotFoundError('Category', request.params.id);
+    const url = await storeOwnPhoto(request, vendorId);
+    const category = await setSectionPhoto(vendorId, section.id, url).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      throw err;
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: { id: category.id, name: category.name, imageUrl: category.imageUrl } };
+  });
+
+  /** [IMAGES-E2E PR4] DELETE /categories/:id/image — take the section's photo down (deleted from storage). */
+  app.delete<{ Params: IdParam }>('/categories/:id/image', auth, async (request) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const category = await setSectionPhoto(vendorId, request.params.id, null);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: { id: category.id, name: category.name, imageUrl: category.imageUrl } };
   });
 
   /** DELETE /categories/:id — Delete a category: [owner 11 Oct] it and its
@@ -2553,6 +2913,8 @@ export async function vendorRoutes(app: FastifyInstance) {
     await requireListingAllowed(app, verification, vendorId);
 
     const body = createItemSchema.parse(request.body);
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] An item's photo is uploaded (POST /items/:id/image), never typed.
+    uploadOnlyPhotoField(body.imageUrl, null, 'the item\'s photo');
 
     // Verify category belongs to this vendor
     const category = await app.prisma.category.findUnique({ where: { id: body.categoryId } });
@@ -2579,7 +2941,6 @@ export async function vendorRoutes(app: FastifyInstance) {
         categoryId: body.categoryId,
         name: body.name.trim(),
         description: body.description?.trim(),
-        imageUrl: body.imageUrl,
         basePrice: body.basePrice,
         sku: body.sku,
         unit: body.unit,
@@ -2867,6 +3228,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     }
 
     const failures: Array<{ row: number; errors: string[] }> = [];
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] A row that names a photo address is imported
+    // WITHOUT it (photos are uploaded), and the answer says so for that row.
+    const notes: Array<{ row: number; note: string }> = [];
     const valid: Array<{ rowNumber: number; data: z.infer<typeof csvRowSchema> }> = [];
 
     rows.forEach((raw, index) => {
@@ -2920,13 +3284,13 @@ export async function vendorRoutes(app: FastifyInstance) {
             stockQuantity: data.stockQuantity === '' ? undefined : data.stockQuantity,
             isAvailable: data.isAvailable === '' ? true : data.isAvailable === 'true',
             fulfillment: data.fulfillment === '' ? 'DELIVERY' : data.fulfillment,
-            imageUrl: data.imageUrl || undefined,
             dietaryTags: [],
             allergens: [],
           },
         });
         importedIds.push({ id: created.id, row: rowNumber, name: data.name });
         imported += 1;
+        if (data.imageUrl.trim() !== '') notes.push({ row: rowNumber, note: IMPORT_PHOTO_ADDRESS_NOTE });
       } catch {
         failures.push({ row: rowNumber, errors: ['Database rejected this row'] });
       }
@@ -2949,9 +3313,70 @@ export async function vendorRoutes(app: FastifyInstance) {
         failedCount: failures.length,
         // Cap the detail list so a fully-broken huge file stays readable
         failures: failures.slice(0, 100),
+        notes: notes.slice(0, 100),
+        notesCount: notes.length,
       },
     };
   });
+
+  /**
+   * [IMAGES-E2E] The one way a store's own photo (menu item, logo, cover) is kept:
+   * a JPEG/PNG/WebP whose bytes say so, scanned, then DRAWN AGAIN with the public
+   * door's own drawing (utils/public-store-photos renderStorePhoto: upright, sRGB,
+   * no metadata at all, EXIF/GPS/XMP/ICC included, long edge at most 1600 px), and
+   * kept in the store's photo folder `items/<store>/`, which is the only folder the
+   * public door serves. The storage seam strips again on the way in.
+   */
+  async function storeOwnPhoto(request: FastifyRequest, vendorId: string): Promise<string> {
+    return keepPublicPhoto(request, storage, `items/${vendorId}`, 'store-media');
+  }
+
+  /** [IMAGES-E2E PR4] The logo or cover set (an upload) or taken down (null) under the store row's
+   *  lock; the photo it replaces is queued for deletion in the same transaction, deleted after. */
+  const setStorePhoto = async (vendorId: string, field: 'logoUrl' | 'coverImageUrl', url: string | null) => {
+    const { vendor, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ logoUrl: string | null; coverImageUrl: string | null }>>`
+        SELECT "logoUrl", "coverImageUrl" FROM "vendors" WHERE "id" = ${vendorId}
+        FOR UPDATE /* store-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Vendor', vendorId);
+      const before = rows[0][field];
+      const queued = before !== url ? await queueStorePhotoDeletions(tx, vendorId, [before]) : [];
+      const row = await tx.vendor.update({
+        where: { id: vendorId },
+        data: { [field]: url },
+        select: { id: true, logoUrl: true, coverImageUrl: true },
+      });
+      return { vendor: row, orphanIds: queued };
+    });
+    await deleteQueuedPhotos(orphanIds);
+    return vendor;
+  };
+
+  /** POST /profile/logo, /profile/cover — the store's own logo or cover photo (store managers).
+   *  [#1964 retry census] Registered with literal paths, so the census can read every route. */
+  const uploadStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const url = await storeOwnPhoto(request, vendorId);
+    const vendor = await setStorePhoto(vendorId, field, url).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      throw err;
+    });
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.post('/profile/logo', auth, uploadStorePhoto('logoUrl'));
+  app.post('/profile/cover', auth, uploadStorePhoto('coverImageUrl'));
+
+  /** DELETE /profile/logo, /profile/cover — take it down (deleted from storage after the pointer goes). */
+  const removeStorePhoto = (field: 'logoUrl' | 'coverImageUrl') => async (request: FastifyRequest) => {
+    const { vendorId } = await requireVendor(app, request, 'MANAGER');
+    const vendor = await setStorePhoto(vendorId, field, null);
+    scheduleVendorSearchSync(app, vendorId);
+    return { success: true, data: vendor };
+  };
+  app.delete('/profile/logo', auth, removeStorePhoto('logoUrl'));
+  app.delete('/profile/cover', auth, removeStorePhoto('coverImageUrl'));
 
   /** POST /items/:id/image — upload behind the StorageProvider interface */
   app.post<{ Params: IdParam }>('/items/:id/image', auth, async (request) => {
@@ -2959,29 +3384,28 @@ export async function vendorRoutes(app: FastifyInstance) {
     const existing = await app.prisma.item.findFirst({ where: { id: request.params.id, vendorId, archivedAt: null } });
     if (!existing) throw new NotFoundError('Item', request.params.id);
 
-    const file = await request.file();
-    if (!file) throw new AppError(400, 'NO_FILE', 'Attach an image file');
-    if (!ALLOWED_IMAGE_TYPES.has(file.mimetype)) {
-      throw new AppError(400, 'BAD_IMAGE_TYPE', 'Only JPEG, PNG, or WebP images are accepted');
-    }
+    const url = await storeOwnPhoto(request, vendorId);
 
-    const buffer = await file.toBuffer();
-    if (!looksLikeImage(buffer)) {
-      throw new AppError(400, 'BAD_IMAGE', 'File content does not match an image format');
-    }
-
-    const { url } = await storage.upload({
-      buffer,
-      filename: file.filename,
-      mimeType: file.mimetype,
-      folder: `items/${vendorId}`,
+    // [IMAGES-E2E PR4] Under the item's lock; the photo it replaces is queued for deletion in the
+    // same transaction and deleted after (a photo the row could not take is deleted too).
+    const { item, orphanIds } = await app.prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+        SELECT "imageUrl" FROM "items" WHERE "id" = ${request.params.id} AND "vendorId" = ${vendorId} AND "archivedAt" IS NULL
+        FOR UPDATE /* item-photo-authority */
+      `;
+      if (!rows[0]) throw new NotFoundError('Item', request.params.id);
+      const queued = await queueStorePhotoDeletions(tx, vendorId, [rows[0].imageUrl]);
+      const row = await tx.item.update({
+        where: { id: request.params.id, archivedAt: null },
+        data: { imageUrl: url },
+        select: { id: true, name: true, imageUrl: true },
+      });
+      return { item: row, orphanIds: queued };
+    }).catch(async (err: unknown) => {
+      await discardKeptPhoto(vendorId, url);
+      return goneIfArchived(request.params.id)(err);
     });
-
-    const item = await app.prisma.item.update({
-      where: { id: request.params.id, archivedAt: null },
-      data: { imageUrl: url },
-      select: { id: true, name: true, imageUrl: true },
-    }).catch(goneIfArchived(request.params.id));
+    await deleteQueuedPhotos(orphanIds);
 
     scheduleVendorSearchSync(app, vendorId);
 
@@ -2998,6 +3422,9 @@ export async function vendorRoutes(app: FastifyInstance) {
     await assertNotBanned(app.prisma, existing.id, { wordBanEditable: true });
 
     const body = updateItemSchema.parse(request.body);
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] Typed text may only take the item's photo down ('') or repeat it.
+    const photo = uploadOnlyPhotoField(body.imageUrl, existing.imageUrl, 'the item\'s photo');
+    let photoOrphans: string[] = [];
     if (body.name !== undefined) assertNotBannedGoods([body.name]);
 
     // If moving to a different category, verify ownership
@@ -3032,13 +3459,20 @@ export async function vendorRoutes(app: FastifyInstance) {
     // transaction: "Spare Rum" + {isAvailable: true} is refused (nothing of the request is written), "Spare Rum"
     // renamed to "Coconut cake" may come on, and a restock never switches a banned item back on (its count is saved).
     const item = await app.prisma.$transaction(async (tx) => {
+      if (photo === null) {
+        const rows = await tx.$queryRaw<Array<{ imageUrl: string | null }>>`
+          SELECT "imageUrl" FROM "items" WHERE "id" = ${request.params.id} AND "archivedAt" IS NULL
+          FOR UPDATE /* item-photo-authority */
+        `;
+        photoOrphans = await queueStorePhotoDeletions(tx, vendorId, [rows[0]?.imageUrl]);
+      }
       const updated = await tx.item.update({
         where: { id: request.params.id, archivedAt: null },
         data: {
           ...(body.categoryId !== undefined && { categoryId: body.categoryId }),
           ...(body.name !== undefined && { name: body.name.trim() }),
           ...(body.description !== undefined && { description: body.description?.trim() }),
-          ...(body.imageUrl !== undefined && { imageUrl: body.imageUrl }),
+          ...(photo === null && { imageUrl: null }),
           ...(body.basePrice !== undefined && { basePrice: body.basePrice }),
           ...(body.sku !== undefined && { sku: body.sku }),
           ...(body.unit !== undefined && { unit: body.unit }),
@@ -3059,6 +3493,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       const banned = (await catalogueChecksFor(tx, [updated.id])).get(updated.id)?.state === 'BANNED';
       return banned ? updated : tx.item.update({ where: { id: updated.id }, data: { isAvailable: true, autoHiddenAt: null }, include: itemInclude });
     }).catch(goneIfArchived(request.params.id));
+    await deleteQueuedPhotos(photoOrphans);
 
     // [MKT-2] THE STOCK COUNT, through the single writer.
     //
@@ -3207,13 +3642,16 @@ export async function vendorRoutes(app: FastifyInstance) {
   });
 
   /** PUT /option-groups/:id — Update an option group */
+  // [Row 300 matrix] Under the tenant wall another tenant's item is invisible, so the
+  // group (or option) can come back with no item: that is "not yours", a 404 like the
+  // owner login answers, never a TypeError. Same check on every option route below.
   app.put<{ Params: IdParam }>('/option-groups/:id', auth, async (request) => {
     const { vendorId } = await requireVendor(app, request, 'MANAGER');
     const existing = await app.prisma.optionGroup.findUnique({
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
     await assertNotBanned(app.prisma, existing.itemId, { wordBanEditable: true });
 
     const body = updateOptionGroupSchema.parse(request.body);
@@ -3241,7 +3679,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!existing || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
+    if (!existing || !existing.item || existing.item.vendorId !== vendorId || existing.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.id);
 
     await app.prisma.option.deleteMany({ where: { optionGroupId: request.params.id } });
     await app.prisma.optionGroup.delete({ where: { id: request.params.id } });
@@ -3260,7 +3698,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.groupId },
       include: { item: { select: { vendorId: true, archivedAt: true } } },
     });
-    if (!group || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
+    if (!group || !group.item || group.item.vendorId !== vendorId || group.item.archivedAt) throw new NotFoundError('OptionGroup', request.params.groupId);
     await assertNotBanned(app.prisma, group.itemId, { wordBanEditable: true });
 
     const body = addOptionSchema.parse(request.body);
@@ -3297,7 +3735,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
     await assertNotBanned(app.prisma, existing.optionGroup.itemId, { wordBanEditable: true });
 
     const body = updateOptionSchema.parse(request.body);
@@ -3324,7 +3762,7 @@ export async function vendorRoutes(app: FastifyInstance) {
       where: { id: request.params.id },
       include: { optionGroup: { include: { item: { select: { vendorId: true, archivedAt: true } } } } },
     });
-    if (!existing || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
+    if (!existing || !existing.optionGroup?.item || existing.optionGroup.item.vendorId !== vendorId || existing.optionGroup.item.archivedAt) throw new NotFoundError('Option', request.params.id);
 
     await app.prisma.option.delete({ where: { id: request.params.id } });
 
@@ -3376,7 +3814,7 @@ export async function vendorRoutes(app: FastifyInstance) {
     // Booking.customerId is a User id with no relation — resolve names in one hit.
     const custIds = [...new Set(bookings.map((b) => b.customerId))];
     const users = custIds.length
-      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true, lastName: true } })
+      ? await app.prisma.user.findMany({ where: { id: { in: custIds } }, select: { id: true, firstName: true } }) // only the first name is served
       : [];
     const byId = new Map(users.map((u) => [u.id, u]));
     return {
@@ -3790,6 +4228,8 @@ export async function vendorRoutes(app: FastifyInstance) {
             // payActions, latestMmgCheckout, recentCheckouts (MMG-CHECKOUT-API.md section 3).
             ...withCardPayAction(await mmgCheckout.feePayload(subscription, request.headers), await cardRail.subscriptionFields(subscription, request)),
             weeklyRate: Number(subscription.weeklyRate),
+            // [owner legal plan R12] The weekly-fee receipts, as printed (billing/fee-receipt.ts).
+            feeReceipts: await (await import('../billing/fee-receipt')).feeReceiptsFor(app.prisma, subscription.id),
           }
         : null,
     };

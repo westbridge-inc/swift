@@ -46,10 +46,22 @@ export async function sessionProbe(): Promise<{ ok: boolean; user?: { id: string
   }
 }
 
-/** Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless. */
+/**
+ * Sign out on the server (the session family is revoked and the cookies cleared); the local shell fails closed regardless.
+ * [Row 78] /logout needs a live access cookie, which lasts minutes: a tab left open got a 401 from the gate, nothing was
+ * revoked, and the 30-day refresh cookie could sign the browser back in. When /logout does not answer success, the
+ * session ends by its refresh cookie instead (/logout/refresh revokes and clears without an access token).
+ */
 export async function logout(): Promise<void> {
+  const init: RequestInit = { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' };
   try {
-    await fetch(`${API_URL}/api/v1/auth/logout`, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...clientHeaders }, body: '{}' });
+    const res = await fetch(`${API_URL}/api/v1/auth/logout`, init);
+    if (res.ok) return;
+  } catch {
+    // unreachable: try the refresh-cookie sign-out below
+  }
+  try {
+    await fetch(`${API_URL}/api/v1/auth/logout/refresh`, init);
   } catch {
     // the cookies are HttpOnly and path-scoped: with the server unreachable the shell still redirects to login
   }
@@ -272,12 +284,19 @@ export interface Promo {
 export const fetchDashboard = (): Promise<Envelope<DashboardOverview>> =>
   apiFetch('/api/v1/admin/dashboard/overview');
 export const fetchRecentOrders = () => apiFetch('/api/v1/admin/orders?limit=20');
-export const fetchUsers = (params?: string): Promise<Envelope<AdminUser[]>> =>
+/** [MC-PR3] A server-paged list: the rows of one page and the server's own count. */
+export interface ListEnvelope<T> {
+  success: boolean;
+  data: T[];
+  meta: { page: number; limit: number; total: number; totalPages: number; hasNext: boolean; hasPrev: boolean; hiddenTestRecords?: number };
+}
+// [MC-PR3] Every list takes the query string built by lib/list-query (page, limit, search, filters, excludeFixtures).
+export const fetchUsers = (params?: string): Promise<ListEnvelope<AdminUser>> =>
   apiFetch(`/api/v1/admin/users?${params || ''}`);
-export const fetchVendors = (status?: string) => apiFetch(`/api/v1/admin/vendors${status ? `?status=${status}` : ''}`);
+export const fetchVendors = (params?: string) => apiFetch(`/api/v1/admin/vendors?${params || ''}`);
 export const fetchPendingVendors = () => apiFetch('/api/v1/admin/vendors/pending');
-export const fetchRiders = () => apiFetch('/api/v1/admin/riders');
-export const fetchDrivers = () => apiFetch('/api/v1/admin/drivers');
+export const fetchRiders = (params?: string) => apiFetch(`/api/v1/admin/riders?${params || ''}`);
+export const fetchDrivers = (params?: string) => apiFetch(`/api/v1/admin/drivers?${params || ''}`);
 export const fetchOrders = (params?: string) => apiFetch(`/api/v1/admin/orders?${params || ''}`);
 export const fetchOrderDetail = (id: string) => apiFetch(`/api/v1/admin/orders/${id}`);
 
@@ -358,6 +377,31 @@ export const topUpSubscription = (id: string, amount: number, reference: string,
     method: 'POST',
     body: JSON.stringify({ amount, reference }),
     headers: { 'Idempotency-Key': idempotencyKey },
+    reason,
+  });
+// [Owner ruling 2026-10-07] Unused prepaid fee credit is refunded in order:
+// set it aside, pay it outside Swift, then record the payout with its transfer
+// reference. Each step is a money action a second admin approves (the server
+// answers 202 APPROVAL_REQUIRED until then). A set-aside that cannot be paid
+// is released back to the credit.
+export const setAsideSubscriptionCredit = (id: string, amount: number, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/set-aside`, {
+    method: 'POST',
+    body: JSON.stringify({ amount }),
+    reason,
+  });
+// [Sol r2 S1] A payout record and a release name the set-aside they are for
+// (refundSetAsideId from the list), so an approval acts only on that one.
+export const recordSubscriptionRefundPaid = (id: string, amount: number, method: 'MMG' | 'BANK_TRANSFER', reference: string, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/paid`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, method, reference, setAsideId }),
+    reason,
+  });
+export const releaseSubscriptionRefund = (id: string, amount: number, setAsideId: string, reason: string) =>
+  apiFetch(`/api/v1/admin/subscriptions/${id}/refund-credit/release`, {
+    method: 'POST',
+    body: JSON.stringify({ amount, setAsideId }),
     reason,
   });
 export const fetchBillingEvents = (id: string) => apiFetch(`/api/v1/admin/subscriptions/${id}/billing-events?limit=20`);
@@ -552,7 +596,9 @@ export const updateZoneFare = (id: string, body: { fromZoneId: string; toZoneId:
 export const deleteZoneFare = (id: string, pair: { fromZoneId: string; toZoneId: string }, reason: string) =>
   apiFetch(`/api/v1/admin/zone-fares/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify(pair), reason });
 
-export const fetchConfig = (): Promise<Envelope<ConfigRow[]>> => apiFetch('/api/v1/admin/config');
+/** Launch switches the API reads from its server environment (read-only). */
+export interface LaunchSwitches { staffInviteAccept?: boolean }
+export const fetchConfig = (): Promise<Envelope<ConfigRow[]> & { switches?: LaunchSwitches }> => apiFetch('/api/v1/admin/config');
 export const fetchAuditLogs = (params?: string) => apiFetch(`/api/v1/admin/audit-logs?${params || 'limit=50'}`);
 
 export const approveVendor = (id: string, reason: string) => apiFetch(`/api/v1/admin/vendors/${id}/approve`, { method: 'PUT', reason });
@@ -626,7 +672,11 @@ export const fetchRatingsModeration = () => apiFetch('/api/v1/admin/ratings/mode
 // edit in between refuses it. Remove bans the item for good, with a reason the
 // partner reads. Neither can lift a certain ban (a banned category, or an
 // earlier removal).
-export const PROHIBITED_CLASSES = ['ALCOHOL', 'TOBACCO', 'VAPES', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL'] as const;
+export const PROHIBITED_CLASSES = [
+  'ALCOHOL', 'TOBACCO', 'VAPES', 'DRUGS', 'MEDICINE', 'AGE_RESTRICTED', 'LPG', 'FUEL',
+  // [R4 · owner 15 Oct] the expanded permanent list (the server's PROHIBITED_CLASSES, class for class)
+  'EXPLOSIVES', 'PESTICIDES', 'PRECIOUS_MINERALS', 'WEAPONS', 'WILDLIFE', 'COUNTERFEIT', 'CURRENCY', 'LEGAL_SERVICES',
+] as const;
 export type ProhibitedClass = (typeof PROHIBITED_CLASSES)[number];
 export const fetchCatalogueReview = () => apiFetch('/api/v1/admin/catalogue-review');
 export const approveCatalogueItem = (itemId: string, wordsHash: string, reason: string) =>
@@ -677,7 +727,7 @@ export const fetchVerificationCounts = () => apiFetch('/api/v1/admin/verificatio
 export const fetchDocumentCustody = (id: string) => apiFetch(`/api/v1/admin/verification/${encodeURIComponent(id)}/custody`);
 export const getDocSignedUrl = (id: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/document-url`);
-export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string } | undefined, reason: string) =>
+export const approveDoc = (id: string, body: { expiresAt?: string; insurance?: InsuranceCheck; documentNumber?: string; issuedOn?: string; certificateYear?: number; registrationKind?: 'BUSINESS_NAME' | 'COMPANY' } | undefined, reason: string) =>
   apiFetch(`/api/v1/admin/verification/${id}/approve`, { method: 'PUT', body: JSON.stringify(body ?? {}), reason });
 // [ADMIN-CONSOLE] The route's whole body (admin.routes.ts rejectDocSchema): the
 // reviewer's words and the server's reason code. The words also ride the
@@ -747,8 +797,11 @@ function identity(row: Pick<DeadLetter, 'name' | 'finishedOn'>): string {
   return `?${params.toString()}`;
 }
 
-export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>) =>
-  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}`, { method: 'POST' });
+/** [U58] `acknowledgedReconciled`: the operator has checked what a RECONCILE_FIRST
+ *  job's failed run already did, so one fresh run cannot repeat it (the server
+ *  refuses that class without it). */
+export const requeueDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>, acknowledgedReconciled = false) =>
+  apiFetch(`/api/v1/admin/dlq/${queue}/${id}/requeue${identity(row)}${acknowledgedReconciled ? '&acknowledgedReconciled=true' : ''}`, { method: 'POST' });
 export const discardDeadLetter = (queue: string, id: string, row: Pick<DeadLetter, 'name' | 'finishedOn'>, reason: string) =>
   apiFetch(`/api/v1/admin/dlq/${queue}/${id}${identity(row)}`, { method: 'DELETE', reason });
 
@@ -793,15 +846,15 @@ export const fetchDiscoveryRequests = (status: string) =>
 
 export const updateDiscoveryCategory = (
   id: string,
-  body: Partial<Pick<DiscoveryCategory, 'name' | 'emoji' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
+  body: Partial<Pick<DiscoveryCategory, 'name' | 'iconKey' | 'aliases' | 'sortWeight' | 'status'>>,
 ) => apiFetch(`/api/v1/admin/discovery/categories/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 
-/** Approve a vendor's request as a NEW category. `emoji`, `kind` and `vertical`
- *  are required by the route — kind and vertical against enums, so the page
- *  offers selects and never a text box. */
+/** Approve a vendor's request as a NEW category. `iconKey`, `kind` and `vertical`
+ *  are required by the route, each against a fixed list (the icon from
+ *  CATEGORY_ICON_OPTIONS, never an emoji), so the page offers selects and never a text box. */
 export const approveDiscoveryRequest = (
   id: string,
-  body: { name?: string; emoji: string; kind: string; vertical: string },
+  body: { name?: string; iconKey: string; kind: string; vertical: string },
 ) => apiFetch(`/api/v1/admin/discovery/requests/${id}/approve`, { method: 'POST', body: JSON.stringify(body) });
 
 /** Resolve a request onto an EXISTING category instead of minting a near-duplicate. */
@@ -981,6 +1034,85 @@ export const fetchMmgCheckouts = (search: MmgCheckoutSearch): Promise<{ success:
 export const fetchMmgCheckout = (id: string): Promise<Envelope<MmgCheckoutSupportDetail>> =>
   apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(id)}`);
 
+// ── [MMG REVERSAL · owner #11] Return a whole weekly-fee payment ────────────
+// MMG reverses in full only. Asking is a money action: a reason and a second
+// admin (or the owner's solo approval) — the first call answers 202
+// APPROVAL_REQUIRED. Only MMG's own lookup then moves the partner's balance.
+export interface MmgFeeReversalRow {
+  id: string;
+  state: 'SENDING' | 'SENT' | 'REVERSED' | 'FAILED' | 'HELD';
+  amount: number;
+  currencyCode: string;
+  reason: string;
+  requestedBy: string;
+  providerStatus: string | null;
+  lookupStatus: string | null;
+  heldReason: string | null;
+  sentAt: string;
+  answeredAt: string | null;
+  lastCheckedAt: string | null;
+  reversedAt: string | null;
+  failedAt: string | null;
+  resolution?: string | null;
+  resolvedBy?: string | null;
+}
+export interface MmgFeeReversalView {
+  checkoutId: string;
+  amountGyd: number;
+  switchedOn: boolean;
+  canReverse: boolean;
+  refusal?: { code: string; message: string };
+  reversals: MmgFeeReversalRow[];
+}
+export const fetchMmgFeeReversal = (checkoutId: string): Promise<Envelope<MmgFeeReversalView>> =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reversal`);
+export const reverseMmgFeePayment = (checkoutId: string, amountGyd: number, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-checkouts/${encodeURIComponent(checkoutId)}/reverse`, {
+    method: 'POST',
+    body: JSON.stringify({ amountGyd, reason }),
+    reason,
+  });
+// [DS1112] Resolve a HELD return on MMG's evidence (money: a reason and a second admin).
+export const resolveMmgFeeReversal = (reversalId: string, outcome: 'NOT_RETURNED' | 'RETURNED' | 'RETURNED_NOT_BOOKED', mmgReference: string, reason: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ outcome, mmgReference, reason }),
+    reason,
+  });
+export const checkMmgFeeReversal = (reversalId: string) =>
+  apiFetch(`/api/v1/admin/billing/mmg-fee-reversals/${encodeURIComponent(reversalId)}/check`, { method: 'POST', body: '{}' });
+
+export interface PaymentConfirmation {
+  id: string; subscriptionId: string; source: string; sourceId: string | null;
+  epoch: number; clockVersion: number; status: string; reason: string;
+  beganAt: string; reviewDueAt: string; overdue: boolean; remainingGraceMs: number; resolvable: boolean;
+  swiftReference: string | null; partner: string | null;
+  settlementPayments: { providerPaymentId: string; mmgTransactionId: string }[];
+}
+export const fetchPaymentConfirmations = (): Promise<Envelope<PaymentConfirmation[]>> => apiFetch('/api/v1/admin/billing/confirmations');
+export interface ConfirmationDecision {
+  sourceId: string; epoch: number; clockVersion: number; decision: 'UNPAID' | 'PAID';
+  providerPaymentId?: string; evidenceReference: string; reason: string;
+}
+export const requestConfirmationResolution = (id: string, body: ConfirmationDecision) =>
+  apiFetch(`/api/v1/admin/billing/confirmations/${encodeURIComponent(id)}/resolve`, { method: 'POST', body: JSON.stringify(body), reason: body.reason });
+
+/** Both active statuses, every page: the first fifty approvals are not exhaustive. */
+export async function fetchConfirmationApprovals(): Promise<import('./approvals').ApprovalRow[]> {
+  const rows: import('./approvals').ApprovalRow[] = [];
+  for (const status of ['PENDING', 'APPROVED']) {
+    for (let page = 1; ; page += 1) {
+      const response = await apiFetch(`/api/v1/admin/approvals?status=${status}&limit=50&page=${page}`);
+      if (response?.success !== true || !Array.isArray(response.data) || !Number.isInteger(response.pagination?.pages)) {
+        throw new Error('Could not read the complete approvals queue. Reload before requesting another decision.');
+      }
+      rows.push(...response.data);
+      if (page >= response.pagination.pages) break;
+    }
+  }
+  return rows;
+}
+
 // ── [MC-AD4] Paid MMG orders held for review (ready too long) ─────────────
 export interface HeldOrder {
   id: string;
@@ -1031,5 +1163,21 @@ export const resolvePaymentDispute = async (
     method: 'POST', body: JSON.stringify({ ...decision, note: reason }), reason,
   });
   if (response?.success !== true || response.data?.orderId !== id || response.data?.resolution !== decision.resolution || response.data?.mismatch !== false) throw unreadableOrderAction();
+  return response;
+};
+
+// ── [L02 · row 34] Partial cash a rider still holds after a refused handover ──
+/**
+ * C4 (money class): record that cash the rider HELD is resolved — handed back
+ * later, or otherwise settled, as the stated reason says. A record only: Swift
+ * moves, refunds and deducts nothing. The first call answers 202
+ * APPROVAL_REQUIRED; a second admin (or the owner's solo approval) decides it
+ * in Approvals, and the asking admin applies it from there.
+ */
+export const resolveHeldDoorCash = async (id: string, reason: string) => {
+  const response = await apiFetch(`/api/v1/admin/orders/${encodeURIComponent(id)}/door-cash-return/resolve`, {
+    method: 'POST', body: '{}', reason,
+  });
+  if (response?.success !== true || response.data?.orderId !== id || response.data?.doorCashReturn?.status !== 'RESOLVED') throw unreadableOrderAction();
   return response;
 };

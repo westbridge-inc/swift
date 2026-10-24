@@ -9,6 +9,7 @@ import { nanoid } from 'nanoid';
 import { grantSuiteCapability } from '../lib/test-target-lock';
 import { applySeedPlan, buildSeedPlan, planApprovalRequest, planRequestFacts, type DesiredConfig, type RequestContext } from '../modules/ops/seed-plan';
 import { approvalRequest, canonicalRequest, parseRequest, SOLO_COOLING_OFF_MS, type RequestFacts, type SignedApproval } from '../modules/ops/approver-signatures';
+import { testPhone } from './helpers/fixture-ids';
 
 // This suite pins the deployment identity singleton for the whole file and restores it after.
 grantSuiteCapability('unscoped-mutation');
@@ -52,7 +53,7 @@ function sign(request: string): SignedApproval {
 const HOUR = 60 * 60 * 1000;
 const RUN = nanoid(6).toLowerCase();
 const KEY = `owner_email_${RUN}`;
-const PHONE = `+5920478${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`;
+const PHONE = testPhone();
 const EMAIL = `owner.${RUN}@example.invalid`;
 const userIds: string[] = [];
 let priorIdentity: { deploymentId: string; environment: string; note: string | null } | null = null;
@@ -294,7 +295,7 @@ describe('[OWNER EMAIL] the seed writes it on the first SUPER_ADMIN, and only th
   it('an email another account uses (in any case) is never taken: refused, nothing written, the approval not spent', async () => {
     await noSuperAdmin();
     try {
-      const other = await prisma.user.create({ data: { phone: `+5920479${String(Math.floor(Math.random() * 1e4)).padStart(4, '0')}`, email: EMAIL.toUpperCase(), firstName: 'Some', lastName: 'One', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE' } });
+      const other = await prisma.user.create({ data: { phone: testPhone(), email: EMAIL.toUpperCase(), firstName: 'Some', lastName: 'One', roles: ['CUSTOMER'], activeRole: 'CUSTOMER', status: 'ACTIVE' } });
       userIds.push(other.id);
       const { desired, plan, ctx, request } = await emailCase(7, EMAIL);
       await expect(applySeedPlan(prisma, URL_, desired, plan, { approvals: [sign(request)], approverKeys: OWNER_ONLY, request: ctx, actor: 'owner' })).rejects.toMatchObject({ code: 'ADMIN_EMAIL_TAKEN' });

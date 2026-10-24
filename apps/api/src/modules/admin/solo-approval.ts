@@ -4,6 +4,7 @@ import { log } from '../../utils/logger';
 import { isProduction } from '../../utils/runtime-mode';
 import { getChannels } from '../../providers/notifications/channels';
 import { smtpConfigFromEnv } from '../../providers/notifications/smtp-email';
+import { smsAccepted } from '../../providers/notifications/sms-outcome';
 import { smsDestinationAllowed } from '../../utils/sms-budget';
 import type { AuditFacts, AuditLogWriter } from '../../lib/audit-writer';
 import { capabilitiesOf, capabilityMode, holdsCapability } from './admin-authority';
@@ -177,9 +178,6 @@ export async function sendSoloEmail(to: string, subject: string, body: string): 
   if (!ref || ref === 'review-suppressed') throw soloRefusal('email-unavailable');
 }
 
-/** Answers from a text provider that mean "nothing was sent" (review seal, recipient list, hand-off). */
-const TEXT_NOT_SENT: ReadonlySet<string> = new Set(['review-suppressed', 'not-allowlisted', 'suppressed']);
-
 /**
  * [Opus S2] Text the owner's phone too, or refuse. The email can be moved by
  * whoever holds the session; the phone on the account cannot (no route
@@ -194,7 +192,9 @@ export async function sendSoloText(to: string | null, body: string): Promise<voi
     log().error({ err }, '[solo approval] text could not be sent — refusing the solo step');
     throw soloRefusal('sms-unavailable');
   }
-  if (!ref || TEXT_NOT_SENT.has(ref)) throw soloRefusal('sms-unavailable');
+  // A resolved send is not a text that left: the review seal, the recipient
+  // list and a hand-off answer with their own refs (sms-outcome.ts).
+  if (!smsAccepted({ ref })) throw soloRefusal('sms-unavailable');
 }
 
 /**

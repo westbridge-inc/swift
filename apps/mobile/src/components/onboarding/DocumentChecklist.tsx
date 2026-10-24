@@ -1,10 +1,12 @@
-import { View } from 'react-native';
+import { useState } from 'react';
+import { Pressable, View } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { color, radius, space } from '@swift/ui';
-import { EmptyState, Spinner, T } from '../../kit';
+import { BrandCheckbox, EmptyState, Spinner, T } from '../../kit';
+import { DOCUMENT_CONSENT_TEXT } from '../../lib/uploadConsentCopy';
 import { DocumentUploadCard } from './DocumentUploadCard';
 import { isTaxiChecklist, taxiDocumentHint, TAXI_TWO_LICENCES } from './taxiDocumentCopy';
-import { emptyChecklistCopy, faceMatchedDocTypes, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
+import { DOCUMENT_REVIEW_PROMISE, emptyChecklistCopy, optionalDocHint, optionalDocTypes } from './documentChecklistPresentation';
 
 /** The progress track. `h-1.5` was 6px via Tailwind's default scale — the
  *  theme maps no numeric spacing, so it was never a token. Named here so the
@@ -31,6 +33,8 @@ export function DocumentChecklist({
   isError?: boolean;
   onRetry?: () => void;
 }) {
+  // [R17] uploads wait for the consent tick (unticked to start); a hook, so before the early returns
+  const [consented, setConsented] = useState(false);
   if (isLoading) {
     return (
       <View style={{ alignItems: 'center', justifyContent: 'center', paddingVertical: space['2xl'] }}>
@@ -55,8 +59,6 @@ export function DocumentChecklist({
   // [VERIFY-DOCS] Documents the person MAY add — shown after the required ones, never counted.
   const optional = optionalDocTypes(status);
   const documents: any[] = status?.documents ?? [];
-  // Which of these the server face-matches right now (none while it is off).
-  const faceMatched = faceMatchedDocTypes(status);
 
   const latestDoc = (docType: string) => {
     const docs = documents
@@ -94,13 +96,31 @@ export function DocumentChecklist({
         Required steps
       </T>
       <T variant="label" tone="muted" style={{ marginBottom: space.sm }}>
-        Upload these to activate your account. We review within 24 hours.
+        {/* [Owner 15 Oct 2026] no promise faster than the support hours allow */}
+        Upload these to activate your account. We review them Monday to Saturday, 8:00–20:00 Guyana time.
       </T>
+      {/* [R17 · legal research D2/B1] an unticked tick before any upload; the API records it in the consent ledger */}
+      <Pressable
+        onPress={() => setConsented((c) => !c)}
+        accessibilityRole="checkbox"
+        accessibilityState={{ checked: consented }}
+        accessibilityLabel={DOCUMENT_CONSENT_TEXT}
+        testID="document-consent-tick"
+        style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginBottom: space.md }}
+      >
+        <BrandCheckbox checked={consented} onToggle={() => setConsented((c) => !c)} />
+        <T variant="label" tone="muted" style={{ flex: 1 }}>{DOCUMENT_CONSENT_TEXT}</T>
+      </Pressable>
       {isTaxiChecklist(checklist) ? (
         <T variant="label" style={{ marginBottom: space.sm }}>
           {TAXI_TWO_LICENCES}
         </T>
       ) : null}
+      {/* [Legal research G4, in-app ¶17] What happens to the documents, truly: a person checks them, and the
+          daily expiry sweep re-checks the dates. */}
+      <T variant="micro" tone="muted" style={{ marginBottom: space.sm }}>
+        {DOCUMENT_REVIEW_PROMISE}
+      </T>
       {/* Progress — how far through the door they are */}
       <View style={{ marginBottom: space.md }}>
         <View style={{ marginBottom: space.xs, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -135,6 +155,7 @@ export function DocumentChecklist({
         const doc = latestDoc(docType);
         return (
           <DocumentUploadCard
+            consented={consented}
             key={docType}
             role={role}
             docType={docType}
@@ -144,7 +165,6 @@ export function DocumentChecklist({
             reviewNote={doc?.reviewNote ?? null}
             replaced={doc?.replaced === true}
             isNext={docType === nextDoc}
-            faceMatched={faceMatched.has(docType)}
             hint={taxiDocumentHint(docType, checklist)}
           />
         );
@@ -161,6 +181,7 @@ export function DocumentChecklist({
             const doc = latestDoc(docType);
             return (
               <DocumentUploadCard
+                consented={consented}
                 key={docType}
                 role={role}
                 docType={docType}
@@ -169,7 +190,6 @@ export function DocumentChecklist({
                 submittedAt={doc?.createdAt ?? null}
                 reviewNote={doc?.reviewNote ?? null}
                 replaced={doc?.replaced === true}
-                faceMatched={faceMatched.has(docType)}
                 optionalHint={optionalDocHint(docType)}
               />
             );

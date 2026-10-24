@@ -1,19 +1,21 @@
 'use client';
 
-import { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Pictogram } from '@/components/glyphs';
-import { courierEstimate, requestCourier, money } from '@/lib/customer';
+import { money } from '@/lib/customer';
+import { courierEstimate, requestCourier, type CourierRequest } from '@/lib/customer-courier';
 import { currentFix } from '@/lib/geolocate';
 import { MAX_ACCURACY_M, submittablePlace, type PickedPlace } from '@/lib/place';
 // [W-18] The field moved to components/location-field.tsx and the TAXI form
 // now uses the same one — it had the identical defect and its own copy of the
 // search box. A shared field is why there cannot be a third.
 import { LocationField } from '@/components/location-field';
+import { lazyRetry } from '@/lib/chunk-retry';
 
 // [WEB-PIN] Pinning either end on the map, as the phone does ("Set location on
 // map"). The map's code loads only when a pin is asked for.
-const PlacePinPanel = lazy(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
+const PlacePinPanel = lazyRetry(() => import('@/components/pin-picker/place-pin-panel').then((module) => ({ default: module.PlacePinPanel })));
 
 // [W-19] The text in the box IS the place, or there is no place. This form used
 // to keep the two apart — pick "42 Lamaha Street", edit the box to "9 Camp
@@ -34,6 +36,13 @@ const SIZES = [
   { k: 'EXTRA_LARGE', l: 'X-Large', d: 'Suitcase' },
 ];
 
+
+/** A request key the server accepts ([A-Za-z0-9._~-]{1,200}). */
+function newParcelKey(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? `web-parcel-${crypto.randomUUID()}`
+    : `web-parcel-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 export default function CourierPage() {
   const router = useRouter();
@@ -67,9 +76,26 @@ export default function CourierPage() {
   const [quoteRound, setQuoteRound] = useState(0);
   const [estimateFailed, setEstimateFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const parcelIntent = useRef<{ intent: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const [locating, setLocating] = useState(false);
+  // Any pickup the sender chooses (typed, searched or pinned) outdates a device
+  // fix still on its way: a late answer must never replace their choice.
+  const pickupChoice = useRef(0);
+  function choosePickup(text: string, place: PickedPlace | null) {
+    pickupChoice.current += 1;
+    setPickupText(text);
+    setPickup(place);
+  }
+
+  /** [review S3-1] The device is asked for its location only when the sender
+   *  taps for it, as in the pin picker — never on page load, where a surprise
+   *  prompt invites a "Block" that would also refuse every later tap. */
+  function locateMe() {
+    if (locating) return;
+    setLocating(true);
+    const ticket = pickupChoice.current;
     // [F-027-02] This one never fabricated a coordinate — it just failed
     // SILENTLY, leaving "Locating…" on screen forever with no way to know the
     // prompt had been denied. Fail closed AND say so.
@@ -78,6 +104,7 @@ export default function CourierPage() {
     // sender pins or searches the pickup instead.
     currentFix('set your pickup')
       .then(({ lat, lng, accuracyM }) => {
+        if (ticket !== pickupChoice.current) return;
         if (accuracyM === null || accuracyM > MAX_ACCURACY_M) {
           setPickup(null);
           setPickupError(accuracyM === null
@@ -89,8 +116,9 @@ export default function CourierPage() {
         setPickupText('Current location');
         setPickupError(null);
       })
-      .catch((e: Error) => { setPickup(null); setPickupError(e.message); });
-  }, []);
+      .catch((e: Error) => { if (ticket === pickupChoice.current) { setPickup(null); setPickupError(e.message); } })
+      .finally(() => setLocating(false));
+  }
 
   // [W-20] The estimate belongs to one exact route and size. Any change clears
   // it, so the price on screen can never describe a different parcel.
@@ -123,7 +151,7 @@ export default function CourierPage() {
     if (!from || !to || fee === null || recipientMissing !== null || !declared) return;
     setBusy(true); setError(null);
     try {
-      const r = await requestCourier({
+      const parcel: CourierRequest = {
         pickup: { lat: from.lat, lng: from.lng },
         dropoff: { lat: to.lat, lng: to.lng },
         // the label submitted is the one that was CHOSEN, and the box shows it
@@ -136,7 +164,13 @@ export default function CourierPage() {
         declaresNoProhibitedItems: true,
         // [PRICE-LOCK] The fee on the button: the server sends the parcel only at it.
         expectedFee: fee,
-      });
+      };
+      // [UI-SWEEP U65] One key per parcel intent: the same parcel pressed again
+      // (a lost answer, a double press) replays the first booking; a changed
+      // parcel is a new intent with a new key.
+      const intent = JSON.stringify(parcel);
+      if (parcelIntent.current?.intent !== intent) parcelIntent.current = { intent, key: newParcelKey() };
+      const r = await requestCourier(parcel, parcelIntent.current.key);
       const id = r?.orderId ?? r?.order?.id ?? r?.id;
       router.push(id ? `/orders/${id}` : '/orders');
     } catch (e) {
@@ -157,9 +191,12 @@ export default function CourierPage() {
             label="Pick up from"
             text={pickupText}
             place={pickup}
-            onChange={(t, p) => { setPickupText(t); setPickup(p); }}
+            onChange={(t, p) => choosePickup(t, p)}
             near={pickup}
           />
+          <button type="button" className="sw-btn sw-btn-outline sw-btn-md self-start" disabled={locating} onClick={locateMe}>
+            {locating ? 'Finding you…' : 'Use my location as the pickup'}
+          </button>
           {pickupError && !pickup && (
             <p role="alert" className="sw-note sw-note-error">{pickupError} You can search for it above or pin it on the map instead.</p>
           )}
@@ -169,7 +206,7 @@ export default function CourierPage() {
                 title="Pin the pickup"
                 mapLabel="Pickup pin map"
                 start={pickup ? { latitude: pickup.lat, longitude: pickup.lng } : null}
-                onUse={(place) => { setPickupText(place.label); setPickup(place); setPickupError(null); closePin('pickup'); }}
+                onUse={(place) => { choosePickup(place.label, place); setPickupError(null); closePin('pickup'); }}
                 onCancel={() => closePin('pickup')}
               />
             </Suspense>
@@ -223,7 +260,7 @@ export default function CourierPage() {
             <input type="checkbox" checked={declared} onChange={(e) => setDeclared(e.target.checked)} aria-label="This parcel has no prohibited items" aria-describedby="parcel-banned-goods" className="mt-1 h-4 w-4 accent-[var(--swift-red)]" />
             <span className="flex flex-col">
               <span className="font-semibold">This parcel has no prohibited items</span>
-              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel or 18+ items.</span>
+              <span id="parcel-banned-goods" className="text-[13px] leading-[18px] text-[var(--swift-muted)]">Swift never carries alcohol, tobacco, vapes, medicines, cannabis or other drugs, cooking gas (LPG), fuel, 18+ items, fireworks or explosives, pesticides or toxic chemicals, raw gold, diamonds or precious stones, firearms, ammunition or replicas, protected wildlife, counterfeit goods, currency and payment cards, or letters, documents and mail.</span>
             </span>
           </label>
         </div>

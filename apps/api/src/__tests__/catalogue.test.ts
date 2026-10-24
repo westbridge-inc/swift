@@ -14,6 +14,8 @@ import { customerRoutes } from '../modules/user/customer.routes';
 import { registerErrorHandler } from '../middleware/error-handler';
 import { BookingService } from '../modules/booking/booking.service';
 import { guyanaDayKey, instantOfGuyanaWallClock } from '../utils/guyana-day';
+import sharp from 'sharp';
+import { wordFreeTag } from './helpers/fixture-ids';
 
 // ---------------------------------------------------------------------------
 // catalogue: CSV import with row-level errors, instant availability
@@ -163,8 +165,9 @@ describe('CSV import', () => {
     const res = await inject('GET', '/api/v1/vendor/items/import/template', undefined, vendorToken);
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toContain('text/csv');
+    // [IMAGES-E2E PR4 · COORD ruling 19 Oct (a)] No photo column: photos are uploaded, never imported.
     expect(res.body.split('\n')[0]).toBe(
-      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment,imageUrl',
+      'category,name,description,basePrice,sku,unit,stockQuantity,isAvailable,fulfillment',
     );
   });
 
@@ -356,10 +359,11 @@ describe('Image upload — validated, behind the StorageProvider', () => {
   });
 
   it('accepts a real PNG and stores a URL', async () => {
-    const png = Buffer.concat([
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-      Buffer.alloc(64, 1),
-    ]);
+    // [Row 108] A real photo: the storage seam reads every photo with the real decoder.
+    // [IMAGES-E2E] And the route now DRAWS it again (pixels decoded end to end), so it is a
+    // photo whose pixels decode: REAL_PNG's image data fails its checksum, which only a
+    // header read never noticed.
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 200, g: 50, b: 50 } } }).png().toBuffer();
     const { payload, contentType } = multipartBody('burger.png', 'image/png', png);
 
     const res = await app.inject({
@@ -422,7 +426,7 @@ describe('deleting a menu item archives its order and booking references', () =>
   });
 
   async function archiveFixture(fulfillment: 'DELIVERY' | 'APPOINTMENT' = 'DELIVERY') {
-    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive ${nanoid(8)}` } });
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: {
       vendorId, categoryId: category.id, name: 'Archive fixture', basePrice: 500, fulfillment,
       stockQuantity: 0, isAvailable: false, autoHiddenAt: new Date(),
@@ -527,7 +531,7 @@ describe('deleting a menu item archives its order and booking references', () =>
   });
 
   it('does not erase an existing booking when the service listing is deleted', async () => {
-    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${nanoid(8)}` } });
+    const category = await app.prisma.category.create({ data: { vendorId, name: `Archive service ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: category.id, name: 'Booked fixture', basePrice: 500, fulfillment: 'APPOINTMENT' } });
     const held = await app.prisma.booking.create({ data: { itemId: item.id, customerId, slotStart: new Date(Date.now() + DAY), slotEnd: new Date(Date.now() + DAY + 1800000) } });
     expect((await inject('DELETE', `/api/v1/vendor/items/${item.id}`, undefined, vendorToken)).statusCode).toBe(200);
@@ -547,7 +551,7 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
   /** A category holding a sold-out delivery listing with an open order, a
    *  service listing with a booking, and an already-archived listing. */
   async function categoryFixture() {
-    const name = `Gone ${nanoid(8)}`;
+    const name = `Gone ${wordFreeTag(8)}`;
     const category = await app.prisma.category.create({ data: { vendorId, name } });
     const dish = await app.prisma.item.create({ data: {
       vendorId, categoryId: category.id, name: 'Category fixture dish', basePrice: 500,
@@ -615,7 +619,7 @@ describe('[owner 11 Oct] deleting a category archives it and its listings — hi
     expect((await inject('PUT', `/api/v1/vendor/categories/${category.id}`, { name: 'Back again' }, vendorToken)).statusCode).toBe(404);
     expect((await inject('DELETE', `/api/v1/vendor/categories/${category.id}`, undefined, vendorToken)).statusCode).toBe(404);
     expect((await inject('POST', '/api/v1/vendor/items', { categoryId: category.id, name: 'Into the archive', basePrice: 100 }, vendorToken)).statusCode).toBe(404);
-    const live = await app.prisma.category.create({ data: { vendorId, name: `Live ${nanoid(6)}` } });
+    const live = await app.prisma.category.create({ data: { vendorId, name: `Live ${wordFreeTag(8)}` } });
     const item = await app.prisma.item.create({ data: { vendorId, categoryId: live.id, name: 'Mover fixture', basePrice: 100 } });
     expect((await inject('PUT', `/api/v1/vendor/items/${item.id}`, { categoryId: category.id }, vendorToken)).statusCode).toBe(404);
     expect((await app.prisma.item.findUniqueOrThrow({ where: { id: item.id } })).categoryId).toBe(live.id);

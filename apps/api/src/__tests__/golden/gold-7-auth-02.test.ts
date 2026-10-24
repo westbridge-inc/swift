@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createGolden } from './gold-7-helpers';
+import { sessionCredentialDigest } from '../../lib/session-credential';
 
 // ---------------------------------------------------------------------------
 // GOLD-7 · AUTH-02 — the picker reads /me, switches to an owned role, reaches
@@ -47,9 +48,11 @@ describe('GOLD-7 · AUTH-02 — role picker to authorized destination', () => {
     const sessions = await h.sys(() => h.app.prisma.session.findMany({ where: { userId: actor.userId } }));
     expect(sessions.length).toBe(1);
     expect(sessions[0]!.id).toBe(actor.sessionId);
-    expect(sessions[0]!.token === rotated.accessToken).toBe(true);
-    expect(sessions[0]!.refreshToken === rotated.refreshToken).toBe(true);
-    expect(sessions[0]!.previousRefreshToken === actor.refreshToken).toBe(true);
+    // [Row 231] the row holds SHA-256 digests of the pair, never the pair
+    expect(sessions[0]!.token === sessionCredentialDigest(rotated.accessToken)).toBe(true);
+    expect(sessions[0]!.refreshToken === sessionCredentialDigest(rotated.refreshToken)).toBe(true);
+    expect(sessions[0]!.previousRefreshToken === sessionCredentialDigest(actor.refreshToken)).toBe(true);
+    expect([sessions[0]!.token, sessions[0]!.refreshToken, sessions[0]!.previousRefreshToken]).not.toContain(rotated.accessToken);
     expect((await h.call('GET', '/api/v1/auth/me', actor.token)).statusCode).toBe(401);
     const refreshedDestination = await h.call('GET', '/api/v1/vendor/profile', rotated.accessToken);
     expect(refreshedDestination.statusCode).toBe(200);

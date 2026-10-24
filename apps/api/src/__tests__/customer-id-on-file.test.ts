@@ -20,6 +20,7 @@ import { FloatService } from '../modules/dispatch/float.service';
 import { TEST_ADMIN_REASON } from './helpers/admin-reason';
 import { injectWithApproval } from './helpers/admin-approval';
 import { ownedVerificationFixture } from './helpers/verification-object';
+import { jpegSized } from './helpers/real-image';
 
 // ---------------------------------------------------------------------------
 // [Owner ruling 8 Oct 2026 ~23:25 GYT — CUSTOMER ID]
@@ -39,13 +40,10 @@ const clusters: string[] = [];
 const runBase = 592_043_000_000 + Math.floor(Math.random() * 8_000_000);
 let seq = 0;
 
-/** A JPEG whose frame header says width × height; `salt` makes every file's bytes (and hash) unique. */
+/** A real JPEG whose frame header says width × height; `salt` makes every file's bytes (and hash) unique.
+ *  [Row 108] Real, because the upload route reads every photo with the real decoder. */
 function jpeg(width: number, height: number, salt = nanoid(12)): Buffer {
-  const app0 = Buffer.from([0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
-  const note = Buffer.from(`swift-customer-id-${salt}`);
-  const com = Buffer.concat([Buffer.from([0xff, 0xfe, 0x00, note.length + 2]), note]);
-  const sof0 = Buffer.from([0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
-  return Buffer.concat([Buffer.from([0xff, 0xd8]), app0, com, sof0, Buffer.from([0xff, 0xd9])]);
+  return jpegSized(width, height, `swift-customer-id-${salt}`);
 }
 const readable = () => jpeg(1600, 1000);
 /** A number sent with a customer ID's approval: never asked for and dropped unread (rule 11 Oct 2026: no ID-number duplicate check at launch). */
@@ -169,11 +167,12 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     const told = await notices(c.id);
     expect(told.map((n) => n.title)).toContain('Your ID is on file');
     for (const n of told) expect(`${n.title} ${n.body}`).not.toMatch(/verified/i);
-    // Taxi rides also need the profile photo (rides.service SELFIE_REQUIRED): the notice never says
-    // rides are unlocked by the ID alone, nor promises orders "of any size".
+    // [Owner ruling 16 Oct: customers take no photos] A taxi ride needs only the ID on file
+    // (rides.service assertL2), so the notice says rides are unlocked, never asks for a photo, and
+    // never promises orders "of any size".
     const onFile = told.find((n) => n.title === 'Your ID is on file');
-    expect(onFile?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(onFile?.body).not.toMatch(/any size|Taxi rides and/);
+    expect(onFile?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
+    expect(onFile?.body).not.toMatch(/photo|selfie|any size/i);
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('ON_FILE');
   });
 
@@ -201,10 +200,11 @@ describe('(1) a customer ID goes on file at once — no admin approval', () => {
     expect(again.json().error.message).toBe('Your ID is already on file.');
   });
 
+  // [Owner ruling 16 Oct: customers take no photos] The gate reads no selfie: it opens on the ID on file alone.
   it('the taxi L2 gate opens on an ID on file, and its refusal speaks of "on file", not verification', () => {
-    expect(() => assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L2', selfieCapturedAt: new Date() })).not.toThrow();
+    expect(() => assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L2' })).not.toThrow();
     let message = '';
-    try { assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L1', selfieCapturedAt: new Date() }); } catch (e) { message = (e as Error).message; }
+    try { assertL2({ id: 'u', tenantId: 't', countryCode: 'GY', trustLevel: 'L1' }); } catch (e) { message = (e as Error).message; }
     expect(message).toMatch(/ID on file/);
     expect(message).not.toMatch(/verif/i);
   });
@@ -326,11 +326,11 @@ describe('(1) an automatic check holds the ID for a person', () => {
     expect(approved.statusCode, approved.body).toBe(200);
     expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
     expect(await customerIdCheck(app.prisma, c.id, 'L2')).toBe('CHECKED');
-    // The person-checked notice is truthful too: bigger orders, and taxi rides need the profile photo.
+    // The person-checked notice is truthful too: bigger orders and taxi rides, and no photo (owner 16 Oct).
     const checked = (await notices(c.id)).find((n) => n.title === 'Identity verified');
     expect(checked?.body).toMatch(/A person on our team checked your ID/);
-    expect(checked?.body).toMatch(/Taxi rides also need your profile photo/);
-    expect(checked?.body).not.toMatch(/any size/);
+    expect(checked?.body).toMatch(/Bigger orders and taxi rides are unlocked now/);
+    expect(checked?.body).not.toMatch(/photo|selfie|any size/i);
   });
 });
 
@@ -344,7 +344,7 @@ describe('(1) an admin can withdraw an ID at any time — back to L1', () => {
     expect(revoked.json().data.accountTrustLevel).toBe('L1');
     expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
     // ...and the taxi gate refuses again (the big-order gate keys on the same L1, orders.test).
-    expect(() => assertL2({ id: c.id, tenantId: 't', countryCode: 'GY', trustLevel: 'L1', selfieCapturedAt: new Date() })).toThrow(/ID on file/);
+    expect(() => assertL2({ id: c.id, tenantId: 't', countryCode: 'GY', trustLevel: 'L1' })).toThrow(/ID on file/);
     expect((await notices(c.id)).map((n) => n.title)).toContain('Your ID is no longer on file');
     expect(await customerIdCheck(app.prisma, c.id, 'L1')).toBe('NOT_ACCEPTED');
 
@@ -547,5 +547,75 @@ describe('partner, driver and rider review is UNCHANGED', () => {
     const held = (await submit(checked.token, { idDocumentUrl: await upload(checked.token, jpeg(400, 300)) })).json().data;
     expect((await admin('PUT', `/api/v1/admin/verification/${held.id}/approve`, { documentNumber: typedNumber() })).statusCode).toBe(200);
     expect(Number((await app.prisma.rider.findUniqueOrThrow({ where: { userId: checked.id } })).floatLimit)).toBe(Number(cfg.floatL2));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [S2-29 · KYC-DECISION-ATOMIC] A reviewer's decision commits with everything it owes — the L2
+// promotion, its notice, the audit trail — or none of it does. A fault between those steps never
+// leaves a decided document with no trail and no L2 (whose retry then hits "not pending"), and a
+// notice that fails after the commit never turns a committed, audited decision into an error.
+// ---------------------------------------------------------------------------
+describe('[S2-29] a reviewer decision commits with its effects and its trail, or not at all', () => {
+  const heldId = async (c: { id: string; token: string }) => {
+    const res = await submit(c.token, { idDocumentUrl: await upload(c.token, jpeg(400, 300)) });
+    expect(res.statusCode, res.body).toBe(201);
+    expect(res.json().data.status).toBe('PENDING');
+    return res.json().data as { id: string };
+  };
+  const docRow = (id: string) => app.prisma.verificationDocument.findUniqueOrThrow({ where: { id }, select: { status: true } });
+  const trail = async (docId: string, action: string) => (await audit(docId)).filter((a) => a.action === action).length;
+  const approve = (docId: string, documentNumber: string) => admin('PUT', `/api/v1/admin/verification/${docId}/approve`, { documentNumber });
+
+  it('a fault between the decision and the L2 promotion leaves nothing half-done, and the retry decides it once', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const number = typedNumber();
+    const fault = vi.spyOn(FloatService.prototype, 'recomputeForUser').mockRejectedValueOnce(new Error('synthetic fault between the decision and the L2 promotion'));
+    let faulted: Awaited<ReturnType<typeof approve>>;
+    let hit = 0;
+    try { faulted = await approve(doc.id, number); hit = fault.mock.calls.length; } finally { fault.mockRestore(); }
+    expect(hit).toBeGreaterThan(0);
+    expect(faulted.statusCode).toBe(500);
+    // Nothing of the decision committed: still pending, still L1, no trail row, no approval notice.
+    expect(await docRow(doc.id)).toEqual({ status: 'PENDING' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L1' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(0);
+    expect((await notices(c.id)).map((n) => n.title)).not.toContain('Document approved');
+    // The reviewer's retry decides it — once, completely.
+    const retried = await approve(doc.id, number);
+    expect(retried.statusCode, retried.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document approved')).toHaveLength(1);
+  });
+
+  it('a notice that fails after the approval commits never fails it: decided, L2, one trail row', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    let attempted = 0;
+    try { res = await approve(doc.id, typedNumber()); attempted = outage.mock.calls.length; } finally { outage.mockRestore(); }
+    expect(attempted).toBeGreaterThan(0);
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'APPROVED' });
+    expect(await user(c.id)).toEqual({ trustLevel: 'L2' });
+    expect(await trail(doc.id, 'APPROVE_VERIFICATION_DOC')).toBe(1);
+  });
+
+  it('a rejection commits with its notice and its trail row: a notice outage never strands it', async () => {
+    const c = await customer();
+    const doc = await heldId(c);
+    const outage = vi.spyOn(NotificationService.prototype, 'send').mockRejectedValue(new Error('synthetic notice outage after commit'));
+    let res: Awaited<ReturnType<typeof approve>>;
+    try {
+      res = await admin('PUT', `/api/v1/admin/verification/${doc.id}/reject`, { reason: 'Synthetic: the picture is not an ID' });
+    } finally { outage.mockRestore(); }
+    expect(res.statusCode, res.body).toBe(200);
+    expect(await docRow(doc.id)).toEqual({ status: 'REJECTED' });
+    expect(await trail(doc.id, 'REJECT_VERIFICATION_DOC')).toBe(1);
+    expect((await notices(c.id)).filter((n) => n.title === 'Document rejected')).toHaveLength(1);
   });
 });

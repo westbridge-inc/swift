@@ -14,6 +14,7 @@ import { inTenantOf } from '../jobs/queue';
 import { algoConfig, invalidateAlgoConfig } from '../modules/algo/algo-config';
 import { syntheticLocationOwner } from './helpers/online-mover';
 import { grantSuiteCapability } from '../lib/test-target-lock';
+import { testPhone, wordFreeTag } from './helpers/fixture-ids';
 
 grantSuiteCapability('unscoped-mutation');
 
@@ -31,7 +32,7 @@ grantSuiteCapability('unscoped-mutation');
 // ---------------------------------------------------------------------------
 
 const SPOT = { lat: 6.71, lng: -57.61 }; // remote: no other suite's movers here
-const PHONE = `+5920031${String(Math.floor(Math.random() * 900) + 100)}`;
+const PHONE = testPhone();
 const QUEUE_SRC = readFileSync(join(__dirname, '..', 'jobs', 'queue.ts'), 'utf8');
 let app: FastifyInstance;
 let dispatch: DispatchService;
@@ -74,7 +75,7 @@ beforeAll(async () => {
     userIds.push(owner.id);
     const vo = await app.prisma.vendorOwner.create({ data: { userId: owner.id } });
     vendorId = (await app.prisma.vendor.create({ data: {
-      ownerId: vo.id, name: `Job V ${nanoid(4)}`, slug: `job-v-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `${PHONE}999`,
+      ownerId: vo.id, name: `Job V ${wordFreeTag(8)}`, slug: `job-v-${nanoid(8).toLowerCase()}`, vendorType: 'RESTAURANT', phone: `${PHONE}999`,
       addressLine1: '1 Job St', city: 'Georgetown', region: 'Demerara-Mahaica', latitude: SPOT.lat, longitude: SPOT.lng,
     } })).id;
     seq += 1;
@@ -201,8 +202,10 @@ describe('[L01 · job PR-2] per-entity jobs run as their object’s tenant', () 
     // [DS704 S4] The census below reads the FIRST site of each job name; a
     // second, unwrapped site for the same name must not hide behind it.
     const count = (re: RegExp) => (QUEUE_SRC.match(new RegExp(re.source, 'g')) ?? []).length;
+    // [row 266] offer-timeout has two sites, both wrapped: the offer worker (the
+    // handler) and the dispatch worker's drain of timeouts enqueued before the split.
     for (const anchor of [/case 'auto-cancel':/, /case 'auto-complete':/, /job\.name === 'dispatch-order'/, /job\.name === 'offer-timeout'/,
-      /job\.name === 'route-match'/, /job\.name !== 'vendor-alert-escalate'/, /job\.name !== 'sync-vendor'/]) {
+      /job\.name !== 'offer-timeout'/, /job\.name === 'route-match'/, /job\.name !== 'vendor-alert-escalate'/, /job\.name !== 'sync-vendor'/]) {
       expect(count(anchor), String(anchor)).toBe(1);
     }
     for (const call of ['autoCancelUnresponsiveOrder\\(ctx,', 'autoCompleteDeliveredOrder\\(ctx,', 'dispatch\\.dispatchOrder\\(', 'dispatch\\.handleOfferTimeout\\(',
@@ -219,6 +222,7 @@ describe('[L01 · job PR-2] per-entity jobs run as their object’s tenant', () 
     expect(block(/case 'auto-complete':/, 200)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => autoCompleteDeliveredOrder/);
     expect(block(/job\.name === 'dispatch-order'/)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) =>\s+dispatch\.dispatchOrder/);
     expect(block(/job\.name === 'offer-timeout'/, 300)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => dispatch\.handleOfferTimeout/);
+    expect(block(/job\.name !== 'offer-timeout'/, 700)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: job\.data\.orderId \}, \(\) => dispatch\.handleOfferTimeout/);
     expect(block(/job\.name === 'route-match'/)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: routeOrderId \}, \(\) => matchOrderRoute/);
     expect(block(/job\.name !== 'vendor-alert-escalate'/, 600)).toMatch(/inTenantOf\(ctx\.prisma, \{ order: orderId \}, \(\) => escalateVendorAlert/);
     expect(block(/job\.name !== 'sync-vendor'/, 600)).toMatch(/inTenantOf\(ctx\.prisma, \{ vendor: vendorId \}/);

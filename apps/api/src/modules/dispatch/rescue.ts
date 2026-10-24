@@ -3,6 +3,7 @@ import type { PrismaClient, Prisma } from '@prisma/client';
 import type { Redis } from 'ioredis';
 import type { Server } from 'socket.io';
 import { algoConfig } from '../algo/algo-config';
+import { rescueIncentivePayable } from './rescue-incentive-guard';
 import { recordDecision } from '../algo/decisions';
 import { NotificationService, notifyAdmins } from '../notification/notification.service';
 import { notSelfDeliveredFilter } from '../fulfillment/fulfillment-mode';
@@ -774,7 +775,8 @@ export async function rescueIncentiveGyd(prisma: PrismaClient, cascade: number, 
   const [amount, from] = await Promise.all([algoConfig(prisma, 'rescue.incentiveGyd', tenantId), algoConfig(prisma, 'rescue.incentiveFromCascade', tenantId)]);
   const gyd = Math.max(0, Math.round(Number(amount.value) || 0));
   const fromCascade = Math.max(1, Math.round(Number(from.value) || 2));
-  return gyd > 0 && cascade >= fromCascade ? gyd : 0;
+  // [Row 208 guard] Production pays no incentive until a payout path and a deletion block ship.
+  return gyd > 0 && cascade >= fromCascade ? rescueIncentivePayable(gyd) : 0;
 }
 
 /** The offer carried an incentive and the rider accepted: the payable exists now. Idempotent per order. */

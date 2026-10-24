@@ -20,7 +20,7 @@ import { site, launch } from '@/site.config';
  * week at a time, no paying ahead (was a four-week limit).
  */
 
-const UPDATED = '15 October 2026';
+const UPDATED = '17 October 2026';
 
 export const metadata = policyMetadata(
   'Refunds and cancellations',
@@ -59,12 +59,12 @@ export default function RefundsPage() {
         <li>
           <b>After the business accepts it</b>, the order can no longer be cancelled in the app. Contact the business to
           change or cancel it: the app shows the phone number the business published. You can still cancel it free in
-          the app if no rider could be found for it, or if it is running very late (for example, 30 minutes past the
+          the app if no rider could be found for it, or if it is running very late (for example, 60 minutes past the
           time you were promised).
         </li>
         <li>
           <b>Rides, parcels and bookings</b> can be cancelled free at any time while nobody has accepted them, and for
-          5 minutes after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
+          1 minute after a driver, rider or provider accepts them. After that, contact your driver, rider or provider.
           You can still cancel free if no driver or rider was found, or if they are running very late, as the app shows.
         </li>
         <li>
@@ -92,6 +92,11 @@ export default function RefundsPage() {
           cash order.
         </li>
       </ul>
+      {/* [Legal research E5] statutory rights are never displaced by these rules. */}
+      <p>
+        These rules do not affect your rights under the Consumer Affairs Act 2011 to return goods or get a refund from
+        the business.
+      </p>
 
       {/* Approved by the owner, 1 Oct 2026. No automatic refund exists; Swift can only help. */}
       <h2>If an MMG-paid order is cancelled or never arrives</h2>
@@ -101,15 +106,15 @@ export default function RefundsPage() {
         business, share the order record with you both, and help you get your money back from the business.{' '}
         {site.tradeName} cannot send the refund itself, because order money never passes through {site.tradeName}, and
         there is no automatic refund. If something is wrong with an order you received, report it the same way; any
-        refund of order money is made by the business.
+        refund of order money is made by the business. We reply within 2 business days; the business must refund
+        within 72 hours of our contact.
       </p>
 
       {/* Approved by the owner, 1 Oct 2026: this whole section is a business commitment. */}
       <h2>The weekly partner fee</h2>
       <p>
         Businesses, riders and drivers pay {site.tradeName} a flat weekly fee for the software. Customers pay{' '}
-        {site.tradeName} nothing. Advertising that a business chooses to buy is covered by the separate advertising
-        terms.
+        {site.tradeName} nothing.
       </p>
       <ul>
         <li>
@@ -118,8 +123,8 @@ export default function RefundsPage() {
           {cardsLive ? 'It can also be paid by Visa or Mastercard, through our bank’s card payment page.' : null}
         </li>
         <li>
-          <b>Charged twice, or by mistake?</b> {site.tradeName} refunds the extra or mistaken charge in full, to the
-          method you paid with, once you tell support at {email} or {phone}. Support replies within{' '}
+          <b>Charged twice, or by mistake?</b> {site.tradeName} refunds the extra or mistaken charge in full, within 14
+          days, to the method you paid with, once you tell support at {email} or {phone}. Support replies within{' '}
           {site.supportReplyBusinessDays} business days.
         </li>
         <li>
@@ -133,7 +138,7 @@ export default function RefundsPage() {
         </li>
         <li>
           <b>Closing your account.</b> {site.tradeName} refunds any weekly fee you paid for a week that has not started,
-          records the refund, and then deletes your account. A week that has already started is not refunded.
+          within 14 days, to the account you paid from, records the refund, and then deletes your account. A week that has already started is not refunded.
         </li>
       </ul>
 

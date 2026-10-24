@@ -12,7 +12,8 @@ import { CustomerIdOnFile, withdrawNotice } from '@/components/verification/Cust
 import { approveDoc, rejectDoc, fetchUserDetail, fetchVerificationCounts, fetchDocumentCustody, type InsuranceCheck } from '@/lib/api';
 import { reasonTooShort } from '@/lib/ask-reason';
 import { REJECTION_REASONS, SECOND_REVIEW_CODES, isRejectionReasonCode, type RejectionReasonCode } from '@/lib/rejection-reasons';
-import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { REVIEW_COUNTS_POLL_MS, REVIEW_STATUSES, applicantId, isSystemActor, newSinceLoaded, docLabel, reviewerHint, reviewNote, roleLabel, vehicleLabel, reviewTimeline, groupApplicants, loadReviewQueue, maskedPhone, waitingSince, resubmissionLabel, previousDecisionLine, type Applicant, type ReviewDocument, type ReviewLane, type ReviewStatus } from '@/lib/review-center';
+import { label } from '@/lib/labels';
 
 const EXPIRING_DOC_TYPES = [
   'fitness_cert', 'vehicle_insurance', 'hire_car_permit',
@@ -20,22 +21,28 @@ const EXPIRING_DOC_TYPES = [
   'hire_car_driver_licence', 'hire_car_vehicle_licence',
   'road_service_licence', 'food_handler_cert', 'gra_restaurant_licence',
   'drivers_licence',
-  // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate
+  // [DOC-1 §18.1] the addendum's annual licences, submittable through a category gate. [owner 16 Oct]
+  // The restaurant licence, sanitary certificate and trade licence ask for their YEAR (reviewerTypes).
   'liquor_licence', 'sanitary_certificate', 'trade_licence',
   // [DOC-1 §3.6 · P3-2] the unregistered trader's signed self-declaration — a one-year
   // validity like a licence, so the console must ask for its date too.
   'self_declaration_unregistered',
+  // [TRADES · 13 Oct 2026; R15] the service-trade licences and certificates. The ones checked again
+  // every January ask for the certificate's YEAR instead of a date (reviewerTypes 'certificateYear').
+  'pest_control_operator_licence', 'pesticide_applicator_certificate', 'eating_house_registration',
+  'gei_electrical_licence',
 ] as const;
 const EMPTY_INSURANCE: InsuranceCheck = { insurerName: '', policyNumber: '', coverageClass: 'HIRE', hireClassConfirmed: false, plateCrossChecked: false };
 const LANES = [{ value: 'operator', label: 'Operators' }, { value: 'customer', label: 'Customers' }, { value: 'all', label: 'Everything' }] as const;
-function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{status}</span>; }
+/** [BUG-GUARDS C5] The document's status in words ("Waiting for review"), never the code. */
+function Chip({ status }: { status: string }) { return <span className={`rc-chip rc-chip-${status.toLowerCase()}`}>{label('VerificationDocumentStatus', status)}</span>; }
 
 function TimelineActor({ actor, applicant }: { actor: string | null; applicant: Applicant }) {
   const system = isSystemActor(actor);
   const isApplicant = actor === applicant.id;
   const person = useQuery({ queryKey: ['review-actor', actor], queryFn: () => fetchUserDetail(actor!), enabled: !system && !isApplicant });
   const name = [person.data?.data?.firstName, person.data?.data?.lastName].filter(Boolean).join(' ');
-  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : 'Reviewer name unavailable')}</small>;
+  return <small>{system ? 'System' : isApplicant ? applicant.name : name || (person.isLoading ? 'Loading reviewer…' : person.isError ? 'Couldn\u2019t load the reviewer\u2019s name' : 'Reviewer name unavailable')}</small>;
 }
 
 export default function VerificationPage() {
@@ -54,6 +61,8 @@ export default function VerificationPage() {
   const [expiresAt, setExpiresAt] = useState('');
   const [documentNumber, setDocumentNumber] = useState('');
   const [issuedOn, setIssuedOn] = useState('');
+  const [certificateYear, setCertificateYear] = useState('');
+  const [registrationKind, setRegistrationKind] = useState<'' | 'BUSINESS_NAME' | 'COMPANY'>('');
   const [insurance, setInsurance] = useState<InsuranceCheck>(EMPTY_INSURANCE);
   const [decision, setDecision] = useState<'approve' | 'reject' | null>(null);
   const [reason, setReason] = useState('');
@@ -120,7 +129,7 @@ export default function VerificationPage() {
     documentList.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
   };
   const selectDocument = (doc: ReviewDocument) => {
-    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setInsurance(EMPTY_INSURANCE);
+    setSelected(doc); setViewed(false); setExpiresAt(''); setDocumentNumber(''); setIssuedOn(''); setCertificateYear(''); setRegistrationKind(''); setInsurance(EMPTY_INSURANCE);
     setMutationError(null); setDecision(null); setReason(''); setReasonCode('');
   };
   const openApplicant = (next: Applicant | null) => {
@@ -149,15 +158,27 @@ export default function VerificationPage() {
     if (match) { openApplicant(match); if (named) selectDocument(named); }
     else setNotice('No documents from this applicant are waiting for review. They may still need to upload one, or the decision is under Approved, Rejected or Expired.');
   }, [queue.data]); // eslint-disable-line react-hooks/exhaustive-deps -- runs once per queue load by design
-  const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType);
+  const needsExpiry = !!selected && (EXPIRING_DOC_TYPES as readonly string[]).includes(selected.docType)
+    && !(selected.reviewerTypes?.includes('certificateYear') ?? false);
   const expiryOk = !needsExpiry || (!!expiresAt && Date.parse(expiresAt) > now);
   const isInsurance = selected?.docType === 'vehicle_insurance';
   const insuranceReady = insurance.insurerName.trim() && insurance.policyNumber.trim() &&
-    (insurance.coverageClass !== 'HIRE' || (insurance.hireClassConfirmed && insurance.plateCrossChecked));
+    // [R13 · research D6] Every motor vehicle's policy must permit use for hire or reward (taxi: passengers
+    // for hire; delivery: commercial use), read and confirmed by the reviewer; a private-use policy is rejected.
+    insurance.coverageClass === 'HIRE' && insurance.hireClassConfirmed && insurance.plateCrossChecked;
   const needsNumber = selected?.reviewerTypes?.includes('documentNumber') ?? false;
   const needsIssuedOn = selected?.reviewerTypes?.includes('issuedOn') ?? false;
+  // [R16] A business registration: the reviewer says what it is; only a yearly business NAME needs its year.
+  const needsRegistrationKind = selected?.reviewerTypes?.includes('registrationKind') ?? false;
+  // [R15] A licence or food certificate checked every January: the year printed on it, never a date.
+  const needsCertificateYear = (selected?.reviewerTypes?.includes('certificateYear') ?? false)
+    && (!needsRegistrationKind || registrationKind === 'BUSINESS_NAME');
+  const yearNow = new Date(now).getFullYear();
+  const certificateYearOk = /^\d{4}$/.test(certificateYear.trim()) && Number(certificateYear) <= yearNow && Number(certificateYear) >= yearNow - 1;
   const typedReady = (!needsNumber || documentNumber.replace(/[^a-z0-9]/gi, '').length >= 4)
-    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now));
+    && (!needsIssuedOn || (!!issuedOn && Number.isFinite(Date.parse(issuedOn)) && Date.parse(issuedOn) <= now))
+    && (!needsCertificateYear || certificateYearOk)
+    && (!needsRegistrationKind || registrationKind !== '');
   const approveBlocked = !viewed || !expiryOk || !typedReady || (isInsurance && !insuranceReady);
   const currentIndex = filtered.findIndex((a) => a.id === applicant?.id);
   const move = (offset: number) => {
@@ -172,10 +193,12 @@ export default function VerificationPage() {
         ...(isInsurance ? { insurance } : {}),
         ...(needsNumber ? { documentNumber: documentNumber.trim() } : {}),
         ...(needsIssuedOn ? { issuedOn: new Date(issuedOn).toISOString() } : {}),
+        ...(needsRegistrationKind && registrationKind ? { registrationKind } : {}),
+        ...(needsCertificateYear ? { certificateYear: Number(certificateYear) } : {}),
       }, note) : rejectDoc(doc.id, note, code as RejectionReasonCode);
     },
     onError: (error) => setMutationError(error),
-    onSuccess: async (result, variables) => {
+    onSuccess: (result, variables) => {
       const outcome = result?.data?.status;
       setNotice(outcome === 'PENDING'
         ? 'Sent for a second review: a different reviewer must confirm it. It is not rejected until they do.'
@@ -184,14 +207,16 @@ export default function VerificationPage() {
         : 'Decision received. Refreshing the server record; no final status was returned.');
       const nextApplicant = filtered[currentIndex + 1] ?? null;
       setDecision(null);
-      // No optimistic decision or removal: invalidate the reads after the response.
-      await Promise.all([
+      // No optimistic decision or removal: the decision shows only from the server's answer (above).
+      // [PERF row 562 · COORD 00:41Z] The next applicant opens AT that answer; the reads that follow
+      // run on their own. They used to hold the whole workspace for four more round trips.
+      openApplicant(nextApplicant);
+      void Promise.all([
         client.invalidateQueries({ queryKey: ['verification'] }),
         client.invalidateQueries({ queryKey: ['verification-history'] }),
         client.invalidateQueries({ queryKey: ['verification-counts'] }),
         client.invalidateQueries({ queryKey: ['document-custody', variables.doc.id] }),
       ]);
-      openApplicant(nextApplicant);
     },
     onSettled: () => { inFlight.current = false; },
   });
@@ -280,6 +305,7 @@ export default function VerificationPage() {
               {selected.previousDecision.reviewNote && <span>Last time: {selected.previousDecision.reviewNote}</span>}
             </aside>}
             {reviewerHint(selected.docType) ? <p className="rc-reviewer-hint">{reviewerHint(selected.docType)}</p> : null}
+            {reviewNote(selected.docType, selected.role) && <p className="rc-muted rc-review-note">{reviewNote(selected.docType, selected.role)}</p>}
             <DocumentViewer key={selected.id} id={selected.id} label={docLabel(selected.docType)} onViewed={setViewed} onRejectMissing={selected.status === 'PENDING' && !busy ? () => { openDecision('reject'); setReasonCode('UNREADABLE'); } : undefined} />
             <div className="rc-review-facts"><span>Consent: {selected.consentAt ? `notice ${selected.privacyNoticeVersion ?? ''}` : 'none on file'}</span>{selected.expiresAt && <span>Recorded expiry: {new Date(selected.expiresAt).toLocaleDateString()}</span>}</div>
             <CustomerIdOnFile key={`cid-${selected.id}`} doc={selected} onWithdrawn={async (doc, accountTrustLevel) => {
@@ -292,16 +318,19 @@ export default function VerificationPage() {
               ]);
               openApplicant(null);
             }} />
-            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn) && <div className="rc-fields">
+            {selected.status === 'PENDING' && (needsExpiry || isInsurance || needsNumber || needsIssuedOn || needsCertificateYear || needsRegistrationKind) && <div className="rc-fields">
+              {needsRegistrationKind && <label>What this certificate is<select aria-label="What this certificate is" value={registrationKind} onChange={(e) => setRegistrationKind(e.target.value as '' | 'BUSINESS_NAME' | 'COMPANY')} disabled={busy}><option value="">Choose…</option><option value="BUSINESS_NAME">Business name (sole trader or partnership): renewed every year</option><option value="COMPANY">Company: certificate of incorporation, never expires</option></select><small>{registrationKind === 'BUSINESS_NAME' ? 'Type the year it is registered for. The store goes offline on 16 January if it is not renewed.' : 'A company’s incorporation certificate never expires.'}</small></label>}
+              {needsCertificateYear && <label>Year printed on the certificate<input inputMode="numeric" aria-label="Year printed on the certificate" autoComplete="off" maxLength={4} placeholder={String(yearNow)} value={certificateYear} onChange={(e) => setCertificateYear(e.target.value)} disabled={busy} /><small>{certificateYear && !certificateYearOk ? `Only this year’s certificate (or, until 16 January, last year’s) can be approved.` : 'It is checked again every January. The server sets the date.'}</small></label>}
               {needsNumber && <label>Document number<input aria-label="Document number" autoComplete="off" maxLength={40} value={documentNumber} onChange={(e) => setDocumentNumber(e.target.value)} disabled={busy} /><small>Read the number from this document.</small></label>}
               {needsIssuedOn && <label>Issue date printed on the document<input type="date" aria-label="Issue date printed on the document" max={new Date(now).toISOString().slice(0, 10)} value={issuedOn} onChange={(e) => setIssuedOn(e.target.value)} disabled={busy} /><small>Read its issue date. The server determines when it must be checked again.</small></label>}
               {needsExpiry && <label>Expiry printed on the document (required)<input type="date" aria-label="Expiry printed on the document" value={expiresAt} onChange={(e) => setExpiresAt(e.target.value)} disabled={busy} />{!expiryOk && <small>{expiresAt ? 'That date has already passed; an expired document cannot be approved.' : 'This document type expires — key the date from the document.'}</small>}</label>}
               {isInsurance && <fieldset disabled={busy}><legend>Insurance 5-point check</legend>
                 <label>Insurer<input placeholder="Insurer" value={insurance.insurerName} onChange={(e) => setInsurance({ ...insurance, insurerName: e.target.value })} /></label>
                 <label>Policy number<input placeholder="Policy number" value={insurance.policyNumber} onChange={(e) => setInsurance({ ...insurance, policyNumber: e.target.value })} /></label>
-                <label>Coverage class<select value={insurance.coverageClass} onChange={(e) => setInsurance({ ...insurance, coverageClass: e.target.value as 'HIRE' | 'PRIVATE' })}><option value="HIRE">HIRE class</option><option value="PRIVATE">PRIVATE class</option></select></label>
-                <label className="rc-check"><input type="checkbox" checked={insurance.hireClassConfirmed} onChange={(e) => setInsurance({ ...insurance, hireClassConfirmed: e.target.checked })} />Hire class confirmed (required for live rides)</label>
-                <label className="rc-check"><input type="checkbox" checked={insurance.plateCrossChecked} onChange={(e) => setInsurance({ ...insurance, plateCrossChecked: e.target.checked })} />Cross-checked against the H-plate</label>
+                <label>Coverage class<select value={insurance.coverageClass} onChange={(e) => setInsurance({ ...insurance, coverageClass: e.target.value as 'HIRE' | 'PRIVATE' })}><option value="HIRE">Hire or reward (taxi: passengers for hire; delivery: commercial use)</option><option value="PRIVATE">Private use only</option></select></label>
+                {insurance.coverageClass === 'PRIVATE' && <p className="rc-error">A private-use policy cannot be approved for paid work. Reject it as “Insurance does not permit use for hire or reward”.</p>}
+                <label className="rc-check"><input type="checkbox" checked={insurance.hireClassConfirmed} onChange={(e) => setInsurance({ ...insurance, hireClassConfirmed: e.target.checked })} />Hire class confirmed: I read the policy’s limitations as to use, and they permit use for hire or reward</label>
+                <label className="rc-check"><input type="checkbox" checked={insurance.plateCrossChecked} onChange={(e) => setInsurance({ ...insurance, plateCrossChecked: e.target.checked })} />Cross-checked against the vehicle’s plate (an H-plate for a taxi)</label>
               </fieldset>}
             </div>}
             <section className="rc-history"><h3>History and audit timeline</h3>

@@ -12,40 +12,11 @@ import {
 } from '../../stores/authStore';
 import type { AuthSessionSnapshot } from '../../lib/authSession';
 import { pendingDocumentLabel } from './documentChecklistPresentation';
+import { docLabel } from './docLabels';
 
-function humanize(docType: string) {
-  return docType.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-// Friendly names for known checklist docs; unknown slugs fall back to humanize().
-const DOC_LABELS: Record<string, string> = {
-  // [VERIFY-DOCS · ruling 4] the new Digital ID card is accepted as the national ID
-  national_id: 'National ID or Digital ID card',
-  drivers_licence: "Driver's Licence",
-  vehicle_registration: 'Vehicle Registration',
-  vehicle_insurance: 'Vehicle Insurance',
-  hire_car_permit: 'Hire-Car Permit',
-  // [VERIFY-DOCS · ruling 8] the two licences that replace the permit: the person's and the car's
-  hire_car_driver_licence: "Hire Car Driver's Licence",
-  hire_car_vehicle_licence: "Car's Hire Licence (yearly, shown on the car)",
-  road_service_licence: 'Road Service Licence',
-  vehicle_plate_photo: 'Vehicle Plate Photo',
-  police_clearance: 'Police Clearance Certificate',
-  fitness_cert: 'Fitness Certificate',
-  // Owner ruling 2026-10-01: a taxi may be any colour. [VERIFY-DOCS · ruling 5] This one photo
-  // replaces the separate plate photo, so the plate must be readable in it.
-  vehicle_exterior_photo: 'Car photo (plate clearly visible)',
-  owner_national_id: 'Owner National ID or Digital ID card',
-  business_registration: 'Business Registration',
-  tin_certificate: 'TIN Certificate',
-  gra_restaurant_licence: 'GRA Restaurant Licence',
-  food_handler_cert: "Food Handler's Certificate",
-  storefront_photo: 'Storefront Photo',
-  selfie: 'Selfie',
-};
-const label = (docType: string) => DOC_LABELS[docType] ?? humanize(docType);
-/** Friendly document name for other surfaces (suspension banners etc.). */
-export const docLabel = label;
+const label = docLabel;
+/** Friendly document name for other surfaces (suspension banners etc.); the names live in ./docLabels. */
+export { docLabel };
 // Safe, always-present icons only.
 const docIcon = (docType: string): keyof typeof MaterialCommunityIcons.glyphMap =>
   docType.includes('photo') || docType === 'selfie'
@@ -69,9 +40,9 @@ export function DocumentUploadCard({
   reviewNote,
   isNext,
   replaced = false,
-  faceMatched = false,
   optionalHint,
   hint,
+  consented = false,
 }: {
   role: string;
   docType: string;
@@ -82,13 +53,13 @@ export function DocumentUploadCard({
   isNext?: boolean;
   /** [REPLACE-PENDING] This copy replaced an earlier one that was still waiting for review. */
   replaced?: boolean;
-  /** The server says it compares this document with the profile selfie (documentChecklistPresentation). */
-  faceMatched?: boolean;
   /** [VERIFY-DOCS] Set for a document the person MAY add: what it is for. Never a gate, so no
    *  "keep operating" copy and no "next step" nudge. */
   optionalHint?: string;
   /** [Owner ruling 11 Oct 2026] What this document is, in plain words (taxi checklist). */
   hint?: string;
+  /** [R17] The checklist's consent tick is given: only then can a document be uploaded. */
+  consented?: boolean;
 }) {
   const upload = useUploadDocument(role);
   const navigation = useNavigation<any>();
@@ -182,6 +153,7 @@ function explainPermissionDenied(
     Alert.alert(label(docType), docType === 'vehicle_exterior_photo'
       ? 'Show the whole car, with its number plate clearly readable. Well lit, no glare.'
       : 'Add a clear, well-lit photo. All corners visible, no glare.', [
+      ...(upload.isError && upload.variables ? [{ text: 'Retry saved photo', onPress: () => upload.mutate(upload.variables!) }] : []),
       { text: 'Take photo', onPress: fromCamera },
       { text: 'Choose from library', onPress: fromLibrary },
       { text: 'Cancel', style: 'cancel' },
@@ -197,7 +169,9 @@ function explainPermissionDenied(
     ? ((upload.error as any)?.response?.data?.error?.message ?? 'Upload failed — tap to try again')
     : null;
 
-  const caption = uploadErr
+  const caption = !consented && !approved && !pending && !uploadErr
+    ? 'Tick the box above to upload'
+    : uploadErr
     ? uploadErr
     : approved
       ? daysLeft != null
@@ -222,7 +196,7 @@ function explainPermissionDenied(
                   : 'Get started';
 
   return (
-    <Pressable disabled={approved || upload.isPending} onPress={pending ? confirmReplace : pick}>
+    <Pressable disabled={approved || upload.isPending || !consented} onPress={pending ? confirmReplace : pick}>
       <Card
         style={[
           { marginBottom: space.sm, flexDirection: 'row', alignItems: 'center' },
@@ -244,12 +218,11 @@ function explainPermissionDenied(
             tone="muted"
             style={uploadErr || rejected ? { color: color.error } : expiringSoon || expired ? { color: color.warning } : undefined}
           >
-            {caption}
+            {upload.isPending ? 'Still uploading — keep this screen open. Slow connections can take a minute.' : caption}
           </T>
           <T variant="body" weight="semibold">{label(docType)}</T>
-          {/* [Owner, 1 Oct · truth] Only when the server says it face-matches
-              this document. It used to show under every ID, while the
-              server's face-matching was switched off. */}
+          {/* [Legal research G4, in-app ¶17] The card no longer says a face was matched: identity checks are made
+              by people (face-matching is off, GUARDRAILS §8). The checklist says what really happens. */}
           {hint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {hint}
@@ -258,11 +231,6 @@ function explainPermissionDenied(
           {optionalHint ? (
             <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
               {optionalHint}
-            </T>
-          ) : null}
-          {faceMatched ? (
-            <T variant="micro" tone="muted" style={{ marginTop: 2 }}>
-              Face-matched against your profile selfie
             </T>
           ) : null}
         </View>

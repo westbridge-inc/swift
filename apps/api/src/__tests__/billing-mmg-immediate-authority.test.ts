@@ -299,6 +299,8 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
     // [MMG checkout I5] the approval-hold gate also reads checkouts in flight; none here.
     mmgCheckoutIntent: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     cardSession: { findFirst: vi.fn(async () => null), findMany: vi.fn(async () => []) },
+    // [MMG REVERSAL] billing also pauses while a weekly-fee payment is being returned; none here.
+    mmgFeeReversal: { findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => null), findMany: vi.fn(async () => []) },
     user: { findUnique: vi.fn(async () => ({ ...state.user })), findUniqueOrThrow: vi.fn(async () => ({ ...state.user })), findMany: vi.fn(async () => []) },
     moverFeeAuthority: authority,
     moverFeeSubscription: memory('member'),
@@ -358,6 +360,10 @@ function harness(entry: ProviderEntry = 'initiate', vendor = false) {
       }),
     },
     ledgerAccount: { upsert: vi.fn(), findMany: vi.fn(async () => []) },
+    // [R12 #1963] A wallet debit records which receipts its money came from (fee-receipt-allocation.ts). This
+    // harness mocks issueReceipt, so no tracked receipt exists: the money is untracked and nothing is recorded.
+    feeReceipt: { findMany: vi.fn(async () => []) },
+    feeReceiptAllocation: { findMany: vi.fn(async () => []), create: vi.fn() },
     ledgerTransaction: { create: vi.fn() },
     ledgerEntry: { createMany: vi.fn() },
     vendor: {
@@ -1723,6 +1729,18 @@ describe('R13 final notice renewal result freshness at the real SMS boundary', (
 });
 
 describe('R5 affirmative MMG evidence and fair card reconciliation', () => {
+  it('push history query carries the payment deadline without authorizing an effect', async () => {
+    const h = harness('prior_lookup');
+    const createdAt = new Date(due.getTime() - 5 * 60_000);
+    const expiresAt = new Date(due.getTime() + 10 * 60_000);
+    Object.assign(h.state.payment!, { status: 'UNKNOWN', externalRef: null, createdAt, expiresAt, lastPolledAt: null, failureRaw: { providerEffect: 'AUTHORIZED' } });
+    const history = vi.spyOn(SandboxMmgProvider.prototype, 'transactionHistory').mockResolvedValue([]);
+    expect(await h.billing.pollPendingMmgCharges(due)).toMatchObject({ settled: 0, banked: 0, adopted: 0, failed: 0, stillPending: 1 });
+    expect(history).toHaveBeenCalledWith({ from: createdAt, to: expiresAt, limit: 100 });
+    expect(h.state.payment).toMatchObject({ status: 'UNKNOWN', externalRef: null });
+    expect(ledger.keys).toEqual([]);
+  });
+
   it.each([
     ['missing', undefined],
     ['empty', ''],

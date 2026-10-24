@@ -1,4 +1,6 @@
 import type { FastifyInstance } from 'fastify';
+import { shownRatingTotals } from '../rating/rating-groups';
+import { revokeUserDevice, revokeUserDevices } from '../../lib/owner-rls';
 import { nanoid } from 'nanoid';
 import bcrypt from 'bcryptjs';
 import type { Prisma, SessionAuthMethod, UserRole, UserStatus } from '@prisma/client';
@@ -11,6 +13,7 @@ import { CountryConfigService } from '../country/country-config.service';
 import { getChannels } from '../../providers/notifications/channels';
 import { LEGAL_VERSION, TERMS, PRIVACY } from '../legal/legal.routes';
 import { publishLegalDocument, recordConsent, type ConsentSurface } from '../legal/consent.service';
+import { AGE_DECLARATION_TYPE, AGE_DECLARATION_V1, AGE_DECLARATION_VERSION } from './age-declaration';
 import {
   completeMoverSessionRevocation,
   emptyMoverSessionRevocationCleanup,
@@ -27,7 +30,7 @@ import {
   disconnectSessionSockets as disconnectAuthorizationSessionSockets,
   disconnectUserSockets as disconnectAuthorizationUserSockets,
 } from '../../utils/socket-revocation';
-import { isDevelopment, isProduction } from '../../utils/runtime-mode';
+import { isProduction } from '../../utils/runtime-mode';
 import {
   armDevelopmentSignupGeneration,
   consumePasswordResetOtpGeneration,
@@ -41,6 +44,7 @@ import {
 } from './signup-continuation';
 import { publicLaunchCountryFromPhone } from './launch-market';
 import { runWithoutTenant, runWithTenant } from '../../plugins/tenant-context';
+import { sessionCredentialMatches } from '../../lib/session-credential';
 import { bindTenantTransaction } from '../../plugins/prisma';
 import {
   PUBLIC_SIGNUP_TENANT_ID,
@@ -58,6 +62,7 @@ import {
   resetPasswordAttemptBudget,
 } from './password-attempts';
 import { requireStepUp } from './step-up';
+import { insertNoticeFor } from '../../lib/owner-wall-notices';
 
 interface DeviceInfo {
   deviceId: string;
@@ -202,10 +207,9 @@ export class AuthService {
     if (purpose === 'password-reset') await storePasswordResetOtp(this.app.redis, phone, otp);
     else await storeSignupOtp(this.app.redis, phone, otp);
 
-    if (isDevelopment()) {
-      this.app.log.info(`[DEV] OTP for ${phone}: ${otp}`);
-    }
-
+    // [M013] The code goes to the SMS channel only, never to a log line, in
+    // development too (local sign-in uses DEV_OTP_BYPASS; the dev adapter keeps
+    // what it "sent" in memory for tests).
     // Delivery rides the swappable SMS channel (Twilio-class adapter later).
     // Do NOT claim success when the send fails — the user would wait forever
     // for a code that never left the building. send-otp runs before any
@@ -311,6 +315,10 @@ export class AuthService {
       include: { customer: true, rider: true, driver: true, vendorOwner: true, admin: true, tenant: { select: { kind: true } } },
     });
     if (!user) throw new AppError(400, 'INVALID_OTP', 'Invalid or expired OTP');
+    // [COORD 18 Oct, option S] The signed-in person never gets the live averageRating/totalRatings of their own
+    // rider or driver row (they move with each single rating): the whole-groups figure instead.
+    if (user.rider) Object.assign(user.rider, await shownRatingTotals(this.app.prisma, 'RIDER', user.id));
+    if (user.driver) Object.assign(user.driver, await shownRatingTotals(this.app.prisma, 'DRIVER', user.id));
 
     // [L04 · AUTH-2] The code proves the phone, not that the account may sign
     // in. Status is read under the User lock (the order ban/suspend and
@@ -356,6 +364,17 @@ export class AuthService {
     return this.signupDocsPublished;
   }
 
+  private ageDeclarationPublished: Promise<void> | null = null;
+  private ensureAgeDeclarationPublished(): Promise<void> {
+    this.ageDeclarationPublished ??= publishLegalDocument(this.app.prisma, {
+      documentType: AGE_DECLARATION_TYPE, version: AGE_DECLARATION_VERSION, renderedText: AGE_DECLARATION_V1,
+    }).then(() => undefined).catch((err) => {
+      this.ageDeclarationPublished = null; // next signup retries rather than caching failure
+      throw err;
+    });
+    return this.ageDeclarationPublished;
+  }
+
   async register(data: {
     phone: string;
     firstName: string;
@@ -365,6 +384,8 @@ export class AuthService {
     role?: SignupRole;
     countryCode?: string;
     acceptTerms?: boolean;
+    /** [Owner ruling 15 Oct 2026] the ticked "I am 18 or older" (the route decides who must send it). */
+    ageConfirmed?: boolean;
     /** Request metadata for silent identity capture — never client-trusted
      *  for anything but SOFT signals (households/CGNAT never punish alone). */
     deviceId?: string | null;
@@ -426,7 +447,7 @@ export class AuthService {
   }
 
   private async createAccount(
-    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
+    data: { phone: string; firstName: string; lastName: string; email?: string; acceptTerms?: boolean; ageConfirmed?: boolean; surface: ConsentSurface; deviceId?: string | null; ipAddress?: string | null },
     plan: { signupRole: SignupRole; roles: UserRole[]; activeRole: UserRole; countryCode: string },
   ) {
     const { signupRole, roles, activeRole, countryCode } = plan;
@@ -437,6 +458,8 @@ export class AuthService {
     // anchor to the exact words /legal/terms and /legal/privacy render.
     const consented = data.acceptTerms === true;
     if (consented) await this.ensureSignupDocsPublished();
+    const ageDeclared = data.ageConfirmed === true;
+    if (ageDeclared) await this.ensureAgeDeclarationPublished();
     const user = await this.app.prisma.$transaction(async (tx) => {
       await bindTenantTransaction(tx);
       const created = await tx.user.create({
@@ -470,6 +493,19 @@ export class AuthService {
             evidence: { control: 'accept_terms_checkbox', path: 'auth/register', role: signupRole },
           });
         }
+      }
+      // [Owner ruling 15 Oct 2026] the 18+ tick, anchored to its exact words, in the account's own transaction.
+      if (ageDeclared) {
+        await recordConsent(tx, {
+          subjectType: 'customer',
+          subjectId: created.id,
+          documentType: AGE_DECLARATION_TYPE,
+          version: AGE_DECLARATION_VERSION,
+          action: 'granted',
+          surface: data.surface,
+          ip: data.ipAddress,
+          evidence: { control: 'age_18_checkbox', path: 'auth/register', role: signupRole },
+        });
       }
       return created;
     });
@@ -600,7 +636,8 @@ export class AuthService {
       // included. Push registrations belong to installs, not sessions, so every
       // one is retired here, as a reset does; this device re-registers its own
       // on its next launch.
-      await tx.deviceToken.updateMany({ where: { userId, isActive: true }, data: { isActive: false } });
+      // [item 20] One narrow SECURITY DEFINER action, so the owner wall can never make it silence nothing.
+      await revokeUserDevices(tx, userId);
 
       // This session continues under new credentials: the old access and
       // refresh tokens (and the previous refresh token's grace) are gone.
@@ -670,9 +707,7 @@ export class AuthService {
         });
       } else {
         // Inbox only: persisted, never fanned out to a push.
-        await this.app.prisma.notification.create({
-          data: { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } },
-        });
+        await insertNoticeFor(this.app.prisma, { userId, type: 'SYSTEM_ANNOUNCEMENT', title, body, data: { kind: 'password_sign_in_paused' } });
       }
     } catch (error) {
       this.app.log.error({ err: error, userId }, 'password-sign-in-paused notice failed');
@@ -966,10 +1001,13 @@ export class AuthService {
       const user = users[0];
       if (!user) return { kind: 'invalid' as const };
 
+      // [Row 231] Raw SQL bypasses the prisma digest extension: the row holds
+      // digests, and the presented credential is checked against them in
+      // constant time. The access token is not read back at all — a stored
+      // digest is never something to hand out.
       const sessions = await tx.$queryRaw<Array<{
         id: string;
         userId: string;
-        token: string;
         refreshToken: string;
         previousRefreshToken: string | null;
         rotatedAt: Date | null;
@@ -978,7 +1016,7 @@ export class AuthService {
         deviceType: string;
         authMethod: SessionAuthMethod;
       }>>`
-        SELECT "id", "userId", "token", "refreshToken", "previousRefreshToken",
+        SELECT "id", "userId", "refreshToken", "previousRefreshToken",
                "rotatedAt", "expiresAt", "deviceId", "deviceType",
                "authMethod"::text AS "authMethod"
         FROM "sessions"
@@ -993,9 +1031,9 @@ export class AuthService {
       }
       // Match the credential and retire reused rotations before any account
       // status answer. Even a blocked account must invalidate this family.
-      const previous = session.refreshToken !== refreshToken;
+      const previous = !sessionCredentialMatches(session.refreshToken, refreshToken);
       if (previous) {
-        if (session.previousRefreshToken !== refreshToken) return { kind: 'invalid' as const };
+        if (!sessionCredentialMatches(session.previousRefreshToken, refreshToken)) return { kind: 'invalid' as const };
         const graceMs = Number(process.env['REFRESH_REUSE_GRACE_MS'] ?? 10_000);
         const age = session.rotatedAt ? Date.now() - session.rotatedAt.getTime() : Infinity;
         if (!(age <= graceMs)) {
@@ -1026,28 +1064,28 @@ export class AuthService {
         };
       }
 
-      // A legitimate double-fire receives the current pair only AFTER the
-      // same account-status and assurance checks as a current credential.
-      if (previous) {
-        return {
-          kind: 'success' as const,
-          tokens: { accessToken: session.token, refreshToken: session.refreshToken, expiresIn: 900 },
-        };
-      }
-
+      // A legitimate double-fire — a retry whose first answer was lost — is
+      // answered only AFTER the same account-status and assurance checks as a
+      // current credential. [Row 231] Only digests are stored, so the pair that
+      // answered the first call cannot be handed out again: the replay is
+      // answered with a FRESH pair below and the first answer's pair is
+      // superseded (401 on use), never revoked. The chain (previousRefreshToken,
+      // rotatedAt) stays where the first rotation put it, so a replay cannot
+      // extend its own grace, and the same credential after the window is
+      // still theft evidence that revokes the family above.
       const newAccessToken = this.app.jwt.sign({
         userId: user.id,
         role: user.activeRole,
         jti: nanoid(8),
       });
       const newRefreshToken = nanoid(64);
+      // Plaintext in, digest at rest: the prisma session extension digests these.
       await tx.session.update({
         where: { id: session.id },
         data: {
           token: newAccessToken,
           refreshToken: newRefreshToken,
-          previousRefreshToken: refreshToken,
-          rotatedAt: new Date(),
+          ...(previous ? {} : { previousRefreshToken: refreshToken, rotatedAt: new Date() }),
           expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
         },
       });
@@ -1118,10 +1156,8 @@ export class AuthService {
       cleanup,
     });
     if (pushToken) {
-      await tx.deviceToken.updateMany({
-        where: { token: pushToken, userId },
-        data: { isActive: false },
-      });
+      // [item 20] The session's own registration, through the narrow action (owner wall).
+      await revokeUserDevice(tx, userId, pushToken);
     }
     await tx.session.delete({ where: { id: sessionId } });
     return { ...cleanup, outboxId };
@@ -1204,7 +1240,9 @@ export class AuthService {
       const session = sessions[0];
       if (
         !session
-        || (session.refreshToken !== refreshToken && session.previousRefreshToken !== refreshToken)
+        // [Row 231] the row holds digests: the presented credential is checked against them in constant time
+        || (!sessionCredentialMatches(session.refreshToken, refreshToken)
+          && !sessionCredentialMatches(session.previousRefreshToken, refreshToken))
       ) {
         return null;
       }
@@ -1255,10 +1293,8 @@ export class AuthService {
     // Global revocation (logout-all, password reset) must silence a lost or
     // stolen device as well as its API session. A future sign-in explicitly
     // re-registers and reactivates the token on the current account.
-    await tx.deviceToken.updateMany({
-      where: { userId, isActive: true },
-      data: { isActive: false },
-    });
+    // [item 20] Through the narrow action: an admin-forced reset acts for someone else (owner wall).
+    await revokeUserDevices(tx, userId);
     return { ...moverCleanup, outboxId };
   }
 

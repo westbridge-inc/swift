@@ -5,6 +5,7 @@ import { AppState, Pressable, ScrollView, Share, StyleSheet, View, useWindowDime
 import MapView, { Marker } from 'react-native-maps';
 import { Image } from 'expo-image';
 import { openExternal } from '../../../lib/openExternal';
+import { openDirections } from '../../../lib/openDirections';
 // The emergency path for the person WAITING. The earner side got one; the
 // customer watching a stranger walk up their path did not.
 import { SosCeremony } from '../../safety/SosCeremony';
@@ -15,7 +16,7 @@ import { useIsFocused, useNavigation, useRoute } from '@react-navigation/native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, elevation, motion, radius, space } from '@swift/ui';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
+import { readOrderFresh, useOrder, useDecideSubstitution, useClaimMmgPayment } from '../../../hooks/customer';
 import { customerApi, courierApi, WEB_URL } from '../../../services/api';
 import { connectSocket, getSocket, subscribeToOrder } from '../../../services/socket';
 import { money } from '../../../lib/money';
@@ -24,16 +25,20 @@ import { promiseLine, promiseNote } from '../../../lib/promise';
 import { haptic } from '../../../lib/haptics';
 import { openMmgPaymentAction, safeMmgPaymentActionUrl } from '../../../lib/payLink';
 import { toast } from '../../../kit/toast';
-import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
+import { copyText } from '../../../lib/clipboard';
+import { mmgStorePaymentDeadline, mmgStorePaymentNote, parseMmgStorePayment } from '../../../lib/mmgStorePayment';
+import { CircleChip, DecorativeIcon, ErrorState, Eyebrow, Header, HoldRing, IconChip, InfoRow, LoadingBlock, PillButton, PopupCard, PopupTitle, T, Timeline, holdRingCaption, holdRingWindow, type TimelineStep as KitTimelineStep } from '../../../kit';
 import { afterDismiss } from '../../../kit/after-dismiss';
 import { VERTICAL_TINT } from '../../../kit/vertical-tint';
 import { STALE_AFTER_MS } from '../../movement/map/interpolation';
 import { customerKeys } from '../../../hooks/customer';
 import { MmgPaymentClaimCard } from '../MmgPaymentClaimCard';
+import { isRemovalQuestion, removalChangeText, swapChangeText, swapDeadlineText, swapDecisionPermissions } from '../substitutionCopy';
 import { CustodyRecoveryNotice } from '../CustodyRecoveryNotice';
 import { parsePartyCaseView, partyCaseWorthShowing } from '../../../lib/custodyRecovery';
 import { boundMmgClaim, parseMmgClaimView, sendBoundMmgClaim, type PendingMmgClaim } from '../mmgClaim';
 import { coordinateOf, decideLiveFix, recordFixDrop, type LiveFixEvent } from '../../../lib/liveFix';
+import { isTaxiOrder } from '../../../lib/orderTrackRoute';
 
 const GUTTER = space['2xl'];
 const ORDER_TINT = VERTICAL_TINT.orders ?? { bg: color.brand[50], ink: color.brand[600] };
@@ -396,7 +401,7 @@ export function DeliveryScreen() {
       void order.refetch();
     },
   });
-  const decideSub = useDecideSubstitution(orderId);
+  const decideSub = useDecideSubstitution();
   // [ORDER-SPINE S1-6] The customer's own claim about a direct-MMG payment —
   // their only first-party door to "I didn't pay". That statement can pause
   // the order, so it is confirmed first; the order refetches either way.
@@ -414,11 +419,34 @@ export function DeliveryScreen() {
   };
 
   const o = order.data;
+  // [TAXI-FLOW 22 Oct] THE BACKSTOP. A ride is never drawn as a store order
+  // ("Sent to the store", "Preparing", "have $800 ready for the seller"). Any
+  // door that reaches this screen with a ride's id — a notification tap, the
+  // inbox, an older caller — is handed to the ride screen the moment the
+  // server's order type is known. `replace`, so Back does not return here.
+  const rideHandedOn = useRef(false);
+  useEffect(() => {
+    if (!isTaxiOrder(o) || rideHandedOn.current) return;
+    rideHandedOn.current = true;
+    navigation.replace('Taxi');
+  }, [navigation, o]);
   const orderStatus = String(o?.status ?? '').toUpperCase();
   const liveTrackingAllowed = LIVE_TRACKING_STATUSES.has(orderStatus)
     && !(o?.fulfillment === 'PICKUP' && orderStatus === 'PICKED_UP');
   const liveTrackingAllowedRef = useRef(liveTrackingAllowed);
   liveTrackingAllowedRef.current = liveTrackingAllowed;
+
+  // [row 5 · ANDROID-QA] The cancel taps read the order straight from the
+  // server (readOrderFresh), not through `order.refetch()`: the screen's own
+  // background refreshes cancel a shared read in flight, and the tap then
+  // waited on their read, which on a slow line could time out and drop it.
+  const readCancelSnapshot = async (targetOrderId: string): Promise<{ data: any; isError: boolean }> => {
+    try {
+      return { data: await readOrderFresh<any>(qc, targetOrderId), isError: false };
+    } catch {
+      return { data: undefined, isError: true };
+    }
+  };
 
   const openCancelConfirmation = async () => {
     const targetOrderId = orderId;
@@ -426,7 +454,7 @@ export function DeliveryScreen() {
     setCancelPreviewOrderId(null);
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -453,7 +481,7 @@ export function DeliveryScreen() {
     }
     setCancelChecking(true);
     try {
-      const refreshed = await order.refetch();
+      const refreshed = await readCancelSnapshot(targetOrderId);
       if (activeOrderIdRef.current !== targetOrderId) return;
       const latest = refreshed.data;
       if (refreshed.isError || !latest) {
@@ -662,10 +690,34 @@ export function DeliveryScreen() {
     prevStatusRef.current = status;
   }, [isFocused, o?.status, o?.fulfillment]);
 
-  if (order.isLoading) return <LoadingBlock style={{ backgroundColor: color.surface.subtle }} />;
-  if (order.isError || !o) {
+  if (order.isLoading) {
     return (
       <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  if (isTaxiOrder(o)) {
+    // The hand-off above is on its way: nothing of the store screen shows.
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        <Header />
+        <LoadingBlock />
+      </View>
+    );
+  }
+  // [row 5 · ANDROID-QA] Only an order that never loaded is an error screen.
+  // On a slow line a background refresh (the 15 s poll, a reconnect) can time
+  // out; that used to swap the whole order, and the Cancel button under the
+  // customer's finger, for an error screen until the next read landed. The
+  // order already on screen stays (the cart's E07 rule).
+  if (!o) {
+    return (
+      <View style={{ flex: 1, backgroundColor: color.surface.subtle, paddingTop: insets.top }}>
+        {/* [UI-SWEEP U32] A visible way back while this loads or fails, not swipe only. */}
+        <Header />
         <ErrorState onRetry={() => order.refetch()} />
       </View>
     );
@@ -691,6 +743,8 @@ export function DeliveryScreen() {
   const rider = o.rider;
   const items: any[] = o.items ?? [];
   const mmgPaymentAction = safeMmgPaymentActionUrl(o.paymentAction) ? o.paymentAction : null;
+  // [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] MMG to the store's number, sent only after the store accepts.
+  const mmgStorePayment = parseMmgStorePayment(o.mmgPayment);
   const mmgClaim = parseMmgClaimView(o.mmgClaim);
   const custodyRecovery = parsePartyCaseView(o.custodyRecovery);
   const mmgCaptured = o.paymentMethod === 'MOBILE_MONEY' && o.paymentStatus === 'CAPTURED';
@@ -1015,7 +1069,63 @@ export function DeliveryScreen() {
           {/* Out-of-stock substitutions (§5.3) — the store asked; you decide. */}
           {!terminal ? items
             .filter((it: any) => it.subStatus === 'PENDING')
-            .map((it: any) => (
+            .map((it: any) => isRemovalQuestion(it.substitution) ? (
+              /* [O-4 · owner 22 Oct 2026] Asked before the store accepted: nothing to swap. The
+                 customer agrees to the changed order before paying, or cancels it (free while the
+                 store has not accepted). */
+              <View
+                key={`sub-${it.id}`}
+                style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
+              >
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                  <Feather name="alert-circle" size={16} color={color.brand[600]} />
+                  <T variant="label" weight="bold" style={{ flex: 1 }}>
+                    {it.name} is out of stock
+                  </T>
+                </View>
+                <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                  {it.substitution?.lastItem
+                    ? `${o.vendor?.name ?? 'The store'} can't supply it.`
+                    : `${o.vendor?.name ?? 'The store'} can't supply it. Continue without it, or cancel the order. Nothing has been charged.`}
+                </T>
+                {removalChangeText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {removalChangeText(it.substitution)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
+                <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
+                  {it.substitution?.lastItem ? null : (
+                    <PillButton
+                      label="Continue without it"
+                      size="md"
+                      style={{ flex: 1 }}
+                      loading={decideSub.isPending}
+                      disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                      onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
+                    />
+                  )}
+                  <PillButton
+                    label="Cancel order"
+                    variant="soft"
+                    size="md"
+                    style={{ flex: 1 }}
+                    loading={cancelChecking || cancelOrder.isPending}
+                    disabled={!o.canCancel}
+                    onPress={() => { void openCancelConfirmation(); }}
+                  />
+                </View>
+              </View>
+            ) : (
               <View
                 key={`sub-${it.id}`}
                 style={{ backgroundColor: color.brand[50], borderRadius: radius.lg, padding: space.md, marginTop: space.xl, marginBottom: space.md }}
@@ -1028,24 +1138,44 @@ export function DeliveryScreen() {
                 </View>
                 <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
                   {o.vendor?.name ?? 'The store'} suggests {it.substituteName} ({money(Number(it.substitutePrice ?? 0))}
-                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead. Rejecting removes the item and lowers your total.
+                  {it.quantity > 1 ? ` × ${it.quantity}` : ''}) instead.{swapDecisionPermissions(it.substitution, o.paymentMethod).reject ? ' Rejecting removes the item and lowers your total.' : ''}
                 </T>
+                {/* [L09 · M028] What approving changes, from the server's own
+                    numbers: the total (paid options included), and the chosen
+                    options that do not come with the swap. */}
+                {swapChangeText(it.substitution, o.paymentMethod) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapChangeText(it.substitution, o.paymentMethod)}
+                  </T>
+                ) : null}
+                {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance ? (
+                  <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                    {swapDecisionPermissions(it.substitution, o.paymentMethod).settlementGuidance}
+                  </T>
+                ) : null}
+                {/* [SUBSTITUTION · owner 17 Oct] The question waits a bounded
+                    time; say until when and what happens without an answer. */}
+                {swapDeadlineText(it.substitution) ? (
+                  <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                    {swapDeadlineText(it.substitution)}
+                  </T>
+                ) : null}
                 <View style={{ flexDirection: 'row', gap: space.md, marginTop: space.md }}>
                   <PillButton
                     label="Approve swap"
                     size="md"
                     style={{ flex: 1 }}
                     loading={decideSub.isPending}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: true })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).approve}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: true })}
                   />
                   <PillButton
                     label="No thanks"
                     variant="soft"
                     size="md"
                     style={{ flex: 1 }}
-                    disabled={decideSub.isPending}
-                    onPress={() => decideSub.mutate({ lineId: it.id, approve: false })}
+                    disabled={decideSub.isPending || !swapDecisionPermissions(it.substitution, o.paymentMethod).reject}
+                    onPress={() => decideSub.mutate({ orderId, lineId: it.id, approve: false })}
                   />
                 </View>
               </View>
@@ -1179,6 +1309,7 @@ export function DeliveryScreen() {
                   {failed
                     ? 'This order could not continue. Report a problem for help with what happens next.'
                     : cancelMessage
+                      ?? (typeof o.cancellationNotice === 'string' && o.cancellationNotice.trim() ? o.cancellationNotice : null) /* [owner 18 Oct 2026] why an unpaid MMG order closed by itself */
                       ?? (mmgCancellationAmbiguous
                         ? `This ${cancelledNoun} was cancelled. If you already sent the MMG payment, ${refundParty} refunds you directly.`
                         : `This ${cancelledNoun} was cancelled.`)}
@@ -1250,10 +1381,9 @@ export function DeliveryScreen() {
                 </T>
                 {o.pickupAddress ? (
                   <Pressable
-                    onPress={() => {
-                      const q = o.pickupLat != null && o.pickupLng != null ? `${o.pickupLat},${o.pickupLng}` : encodeURIComponent(o.pickupAddress);
-                      void openExternal(`https://maps.apple.com/?daddr=${q}`, "Couldn't open maps on this phone.");
-                    }}
+                    // [row 363] The phone's own maps: Apple Maps on iOS, Google
+                    // Maps on Android (it was maps.apple.com on every phone).
+                    onPress={() => { void openDirections({ lat: o.pickupLat, lng: o.pickupLng, address: o.pickupAddress }); }}
                     accessibilityRole="button"
                     accessibilityLabel={`Directions to ${o.vendor?.name ?? 'the store'}`}
                     accessibilityHint="Opens turn-by-turn directions"
@@ -1288,6 +1418,19 @@ export function DeliveryScreen() {
                 </T>
               </View>
             )
+          ) : null}
+
+          {/* [R14 · legal research D12] The server's words, shown while the store delivers THIS order
+              with its own rider (null on every other order) — never decided here. */}
+          {typeof o.ownRiderNotice === 'string' && o.ownRiderNotice ? (
+            <View
+              accessible
+              accessibilityLabel={o.ownRiderNotice}
+              style={{ flexDirection: 'row', alignItems: 'flex-start', gap: space.sm, marginTop: space.xl, paddingHorizontal: space.md, paddingVertical: space.sm, borderRadius: radius.lg, backgroundColor: color.soft.info }}
+            >
+              <Feather name="info" size={16} color={color.info} />
+              <T variant="caption" tone="info" style={{ flex: 1 }}>{o.ownRiderNotice}</T>
+            </View>
           ) : null}
 
           {/* [MKT-F057] Delivery handover gate — the RIDER asks for THIS code at
@@ -1370,6 +1513,38 @@ export function DeliveryScreen() {
                   if (!(await openMmgPaymentAction(mmgPaymentAction))) {
                     toast.show(`Couldn't open MMG — open the MMG app and pay ${mmgPaymentAction.recipientName} directly.`);
                   }
+                }}
+                style={{ marginTop: space.md }}
+              />
+            </View>
+          ) : null}
+
+          {/* [owner 17 Oct 2026 · PAYMENT-SIMPLIFY] The store has accepted: pay it directly, by MMG, to its
+              number. The server sends this ONLY to this order's customer and only until the store marks the
+              order "Paid by MMG"; the app opens no payment page and Swift never touches the money. */}
+          {mmgStorePayment && !cancelled && !failed ? (
+            <View testID="mmg-store-number" style={{ borderRadius: radius.lg, backgroundColor: color.brand[50], padding: space.lg, marginTop: space.xl }}>
+              <T variant="body" weight="bold" tone="deep">
+                Pay by MMG
+              </T>
+              <T variant="body" style={{ marginTop: space.xs }}>
+                {mmgStorePayment.instruction}
+              </T>
+              <T variant="caption" tone="muted" style={{ marginTop: space.xs }}>
+                {mmgStorePaymentNote(mmgStorePayment)}
+              </T>
+              {/* [owner 18 Oct 2026] Not marked "Paid by MMG" within 30 minutes of acceptance = cancelled. */}
+              {mmgStorePaymentDeadline(mmgStorePayment) ? (
+                <T variant="caption" weight="semibold" style={{ marginTop: space.xs }}>
+                  {mmgStorePaymentDeadline(mmgStorePayment)}
+                </T>
+              ) : null}
+              <PillButton
+                label="Copy MMG number"
+                icon="copy"
+                variant="soft"
+                onPress={() => {
+                  toast.show(copyText(mmgStorePayment.number) ? 'MMG number copied' : `The number is ${mmgStorePayment.numberDisplay}`);
                 }}
                 style={{ marginTop: space.md }}
               />
